@@ -22,6 +22,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `ArtifactService` trait and request/response structs
   - Server API uses `create_app_with_a2a`, `ServerConfig`, `AgentLoader`
   - Telemetry uses `init_telemetry` and `init_with_otlp` functions
+- All clippy warnings for `--all-targets --all-features`:
+  - Unused imports in test files and examples
+  - Unused variables in example code (prefixed with underscore)
+  - `unnecessary_literal_unwrap` in test assertions
 
 ### Changed
 - Integration tests requiring `GEMINI_API_KEY` now marked with `#[ignore]` for CI compatibility
