@@ -34,7 +34,10 @@ pub trait Tool: Send + Sync {
 #[async_trait]
 pub trait ToolContext: CallbackContext {
     fn function_call_id(&self) -> &str;
-    fn actions(&self) -> &EventActions;
+    /// Get the current event actions. Returns an owned copy for thread safety.
+    fn actions(&self) -> EventActions;
+    /// Set the event actions (e.g., to trigger escalation or skip summarization).
+    fn set_actions(&self, actions: EventActions);
     async fn search_memory(&self, query: &str) -> Result<Vec<MemoryEntry>>;
 }
 
@@ -50,6 +53,7 @@ pub type ToolPredicate = Box<dyn Fn(&dyn Tool) -> bool + Send + Sync>;
 mod tests {
     use super::*;
     use crate::{Content, EventActions, ReadonlyContext, RunConfig};
+    use std::sync::Mutex;
 
     struct TestTool {
         name: String,
@@ -59,7 +63,7 @@ mod tests {
     struct TestContext {
         content: Content,
         config: RunConfig,
-        actions: EventActions,
+        actions: Mutex<EventActions>,
     }
 
     impl TestContext {
@@ -67,7 +71,7 @@ mod tests {
             Self {
                 content: Content::new("user"),
                 config: RunConfig::default(),
-                actions: EventActions::default(),
+                actions: Mutex::new(EventActions::default()),
             }
         }
     }
@@ -109,8 +113,11 @@ mod tests {
         fn function_call_id(&self) -> &str {
             "call-123"
         }
-        fn actions(&self) -> &EventActions {
-            &self.actions
+        fn actions(&self) -> EventActions {
+            self.actions.lock().unwrap().clone()
+        }
+        fn set_actions(&self, actions: EventActions) {
+            *self.actions.lock().unwrap() = actions;
         }
         async fn search_memory(&self, _query: &str) -> Result<Vec<crate::MemoryEntry>> {
             Ok(vec![])
