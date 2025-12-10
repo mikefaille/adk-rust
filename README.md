@@ -50,6 +50,9 @@ export OPENAI_API_KEY="your-api-key"
 
 # For Anthropic
 export ANTHROPIC_API_KEY="your-api-key"
+
+# For DeepSeek
+export DEEPSEEK_API_KEY="your-api-key"
 ```
 
 ### Basic Example (Gemini)
@@ -114,6 +117,32 @@ async fn main() -> Result<()> {
 }
 ```
 
+### DeepSeek Example
+
+```rust
+use adk_agent::LlmAgentBuilder;
+use adk_model::deepseek::{DeepSeekClient, DeepSeekConfig};
+use std::sync::Arc;
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let api_key = std::env::var("DEEPSEEK_API_KEY")?;
+
+    // Standard chat model
+    let model = DeepSeekClient::new(DeepSeekConfig::chat(api_key))?;
+
+    // Or use reasoner for chain-of-thought reasoning
+    // let model = DeepSeekClient::new(DeepSeekConfig::reasoner(api_key))?;
+
+    let agent = LlmAgentBuilder::new("assistant")
+        .instruction("You are a helpful assistant.")
+        .model(Arc::new(model))
+        .build()?;
+
+    Ok(())
+}
+```
+
 ### Run Examples
 
 ```bash
@@ -123,6 +152,11 @@ cargo run --example quickstart
 # OpenAI examples (requires --features openai)
 cargo run --example openai_basic --features openai
 cargo run --example openai_tools --features openai
+
+# DeepSeek examples (requires --features deepseek)
+cargo run --example deepseek_basic --features deepseek
+cargo run --example deepseek_reasoner --features deepseek
+cargo run --example deepseek_tools --features deepseek
 
 # REST API server
 cargo run --example server
@@ -396,8 +430,11 @@ ADK supports multiple LLM providers with a unified API:
 | Gemini | `gemini-2.5-flash`, `gemini-2.5-pro`, `gemini-2.0-flash` | (default) |
 | OpenAI | `gpt-4.1`, `gpt-4.1-mini`, `o3-mini`, `gpt-4o` | `openai` |
 | Anthropic | `claude-sonnet-4`, `claude-opus-4`, `claude-haiku-4` | `anthropic` |
+| DeepSeek | `deepseek-chat`, `deepseek-reasoner` | `deepseek` |
 
 All providers support streaming, function calling, and multimodal inputs (where available).
+
+**DeepSeek-specific features**: Thinking mode (chain-of-thought reasoning), context caching (10x cost reduction for repeated prefixes).
 
 ### Production Features
 
