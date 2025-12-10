@@ -24,6 +24,7 @@ serde = { workspace = true }
 gemini = { workspace = true, optional = true }
 async-openai = { version = "0.27", optional = true }
 claudius = { version = "0.16", optional = true, default-features = false }
+reqwest = { workspace = true, optional = true }
 anyhow.workspace = true
 tracing.workspace = true
 base64 = "0.21"
@@ -33,4 +34,5 @@ default = ["gemini"]
 gemini = ["dep:gemini"]
 openai = ["dep:async-openai"]
 anthropic = ["dep:claudius"]
-all-providers = ["gemini", "openai", "anthropic"]
+deepseek = ["dep:reqwest"]
+all-providers = ["gemini", "openai", "anthropic", "deepseek"]

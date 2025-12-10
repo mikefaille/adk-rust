@@ -163,6 +163,16 @@ path = "anthropic_tools/main.rs"
 required-features = ["anthropic"]
 
 [[example]]
+name = "deepseek_basic"
+path = "deepseek_basic/main.rs"
+required-features = ["deepseek"]
+
+[[example]]
+name = "deepseek_reasoner"
+path = "deepseek_reasoner/main.rs"
+required-features = ["deepseek"]
+
+[[example]]
 name = "realtime_basic"
 path = "realtime_basic/main.rs"
 required-features = ["realtime-openai"]
@@ -297,6 +307,7 @@ required-features = ["browser"]
 default = []
 openai = ["adk-model/openai"]
 anthropic = ["adk-model/anthropic"]
+deepseek = ["adk-model/deepseek"]
 realtime-openai = ["adk-realtime/openai"]
 realtime-gemini = ["adk-realtime/gemini"]
 browser = ["dep:adk-browser", "dep:reqwest"]

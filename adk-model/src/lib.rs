@@ -1,6 +1,6 @@
 //! # adk-model
 //!
-//! LLM model integrations for ADK (Gemini, OpenAI, Anthropic, etc.).
+//! LLM model integrations for ADK (Gemini, OpenAI, Anthropic, DeepSeek, etc.).
 //!
 //! ## Overview
 //!
@@ -10,6 +10,7 @@
 //! - `OpenAIClient` - OpenAI models (GPT-4o, GPT-4o-mini, etc.) - requires `openai` feature
 //! - `AzureOpenAIClient` - Azure OpenAI Service - requires `openai` feature
 //! - `AnthropicClient` - Anthropic Claude models (Claude 4, Claude 3.5, etc.) - requires `anthropic` feature
+//! - `DeepSeekClient` - DeepSeek models (deepseek-chat, deepseek-reasoner) - requires `deepseek` feature
 //! - [`MockLlm`] - Mock LLM for testing
 //!
 //! ## Quick Start
@@ -46,6 +47,18 @@
 //! )).unwrap();
 //! ```
 //!
+//! ### DeepSeek
+//!
+//! ```rust,ignore
+//! use adk_model::deepseek::{DeepSeekClient, DeepSeekConfig};
+//!
+//! // Chat model
+//! let chat = DeepSeekClient::chat(std::env::var("DEEPSEEK_API_KEY").unwrap()).unwrap();
+//!
+//! // Reasoner with thinking mode
+//! let reasoner = DeepSeekClient::reasoner(std::env::var("DEEPSEEK_API_KEY").unwrap()).unwrap();
+//! ```
+//!
 //! ## Supported Models
 //!
 //! ### Gemini
@@ -69,6 +82,12 @@
 //! | `claude-3-5-sonnet-20241022` | Claude 3.5 Sonnet |
 //! | `claude-3-opus-20240229` | Most capable Claude 3 |
 //!
+//! ### DeepSeek
+//! | Model | Description |
+//! |-------|-------------|
+//! | `deepseek-chat` | Fast, capable chat model |
+//! | `deepseek-reasoner` | Reasoning model with thinking mode |
+//!
 //! ## Features
 //!
 //! - Async streaming with backpressure
@@ -79,6 +98,8 @@
 
 #[cfg(feature = "anthropic")]
 pub mod anthropic;
+#[cfg(feature = "deepseek")]
+pub mod deepseek;
 #[cfg(feature = "gemini")]
 pub mod gemini;
 pub mod mock;
@@ -87,6 +108,8 @@ pub mod openai;
 
 #[cfg(feature = "anthropic")]
 pub use anthropic::AnthropicClient;
+#[cfg(feature = "deepseek")]
+pub use deepseek::{DeepSeekClient, DeepSeekConfig};
 #[cfg(feature = "gemini")]
 pub use gemini::GeminiModel;
 pub use mock::MockLlm;
