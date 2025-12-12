@@ -330,10 +330,7 @@ fn build_section_component(section: DashboardSection) -> Component {
                     .into_iter()
                     .map(|p| KeyValuePair { key: p.key, value: p.value })
                     .collect();
-                card_content.push(Component::KeyValue(KeyValue {
-                    id: None,
-                    pairs: kv_pairs,
-                }));
+                card_content.push(Component::KeyValue(KeyValue { id: None, pairs: kv_pairs }));
             }
         }
         "list" => {

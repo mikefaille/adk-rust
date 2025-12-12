@@ -134,7 +134,10 @@ fn registration_template(data: &TemplateData) -> Vec<Component> {
     vec![Component::Card(Card {
         id: Some("registration-card".to_string()),
         title: Some(data.title.clone().unwrap_or_else(|| "Create Account".to_string())),
-        description: data.description.clone().or_else(|| Some("Enter your details to register".to_string())),
+        description: data
+            .description
+            .clone()
+            .or_else(|| Some("Enter your details to register".to_string())),
         content: vec![
             Component::TextInput(TextInput {
                 id: Some("name".to_string()),
@@ -188,7 +191,10 @@ fn login_template(data: &TemplateData) -> Vec<Component> {
     vec![Component::Card(Card {
         id: Some("login-card".to_string()),
         title: Some(data.title.clone().unwrap_or_else(|| "Welcome Back".to_string())),
-        description: data.description.clone().or_else(|| Some("Sign in to your account".to_string())),
+        description: data
+            .description
+            .clone()
+            .or_else(|| Some("Sign in to your account".to_string())),
         content: vec![
             Component::TextInput(TextInput {
                 id: Some("email".to_string()),
@@ -242,29 +248,21 @@ fn user_profile_template(data: &TemplateData) -> Vec<Component> {
                 content: format!("**{}**", name),
                 variant: TextVariant::H3,
             }),
-            Component::Badge(Badge {
-                id: None,
-                label: role,
-                variant: BadgeVariant::Info,
-            }),
+            Component::Badge(Badge { id: None, label: role, variant: BadgeVariant::Info }),
             Component::Divider(Divider { id: None }),
             Component::KeyValue(KeyValue {
                 id: None,
-                pairs: vec![
-                    KeyValuePair { key: "Email".to_string(), value: email },
-                ],
+                pairs: vec![KeyValuePair { key: "Email".to_string(), value: email }],
             }),
         ],
-        footer: Some(vec![
-            Component::Button(Button {
-                id: Some("edit".to_string()),
-                label: "Edit Profile".to_string(),
-                action_id: "edit_profile".to_string(),
-                variant: ButtonVariant::Secondary,
-                disabled: false,
-                icon: None,
-            }),
-        ]),
+        footer: Some(vec![Component::Button(Button {
+            id: Some("edit".to_string()),
+            label: "Edit Profile".to_string(),
+            action_id: "edit_profile".to_string(),
+            variant: ButtonVariant::Secondary,
+            disabled: false,
+            icon: None,
+        })]),
     })]
 }
 
@@ -272,7 +270,10 @@ fn settings_template(data: &TemplateData) -> Vec<Component> {
     vec![Component::Card(Card {
         id: Some("settings-card".to_string()),
         title: Some(data.title.clone().unwrap_or_else(|| "Settings".to_string())),
-        description: data.description.clone().or_else(|| Some("Manage your preferences".to_string())),
+        description: data
+            .description
+            .clone()
+            .or_else(|| Some("Manage your preferences".to_string())),
         content: vec![
             Component::Switch(Switch {
                 id: Some("notifications".to_string()),
@@ -314,16 +315,14 @@ fn confirm_delete_template(data: &TemplateData) -> Vec<Component> {
     vec![Component::Modal(Modal {
         id: Some("confirm-delete-modal".to_string()),
         title: data.title.clone().unwrap_or_else(|| "Confirm Deletion".to_string()),
-        content: vec![
-            Component::Alert(Alert {
-                id: None,
-                title: "Warning".to_string(),
-                description: Some(data.message.clone().unwrap_or_else(|| 
-                    "This action cannot be undone. All data will be permanently deleted.".to_string()
-                )),
-                variant: AlertVariant::Warning,
-            }),
-        ],
+        content: vec![Component::Alert(Alert {
+            id: None,
+            title: "Warning".to_string(),
+            description: Some(data.message.clone().unwrap_or_else(|| {
+                "This action cannot be undone. All data will be permanently deleted.".to_string()
+            })),
+            variant: AlertVariant::Warning,
+        })],
         footer: Some(vec![
             Component::Button(Button {
                 id: Some("cancel".to_string()),
@@ -350,9 +349,21 @@ fn confirm_delete_template(data: &TemplateData) -> Vec<Component> {
 fn status_dashboard_template(data: &TemplateData) -> Vec<Component> {
     let stats = if data.stats.is_empty() {
         vec![
-            StatItem { label: "CPU".to_string(), value: "45%".to_string(), status: Some("ok".to_string()) },
-            StatItem { label: "Memory".to_string(), value: "78%".to_string(), status: Some("warning".to_string()) },
-            StatItem { label: "Disk".to_string(), value: "32%".to_string(), status: Some("ok".to_string()) },
+            StatItem {
+                label: "CPU".to_string(),
+                value: "45%".to_string(),
+                status: Some("ok".to_string()),
+            },
+            StatItem {
+                label: "Memory".to_string(),
+                value: "78%".to_string(),
+                status: Some("warning".to_string()),
+            },
+            StatItem {
+                label: "Disk".to_string(),
+                value: "32%".to_string(),
+                status: Some("ok".to_string()),
+            },
         ]
     } else {
         data.stats.clone()
@@ -368,37 +379,40 @@ fn status_dashboard_template(data: &TemplateData) -> Vec<Component> {
             id: None,
             columns: stats.len().min(4) as u8,
             gap: 4,
-            children: stats.iter().map(|stat| {
-                let status_variant = match stat.status.as_deref() {
-                    Some("ok") | Some("success") => BadgeVariant::Success,
-                    Some("warning") => BadgeVariant::Warning,
-                    Some("error") | Some("critical") => BadgeVariant::Error,
-                    _ => BadgeVariant::Default,
-                };
-                Component::Card(Card {
-                    id: None,
-                    title: None,
-                    description: None,
-                    content: vec![
-                        Component::Text(Text {
-                            id: None,
-                            content: stat.label.clone(),
-                            variant: TextVariant::Caption,
-                        }),
-                        Component::Text(Text {
-                            id: None,
-                            content: stat.value.clone(),
-                            variant: TextVariant::H3,
-                        }),
-                        Component::Badge(Badge {
-                            id: None,
-                            label: stat.status.clone().unwrap_or_else(|| "ok".to_string()),
-                            variant: status_variant,
-                        }),
-                    ],
-                    footer: None,
+            children: stats
+                .iter()
+                .map(|stat| {
+                    let status_variant = match stat.status.as_deref() {
+                        Some("ok") | Some("success") => BadgeVariant::Success,
+                        Some("warning") => BadgeVariant::Warning,
+                        Some("error") | Some("critical") => BadgeVariant::Error,
+                        _ => BadgeVariant::Default,
+                    };
+                    Component::Card(Card {
+                        id: None,
+                        title: None,
+                        description: None,
+                        content: vec![
+                            Component::Text(Text {
+                                id: None,
+                                content: stat.label.clone(),
+                                variant: TextVariant::Caption,
+                            }),
+                            Component::Text(Text {
+                                id: None,
+                                content: stat.value.clone(),
+                                variant: TextVariant::H3,
+                            }),
+                            Component::Badge(Badge {
+                                id: None,
+                                label: stat.status.clone().unwrap_or_else(|| "ok".to_string()),
+                                variant: status_variant,
+                            }),
+                        ],
+                        footer: None,
+                    })
                 })
-            }).collect(),
+                .collect(),
         }),
     ]
 }
@@ -406,9 +420,21 @@ fn status_dashboard_template(data: &TemplateData) -> Vec<Component> {
 fn data_table_template(data: &TemplateData) -> Vec<Component> {
     let columns = if data.columns.is_empty() {
         vec![
-            TableColumn { header: "ID".to_string(), accessor_key: "id".to_string(), sortable: true },
-            TableColumn { header: "Name".to_string(), accessor_key: "name".to_string(), sortable: true },
-            TableColumn { header: "Status".to_string(), accessor_key: "status".to_string(), sortable: false },
+            TableColumn {
+                header: "ID".to_string(),
+                accessor_key: "id".to_string(),
+                sortable: true,
+            },
+            TableColumn {
+                header: "Name".to_string(),
+                accessor_key: "name".to_string(),
+                sortable: true,
+            },
+            TableColumn {
+                header: "Status".to_string(),
+                accessor_key: "status".to_string(),
+                sortable: false,
+            },
         ]
     } else {
         data.columns.clone()
@@ -435,7 +461,10 @@ fn success_message_template(data: &TemplateData) -> Vec<Component> {
     vec![Component::Alert(Alert {
         id: Some("success-alert".to_string()),
         title: data.title.clone().unwrap_or_else(|| "Success!".to_string()),
-        description: data.message.clone().or_else(|| Some("Operation completed successfully.".to_string())),
+        description: data
+            .message
+            .clone()
+            .or_else(|| Some("Operation completed successfully.".to_string())),
         variant: AlertVariant::Success,
     })]
 }
@@ -444,19 +473,20 @@ fn error_message_template(data: &TemplateData) -> Vec<Component> {
     vec![Component::Alert(Alert {
         id: Some("error-alert".to_string()),
         title: data.title.clone().unwrap_or_else(|| "Error".to_string()),
-        description: data.message.clone().or_else(|| Some("Something went wrong. Please try again.".to_string())),
+        description: data
+            .message
+            .clone()
+            .or_else(|| Some("Something went wrong. Please try again.".to_string())),
         variant: AlertVariant::Error,
     })]
 }
 
 fn loading_template(data: &TemplateData) -> Vec<Component> {
-    vec![
-        Component::Spinner(Spinner {
-            id: Some("loading-spinner".to_string()),
-            size: SpinnerSize::Large,
-            label: data.message.clone().or_else(|| Some("Loading...".to_string())),
-        }),
-    ]
+    vec![Component::Spinner(Spinner {
+        id: Some("loading-spinner".to_string()),
+        size: SpinnerSize::Large,
+        label: data.message.clone().or_else(|| Some("Loading...".to_string())),
+    })]
 }
 
 #[cfg(test)]

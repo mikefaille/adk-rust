@@ -7,8 +7,7 @@
 //! Run with: cargo run --example streaming_demo
 
 use adk_ui::{
-    Component, Progress, Text, TextVariant,
-    UiResponse, UiUpdate, Theme, Alert, AlertVariant,
+    Alert, AlertVariant, Component, Progress, Text, TextVariant, Theme, UiResponse, UiUpdate,
 };
 
 fn main() {
@@ -16,7 +15,7 @@ fn main() {
 
     // Step 1: Initial UI with a progress bar at 0%
     println!("Step 1: Sending initial progress bar at 0%...\n");
-    
+
     let initial_response = UiResponse::new(vec![
         Component::Text(Text {
             id: Some("status-text".to_string()),
@@ -28,18 +27,19 @@ fn main() {
             value: 0,
             label: Some("Processing: 0%".to_string()),
         }),
-    ]).with_theme(Theme::System);
+    ])
+    .with_theme(Theme::System);
 
     println!("Initial UiResponse:");
     println!("{}\n", serde_json::to_string_pretty(&initial_response).unwrap());
 
     // Step 2: Simulate progress updates
     let progress_steps = [25, 50, 75, 100];
-    
+
     for progress in progress_steps {
         std::thread::sleep(std::time::Duration::from_millis(500));
         println!("Step {}: Updating progress to {}%...", progress / 25 + 1, progress);
-        
+
         let status_text = match progress {
             25 => "Downloading files...",
             50 => "Processing data...",
@@ -47,17 +47,17 @@ fn main() {
             100 => "Complete!",
             _ => "Working...",
         };
-        
+
         // Update the progress bar component by ID
         let progress_update = UiUpdate::replace(
-            "main-progress",  // Target the component by its ID
+            "main-progress", // Target the component by its ID
             Component::Progress(Progress {
                 id: Some("main-progress".to_string()),
                 value: progress,
                 label: Some(format!("Processing: {}%", progress)),
             }),
         );
-        
+
         // Update the status text
         let text_update = UiUpdate::replace(
             "status-text",
@@ -67,7 +67,7 @@ fn main() {
                 variant: TextVariant::H3,
             }),
         );
-        
+
         println!("Progress UiUpdate:");
         println!("{}", serde_json::to_string_pretty(&progress_update).unwrap());
         println!("Text UiUpdate:");
@@ -76,7 +76,7 @@ fn main() {
 
     // Step 3: Final state - replace with success message
     println!("Step 6: Final state with success alert...\n");
-    
+
     let final_response = UiResponse::new(vec![
         Component::Text(Text {
             id: Some("status-text".to_string()),

@@ -27,18 +27,18 @@ pub trait Validate {
 impl Validate for UiResponse {
     fn validate(&self, path: &str) -> Vec<ValidationError> {
         let mut errors = Vec::new();
-        
+
         if self.components.is_empty() {
             errors.push(ValidationError {
                 path: path.to_string(),
                 message: "UiResponse must have at least one component".to_string(),
             });
         }
-        
+
         for (i, component) in self.components.iter().enumerate() {
             errors.extend(component.validate(&format!("{}.components[{}]", path, i)));
         }
-        
+
         errors
     }
 }
@@ -46,7 +46,7 @@ impl Validate for UiResponse {
 impl Validate for Component {
     fn validate(&self, path: &str) -> Vec<ValidationError> {
         let mut errors = Vec::new();
-        
+
         match self {
             Component::Text(t) => {
                 if t.content.is_empty() {
@@ -172,7 +172,7 @@ impl Validate for Component {
             // Other components with minimal validation
             _ => {}
         }
-        
+
         errors
     }
 }
