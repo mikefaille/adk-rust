@@ -44,6 +44,13 @@ pub enum Component {
     // Feedback
     Alert(Alert),
     Progress(Progress),
+    Toast(Toast),
+    Modal(Modal),
+    Spinner(Spinner),
+    Skeleton(Skeleton),
+
+    // Extended Inputs
+    Textarea(Textarea),
 }
 
 // --- Atoms ---
@@ -82,6 +89,9 @@ pub struct Button {
     pub variant: ButtonVariant,
     #[serde(default)]
     pub disabled: bool,
+    /// Optional icon name (Lucide icon) to display with the button
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
@@ -146,12 +156,27 @@ pub struct TextInput {
     pub id: Option<String>,
     pub name: String,
     pub label: String,
+    /// Input type: text, email, password, tel, url
+    #[serde(default = "default_input_type")]
+    pub input_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub placeholder: Option<String>,
     #[serde(default)]
     pub required: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub default_value: Option<String>,
+    /// Minimum length for text input validation
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_length: Option<usize>,
+    /// Maximum length for text input validation
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_length: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+}
+
+fn default_input_type() -> String {
+    "text".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -161,11 +186,17 @@ pub struct NumberInput {
     pub id: Option<String>,
     pub name: String,
     pub label: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub min: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub max: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub step: Option<f64>,
     #[serde(default)]
     pub required: bool,
+    /// Default value for the number input
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_value: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
@@ -290,7 +321,11 @@ pub struct Container {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct Divider;
+pub struct Divider {
+    /// Optional ID for streaming updates
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Tabs {
@@ -315,12 +350,28 @@ pub struct Table {
     pub id: Option<String>,
     pub columns: Vec<TableColumn>,
     pub data: Vec<HashMap<String, serde_json::Value>>,
+    /// Enable sorting on columns
+    #[serde(default)]
+    pub sortable: bool,
+    /// Enable pagination
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub page_size: Option<u32>,
+    /// Striped row styling
+    #[serde(default)]
+    pub striped: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct TableColumn {
     pub header: String,
     pub accessor_key: String,
+    /// Whether this column is sortable (when table.sortable is true)
+    #[serde(default = "default_true")]
+    pub sortable: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -363,11 +414,28 @@ pub struct Chart {
     /// Optional ID for streaming updates
     #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     pub kind: ChartKind,
     pub data: Vec<HashMap<String, serde_json::Value>>,
     pub x_key: String,
     pub y_keys: Vec<String>,
+    /// X-axis label
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub x_label: Option<String>,
+    /// Y-axis label
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub y_label: Option<String>,
+    /// Show legend
+    #[serde(default = "default_show_legend")]
+    pub show_legend: bool,
+    /// Custom colors for data series (hex values)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub colors: Option<Vec<String>>,
+}
+
+fn default_show_legend() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -409,6 +477,104 @@ pub struct Progress {
     pub id: Option<String>,
     pub value: u8, // 0-100
     pub label: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct Toast {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    pub message: String,
+    #[serde(default)]
+    pub variant: AlertVariant,
+    /// Duration in ms, default 5000
+    #[serde(default = "default_toast_duration")]
+    pub duration: u32,
+    #[serde(default = "default_true")]
+    pub dismissible: bool,
+}
+
+fn default_toast_duration() -> u32 {
+    5000
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct Modal {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    pub title: String,
+    pub content: Vec<Component>,
+    pub footer: Option<Vec<Component>>,
+    #[serde(default)]
+    pub size: ModalSize,
+    #[serde(default = "default_true")]
+    pub closable: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ModalSize {
+    Small,
+    #[default]
+    Medium,
+    Large,
+    Full,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct Spinner {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub size: SpinnerSize,
+    pub label: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SpinnerSize {
+    Small,
+    #[default]
+    Medium,
+    Large,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct Skeleton {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub variant: SkeletonVariant,
+    pub width: Option<String>,
+    pub height: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SkeletonVariant {
+    #[default]
+    Text,
+    Circle,
+    Rectangle,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct Textarea {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    pub name: String,
+    pub label: String,
+    pub placeholder: Option<String>,
+    #[serde(default = "default_textarea_rows")]
+    pub rows: u8,
+    #[serde(default)]
+    pub required: bool,
+    pub default_value: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+fn default_textarea_rows() -> u8 {
+    4
 }
 
 // --- Root Response ---

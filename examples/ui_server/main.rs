@@ -1,7 +1,7 @@
 use adk_agent::LlmAgentBuilder;
 use adk_core::SingleAgentLoader;
 use adk_model::gemini::GeminiModel;
-use adk_ui::UiToolset;
+use adk_ui::{UiToolset, UI_AGENT_PROMPT};
 use anyhow::Result;
 use std::sync::Arc;
 
@@ -17,23 +17,10 @@ async fn main() -> Result<()> {
     let ui_tools = UiToolset::all_tools();
 
     // Create an agent with UI rendering capabilities
+    // Uses the tested prompt from adk_ui::UI_AGENT_PROMPT
     let mut builder = LlmAgentBuilder::new("ui_demo")
         .description("An agent that uses dynamic UI components to interact with users")
-        .instruction(r#"
-            You are a helpful assistant that uses UI components to interact with users.
-            
-            When users need to provide information (like registration, settings, or surveys), 
-            use the render_form tool to create a form.
-            
-            When showing results or information, use render_card.
-            
-            When asking for confirmation before important actions, use render_confirm.
-            
-            For notifications or status updates, use render_alert.
-            
-            After calling a render tool, present a brief message to the user and wait for their response.
-            Do NOT call the same render tool again unless the user asks for something different.
-        "#)
+        .instruction(UI_AGENT_PROMPT)
         .model(Arc::new(GeminiModel::new(&api_key, "gemini-2.5-flash")?));
 
     // Add each tool individually

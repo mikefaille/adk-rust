@@ -27,7 +27,27 @@ pub struct ColumnDef {
     pub accessor_key: String,
 }
 
-/// Tool for rendering data tables
+/// Tool for rendering data tables.
+///
+/// Creates tabular displays for structured data with customizable columns.
+/// Supports optional title, sorting, pagination, and striped styling.
+///
+/// # Example JSON Parameters
+///
+/// ```json
+/// {
+///   "title": "User List",
+///   "columns": [
+///     { "header": "Name", "accessor_key": "name" },
+///     { "header": "Email", "accessor_key": "email" },
+///     { "header": "Role", "accessor_key": "role" }
+///   ],
+///   "data": [
+///     { "name": "Alice", "email": "alice@example.com", "role": "Admin" },
+///     { "name": "Bob", "email": "bob@example.com", "role": "User" }
+///   ]
+/// }
+/// ```
 pub struct RenderTableTool;
 
 impl RenderTableTool {
@@ -49,7 +69,14 @@ impl Tool for RenderTableTool {
     }
 
     fn description(&self) -> &str {
-        "Render a data table to display tabular information. Use this for showing lists of items, search results, or any structured data with multiple rows and columns."
+        r#"Render a data table. Output example:
+┌───────┬─────────────────────┬───────┐
+│ Name  │ Email               │ Role  │
+├───────┼─────────────────────┼───────┤
+│ Alice │ alice@example.com   │ Admin │
+│ Bob   │ bob@example.com     │ User  │
+└───────┴─────────────────────┴───────┘
+Set sortable=true for clickable column headers. Set page_size for pagination. Set striped=true for alternating row colors."#
     }
 
     fn parameters_schema(&self) -> Option<Value> {
@@ -63,7 +90,7 @@ impl Tool for RenderTableTool {
         let columns: Vec<TableColumn> = params
             .columns
             .into_iter()
-            .map(|c| TableColumn { header: c.header, accessor_key: c.accessor_key })
+            .map(|c| TableColumn { header: c.header, accessor_key: c.accessor_key, sortable: true })
             .collect();
 
         let mut components = Vec::new();
@@ -77,9 +104,17 @@ impl Tool for RenderTableTool {
             }));
         }
 
-        components.push(Component::Table(Table { id: None, columns, data: params.data }));
+        components.push(Component::Table(Table {
+            id: None,
+            columns,
+            data: params.data,
+            sortable: false,
+            page_size: None,
+            striped: false,
+        }));
 
         let ui = UiResponse::new(components);
-        Ok(serde_json::to_value(ui).unwrap())
+        serde_json::to_value(ui)
+            .map_err(|e| adk_core::AdkError::Tool(format!("Failed to serialize UI: {}", e)))
     }
 }

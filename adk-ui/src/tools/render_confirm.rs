@@ -80,6 +80,7 @@ impl Tool for RenderConfirmTool {
                 action_id: params.cancel_action.unwrap_or_else(|| "cancel".to_string()),
                 variant: ButtonVariant::Ghost,
                 disabled: false,
+                icon: None,
             }),
             Component::Button(Button {
                 id: None,
@@ -87,6 +88,7 @@ impl Tool for RenderConfirmTool {
                 action_id: params.confirm_action,
                 variant: confirm_variant,
                 disabled: false,
+                icon: None,
             }),
         ];
 
@@ -102,6 +104,7 @@ impl Tool for RenderConfirmTool {
             footer: Some(footer),
         })]);
 
-        Ok(serde_json::to_value(ui).unwrap())
+        serde_json::to_value(ui)
+            .map_err(|e| adk_core::AdkError::Tool(format!("Failed to serialize UI: {}", e)))
     }
 }

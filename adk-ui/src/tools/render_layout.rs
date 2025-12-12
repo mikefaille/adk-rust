@@ -7,54 +7,97 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-/// A section in a dashboard layout - simplified
+/// A section in a dashboard layout.
+///
+/// Each section has a `type` field that determines which other fields are used:
+/// - `"stats"`: Uses `stats` field for label/value/status items
+/// - `"text"`: Uses `text` field for plain text content
+/// - `"alert"`: Uses `message` and `severity` fields
+/// - `"table"`: Uses `columns` and `rows` fields
+/// - `"chart"`: Uses `chart_type`, `data`, `x_key`, `y_keys` fields
+/// - `"key_value"`: Uses `pairs` field for key-value display
+/// - `"list"`: Uses `items` and `ordered` fields
+/// - `"code_block"`: Uses `code` and `language` fields
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct DashboardSection {
-    /// Section title
+    /// Section title displayed as card header
     pub title: String,
-    /// Type of content: "stats", "table", "chart", "alert", "text"
+    /// Type of content: "stats", "table", "chart", "alert", "text", "key_value", "list", "code_block"
     #[serde(rename = "type")]
     pub section_type: String,
-    /// For stats sections: list of label/value pairs
-    #[serde(default)]
+    /// For stats sections: list of label/value pairs with optional status
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stats: Option<Vec<StatItem>>,
     /// For text sections: the text content
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
-    /// For alert sections: the message and severity (info, success, warning, error)
-    #[serde(default)]
+    /// For alert sections: the message to display
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
-    #[serde(default)]
+    /// For alert sections: severity level ("info", "success", "warning", "error")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub severity: Option<String>,
-    /// For table sections: columns and rows
-    #[serde(default)]
+    /// For table sections: column definitions
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub columns: Option<Vec<ColumnSpec>>,
-    #[serde(default)]
+    /// For table sections: row data as key-value maps
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rows: Option<Vec<HashMap<String, Value>>>,
-    /// For chart sections
-    #[serde(default)]
+    /// For chart sections: chart type ("bar", "line", "area", "pie")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chart_type: Option<String>,
-    #[serde(default)]
+    /// For chart sections: data points as key-value maps
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data: Option<Vec<HashMap<String, Value>>>,
-    #[serde(default)]
+    /// For chart sections: key for x-axis values
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub x_key: Option<String>,
-    #[serde(default)]
+    /// For chart sections: keys for y-axis values
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub y_keys: Option<Vec<String>>,
+    /// For key_value sections: list of key-value pairs
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pairs: Option<Vec<KeyValueItem>>,
+    /// For list sections: list of text items
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub items: Option<Vec<String>>,
+    /// For list sections: whether to display as ordered list (default: false)
+    #[serde(default)]
+    pub ordered: bool,
+    /// For code_block sections: the code content
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
+    /// For code_block sections: programming language for syntax highlighting
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct StatItem {
+    /// Label displayed for this stat
     pub label: String,
+    /// Value displayed for this stat
     pub value: String,
-    /// Optional status: "operational", "degraded", "down"
-    #[serde(default)]
+    /// Optional status indicator: "operational"/"ok"/"success" (green), "degraded"/"warning" (yellow), "down"/"error"/"outage" (red)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ColumnSpec {
+    /// Column header text
     pub header: String,
+    /// Key to access data from row objects
     pub key: String,
+}
+
+/// Key-value pair for key_value sections
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct KeyValueItem {
+    /// Display label
+    pub key: String,
+    /// Display value
+    pub value: String,
 }
 
 /// Parameters for the render_layout tool
@@ -67,9 +110,53 @@ pub struct RenderLayoutParams {
     pub description: Option<String>,
     /// Sections to display
     pub sections: Vec<DashboardSection>,
+    /// Theme: "light", "dark", or "system" (default: "light")
+    #[serde(default)]
+    pub theme: Option<String>,
 }
 
-/// Tool for rendering complex multi-component layouts
+/// Tool for rendering complex multi-component layouts.
+///
+/// Creates dashboard-style layouts with multiple sections, each containing
+/// different types of content. Ideal for status pages, admin dashboards,
+/// and multi-section displays.
+///
+/// # Supported Section Types
+///
+/// - `stats`: Status indicators with labels, values, and optional status colors
+/// - `text`: Plain text content
+/// - `alert`: Notification banners with severity levels
+/// - `table`: Tabular data with columns and rows
+/// - `chart`: Data visualizations (bar, line, area, pie)
+/// - `key_value`: Key-value pair displays
+/// - `list`: Ordered or unordered lists
+/// - `code_block`: Code snippets with syntax highlighting
+///
+/// # Example JSON Parameters
+///
+/// ```json
+/// {
+///   "title": "System Status",
+///   "sections": [
+///     {
+///       "title": "Services",
+///       "type": "stats",
+///       "stats": [
+///         { "label": "API", "value": "Healthy", "status": "operational" },
+///         { "label": "Database", "value": "Degraded", "status": "warning" }
+///       ]
+///     },
+///     {
+///       "title": "Configuration",
+///       "type": "key_value",
+///       "pairs": [
+///         { "key": "Version", "value": "1.2.3" },
+///         { "key": "Region", "value": "us-east-1" }
+///       ]
+///     }
+///   ]
+/// }
+/// ```
 pub struct RenderLayoutTool;
 
 impl RenderLayoutTool {
@@ -91,7 +178,17 @@ impl Tool for RenderLayoutTool {
     }
 
     fn description(&self) -> &str {
-        "Render a dashboard layout with multiple sections. Use for status pages, dashboards, or multi-part displays. Each section has a type: 'stats' (with label/value/status items), 'table' (with columns/rows), 'chart' (with data/x_key/y_keys), 'alert' (with message/severity), or 'text' (with text content)."
+        r#"Render a dashboard layout with multiple sections. Output example:
+┌─────────────────────────────────────────────┐
+│ System Status                               │
+├─────────────────────────────────────────────┤
+│ CPU: 45% ✓  │ Memory: 78% ⚠  │ Disk: 92% ✗ │
+├─────────────────────────────────────────────┤
+│ [Chart: Usage over time]                    │
+├─────────────────────────────────────────────┤
+│ Region: us-east-1  │  Version: 1.2.3        │
+└─────────────────────────────────────────────┘
+Section types: stats (label/value/status), table, chart, alert, text, key_value, list, code_block."#
     }
 
     fn parameters_schema(&self) -> Option<Value> {
@@ -127,8 +224,20 @@ impl Tool for RenderLayoutTool {
             components.push(section_component);
         }
 
-        let ui = UiResponse::new(components);
-        Ok(serde_json::to_value(ui).unwrap())
+        let mut ui = UiResponse::new(components);
+
+        // Apply theme if specified
+        if let Some(theme_str) = params.theme {
+            let theme = match theme_str.to_lowercase().as_str() {
+                "dark" => Theme::Dark,
+                "system" => Theme::System,
+                _ => Theme::Light,
+            };
+            ui = ui.with_theme(theme);
+        }
+
+        serde_json::to_value(ui)
+            .map_err(|e| adk_core::AdkError::Tool(format!("Failed to serialize UI: {}", e)))
     }
 }
 
@@ -181,12 +290,15 @@ fn build_section_component(section: DashboardSection) -> Component {
             if let (Some(cols), Some(rows)) = (section.columns, section.rows) {
                 let table_columns: Vec<TableColumn> = cols
                     .into_iter()
-                    .map(|c| TableColumn { header: c.header, accessor_key: c.key })
+                    .map(|c| TableColumn { header: c.header, accessor_key: c.key, sortable: true })
                     .collect();
                 card_content.push(Component::Table(Table {
                     id: None,
                     columns: table_columns,
                     data: rows,
+                    sortable: false,
+                    page_size: None,
+                    striped: false,
                 }));
             }
         }
@@ -205,11 +317,45 @@ fn build_section_component(section: DashboardSection) -> Component {
                     data,
                     x_key: x,
                     y_keys: y,
+                    x_label: None,
+                    y_label: None,
+                    show_legend: true,
+                    colors: None,
+                }));
+            }
+        }
+        "key_value" => {
+            if let Some(pairs) = section.pairs {
+                let kv_pairs: Vec<KeyValuePair> = pairs
+                    .into_iter()
+                    .map(|p| KeyValuePair { key: p.key, value: p.value })
+                    .collect();
+                card_content.push(Component::KeyValue(KeyValue {
+                    id: None,
+                    pairs: kv_pairs,
+                }));
+            }
+        }
+        "list" => {
+            if let Some(items) = section.items {
+                card_content.push(Component::List(List {
+                    id: None,
+                    items,
+                    ordered: section.ordered,
+                }));
+            }
+        }
+        "code_block" => {
+            if let Some(code) = section.code {
+                card_content.push(Component::CodeBlock(CodeBlock {
+                    id: None,
+                    code,
+                    language: section.language,
                 }));
             }
         }
         _ => {
-            // Fallback: show raw text
+            // Fallback: show raw text for unknown section types
             card_content.push(Component::Text(Text {
                 id: None,
                 content: format!("Unknown section type: {}", section.section_type),

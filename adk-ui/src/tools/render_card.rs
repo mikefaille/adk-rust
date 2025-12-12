@@ -36,7 +36,23 @@ fn default_variant() -> String {
     "primary".to_string()
 }
 
-/// Tool for rendering information cards
+/// Tool for rendering information cards.
+///
+/// Creates styled card components to display content with optional action buttons.
+/// Cards are ideal for status updates, summaries, or any structured information.
+///
+/// # Example JSON Parameters
+///
+/// ```json
+/// {
+///   "title": "Welcome",
+///   "description": "Getting started with your account",
+///   "content": "Your account has been created successfully. Click below to continue.",
+///   "actions": [
+///     { "label": "Get Started", "action_id": "start", "variant": "primary" }
+///   ]
+/// }
+/// ```
 pub struct RenderCardTool;
 
 impl RenderCardTool {
@@ -58,7 +74,15 @@ impl Tool for RenderCardTool {
     }
 
     fn description(&self) -> &str {
-        "Render an information card to display content to the user. Use this for showing status updates, summaries, or any structured information with optional action buttons."
+        r#"Render an information card. Output example:
+┌─────────────────────────────┐
+│ Welcome                     │
+│ Your account is ready       │
+│ ─────────────────────────── │
+│ Click below to get started. │
+│      [Get Started]          │
+└─────────────────────────────┘
+Use for status updates, summaries, or any structured info with optional action buttons."#
     }
 
     fn parameters_schema(&self) -> Option<Value> {
@@ -98,6 +122,7 @@ impl Tool for RenderCardTool {
                             action_id: action.action_id,
                             variant,
                             disabled: false,
+                            icon: None,
                         })
                     })
                     .collect(),
@@ -112,6 +137,7 @@ impl Tool for RenderCardTool {
             footer,
         })]);
 
-        Ok(serde_json::to_value(ui).unwrap())
+        serde_json::to_value(ui)
+            .map_err(|e| adk_core::AdkError::Tool(format!("Failed to serialize UI: {}", e)))
     }
 }

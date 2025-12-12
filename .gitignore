@@ -67,3 +67,4 @@ docs/CRATES_IO_PUBLICATION_PLAN.md
 # Vendor (patched dependencies)
 # Note: vendor/ IS tracked for gemini-rust patch
 CLAUDE.md
+packages/adk-ui-react/node_modules/

@@ -279,3 +279,7 @@ cargo run --example realtime_handoff --features realtime-openai
 ## License
 
 Apache-2.0
+
+## Part of ADK-Rust
+
+This crate is part of the [ADK-Rust](https://adk-rust.com) framework for building AI agents in Rust.

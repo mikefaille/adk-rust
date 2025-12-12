@@ -1,12 +1,11 @@
 [package]
 name = "adk-ui"
-version = "0.1.5"
-edition = "2021"
-rust-version = "1.75"
-license = "Apache-2.0"
-authors = ["Zavora AI <hello@zavora.ai>"]
-description = "Dynamic UI generation for  Rust Agent Development Kit (ADK-Rust) agents - render forms, cards, tables, charts and more"
-homepage = "https://github.com/zavora-ai/adk-rust"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Dynamic UI generation for Rust Agent Development Kit (ADK-Rust) agents - render forms, cards, tables, charts and more"
 repository = "https://github.com/zavora-ai/adk-rust"
 documentation = "https://docs.rs/adk-ui"
 keywords = ["ai", "agent", "ui", "generative", "adk"]

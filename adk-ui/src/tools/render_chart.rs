@@ -28,7 +28,33 @@ fn default_chart_type() -> String {
     "bar".to_string()
 }
 
-/// Tool for rendering charts and visualizations
+/// Tool for rendering charts and data visualizations.
+///
+/// Creates interactive charts to display data trends, comparisons, and distributions.
+/// Supports multiple chart types and customizable axis labels, legends, and colors.
+///
+/// # Chart Types
+///
+/// - `bar`: Vertical bar chart (default)
+/// - `line`: Line chart for trends
+/// - `area`: Filled area chart
+/// - `pie`: Pie chart for distributions
+///
+/// # Example JSON Parameters
+///
+/// ```json
+/// {
+///   "title": "Monthly Sales",
+///   "type": "line",
+///   "data": [
+///     { "month": "Jan", "sales": 100 },
+///     { "month": "Feb", "sales": 150 },
+///     { "month": "Mar", "sales": 120 }
+///   ],
+///   "x_key": "month",
+///   "y_keys": ["sales"]
+/// }
+/// ```
 pub struct RenderChartTool;
 
 impl RenderChartTool {
@@ -75,8 +101,13 @@ impl Tool for RenderChartTool {
             data: params.data,
             x_key: params.x_key,
             y_keys: params.y_keys,
+            x_label: None,
+            y_label: None,
+            show_legend: true,
+            colors: None,
         })]);
 
-        Ok(serde_json::to_value(ui).unwrap())
+        serde_json::to_value(ui)
+            .map_err(|e| adk_core::AdkError::Tool(format!("Failed to serialize UI: {}", e)))
     }
 }

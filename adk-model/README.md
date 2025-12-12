@@ -10,8 +10,8 @@ LLM model integrations for Rust Agent Development Kit (ADK-Rust) with Gemini, Op
 
 `adk-model` provides LLM integrations for the Rust Agent Development Kit ([ADK-Rust](https://github.com/zavora-ai/adk-rust)). Supports all major providers:
 
-- **Gemini** - Google's Gemini models (2.0 Flash, Pro, etc.)
-- **OpenAI** - GPT-4o, GPT-4o-mini, Azure OpenAI
+- **Gemini** - Google's Gemini models (3.0 Pro, 2.5 Pro, 2.0 Flash, etc.)
+- **OpenAI** - GPT-5.2, GPT-5.1, GPT-5, GPT-4o, GPT-4o-mini, Azure OpenAI
 - **Anthropic** - Claude Opus 4.5, Claude Sonnet 4.5, Claude Sonnet 4, Claude 3.5
 - **DeepSeek** - DeepSeek-Chat, DeepSeek-Reasoner with thinking mode
 - **Streaming** - Real-time response streaming for all providers
@@ -138,10 +138,11 @@ See [Gemini models documentation](https://ai.google.dev/gemini-api/docs/models/g
 
 | Model | Description |
 |-------|-------------|
+| `gpt-5.2` | Latest GPT-5 with enhanced reasoning |
+| `gpt-5.1` | GPT-5 with improved tool use |
+| `gpt-5` | GPT-5 base model |
 | `gpt-4o` | Most capable GPT-4 model |
 | `gpt-4o-mini` | Fast, cost-effective GPT-4 |
-| `gpt-4-turbo` | GPT-4 Turbo with vision |
-| `gpt-3.5-turbo` | Fast and economical |
 
 See [OpenAI models documentation](https://platform.openai.com/docs/models) for the full list.
 
@@ -222,4 +223,4 @@ Apache-2.0
 
 ## Part of ADK-Rust
 
-This crate is part of the [ADK-Rust](https://github.com/zavora-ai/adk-rust) framework for building AI agents in Rust.
+This crate is part of the [ADK-Rust](https://adk-rust.com) framework for building AI agents in Rust.

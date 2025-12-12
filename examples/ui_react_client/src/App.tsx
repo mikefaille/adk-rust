@@ -1,8 +1,8 @@
-import { useState, useRef, useCallback } from 'react';
+import { useState, useRef, useCallback, useEffect } from 'react';
 import { Renderer } from './adk-ui-renderer/Renderer';
 import type { UiResponse, Component, UiEvent } from './adk-ui-renderer/types';
 import { uiEventToMessage } from './adk-ui-renderer/types';
-import { Send, Loader2 } from 'lucide-react';
+import { Send, Loader2, Moon, Sun, Monitor } from 'lucide-react';
 
 // Configuration - adjust these to match your adk-server
 // Uses same hostname as the page, but on port 8080
@@ -69,7 +69,19 @@ function App() {
   const [input, setInput] = useState('');
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [theme, setTheme] = useState<'light' | 'dark' | 'system'>('system');
   const abortRef = useRef<AbortController | null>(null);
+
+  // Apply theme to document
+  useEffect(() => {
+    const root = document.documentElement;
+    if (theme === 'system') {
+      const isDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+      root.classList.toggle('dark', isDark);
+    } else {
+      root.classList.toggle('dark', theme === 'dark');
+    }
+  }, [theme]);
 
   // Create a session if we don't have one
   const ensureSession = async (): Promise<string> => {
@@ -320,14 +332,11 @@ function App() {
                 }
               }
 
-              // Check event.actions for tool responses
-              if (event.actions) {
-                for (const action of event.actions) {
-                  // Tool call results often have nested content
-                  const found = findComponents(action);
-                  if (found.length > 0) {
-                    uiComponents = found;
-                  }
+              // Check event.actions for tool responses (actions is an object, not array)
+              if (event.actions && typeof event.actions === 'object') {
+                const found = findComponents(event.actions);
+                if (found.length > 0) {
+                  uiComponents = found;
                 }
               }
 
@@ -348,6 +357,10 @@ function App() {
                       : fullText,
                     isStreaming: true,
                   };
+                  // Check for theme in the response
+                  if (event.theme && ['light', 'dark', 'system'].includes(event.theme)) {
+                    setTheme(event.theme);
+                  }
                 }
                 return updated;
               });
@@ -405,26 +418,76 @@ function App() {
   };
 
   return (
-    <div className="min-h-screen bg-gray-50 flex flex-col">
-      <header className="bg-white border-b p-4 shadow-sm">
+    <div className="min-h-screen bg-gray-50 dark:bg-gray-900 flex flex-col transition-colors duration-300">
+      <header className="bg-white dark:bg-gray-800 border-b dark:border-gray-700 p-4 shadow-sm">
         <div className="max-w-3xl mx-auto flex items-center gap-2">
           <div className="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center text-white font-bold">A</div>
-          <h1 className="font-bold text-xl text-gray-800">ADK UI Agent</h1>
-          {sessionId && (
-            <span className="text-xs text-gray-400 ml-auto">Session: {sessionId.slice(0, 8)}...</span>
-          )}
+          <h1 className="font-bold text-xl text-gray-800 dark:text-white">ADK UI Agent</h1>
+          <div className="ml-auto flex items-center gap-2">
+            <button
+              onClick={() => setTheme(theme === 'dark' ? 'light' : theme === 'light' ? 'system' : 'dark')}
+              className="p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
+              title={`Theme: ${theme}`}
+            >
+              {theme === 'dark' ? <Moon className="w-4 h-4 text-gray-600 dark:text-gray-300" /> :
+                theme === 'light' ? <Sun className="w-4 h-4 text-gray-600" /> :
+                  <Monitor className="w-4 h-4 text-gray-600 dark:text-gray-300" />}
+            </button>
+            {sessionId && (
+              <span className="text-xs text-gray-400">Session: {sessionId.slice(0, 8)}...</span>
+            )}
+          </div>
         </div>
       </header>
 
       <main className="flex-1 max-w-3xl w-full mx-auto p-4 overflow-y-auto">
         {messages.length === 0 && (
-          <div className="text-center text-gray-400 mt-8">
-            <p>Try these prompts:</p>
-            <ul className="mt-2 space-y-1">
-              <li>"I want to register"</li>
-              <li>"Show me my profile"</li>
-              <li>"Delete my account"</li>
-            </ul>
+          <div className="mt-8 max-w-2xl mx-auto">
+            <h2 className="text-xl font-semibold text-gray-700 dark:text-gray-200 mb-4 text-center">
+              🦀 Example Prompts
+            </h2>
+            <table className="w-full text-sm border-collapse">
+              <thead>
+                <tr className="bg-gray-100 dark:bg-gray-800">
+                  <th className="px-3 py-2 text-left font-semibold text-gray-600 dark:text-gray-300 border dark:border-gray-700">Level</th>
+                  <th className="px-3 py-2 text-left font-semibold text-gray-600 dark:text-gray-300 border dark:border-gray-700">Prompt</th>
+                  <th className="px-3 py-2 text-left font-semibold text-gray-600 dark:text-gray-300 border dark:border-gray-700">Component</th>
+                </tr>
+              </thead>
+              <tbody className="text-gray-600 dark:text-gray-400">
+                {[
+                  { level: 'Basic', levelClass: 'text-green-600 dark:text-green-400', prompt: 'I want to register', component: 'Form' },
+                  { level: 'Basic', levelClass: 'text-green-600 dark:text-green-400', prompt: 'Show me my profile in dark mode', component: 'Card + Theme' },
+                  { level: 'Medium', levelClass: 'text-yellow-600 dark:text-yellow-400', prompt: 'Show a dashboard with light theme', component: 'Layout' },
+                  { level: 'Medium', levelClass: 'text-yellow-600 dark:text-yellow-400', prompt: 'List all users with email and role', component: 'Table' },
+                  { level: 'Advanced', levelClass: 'text-orange-600 dark:text-orange-400', prompt: 'Create an analytics dashboard with sales chart in dark mode', component: 'Multi-section' },
+                  { level: 'Safety', levelClass: 'text-red-600 dark:text-red-400', prompt: 'Delete my account', component: 'Confirm' },
+                ].map((row, i) => (
+                  <tr
+                    key={i}
+                    className="hover:bg-blue-50 dark:hover:bg-blue-900/30 cursor-pointer transition-colors"
+                    onClick={() => {
+                      setInput(row.prompt);
+                      setTimeout(() => {
+                        const form = document.querySelector('form');
+                        if (form) form.dispatchEvent(new Event('submit', { bubbles: true }));
+                      }, 50);
+                    }}
+                  >
+                    <td className="px-3 py-2 border dark:border-gray-700">
+                      <span className={`${row.levelClass} font-medium`}>{row.level}</span>
+                    </td>
+                    <td className="px-3 py-2 border dark:border-gray-700 italic text-blue-600 dark:text-blue-400 underline underline-offset-2">
+                      "{row.prompt}"
+                    </td>
+                    <td className="px-3 py-2 border dark:border-gray-700">{row.component}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <p className="text-center text-gray-500 dark:text-gray-400 mt-4 text-xs">
+              👆 Click any prompt to try it instantly
+            </p>
           </div>
         )}
         <div className="space-y-6">
@@ -435,19 +498,19 @@ function App() {
                   <p>{msg.content as string}</p>
                 ) : isUiResponse(msg.content) ? (
                   <div className="space-y-4">
-                    {msg.content.components.map((comp, i) => (
-                      <Renderer key={i} component={comp} onAction={handleUiAction} />
+                    {(msg.content as UiResponse).components.map((comp, i) => (
+                      <Renderer key={i} component={comp} onAction={handleUiAction} theme={(msg.content as UiResponse).theme} />
                     ))}
                   </div>
                 ) : (
-                  <div className="bg-white p-4 rounded-lg border shadow-sm">
+                  <div className="bg-white dark:bg-gray-800 p-4 rounded-lg border dark:border-gray-700 shadow-sm">
                     {msg.isStreaming && !msg.content && (
                       <div className="flex items-center gap-2 text-gray-400">
                         <Loader2 className="w-4 h-4 animate-spin" />
                         <span>Thinking...</span>
                       </div>
                     )}
-                    <p className="whitespace-pre-wrap">{msg.content as string}</p>
+                    <p className="whitespace-pre-wrap text-gray-800 dark:text-gray-200">{msg.content as string}</p>
                   </div>
                 )}
               </div>
@@ -456,7 +519,7 @@ function App() {
         </div>
       </main>
 
-      <footer className="bg-white border-t p-4">
+      <footer className="bg-white dark:bg-gray-800 border-t dark:border-gray-700 p-4">
         <div className="max-w-3xl mx-auto flex gap-2">
           <input
             type="text"
@@ -465,7 +528,7 @@ function App() {
             onKeyDown={e => e.key === 'Enter' && handleSend()}
             placeholder="Type a message..."
             disabled={isLoading}
-            className="flex-1 px-4 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500 outline-none disabled:bg-gray-100"
+            className="flex-1 px-4 py-2 border dark:border-gray-600 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none disabled:bg-gray-100 dark:disabled:bg-gray-700 bg-white dark:bg-gray-700 text-gray-800 dark:text-white placeholder-gray-400"
           />
           <button
             onClick={handleSend}

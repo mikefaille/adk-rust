@@ -6,54 +6,65 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::Arc;
 
-/// Parameters for the render_alert tool
+/// Parameters for the render_toast tool
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct RenderAlertParams {
-    /// Alert title
-    pub title: String,
-    /// Optional detailed message
-    #[serde(default)]
-    pub description: Option<String>,
-    /// Alert variant: info, success, warning, error
+pub struct RenderToastParams {
+    /// Toast message to display
+    pub message: String,
+    /// Toast variant: info, success, warning, error
     #[serde(default = "default_variant")]
     pub variant: String,
+    /// Duration in milliseconds before auto-dismiss (default 5000)
+    #[serde(default = "default_duration")]
+    pub duration: u32,
+    /// Whether the toast can be manually dismissed
+    #[serde(default = "default_true")]
+    pub dismissible: bool,
 }
 
 fn default_variant() -> String {
     "info".to_string()
 }
 
-/// Tool for rendering alerts/notifications
-pub struct RenderAlertTool;
+fn default_duration() -> u32 {
+    5000
+}
 
-impl RenderAlertTool {
+fn default_true() -> bool {
+    true
+}
+
+/// Tool for rendering toast notifications
+pub struct RenderToastTool;
+
+impl RenderToastTool {
     pub fn new() -> Self {
         Self
     }
 }
 
-impl Default for RenderAlertTool {
+impl Default for RenderToastTool {
     fn default() -> Self {
         Self::new()
     }
 }
 
 #[async_trait]
-impl Tool for RenderAlertTool {
+impl Tool for RenderToastTool {
     fn name(&self) -> &str {
-        "render_alert"
+        "render_toast"
     }
 
     fn description(&self) -> &str {
-        "Render an alert notification to inform the user about something. Use for success messages, warnings, errors, or important information."
+        "Render a temporary toast notification. Use for brief status updates, success messages, or non-blocking alerts that auto-dismiss."
     }
 
     fn parameters_schema(&self) -> Option<Value> {
-        Some(super::generate_gemini_schema::<RenderAlertParams>())
+        Some(super::generate_gemini_schema::<RenderToastParams>())
     }
 
     async fn execute(&self, _ctx: Arc<dyn ToolContext>, args: Value) -> Result<Value> {
-        let params: RenderAlertParams = serde_json::from_value(args)
+        let params: RenderToastParams = serde_json::from_value(args)
             .map_err(|e| adk_core::AdkError::Tool(format!("Invalid parameters: {}", e)))?;
 
         let variant = match params.variant.as_str() {
@@ -63,11 +74,12 @@ impl Tool for RenderAlertTool {
             _ => AlertVariant::Info,
         };
 
-        let ui = UiResponse::new(vec![Component::Alert(Alert {
+        let ui = UiResponse::new(vec![Component::Toast(Toast {
             id: None,
-            title: params.title,
-            description: params.description,
+            message: params.message,
             variant,
+            duration: params.duration,
+            dismissible: params.dismissible,
         })]);
 
         serde_json::to_value(ui)

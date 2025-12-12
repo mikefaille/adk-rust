@@ -6,12 +6,13 @@ The `adk-ui` crate enables AI agents to dynamically generate rich user interface
 
 UI tools allow agents to:
 
-- Collect user input through dynamic forms
+- Collect user input through dynamic forms with textarea support
 - Display information with cards, alerts, and notifications
-- Present data in tables and charts
-- Show progress for multi-step operations
+- Present data in tables and interactive charts (Recharts)
+- Show progress and loading states (spinner, skeleton)
 - Create dashboard layouts with multiple components
-- Request user confirmation before actions
+- Request user confirmation via modals
+- Display toast notifications for status updates
 
 ## Quick Start
 
@@ -37,7 +38,7 @@ use std::sync::Arc;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let model = Arc::new(GeminiModel::from_env("gemini-2.0-flash")?);
 
-    // Get all 8 UI tools
+    // Get all 10 UI tools
     let ui_tools = UiToolset::all_tools();
 
     // Create AI agent with UI tools
@@ -48,7 +49,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Use render_form for collecting information.
             Use render_card for displaying results.
             Use render_alert for notifications.
-            Use render_confirm before destructive actions.
+            Use render_modal for confirmation dialogs.
+            Use render_toast for brief status messages.
         "#);
 
     for tool in ui_tools {
@@ -80,7 +82,7 @@ Render interactive forms to collect user input.
 }
 ```
 
-**Field types**: `text`, `email`, `password`, `number`, `date`, `select`, `multiselect`, `switch`, `slider`
+**Field types**: `text`, `email`, `password`, `number`, `date`, `select`, `multiselect`, `switch`, `slider`, `textarea`
 
 ### render_card
 
@@ -216,6 +218,39 @@ Create dashboard layouts with multiple sections.
 
 **Section types**: `stats`, `table`, `chart`, `alert`, `text`
 
+### render_modal
+
+Display modal dialogs for confirmations or focused interactions.
+
+```json
+{
+  "title": "Confirm Deletion",
+  "message": "Are you sure you want to delete this item? This action cannot be undone.",
+  "size": "medium",
+  "closable": true,
+  "confirm_label": "Delete",
+  "cancel_label": "Cancel",
+  "confirm_action": "delete_confirmed"
+}
+```
+
+**Sizes**: `small`, `medium`, `large`, `full`
+
+### render_toast
+
+Show brief toast notifications for status updates.
+
+```json
+{
+  "message": "Settings saved successfully",
+  "variant": "success",
+  "duration": 5000,
+  "dismissible": true
+}
+```
+
+**Variants**: `info`, `success`, `warning`, `error`
+
 ## Filtered Tools
 
 Select only the tools your agent needs:
@@ -224,7 +259,9 @@ Select only the tools your agent needs:
 let toolset = UiToolset::new()
     .without_chart()      // Disable charts
     .without_table()      // Disable tables
-    .without_progress();  // Disable progress
+    .without_progress()   // Disable progress
+    .without_modal()      // Disable modals
+    .without_toast();     // Disable toasts
 
 // Or use forms only
 let forms_only = UiToolset::forms_only();
@@ -270,14 +307,14 @@ let update = UiUpdate {
 
 ## Component Schema
 
-All 23 component types support optional `id` fields for streaming updates:
+All 28 component types support optional `id` fields for streaming updates:
 
 **Atoms**: Text, Button, Icon, Image, Badge
-**Inputs**: TextInput, NumberInput, Select, MultiSelect, Switch, DateInput, Slider
+**Inputs**: TextInput, NumberInput, Select, MultiSelect, Switch, DateInput, Slider, Textarea
 **Layouts**: Stack, Grid, Card, Container, Divider, Tabs
 **Data**: Table, List, KeyValue, CodeBlock
-**Visualization**: Chart (bar, line, area, pie)
-**Feedback**: Alert, Progress
+**Visualization**: Chart (bar, line, area, pie via Recharts)
+**Feedback**: Alert, Progress, Toast, Modal, Spinner, Skeleton
 
 ## React Client
 
@@ -294,10 +331,12 @@ npm install && npm run dev -- --host
 
 The React client includes:
 - TypeScript types matching the Rust schema
-- Component renderer for all 23 types
+- Component renderer for all 28 types
+- Recharts integration for interactive charts
 - Markdown rendering support
 - Dark mode support
 - Form submission handling
+- Modal and toast components
 
 ## Architecture
 
@@ -333,6 +372,7 @@ Test the UI tools with these prompts:
 # Forms
 "I want to register for an account"
 "Create a contact form"
+"Create a feedback form with a comments textarea"
 
 # Cards
 "Show me my profile"
@@ -342,8 +382,13 @@ Test the UI tools with these prompts:
 "Show a success message"
 "Display a warning about expiring session"
 
-# Confirmation
-"I want to delete my account"
+# Modals
+"I want to delete my account" (shows confirmation modal)
+"Show a confirmation dialog before submitting"
+
+# Toasts
+"Show a success toast notification"
+"Display an error toast"
 
 # Tables
 "Show my recent orders"
@@ -351,10 +396,13 @@ Test the UI tools with these prompts:
 
 # Charts
 "Show monthly sales chart"
-"Display traffic trends"
+"Display traffic trends as a line chart"
+"Show revenue breakdown as a pie chart"
 
-# Progress
+# Progress & Loading
 "Show upload progress at 75%"
+"Display a loading spinner"
+"Show skeleton loading state"
 
 # Dashboards
 "Show system status dashboard"

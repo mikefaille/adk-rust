@@ -117,6 +117,7 @@ impl Tool for RenderProgressTool {
             footer: None,
         })]);
 
-        Ok(serde_json::to_value(ui).unwrap())
+        serde_json::to_value(ui)
+            .map_err(|e| adk_core::AdkError::Tool(format!("Failed to serialize UI: {}", e)))
     }
 }

@@ -22,6 +22,9 @@ pub struct RenderFormParams {
     /// Submit button label
     #[serde(default = "default_submit_label")]
     pub submit_label: String,
+    /// Theme: "light", "dark", or "system" (default: "light")
+    #[serde(default)]
+    pub theme: Option<String>,
 }
 
 fn default_submit_action() -> String {
@@ -56,7 +59,34 @@ fn default_field_type() -> String {
     "text".to_string()
 }
 
-/// Tool for rendering forms to collect user input
+/// Tool for rendering forms to collect user input.
+///
+/// This tool generates form UI components that allow agents to collect
+/// structured input from users. The form includes various field types
+/// and returns submitted data via `UiEvent::FormSubmit`.
+///
+/// # Supported Field Types
+///
+/// - `text`: Single-line text input (default)
+/// - `email`: Email address input with validation
+/// - `password`: Password input (masked)
+/// - `number`: Numeric input
+/// - `select`: Dropdown selection from options
+/// - `textarea`: Multi-line text input
+///
+/// # Example JSON Parameters
+///
+/// ```json
+/// {
+///   "title": "Contact Form",
+///   "description": "Please fill out your details",
+///   "fields": [
+///     { "name": "email", "label": "Email", "type": "email", "required": true },
+///     { "name": "message", "label": "Message", "type": "textarea" }
+///   ],
+///   "submit_label": "Send"
+/// }
+/// ```
 pub struct RenderFormTool;
 
 impl RenderFormTool {
@@ -78,7 +108,16 @@ impl Tool for RenderFormTool {
     }
 
     fn description(&self) -> &str {
-        "Render a form to collect structured input from the user. Use this when you need the user to provide multiple pieces of information like registration, settings, or surveys."
+        r#"Render a form to collect user input. Output example:
+┌─────────────────────────┐
+│ Registration Form       │
+│ ─────────────────────── │
+│ Name*: [___________]    │
+│ Email*: [___________]   │
+│ Password*: [___________]│
+│         [Register]      │
+└─────────────────────────┘
+Use field types: text, email, password, number, select, textarea. Set required=true for mandatory fields."#
     }
 
     fn parameters_schema(&self) -> Option<Value> {
@@ -102,6 +141,7 @@ impl Tool for RenderFormTool {
                     max: None,
                     step: None,
                     required: field.required,
+                    default_value: None,
                     error: None,
                 }),
                 "select" => Component::Select(Select {
@@ -112,13 +152,26 @@ impl Tool for RenderFormTool {
                     required: field.required,
                     error: None,
                 }),
-                _ => Component::TextInput(TextInput {
+                "textarea" => Component::Textarea(Textarea {
                     id: None,
                     name: field.name,
                     label: field.label,
                     placeholder: field.placeholder,
+                    rows: 4,
                     required: field.required,
                     default_value: None,
+                    error: None,
+                }),
+                _ => Component::TextInput(TextInput {
+                    id: None,
+                    name: field.name,
+                    label: field.label,
+                    input_type: field.field_type.clone(),
+                    placeholder: field.placeholder,
+                    required: field.required,
+                    default_value: None,
+                    min_length: None,
+                    max_length: None,
                     error: None,
                 }),
             };
@@ -132,10 +185,11 @@ impl Tool for RenderFormTool {
             action_id: params.submit_action,
             variant: ButtonVariant::Primary,
             disabled: false,
+            icon: None,
         }));
 
         // Wrap in a card
-        let ui = UiResponse::new(vec![Component::Card(Card {
+        let mut ui = UiResponse::new(vec![Component::Card(Card {
             id: None,
             title: Some(params.title),
             description: params.description,
@@ -143,7 +197,18 @@ impl Tool for RenderFormTool {
             footer: None,
         })]);
 
+        // Apply theme if specified
+        if let Some(theme_str) = params.theme {
+            let theme = match theme_str.to_lowercase().as_str() {
+                "dark" => Theme::Dark,
+                "system" => Theme::System,
+                _ => Theme::Light,
+            };
+            ui = ui.with_theme(theme);
+        }
+
         // Return as JSON - the framework will convert to Part::InlineData
-        Ok(serde_json::to_value(ui).unwrap())
+        serde_json::to_value(ui)
+            .map_err(|e| adk_core::AdkError::Tool(format!("Failed to serialize UI: {}", e)))
     }
 }

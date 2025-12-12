@@ -341,6 +341,10 @@ path = "ui_agent/main.rs"
 name = "ui_server"
 path = "ui_server/main.rs"
 
+[[example]]
+name = "streaming_demo"
+path = "streaming_demo/main.rs"
+
 [features]
 default = []
 openai = ["adk-model/openai"]

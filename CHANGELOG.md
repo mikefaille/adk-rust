@@ -5,7 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.1.6] - 2025-12-12
+
+### Added
+- **adk-ui**: New modules for improved LLM reliability and developer experience:
+  - `prompts.rs` - Tested system prompts (`UI_AGENT_PROMPT`) with few-shot examples
+  - `templates.rs` - 10 pre-built UI templates (Registration, Login, Dashboard, etc.)
+  - `validation.rs` - Server-side validation with `validate_ui_response()`
+- **adk-ui**: Component enhancements:
+  - `Button`: Added `icon` field for icon buttons
+  - `TextInput`: Added `min_length`, `max_length` validation
+  - `NumberInput`: Added `default_value` field
+  - `Table`: Added `sortable`, `striped`, `page_size` fields
+  - `Chart`: Added `x_label`, `y_label`, `show_legend`, `colors` fields
+  - `render_layout`: Added `key_value`, `list`, `code_block` section types
+- **npm package**: Published `@zavora-ai/adk-ui-react@0.1.6` to npm
+- **streaming_demo**: New example showing `UiUpdate` for real-time progress bar updates
+- React client improvements:
+  - Clickable example prompts table with instant send
+  - Dark mode and theme support
+  - Table sorting and pagination
+  - Chart colors and axis labels
+
+### Fixed
+- All 10 render tools now use proper error handling (replaced `unwrap()`)
+- TypeScript types updated for all new Rust schema fields
+
+### Changed
+- All crates now use workspace version inheritance (`version.workspace = true`)
 
 ## [0.1.5] - 2025-12-10
 

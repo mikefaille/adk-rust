@@ -455,9 +455,26 @@ All providers support streaming, function calling, and multimodal inputs (where 
 
 ## Documentation
 
+- **Website**: [adk-rust.com](https://adk-rust.com) - Official documentation and guides
 - **API Reference**: [docs.rs/adk-rust](https://docs.rs/adk-rust) - Full API documentation
-- **Official Docs**: [docs/official_docs/](docs/official_docs/) - ADK framework documentation
 - **Examples**: [examples/README.md](examples/README.md) - 50+ working examples with detailed explanations
+
+### Dynamic UI Generation
+
+The `adk-ui` crate enables agents to render rich user interfaces:
+
+```rust
+use adk_ui::{UiToolset, UI_AGENT_PROMPT};
+
+let agent = LlmAgentBuilder::new("ui_assistant")
+    .instruction(UI_AGENT_PROMPT)  // Tested prompt for reliable UI generation
+    .tools(UiToolset::all_tools()) // 10 render tools
+    .build()?;
+```
+
+**React Client**: `npm install @zavora-ai/adk-ui-react`
+
+**Features**: 28 components, 10 templates, dark mode, streaming updates, server-side validation
 
 ## Development
 

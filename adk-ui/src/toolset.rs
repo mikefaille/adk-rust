@@ -25,6 +25,8 @@ pub struct UiToolset {
     include_chart: bool,
     include_layout: bool,
     include_progress: bool,
+    include_modal: bool,
+    include_toast: bool,
 }
 
 impl UiToolset {
@@ -39,6 +41,8 @@ impl UiToolset {
             include_chart: true,
             include_layout: true,
             include_progress: true,
+            include_modal: true,
+            include_toast: true,
         }
     }
 
@@ -53,6 +57,8 @@ impl UiToolset {
             include_chart: false,
             include_layout: false,
             include_progress: false,
+            include_modal: false,
+            include_toast: false,
         }
     }
 
@@ -104,6 +110,18 @@ impl UiToolset {
         self
     }
 
+    /// Disable modal rendering
+    pub fn without_modal(mut self) -> Self {
+        self.include_modal = false;
+        self
+    }
+
+    /// Disable toast rendering
+    pub fn without_toast(mut self) -> Self {
+        self.include_toast = false;
+        self
+    }
+
     /// Get all tools as a Vec for use with LlmAgentBuilder
     pub fn all_tools() -> Vec<Arc<dyn Tool>> {
         vec![
@@ -115,6 +133,8 @@ impl UiToolset {
             Arc::new(RenderChartTool::new()),
             Arc::new(RenderLayoutTool::new()),
             Arc::new(RenderProgressTool::new()),
+            Arc::new(RenderModalTool::new()),
+            Arc::new(RenderToastTool::new()),
         ]
     }
 }
@@ -158,6 +178,12 @@ impl Toolset for UiToolset {
         if self.include_progress {
             tools.push(Arc::new(RenderProgressTool::new()));
         }
+        if self.include_modal {
+            tools.push(Arc::new(RenderModalTool::new()));
+        }
+        if self.include_toast {
+            tools.push(Arc::new(RenderToastTool::new()));
+        }
 
         Ok(tools)
     }
@@ -168,9 +194,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_all_tools_returns_8_tools() {
+    fn test_all_tools_returns_10_tools() {
         let tools = UiToolset::all_tools();
-        assert_eq!(tools.len(), 8);
+        assert_eq!(tools.len(), 10);
 
         let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
         assert!(names.contains(&"render_form"));
@@ -181,6 +207,8 @@ mod tests {
         assert!(names.contains(&"render_chart"));
         assert!(names.contains(&"render_layout"));
         assert!(names.contains(&"render_progress"));
+        assert!(names.contains(&"render_modal"));
+        assert!(names.contains(&"render_toast"));
     }
 
     #[test]

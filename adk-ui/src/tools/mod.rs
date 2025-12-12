@@ -4,8 +4,10 @@ mod render_chart;
 mod render_confirm;
 mod render_form;
 mod render_layout;
+mod render_modal;
 mod render_progress;
 mod render_table;
+mod render_toast;
 
 pub use render_alert::RenderAlertTool;
 pub use render_card::RenderCardTool;
@@ -13,8 +15,10 @@ pub use render_chart::RenderChartTool;
 pub use render_confirm::RenderConfirmTool;
 pub use render_form::RenderFormTool;
 pub use render_layout::RenderLayoutTool;
+pub use render_modal::RenderModalTool;
 pub use render_progress::RenderProgressTool;
 pub use render_table::RenderTableTool;
+pub use render_toast::RenderToastTool;
 
 use schemars::{gen::SchemaSettings, JsonSchema};
 use serde::Serialize;
