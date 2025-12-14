@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useState, DragEvent } from 'react';
 import {
   ReactFlow,
   Background,
@@ -14,6 +14,12 @@ import '@xyflow/react/dist/style.css';
 import { useStore } from '../../store';
 import { TestConsole } from '../Console/TestConsole';
 
+const AGENT_TYPES = [
+  { type: 'llm', label: 'LLM Agent', enabled: true },
+  { type: 'tool', label: 'Tool Agent', enabled: false },
+  { type: 'condition', label: 'Condition', enabled: false },
+];
+
 export function Canvas() {
   const { currentProject, closeProject, saveProject, selectNode, selectedNodeId, updateAgent, addAgent, addEdge: addProjectEdge } = useStore();
   const [showConsole, setShowConsole] = useState(true);
@@ -21,20 +27,20 @@ export function Canvas() {
   const [nodes, setNodes, onNodesChange] = useNodesState<Node>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
 
-  // Update canvas whenever project changes
   useEffect(() => {
     if (!currentProject) return;
     
+    const agentIds = Object.keys(currentProject.agents);
     const newNodes: Node[] = [
-      { id: 'START', position: { x: 50, y: 200 }, data: { label: 'START' }, type: 'input' },
-      { id: 'END', position: { x: 600, y: 200 }, data: { label: 'END' }, type: 'output' },
+      { id: 'START', position: { x: 200, y: 50 }, data: { label: '▶ START' }, type: 'input', style: { background: '#1a472a', border: '2px solid #4ade80', borderRadius: 8, padding: 10, color: '#fff' } },
+      { id: 'END', position: { x: 200, y: 150 + agentIds.length * 120 }, data: { label: '⏹ END' }, type: 'output', style: { background: '#4a1a1a', border: '2px solid #f87171', borderRadius: 8, padding: 10, color: '#fff' } },
     ];
-    Object.entries(currentProject.agents).forEach(([id, agent]) => {
+    agentIds.forEach((id, i) => {
       newNodes.push({
         id,
-        position: { x: agent.position.x, y: agent.position.y },
-        data: { label: id },
-        style: { background: '#16213e', border: '1px solid #e94560', borderRadius: 8, padding: 10, color: '#fff' },
+        position: { x: 200, y: 150 + i * 120 },
+        data: { label: `🤖 ${id}` },
+        style: { background: '#16213e', border: '2px solid #e94560', borderRadius: 8, padding: 12, color: '#fff', minWidth: 120 },
       });
     });
     setNodes(newNodes);
@@ -43,27 +49,45 @@ export function Canvas() {
       id: `e${i}`,
       source: e.from,
       target: e.to,
-      animated: true,
-      style: { stroke: '#e94560' },
+      type: 'smoothstep',
+      style: { stroke: '#e94560', strokeWidth: 2 },
     }));
     setEdges(newEdges);
   }, [currentProject, setNodes, setEdges]);
 
-  const handleAddAgent = () => {
+  const createAgent = useCallback(() => {
     if (!currentProject) return;
-    const id = `agent_${Object.keys(currentProject.agents).length + 1}`;
+    const agentCount = Object.keys(currentProject.agents).length;
+    const id = `agent_${agentCount + 1}`;
     addAgent(id, {
       type: 'llm',
       model: 'gemini-2.0-flash',
       instruction: 'You are a helpful assistant.',
       tools: [],
       sub_agents: [],
-      position: { x: 300, y: 200 },
+      position: { x: 200, y: 150 + agentCount * 120 },
     });
     addProjectEdge('START', id);
     addProjectEdge(id, 'END');
     selectNode(id);
+  }, [currentProject, addAgent, addProjectEdge, selectNode]);
+
+  const onDragStart = (e: DragEvent, nodeType: string) => {
+    e.dataTransfer.setData('application/reactflow', nodeType);
+    e.dataTransfer.effectAllowed = 'move';
   };
+
+  const onDragOver = useCallback((e: DragEvent) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+  }, []);
+
+  const onDrop = useCallback((e: DragEvent) => {
+    e.preventDefault();
+    const type = e.dataTransfer.getData('application/reactflow');
+    if (!type) return;
+    createAgent();
+  }, [createAgent]);
 
   const onConnect = useCallback((params: Connection) => setEdges((eds) => addEdge(params, eds)), [setEdges]);
 
@@ -75,9 +99,7 @@ export function Canvas() {
     }
   }, [selectNode]);
 
-  const onPaneClick = useCallback(() => {
-    selectNode(null);
-  }, [selectNode]);
+  const onPaneClick = useCallback(() => selectNode(null), [selectNode]);
 
   if (!currentProject) return null;
 
@@ -91,14 +113,19 @@ export function Canvas() {
         <div className="w-48 bg-studio-panel border-r border-gray-700 p-4 flex flex-col">
           <h3 className="font-semibold mb-4">Components</h3>
           <div className="space-y-2 flex-1">
-            <div 
-              onClick={handleAddAgent}
-              className="p-2 bg-studio-accent rounded cursor-pointer hover:bg-studio-highlight transition-colors text-sm"
-            >
-              + LLM Agent
-            </div>
-            <div className="p-2 bg-studio-accent rounded opacity-50 cursor-not-allowed text-sm">Tool Agent</div>
-            <div className="p-2 bg-studio-accent rounded opacity-50 cursor-not-allowed text-sm">Condition</div>
+            {AGENT_TYPES.map(({ type, label, enabled }) => (
+              <div
+                key={type}
+                draggable={enabled}
+                onDragStart={(e) => enabled && onDragStart(e, type)}
+                onClick={() => enabled && createAgent()}
+                className={`p-2 bg-studio-accent rounded text-sm ${
+                  enabled ? 'cursor-grab hover:bg-studio-highlight' : 'opacity-50 cursor-not-allowed'
+                }`}
+              >
+                {enabled ? '⊕ ' : ''}{label}
+              </div>
+            ))}
           </div>
           <div className="space-y-2">
             <button onClick={() => setShowConsole(!showConsole)} className="w-full px-3 py-2 bg-gray-700 rounded text-sm">
@@ -118,7 +145,12 @@ export function Canvas() {
             onConnect={onConnect}
             onNodeClick={onNodeClick}
             onPaneClick={onPaneClick}
+            onDrop={onDrop}
+            onDragOver={onDragOver}
             fitView
+            fitViewOptions={{ padding: 0.3, maxZoom: 1 }}
+            minZoom={0.1}
+            maxZoom={2}
           >
             <Background color="#333" gap={20} />
             <Controls />
@@ -159,7 +191,7 @@ export function Canvas() {
       )}
       {showConsole && !hasAgents && (
         <div className="h-32 bg-studio-panel border-t border-gray-700 flex items-center justify-center text-gray-500">
-          Click "+ LLM Agent" to add an agent
+          Drag "LLM Agent" onto the canvas to get started
         </div>
       )}
     </div>

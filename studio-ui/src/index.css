@@ -19,3 +19,20 @@ body {
   height: 10px;
   background: #e94560;
 }
+
+
+.react-flow__controls {
+  background: #16213e;
+  border: 1px solid #e94560;
+  border-radius: 8px;
+}
+
+.react-flow__controls-button {
+  background: #16213e;
+  border-bottom: 1px solid #333;
+  fill: #e94560;
+}
+
+.react-flow__controls-button:hover {
+  background: #1f2937;
+}
