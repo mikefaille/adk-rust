@@ -18,13 +18,21 @@ const AGENT_TYPES = [
   { type: 'sequential', label: 'Sequential Agent', enabled: true },
   { type: 'loop', label: 'Loop Agent', enabled: true },
   { type: 'parallel', label: 'Parallel Agent', enabled: true },
-  { type: 'tool', label: 'Tool Agent', enabled: false },
+];
+
+const TOOL_TYPES = [
+  { type: 'function', label: 'Function Tool', icon: 'ƒ' },
+  { type: 'mcp', label: 'MCP Tool', icon: '🔌' },
+  { type: 'browser', label: 'Browser Tool', icon: '🌐' },
+  { type: 'exit_loop', label: 'Exit Loop', icon: '⏹' },
+  { type: 'google_search', label: 'Google Search', icon: '🔍' },
+  { type: 'load_artifact', label: 'Load Artifact', icon: '📦' },
 ];
 
 type FlowPhase = 'idle' | 'input' | 'output';
 
 export function Canvas() {
-  const { currentProject, closeProject, saveProject, selectNode, selectedNodeId, updateAgent, addAgent, addEdge: addProjectEdge, removeEdge: removeProjectEdge } = useStore();
+  const { currentProject, closeProject, saveProject, selectNode, selectedNodeId, updateAgent, addAgent, addEdge: addProjectEdge, removeEdge: removeProjectEdge, addToolToAgent, removeToolFromAgent } = useStore();
   const [showConsole, setShowConsole] = useState(true);
   const [flowPhase, setFlowPhase] = useState<FlowPhase>('idle');
 
@@ -84,10 +92,24 @@ export function Canvas() {
           style: { background: config.bg, border: `2px solid ${config.border}`, borderRadius: 8, padding: 12, color: '#fff', minWidth: isParallel ? 200 : 150 },
         });
       } else {
+        const tools = agent.tools || [];
         newNodes.push({
           id,
           position: { x: 200, y: 150 + i * 150 },
-          data: { label: <div className="text-center"><div>🤖 {id}</div><div className="text-xs text-gray-400">LLM Agent</div></div> },
+          data: { label: (
+            <div className="text-center">
+              <div>🤖 {id}</div>
+              <div className="text-xs text-gray-400">LLM Agent</div>
+              {tools.length > 0 && (
+                <div className="border-t border-gray-600 pt-1 mt-1">
+                  {tools.map(t => {
+                    const tool = TOOL_TYPES.find(tt => tt.type === t);
+                    return <div key={t} className="text-xs text-gray-300">{tool?.icon} {tool?.label || t}</div>;
+                  })}
+                </div>
+              )}
+            </div>
+          )},
           style: { background: '#16213e', border: '2px solid #e94560', borderRadius: 8, padding: 12, color: '#fff', minWidth: 120 },
         });
       }
@@ -218,22 +240,47 @@ export function Canvas() {
     <div className="flex flex-col h-full">
       <div className="flex flex-1 overflow-hidden">
         {/* Palette */}
-        <div className="w-48 bg-studio-panel border-r border-gray-700 p-4 flex flex-col">
-          <h3 className="font-semibold mb-4">Components</h3>
-          <div className="space-y-2 flex-1">
-            {AGENT_TYPES.map(({ type, label, enabled }) => (
+        <div className="w-48 bg-studio-panel border-r border-gray-700 p-4 flex flex-col overflow-y-auto">
+          <h3 className="font-semibold mb-2">Agents</h3>
+          <div className="space-y-1 mb-4">
+            {AGENT_TYPES.map(({ type, label }) => (
               <div
                 key={type}
-                draggable={enabled}
-                onDragStart={(e) => enabled && onDragStart(e, type)}
-                onClick={() => enabled && createAgent(type)}
-                className={`p-2 bg-studio-accent rounded text-sm ${
-                  enabled ? 'cursor-grab hover:bg-studio-highlight' : 'opacity-50 cursor-not-allowed'
-                }`}
+                draggable
+                onDragStart={(e) => onDragStart(e, type)}
+                onClick={() => createAgent(type)}
+                className="p-2 bg-studio-accent rounded text-sm cursor-grab hover:bg-studio-highlight"
               >
-                {enabled ? '⊕ ' : ''}{label}
+                ⊕ {label}
               </div>
             ))}
+          </div>
+          
+          <h3 className="font-semibold mb-2">Tools</h3>
+          <div className="space-y-1 flex-1">
+            {TOOL_TYPES.map(({ type, label, icon }) => {
+              const isAdded = selectedNodeId && currentProject?.agents[selectedNodeId]?.tools?.includes(type);
+              return (
+                <div
+                  key={type}
+                  className={`p-2 rounded text-sm cursor-pointer flex items-center gap-2 ${
+                    isAdded ? 'bg-green-800 hover:bg-green-700' : 'bg-gray-700 hover:bg-gray-600'
+                  } ${!selectedNodeId ? 'opacity-50' : ''}`}
+                  onClick={() => {
+                    if (!selectedNodeId) return;
+                    if (isAdded) {
+                      removeToolFromAgent(selectedNodeId, type);
+                    } else {
+                      addToolToAgent(selectedNodeId, type);
+                    }
+                  }}
+                >
+                  <span>{icon}</span>
+                  <span className="text-xs">{label}</span>
+                  {isAdded && <span className="ml-auto text-xs">✓</span>}
+                </div>
+              );
+            })}
           </div>
           <div className="space-y-2">
             <button onClick={() => setShowConsole(!showConsole)} className="w-full px-3 py-2 bg-gray-700 rounded text-sm">
@@ -330,10 +377,26 @@ export function Canvas() {
                 />
                 <label className="block text-sm text-gray-400 mb-1">Instruction</label>
                 <textarea
-                  className="w-full px-2 py-1 bg-studio-bg border border-gray-600 rounded text-sm h-32"
+                  className="w-full px-2 py-1 bg-studio-bg border border-gray-600 rounded text-sm h-24"
                   value={selectedAgent.instruction}
                   onChange={(e) => updateAgent(selectedNodeId!, { instruction: e.target.value })}
                 />
+                {selectedAgent.tools.length > 0 && (
+                  <div className="mt-3">
+                    <label className="block text-sm text-gray-400 mb-1">Tools</label>
+                    <div className="flex flex-wrap gap-1">
+                      {selectedAgent.tools.map(t => {
+                        const tool = TOOL_TYPES.find(tt => tt.type === t);
+                        return (
+                          <span key={t} className="text-xs bg-gray-700 px-2 py-1 rounded flex items-center gap-1">
+                            {tool?.icon} {tool?.label || t}
+                            <button onClick={() => removeToolFromAgent(selectedNodeId!, t)} className="ml-1 text-red-400 hover:text-red-300">×</button>
+                          </span>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
               </div>
             )}
           </div>

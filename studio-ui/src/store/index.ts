@@ -26,6 +26,8 @@ interface StudioState {
   removeAgent: (id: string) => void;
   addEdge: (from: string, to: string) => void;
   removeEdge: (from: string, to: string) => void;
+  addToolToAgent: (agentId: string, toolType: string) => void;
+  removeToolFromAgent: (agentId: string, toolType: string) => void;
 }
 
 export const useStore = create<StudioState>((set, get) => ({
@@ -139,6 +141,42 @@ export const useStore = create<StudioState>((set, get) => ({
           workflow: {
             ...s.currentProject.workflow,
             edges: s.currentProject.workflow.edges.filter((e) => !(e.from === from && e.to === to)),
+          },
+        },
+      };
+    });
+    setTimeout(() => get().saveProject(), 0);
+  },
+
+  addToolToAgent: (agentId, toolType) => {
+    set((s) => {
+      if (!s.currentProject) return s;
+      const agent = s.currentProject.agents[agentId];
+      if (!agent || agent.tools.includes(toolType)) return s;
+      return {
+        currentProject: {
+          ...s.currentProject,
+          agents: {
+            ...s.currentProject.agents,
+            [agentId]: { ...agent, tools: [...agent.tools, toolType] },
+          },
+        },
+      };
+    });
+    setTimeout(() => get().saveProject(), 0);
+  },
+
+  removeToolFromAgent: (agentId, toolType) => {
+    set((s) => {
+      if (!s.currentProject) return s;
+      const agent = s.currentProject.agents[agentId];
+      if (!agent) return s;
+      return {
+        currentProject: {
+          ...s.currentProject,
+          agents: {
+            ...s.currentProject.agents,
+            [agentId]: { ...agent, tools: agent.tools.filter(t => t !== toolType) },
           },
         },
       };
