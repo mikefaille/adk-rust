@@ -5,7 +5,7 @@ interface ToolCall {
   args: unknown;
 }
 
-export function useSSE(projectId: string | null) {
+export function useSSE(projectId: string | null, binaryPath?: string | null) {
   const [isStreaming, setIsStreaming] = useState(false);
   const [streamingText, setStreamingText] = useState('');
   const [currentAgent, setCurrentAgent] = useState('');
@@ -24,6 +24,9 @@ export function useSSE(projectId: string | null) {
       setIsStreaming(true);
 
       const params = new URLSearchParams({ input });
+      if (binaryPath) {
+        params.set('binary_path', binaryPath);
+      }
       const es = new EventSource(`/api/projects/${projectId}/stream?${params}`);
       esRef.current = es;
       let ended = false;

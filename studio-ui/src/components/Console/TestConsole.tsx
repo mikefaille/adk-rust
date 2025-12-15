@@ -6,21 +6,28 @@ import { useSSE } from '../../hooks/useSSE';
 interface Message {
   role: 'user' | 'assistant';
   content: string;
+  agent?: string;
 }
 
 type FlowPhase = 'idle' | 'input' | 'output';
 
 interface Props {
   onFlowPhase?: (phase: FlowPhase) => void;
+  binaryPath?: string | null;
 }
 
-export function TestConsole({ onFlowPhase }: Props) {
+export function TestConsole({ onFlowPhase, binaryPath }: Props) {
   const { currentProject } = useStore();
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
-  const { send, cancel, isStreaming, streamingText, currentAgent, toolCalls } = useSSE(currentProject?.id ?? null);
+  const { send, cancel, isStreaming, streamingText, currentAgent, toolCalls } = useSSE(currentProject?.id ?? null, binaryPath);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const sendingRef = useRef(false);
+  const lastAgentRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (currentAgent) lastAgentRef.current = currentAgent;
+  }, [currentAgent]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -41,12 +48,13 @@ export function TestConsole({ onFlowPhase }: Props) {
     setInput('');
     setMessages((m) => [...m, { role: 'user', content: userMsg }]);
     onFlowPhase?.('input');
+    lastAgentRef.current = null;
     
     send(
       userMsg,
       (text) => {
         if (text) {
-          setMessages((m) => [...m, { role: 'assistant', content: text }]);
+          setMessages((m) => [...m, { role: 'assistant', content: text, agent: lastAgentRef.current || undefined }]);
         }
         onFlowPhase?.('idle');
         sendingRef.current = false;
@@ -92,7 +100,7 @@ export function TestConsole({ onFlowPhase }: Props) {
         )}
         {messages.map((m, i) => (
           <div key={i} className={`text-sm ${m.role === 'user' ? 'text-blue-400' : 'text-gray-200'}`}>
-            <span className="font-semibold">{m.role === 'user' ? 'You: ' : 'Agent: '}</span>
+            <span className="font-semibold">{m.role === 'user' ? 'You: ' : `${m.agent || 'Agent'}: `}</span>
             {m.role === 'user' ? (
               <span>{m.content}</span>
             ) : (

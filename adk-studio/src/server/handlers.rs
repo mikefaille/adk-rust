@@ -176,8 +176,11 @@ pub async fn build_project_stream(
     use axum::response::sse::Event;
     use tokio::io::{AsyncBufReadExt, BufReader};
     use tokio::process::Command;
+    use std::time::Instant;
     
     let stream = async_stream::stream! {
+        let start_time = Instant::now();
+        
         let storage = state.storage.read().await;
         let project = match storage.get(id).await {
             Ok(p) => p,
@@ -196,7 +199,10 @@ pub async fn build_project_stream(
         };
         
         // Write to temp directory
-        let project_name = project.name.to_lowercase().replace(' ', "_");
+        let mut project_name = project.name.to_lowercase().replace(' ', "_").replace(|c: char| !c.is_alphanumeric() && c != '_', "");
+        if project_name.is_empty() || project_name.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+            project_name = format!("project_{}", project_name);
+        }
         let build_dir = std::env::temp_dir().join("adk-studio-builds").join(&project_name);
         if let Err(e) = std::fs::create_dir_all(&build_dir) {
             yield Ok(Event::default().event("error").data(e.to_string()));
@@ -216,9 +222,13 @@ pub async fn build_project_stream(
         
         yield Ok(Event::default().event("status").data("Starting cargo build..."));
         
+        // Use shared target directory for faster incremental builds
+        let shared_target = std::env::temp_dir().join("adk-studio-builds").join("_shared_target");
+        let _ = std::fs::create_dir_all(&shared_target);
+        
         let mut child = match Command::new("cargo")
             .arg("build")
-            .arg("--release")
+            .env("CARGO_TARGET_DIR", &shared_target)
             .current_dir(&build_dir)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -239,11 +249,14 @@ pub async fn build_project_stream(
         
         let status = child.wait().await;
         let success = status.map(|s| s.success()).unwrap_or(false);
+        let elapsed = start_time.elapsed();
         
         if success {
-            let binary = build_dir.join("target/release").join(&project_name);
+            let binary = shared_target.join("debug").join(&project_name);
+            yield Ok(Event::default().event("output").data(format!("\n✓ Build completed in {:.1}s", elapsed.as_secs_f32())));
             yield Ok(Event::default().event("done").data(binary.to_string_lossy().to_string()));
         } else {
+            yield Ok(Event::default().event("output").data(format!("\n✗ Build failed after {:.1}s", elapsed.as_secs_f32())));
             yield Ok(Event::default().event("error").data("Build failed"));
         }
     };
@@ -275,10 +288,14 @@ pub async fn build_project(
         std::fs::write(&path, &file.content).map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     }
     
+    // Use shared target directory for faster incremental builds
+    let shared_target = std::env::temp_dir().join("adk-studio-builds").join("_shared_target");
+    let _ = std::fs::create_dir_all(&shared_target);
+    
     // Run cargo build
     let output = std::process::Command::new("cargo")
         .arg("build")
-        .arg("--release")
+        .env("CARGO_TARGET_DIR", &shared_target)
         .current_dir(&build_dir)
         .output()
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -288,7 +305,7 @@ pub async fn build_project(
     let combined = format!("{}\n{}", stdout, stderr);
     
     if output.status.success() {
-        let binary = build_dir.join("target/release").join(&project_name);
+        let binary = shared_target.join("debug").join(&project_name);
         Ok(Json(BuildResponse {
             success: true,
             output: combined,

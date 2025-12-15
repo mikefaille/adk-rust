@@ -42,6 +42,7 @@ export function Canvas() {
   const [compiledCode, setCompiledCode] = useState<GeneratedProject | null>(null);
   const [buildOutput, setBuildOutput] = useState<{success: boolean, output: string, path: string | null} | null>(null);
   const [building, setBuilding] = useState(false);
+  const [builtBinaryPath, setBuiltBinaryPath] = useState<string | null>(null);
 
   const [nodes, setNodes, onNodesChange] = useNodesState<Node>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
@@ -76,6 +77,7 @@ export function Canvas() {
     
     eventSource.addEventListener('done', (e) => {
       setBuildOutput({ success: true, output, path: e.data });
+      setBuiltBinaryPath(e.data);
       setBuilding(false);
       eventSource.close();
     });
@@ -298,10 +300,24 @@ export function Canvas() {
         position: { x: 200, y: 150 + agentCount * 120 },
       });
     }
-    addProjectEdge('START', id);
-    addProjectEdge(id, 'END');
+    
+    // Insert new agent into the chain: find what points to END, insert before it
+    const edges = currentProject.workflow.edges;
+    const edgeToEnd = edges.find(e => e.to === 'END');
+    
+    if (edgeToEnd) {
+      // Remove old edge to END, insert new agent in between
+      removeProjectEdge(edgeToEnd.from, 'END');
+      addProjectEdge(edgeToEnd.from, id);
+      addProjectEdge(id, 'END');
+    } else {
+      // No edges yet, connect START → agent → END
+      addProjectEdge('START', id);
+      addProjectEdge(id, 'END');
+    }
+    
     selectNode(id);
-  }, [currentProject, addAgent, addProjectEdge, selectNode]);
+  }, [currentProject, addAgent, addProjectEdge, removeProjectEdge, selectNode]);
 
   const onDragStart = (e: DragEvent, nodeType: string) => {
     e.dataTransfer.setData('application/reactflow', nodeType);
@@ -769,12 +785,12 @@ export function Canvas() {
       </div>
 
       {/* Test Console */}
-      {showConsole && hasAgents && buildOutput?.path && (
+      {showConsole && hasAgents && builtBinaryPath && (
         <div className="h-64">
-          <TestConsole onFlowPhase={setFlowPhase} />
+          <TestConsole onFlowPhase={setFlowPhase} binaryPath={builtBinaryPath} />
         </div>
       )}
-      {showConsole && hasAgents && !buildOutput?.path && (
+      {showConsole && hasAgents && !builtBinaryPath && (
         <div className="h-32 bg-studio-panel border-t border-gray-700 flex items-center justify-center text-gray-500">
           <div className="text-center">
             <div>Build the project first to test it</div>

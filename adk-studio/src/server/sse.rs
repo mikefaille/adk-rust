@@ -12,6 +12,8 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::sync::{Arc, OnceLock};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::process::Command;
 
 pub fn session_service() -> &'static Arc<InMemorySessionService> {
     static INSTANCE: OnceLock<Arc<InMemorySessionService>> = OnceLock::new();
@@ -23,6 +25,8 @@ pub struct StreamQuery {
     input: String,
     #[serde(default)]
     api_key: Option<String>,
+    #[serde(default)]
+    binary_path: Option<String>,
 }
 
 pub async fn stream_handler(
@@ -33,8 +37,58 @@ pub async fn stream_handler(
     let api_key = query.api_key
         .or_else(|| std::env::var("GOOGLE_API_KEY").ok())
         .unwrap_or_default();
+    let input = query.input;
+    let binary_path = query.binary_path;
 
     let stream = async_stream::stream! {
+        // If binary_path provided, run the compiled binary
+        if let Some(bin_path) = binary_path {
+            yield Ok(Event::default().event("agent").data("graph"));
+            
+            let mut child = match Command::new(&bin_path)
+                .env("GOOGLE_API_KEY", &api_key)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn() {
+                    Ok(c) => c,
+                    Err(e) => {
+                        yield Ok(Event::default().event("error").data(format!("Failed to start binary: {}", e)));
+                        return;
+                    }
+                };
+            
+            let mut stdin = child.stdin.take().unwrap();
+            let stdout = child.stdout.take().unwrap();
+            
+            if let Err(e) = stdin.write_all(format!("{}\nquit\n", input).as_bytes()).await {
+                yield Ok(Event::default().event("error").data(e.to_string()));
+                return;
+            }
+            drop(stdin);
+            
+            let mut reader = BufReader::new(stdout).lines();
+            let mut capturing = false;
+            let mut response = String::new();
+            
+            while let Ok(Some(line)) = reader.next_line().await {
+                if line.starts_with("> ") || line.starts_with("Graph workflow ready") {
+                    capturing = true;
+                    continue;
+                }
+                if capturing && !line.is_empty() {
+                    if !response.is_empty() { response.push('\n'); }
+                    response.push_str(&line);
+                    yield Ok(Event::default().event("chunk").data(&response));
+                }
+            }
+            
+            let _ = child.wait().await;
+            yield Ok(Event::default().event("end").data(""));
+            return;
+        }
+
+        // Runtime compiler path
         let project_id: uuid::Uuid = match id.parse() {
             Ok(id) => id,
             Err(e) => {
@@ -103,7 +157,7 @@ pub async fn stream_handler(
             }
         };
 
-        let content = Content::new("user").with_text(&query.input);
+        let content = Content::new("user").with_text(&input);
         let mut run_stream = match runner.run("user".into(), session.id().to_string(), content).await {
             Ok(s) => s,
             Err(e) => {
