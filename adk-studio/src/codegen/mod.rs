@@ -36,6 +36,9 @@ pub struct GeneratedFile {
 fn generate_main_rs(project: &ProjectSchema) -> String {
     let mut code = String::new();
     
+    // Allow unused imports for flexibility
+    code.push_str("#![allow(unused_imports)]\n\n");
+    
     // Imports
     code.push_str("use adk_agent::{LlmAgentBuilder, SequentialAgent, LoopAgent, ParallelAgent};\n");
     code.push_str("use adk_core::ToolContext;\n");
