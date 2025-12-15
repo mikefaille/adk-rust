@@ -1,9 +1,15 @@
 import { useCallback, useRef, useState } from 'react';
 
+interface ToolCall {
+  name: string;
+  args: unknown;
+}
+
 export function useSSE(projectId: string | null) {
   const [isStreaming, setIsStreaming] = useState(false);
   const [streamingText, setStreamingText] = useState('');
   const [currentAgent, setCurrentAgent] = useState('');
+  const [toolCalls, setToolCalls] = useState<ToolCall[]>([]);
   const esRef = useRef<EventSource | null>(null);
   const textRef = useRef('');
 
@@ -14,6 +20,7 @@ export function useSSE(projectId: string | null) {
       textRef.current = '';
       setStreamingText('');
       setCurrentAgent('');
+      setToolCalls([]);
       setIsStreaming(true);
 
       const params = new URLSearchParams({ input });
@@ -22,7 +29,6 @@ export function useSSE(projectId: string | null) {
       let ended = false;
 
       es.addEventListener('agent', (e) => {
-        // New agent started, add separator
         if (textRef.current) {
           textRef.current += '\n\n';
           setStreamingText(textRef.current);
@@ -33,6 +39,24 @@ export function useSSE(projectId: string | null) {
       es.addEventListener('chunk', (e) => {
         textRef.current += e.data;
         setStreamingText(textRef.current);
+      });
+
+      es.addEventListener('tool_call', (e) => {
+        try {
+          const data = JSON.parse(e.data);
+          setToolCalls(prev => [...prev, { name: data.name, args: data.args }]);
+          textRef.current += `\n🔧 Calling ${data.name}...\n`;
+          setStreamingText(textRef.current);
+        } catch {}
+      });
+
+      es.addEventListener('tool_result', (e) => {
+        try {
+          const data = JSON.parse(e.data);
+          const resultStr = typeof data.result === 'string' ? data.result : JSON.stringify(data.result).slice(0, 200);
+          textRef.current += `✓ ${data.name}: ${resultStr}\n`;
+          setStreamingText(textRef.current);
+        } catch {}
       });
 
       es.addEventListener('end', () => {
@@ -66,5 +90,5 @@ export function useSSE(projectId: string | null) {
     setIsStreaming(false);
   }, []);
 
-  return { send, cancel, isStreaming, streamingText, currentAgent };
+  return { send, cancel, isStreaming, streamingText, currentAgent, toolCalls };
 }

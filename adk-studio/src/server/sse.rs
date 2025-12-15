@@ -123,11 +123,22 @@ pub async fn stream_handler(
                 }
                 if let Some(c) = event.content() {
                     for part in &c.parts {
-                        if let Some(text) = part.text() {
-                            if text != last_text {
-                                yield Ok(Event::default().event("chunk").data(text));
-                                last_text = text.to_string();
+                        match part {
+                            adk_core::Part::Text { text } => {
+                                if text != &last_text {
+                                    yield Ok(Event::default().event("chunk").data(text));
+                                    last_text = text.clone();
+                                }
                             }
+                            adk_core::Part::FunctionCall { name, args, .. } => {
+                                let tool_data = serde_json::json!({"name": name, "args": args}).to_string();
+                                yield Ok(Event::default().event("tool_call").data(tool_data));
+                            }
+                            adk_core::Part::FunctionResponse { name, response, .. } => {
+                                let result_data = serde_json::json!({"name": name, "result": response}).to_string();
+                                yield Ok(Event::default().event("tool_result").data(result_data));
+                            }
+                            _ => {}
                         }
                     }
                 }

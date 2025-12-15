@@ -28,6 +28,7 @@ interface StudioState {
   removeEdge: (from: string, to: string) => void;
   addToolToAgent: (agentId: string, toolType: string) => void;
   removeToolFromAgent: (agentId: string, toolType: string) => void;
+  addSubAgentToContainer: (containerId: string) => void;
 }
 
 export const useStore = create<StudioState>((set, get) => ({
@@ -182,5 +183,24 @@ export const useStore = create<StudioState>((set, get) => ({
       };
     });
     setTimeout(() => get().saveProject(), 0);
+  },
+
+  addSubAgentToContainer: (containerId) => {
+    const { currentProject, addAgent, updateAgent, saveProject } = get();
+    if (!currentProject) return;
+    const container = currentProject.agents[containerId];
+    if (!container) return;
+    const subCount = container.sub_agents.length + 1;
+    const newId = `${containerId}_agent_${subCount}`;
+    addAgent(newId, {
+      type: 'llm',
+      model: 'gemini-2.0-flash',
+      instruction: `You are agent ${subCount}.`,
+      tools: [],
+      sub_agents: [],
+      position: { x: 0, y: 0 },
+    });
+    updateAgent(containerId, { sub_agents: [...container.sub_agents, newId] });
+    saveProject();
   },
 }));

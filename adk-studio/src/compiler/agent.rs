@@ -1,6 +1,8 @@
 use crate::schema::{AgentSchema, AgentType, ProjectSchema};
 use adk_agent::{Agent, LlmAgentBuilder, LoopAgent, ParallelAgent, SequentialAgent};
+use adk_core::Tool;
 use adk_model::gemini::GeminiModel;
+use adk_tool::{ExitLoopTool, GoogleSearchTool, LoadArtifactsTool};
 use anyhow::{anyhow, Result};
 use std::sync::Arc;
 
@@ -19,10 +21,30 @@ fn compile_llm_agent(name: &str, schema: &AgentSchema, api_key: &str) -> Result<
     let model_name = schema.model.as_deref().unwrap_or("gemini-2.0-flash");
     let model = Arc::new(GeminiModel::new(api_key, model_name)?);
     let mut builder = LlmAgentBuilder::new(name).model(model);
+    
     if !schema.instruction.is_empty() {
         builder = builder.instruction(&schema.instruction);
     }
+    
+    // Add tools
+    for tool_type in &schema.tools {
+        if let Some(tool) = compile_tool(tool_type) {
+            builder = builder.tool(tool);
+        }
+    }
+    
     Ok(Arc::new(builder.build()?))
+}
+
+fn compile_tool(tool_type: &str) -> Option<Arc<dyn Tool>> {
+    match tool_type {
+        "google_search" => Some(Arc::new(GoogleSearchTool::new())),
+        "exit_loop" => Some(Arc::new(ExitLoopTool::new())),
+        "load_artifact" => Some(Arc::new(LoadArtifactsTool::new())),
+        // These require more setup, skip for now
+        "function" | "mcp" | "browser" => None,
+        _ => None,
+    }
 }
 
 fn compile_sequential_agent(name: &str, schema: &AgentSchema, api_key: &str, project: &ProjectSchema) -> Result<Arc<dyn Agent>> {

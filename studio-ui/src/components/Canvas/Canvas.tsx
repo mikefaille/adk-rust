@@ -32,7 +32,7 @@ const TOOL_TYPES = [
 type FlowPhase = 'idle' | 'input' | 'output';
 
 export function Canvas() {
-  const { currentProject, closeProject, saveProject, selectNode, selectedNodeId, updateAgent, addAgent, removeAgent, addEdge: addProjectEdge, removeEdge: removeProjectEdge, addToolToAgent, removeToolFromAgent } = useStore();
+  const { currentProject, closeProject, saveProject, selectNode, selectedNodeId, updateAgent, addAgent, removeAgent, addEdge: addProjectEdge, removeEdge: removeProjectEdge, addToolToAgent, removeToolFromAgent, addSubAgentToContainer } = useStore();
   const [showConsole, setShowConsole] = useState(true);
   const [flowPhase, setFlowPhase] = useState<FlowPhase>('idle');
   const [selectedSubAgent, setSelectedSubAgent] = useState<{parent: string, sub: string} | null>(null);
@@ -100,11 +100,15 @@ export function Canvas() {
               <div className="text-center">
                 <div className="font-semibold">{config.icon} {id}</div>
                 <div className="text-xs text-gray-400 mb-1">{config.label}</div>
-                <div className={`border-t border-gray-600 pt-1 mt-1 ${isParallel ? 'flex gap-1 justify-center' : ''} ${isLoop ? 'relative' : ''}`}>
+                <div className={`border-t border-gray-600 pt-1 mt-1 ${isLoop ? 'relative' : ''}`}>
                   {isLoop && (
                     <div className="absolute -left-2 top-0 bottom-0 w-1 border-l-2 border-t-2 border-b-2 border-purple-400 rounded-l" />
                   )}
-                  <div className={isLoop ? 'ml-1' : ''}>{subAgentLabels}</div>
+                  {isParallel ? (
+                    <div className="flex gap-1 flex-wrap justify-center">{subAgentLabels}</div>
+                  ) : (
+                    <div className={isLoop ? 'ml-1' : ''}>{subAgentLabels}</div>
+                  )}
                   {isLoop && (
                     <div className="absolute -right-2 top-1/2 text-purple-400 text-xs">↩</div>
                   )}
@@ -112,7 +116,7 @@ export function Canvas() {
               </div>
             )
           },
-          style: { background: config.bg, border: `2px solid ${config.border}`, borderRadius: 8, padding: 12, color: '#fff', minWidth: isParallel ? 200 : 150 },
+          style: { background: config.bg, border: `2px solid ${config.border}`, borderRadius: 8, padding: 12, color: '#fff', minWidth: isParallel ? 250 : 150 },
         });
       } else {
         const tools = agent.tools || [];
@@ -388,6 +392,12 @@ export function Canvas() {
                     </div>
                   );
                 })}
+                <button
+                  onClick={() => addSubAgentToContainer(selectedNodeId!)}
+                  className="w-full py-2 bg-gray-700 hover:bg-gray-600 rounded text-sm"
+                >
+                  + Add Sub-Agent
+                </button>
               </div>
             ) : (
               /* LLM Agent Properties */
