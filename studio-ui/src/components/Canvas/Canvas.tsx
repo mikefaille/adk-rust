@@ -211,7 +211,22 @@ export function Canvas() {
                 <div className="border-t border-gray-600 pt-1 mt-1">
                   {tools.map(t => {
                     const tool = TOOL_TYPES.find(tt => tt.type === t);
-                    return <div key={t} className="text-xs text-gray-300">{tool?.icon} {tool?.label || t}</div>;
+                    const isConfigurable = tool?.configurable;
+                    return (
+                      <div 
+                        key={t} 
+                        className={`text-xs text-gray-300 px-1 py-0.5 rounded ${isConfigurable ? 'cursor-pointer hover:bg-gray-700 hover:text-white' : ''}`}
+                        onClick={(e) => {
+                          if (isConfigurable) {
+                            e.stopPropagation();
+                            selectNode(id);
+                            selectTool(`${id}_${t}`);
+                          }
+                        }}
+                      >
+                        {tool?.icon} {tool?.label || t} {isConfigurable && <span className="text-blue-400">⚙</span>}
+                      </div>
+                    );
                   })}
                 </div>
               )}
@@ -222,7 +237,7 @@ export function Canvas() {
       }
     });
     setNodes(newNodes);
-  }, [currentProject, setNodes, selectedSubAgent, removeSubAgent, activeAgent]);
+  }, [currentProject, setNodes, selectedSubAgent, removeSubAgent, activeAgent, selectNode, selectTool]);
 
   // Update edges based on flow phase and active agent
   useEffect(() => {

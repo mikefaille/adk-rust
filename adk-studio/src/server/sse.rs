@@ -91,10 +91,26 @@ pub async fn stream_handler(
                             Ok(Some(line)) => {
                                 // Parse JSON tracing output from stderr
                                 if let Ok(json) = serde_json::from_str::<serde_json::Value>(&line) {
-                                    // Extract agent name and message from tracing JSON
-                                    if let Some(target) = json.get("target").and_then(|v| v.as_str()) {
+                                    let fields = json.get("fields");
+                                    let msg = fields.and_then(|f| f.get("message")).and_then(|m| m.as_str()).unwrap_or("");
+                                    
+                                    // Check for tool_call event
+                                    if msg == "tool_call" {
+                                        let name = fields.and_then(|f| f.get("tool.name")).and_then(|v| v.as_str()).unwrap_or("");
+                                        let args = fields.and_then(|f| f.get("tool.args")).and_then(|v| v.as_str()).unwrap_or("{}");
+                                        let tool_data = serde_json::json!({"name": name, "args": args}).to_string();
+                                        yield Ok(Event::default().event("tool_call").data(tool_data));
+                                    }
+                                    // Check for tool_result event
+                                    else if msg == "tool_result" {
+                                        let name = fields.and_then(|f| f.get("tool.name")).and_then(|v| v.as_str()).unwrap_or("");
+                                        let result = fields.and_then(|f| f.get("tool.result")).and_then(|v| v.as_str()).unwrap_or("");
+                                        let result_data = serde_json::json!({"name": name, "result": result}).to_string();
+                                        yield Ok(Event::default().event("tool_result").data(result_data));
+                                    }
+                                    // Other log messages
+                                    else if let Some(target) = json.get("target").and_then(|v| v.as_str()) {
                                         if target.starts_with("adk") {
-                                            let msg = json.get("fields").and_then(|f| f.get("message")).and_then(|m| m.as_str()).unwrap_or("");
                                             let span = json.get("span").and_then(|s| s.get("agent.name")).and_then(|n| n.as_str());
                                             if let Some(agent) = span {
                                                 yield Ok(Event::default().event("log").data(format!("{{\"agent\":\"{}\",\"message\":\"{}\"}}", agent, msg)));

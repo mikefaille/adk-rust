@@ -381,7 +381,9 @@ fn generate_function_tool(config: &crate::schema::FunctionToolConfig) -> String 
     
     code.push_str(&format!("async fn {}_fn(_ctx: Arc<dyn ToolContext>, args: Value) -> Result<Value, adk_core::AdkError> {{\n", fn_name));
     
+    let mut param_names = Vec::new();
     for param in &config.parameters {
+        param_names.push(param.name.clone());
         let extract = match param.param_type {
             crate::schema::ParamType::String => format!("    let {} = args[\"{}\"].as_str().unwrap_or(\"\");\n", param.name, param.name),
             crate::schema::ParamType::Number => format!("    let {} = args[\"{}\"].as_f64().unwrap_or(0.0);\n", param.name, param.name),
@@ -390,9 +392,12 @@ fn generate_function_tool(config: &crate::schema::FunctionToolConfig) -> String 
         code.push_str(&extract);
     }
     
-    code.push_str("\n    // TODO: Implement your function logic here\n");
-    code.push_str("    Ok(json!({\n");
+    // Generate dummy response that includes all parameters
+    code.push_str("\n    Ok(json!({\n");
     code.push_str(&format!("        \"function\": \"{}\",\n", fn_name));
+    for name in &param_names {
+        code.push_str(&format!("        \"{}\": {},\n", name, name));
+    }
     code.push_str("        \"status\": \"success\"\n");
     code.push_str("    }))\n");
     code.push_str("}\n\n");
