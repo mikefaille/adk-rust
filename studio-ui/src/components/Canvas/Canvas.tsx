@@ -168,12 +168,29 @@ export function Canvas() {
     );
     const topLevelAgents = agentIds.filter(id => !allSubAgents.has(id));
     
+    // Sort agents by workflow order (follow edges from START)
+    const sortedAgents: string[] = [];
+    const edges = currentProject.workflow.edges;
+    let current = 'START';
+    while (sortedAgents.length < topLevelAgents.length) {
+      const nextEdge = edges.find(e => e.from === current && e.to !== 'END');
+      if (!nextEdge) break;
+      if (topLevelAgents.includes(nextEdge.to)) {
+        sortedAgents.push(nextEdge.to);
+      }
+      current = nextEdge.to;
+    }
+    // Add any remaining agents not in the chain
+    topLevelAgents.forEach(id => {
+      if (!sortedAgents.includes(id)) sortedAgents.push(id);
+    });
+    
     const newNodes: Node[] = [
-      { id: 'START', position: { x: 200, y: 50 }, data: { label: '▶ START' }, type: 'input', style: { background: '#1a472a', border: '2px solid #4ade80', borderRadius: 8, padding: 10, color: '#fff' } },
-      { id: 'END', position: { x: 200, y: 150 + topLevelAgents.length * 150 }, data: { label: '⏹ END' }, type: 'output', style: { background: '#4a1a1a', border: '2px solid #f87171', borderRadius: 8, padding: 10, color: '#fff' } },
+      { id: 'START', position: { x: 50, y: 50 }, data: { label: '▶ START' }, type: 'input', style: { background: '#1a472a', border: '2px solid #4ade80', borderRadius: 8, padding: 10, color: '#fff' } },
+      { id: 'END', position: { x: 50, y: 150 + sortedAgents.length * 150 }, data: { label: '⏹ END' }, type: 'output', style: { background: '#4a1a1a', border: '2px solid #f87171', borderRadius: 8, padding: 10, color: '#fff' } },
     ];
     
-    topLevelAgents.forEach((id, i) => {
+    sortedAgents.forEach((id, i) => {
       const agent = currentProject.agents[id];
       if (agent.type === 'sequential' || agent.type === 'loop' || agent.type === 'parallel') {
         const isParallel = agent.type === 'parallel';
@@ -203,7 +220,7 @@ export function Canvas() {
         }[agent.type]!;
         newNodes.push({
           id,
-          position: { x: 200, y: 150 + i * 150 },
+          position: { x: 50, y: 150 + i * 150 },
           data: { 
             label: (
               <div className="text-center">
@@ -231,7 +248,7 @@ export function Canvas() {
         const routes = agent.routes || [];
         newNodes.push({
           id,
-          position: { x: 200, y: 150 + i * 150 },
+          position: { x: 50, y: 150 + i * 150 },
           data: { label: (
             <div className="text-center">
               <div className="font-semibold">🔀 {id}</div>
@@ -254,7 +271,7 @@ export function Canvas() {
         const isActive = activeAgent === id;
         newNodes.push({
           id,
-          position: { x: 200, y: 150 + i * 150 },
+          position: { x: 50, y: 150 + i * 150 },
           data: { label: (
             <div className="text-center">
               <div>{isActive ? '⚡' : '🤖'} {id}</div>
@@ -353,7 +370,7 @@ export function Canvas() {
         instruction: '',
         tools: [],
         sub_agents: [sub1, sub2],
-        position: { x: 200, y: 150 + agentCount * 180 },
+        position: { x: 50, y: 150 + agentCount * 180 },
         max_iterations: agentType === 'loop' ? 3 : undefined,
       });
     } else if (agentType === 'router') {
@@ -363,7 +380,7 @@ export function Canvas() {
         instruction: 'Route the request based on intent.',
         tools: [],
         sub_agents: [],
-        position: { x: 200, y: 150 + agentCount * 120 },
+        position: { x: 50, y: 150 + agentCount * 120 },
         routes: [
           { condition: 'default', target: 'END' },
         ],
@@ -375,7 +392,7 @@ export function Canvas() {
         instruction: 'You are a helpful assistant.',
         tools: [],
         sub_agents: [],
-        position: { x: 200, y: 150 + agentCount * 120 },
+        position: { x: 50, y: 150 + agentCount * 120 },
       });
     }
     
@@ -571,8 +588,7 @@ export function Canvas() {
             onDrop={onDrop}
             onDragOver={onDragOver}
             deleteKeyCode={['Backspace', 'Delete']}
-            fitView
-            fitViewOptions={{ padding: 0.3, maxZoom: 1 }}
+            defaultViewport={{ x: 0, y: 0, zoom: 1 }}
             minZoom={0.1}
             maxZoom={2}
           >
