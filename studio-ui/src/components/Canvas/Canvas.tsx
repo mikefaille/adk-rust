@@ -28,9 +28,9 @@ const TOOL_TYPES = [
   { type: 'function', label: 'Function Tool', icon: 'ƒ', configurable: true },
   { type: 'mcp', label: 'MCP Tool', icon: '🔌', configurable: true },
   { type: 'browser', label: 'Browser Tool', icon: '🌐', configurable: true },
-  { type: 'exit_loop', label: 'Exit Loop', icon: '⏹', configurable: false },
-  { type: 'google_search', label: 'Google Search', icon: '🔍', configurable: false },
-  { type: 'load_artifact', label: 'Load Artifact', icon: '📦', configurable: false },
+  { type: 'exit_loop', label: 'Exit Loop', icon: '⏹', configurable: true },
+  { type: 'google_search', label: 'Google Search', icon: '🔍', configurable: true },
+  { type: 'load_artifact', label: 'Load Artifact', icon: '📦', configurable: true },
 ];
 
 type FlowPhase = 'idle' | 'input' | 'output';
@@ -821,7 +821,13 @@ export function Canvas() {
 
         {/* Tool Configuration Panel */}
         {selectedToolId && currentProject && (() => {
-          const actualToolType = selectedToolId.includes('_mcp') ? 'mcp' : selectedToolId.includes('_function') ? 'function' : selectedToolId.includes('_browser') ? 'browser' : '';
+          const actualToolType = selectedToolId.includes('_mcp') ? 'mcp' 
+            : selectedToolId.includes('_function') ? 'function' 
+            : selectedToolId.includes('_browser') ? 'browser'
+            : selectedToolId.includes('_exit_loop') ? 'exit_loop'
+            : selectedToolId.includes('_google_search') ? 'google_search'
+            : selectedToolId.includes('_load_artifact') ? 'load_artifact'
+            : '';
           const config = currentProject.tool_configs?.[selectedToolId];
           
           const getDefaultConfig = (type: string) => {
@@ -832,7 +838,9 @@ export function Canvas() {
           };
           
           const currentConfig = config || getDefaultConfig(actualToolType);
-          if (!currentConfig) return null;
+          // For simple tools without config, still show the panel
+          const isSimpleTool = ['exit_loop', 'google_search', 'load_artifact'].includes(actualToolType);
+          if (!currentConfig && !isSimpleTool) return null;
           
           return (
             <div className="w-80 bg-studio-panel border-l border-gray-700 p-4 overflow-y-auto">
@@ -1303,6 +1311,39 @@ Ok(json!({"result": result, "operation": operation}))`
                   </div>
                 );
               })()}
+
+              {actualToolType === 'exit_loop' && (
+                <div className="space-y-3">
+                  <div className="p-2 bg-blue-900/50 border border-blue-600 rounded text-xs">
+                    <div className="font-semibold text-blue-400 mb-1">ℹ️ Exit Loop Tool</div>
+                    <p className="text-blue-200">Allows the agent to exit a loop when the task is complete.</p>
+                    <p className="text-blue-200 mt-2">Use with Loop Agent to let the LLM decide when to stop iterating.</p>
+                  </div>
+                  <div className="text-xs text-gray-500">No configuration needed.</div>
+                </div>
+              )}
+
+              {actualToolType === 'google_search' && (
+                <div className="space-y-3">
+                  <div className="p-2 bg-blue-900/50 border border-blue-600 rounded text-xs">
+                    <div className="font-semibold text-blue-400 mb-1">ℹ️ Google Search Tool</div>
+                    <p className="text-blue-200">Enables web search via Google's Grounding API.</p>
+                    <p className="text-blue-200 mt-2">Requires Gemini model with grounding support.</p>
+                  </div>
+                  <div className="text-xs text-gray-500">No configuration needed.</div>
+                </div>
+              )}
+
+              {actualToolType === 'load_artifact' && (
+                <div className="space-y-3">
+                  <div className="p-2 bg-blue-900/50 border border-blue-600 rounded text-xs">
+                    <div className="font-semibold text-blue-400 mb-1">ℹ️ Load Artifact Tool</div>
+                    <p className="text-blue-200">Loads artifacts from the session store.</p>
+                    <p className="text-blue-200 mt-2">Use to retrieve files, images, or data saved by other agents.</p>
+                  </div>
+                  <div className="text-xs text-gray-500">No configuration needed.</div>
+                </div>
+              )}
             </div>
           );
         })()}
