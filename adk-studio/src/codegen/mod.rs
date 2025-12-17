@@ -428,25 +428,14 @@ fn generate_container_node(id: &str, agent: &AgentSchema, project: &ProjectSchem
     for sub_id in &agent.sub_agents {
         if let Some(sub) = project.agents.get(sub_id) {
             let model = sub.model.as_deref().unwrap_or("gemini-2.0-flash");
-            code.push_str(&format!("    let {}_model = Arc::new(GeminiModel::new(&api_key, \"{}\")?);\n", sub_id, model));
-            code.push_str(&format!("    let mut {}_builder = LlmAgentBuilder::new(\"{}\")\n", sub_id, sub_id));
-            if !sub.instruction.is_empty() {
-                let escaped = sub.instruction.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n");
-                code.push_str(&format!("        .instruction(\"{}\")\n", escaped));
-            }
-            code.push_str(&format!("        .model({}_model);\n", sub_id));
+            let has_tools = !sub.tools.is_empty();
+            let has_instruction = !sub.instruction.is_empty();
+            let mut_kw = if has_tools || has_instruction { "mut " } else { "" };
             
-            // Add tools for sub-agent
+            // Load MCP tools BEFORE creating builder (matching working pattern)
             for tool_type in &sub.tools {
                 let tool_id = format!("{}_{}", sub_id, tool_type);
-                if tool_type.starts_with("function") {
-                    if let Some(ToolConfig::Function(config)) = project.tool_configs.get(&tool_id) {
-                        let fn_name = &config.name;
-                        let struct_name = to_pascal_case(fn_name);
-                        code.push_str(&format!("    {}_builder = {}_builder.tool(Arc::new(FunctionTool::new(\"{}\", \"{}\", {}_fn).with_parameters_schema::<{}Args>()));\n", 
-                            sub_id, sub_id, fn_name, config.description.replace('"', "\\\""), fn_name, struct_name));
-                    }
-                } else if tool_type.starts_with("mcp") {
+                if tool_type.starts_with("mcp") {
                     if let Some(ToolConfig::Mcp(config)) = project.tool_configs.get(&tool_id) {
                         let var_suffix = tool_type.replace("mcp_", "mcp");
                         code.push_str(&format!("    let mut {}_{}_cmd = Command::new(\"{}\");\n", sub_id, var_suffix, config.server_command));
@@ -459,8 +448,37 @@ fn generate_container_node(id: &str, agent: &AgentSchema, project: &ProjectSchem
                         code.push_str(&format!("    ).await.map_err(|_| anyhow::anyhow!(\"MCP server '{}' failed to start within 10s\"))??;\n", config.server_command));
                         code.push_str(&format!("    let {}_{}_toolset = McpToolset::new({}_{}_client);\n", sub_id, var_suffix, sub_id, var_suffix));
                         code.push_str(&format!("    let {}_{}_tools = {}_{}_toolset.tools(Arc::new(MinimalContext::new())).await?;\n", sub_id, var_suffix, sub_id, var_suffix));
-                        code.push_str(&format!("    for tool in {}_{}_tools {{ {}_builder = {}_builder.tool(tool); }}\n", sub_id, var_suffix, sub_id, sub_id));
+                        code.push_str(&format!("    eprintln!(\"Loaded {{}} tools from MCP server '{}'\", {}_{}_tools.len());\n\n", config.server_command, sub_id, var_suffix));
                     }
+                }
+            }
+            
+            // Create builder
+            code.push_str(&format!("    let {}{}_builder = LlmAgentBuilder::new(\"{}\")\n", mut_kw, sub_id, sub_id));
+            code.push_str(&format!("        .model(Arc::new(GeminiModel::new(&api_key, \"{}\")?))", model));
+            code.push_str(";\n");
+            
+            // Add instruction separately (matching working pattern)
+            if !sub.instruction.is_empty() {
+                let escaped = sub.instruction.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n");
+                code.push_str(&format!("    {}_builder = {}_builder.instruction(\"{}\");\n", sub_id, sub_id, escaped));
+            }
+            
+            // Add tools
+            for tool_type in &sub.tools {
+                let tool_id = format!("{}_{}", sub_id, tool_type);
+                if tool_type.starts_with("function") {
+                    if let Some(ToolConfig::Function(config)) = project.tool_configs.get(&tool_id) {
+                        let fn_name = &config.name;
+                        let struct_name = to_pascal_case(fn_name);
+                        code.push_str(&format!("    {}_builder = {}_builder.tool(Arc::new(FunctionTool::new(\"{}\", \"{}\", {}_fn).with_parameters_schema::<{}Args>()));\n", 
+                            sub_id, sub_id, fn_name, config.description.replace('"', "\\\""), fn_name, struct_name));
+                    }
+                } else if tool_type.starts_with("mcp") {
+                    let var_suffix = tool_type.replace("mcp_", "mcp");
+                    code.push_str(&format!("    for tool in {}_{}_tools {{\n", sub_id, var_suffix));
+                    code.push_str(&format!("        {}_builder = {}_builder.tool(tool);\n", sub_id, sub_id));
+                    code.push_str("    }\n");
                 } else if tool_type == "google_search" {
                     code.push_str(&format!("    {}_builder = {}_builder.tool(Arc::new(GoogleSearchTool::new()));\n", sub_id, sub_id));
                 } else if tool_type == "exit_loop" {
@@ -501,14 +519,18 @@ fn generate_container_node(id: &str, agent: &AgentSchema, project: &ProjectSchem
     code.push_str("        })\n");
     code.push_str("        .with_output_mapper(|events| {\n");
     code.push_str("            let mut updates = std::collections::HashMap::new();\n");
+    code.push_str("            let mut full_text = String::new();\n");
     code.push_str("            for event in events {\n");
     code.push_str("                if let Some(content) = event.content() {\n");
-    code.push_str("                    let text: String = content.parts.iter()\n");
-    code.push_str("                        .filter_map(|p| p.text()).collect::<Vec<_>>().join(\"\");\n");
-    code.push_str("                    if !text.is_empty() {\n");
-    code.push_str("                        updates.insert(\"response\".to_string(), json!(text));\n");
+    code.push_str("                    for part in &content.parts {\n");
+    code.push_str("                        if let Some(text) = part.text() {\n");
+    code.push_str("                            full_text.push_str(text);\n");
+    code.push_str("                        }\n");
     code.push_str("                    }\n");
     code.push_str("                }\n");
+    code.push_str("            }\n");
+    code.push_str("            if !full_text.is_empty() {\n");
+    code.push_str("                updates.insert(\"response\".to_string(), json!(full_text));\n");
     code.push_str("            }\n");
     code.push_str("            updates\n");
     code.push_str("        });\n\n");

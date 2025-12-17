@@ -35,6 +35,10 @@ pub trait Session: Send + Sync {
     fn state(&self) -> &dyn State;
     /// Returns the conversation history from this session as Content items
     fn conversation_history(&self) -> Vec<Content>;
+    /// Append content to conversation history (for sequential agent support)
+    fn append_to_history(&self, _content: Content) {
+        // Default no-op - implementations can override to track history
+    }
 }
 
 #[async_trait]

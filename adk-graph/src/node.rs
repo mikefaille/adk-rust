@@ -342,7 +342,15 @@ impl Node for AgentNode {
         // Map events to state updates
         let updates = (self.output_mapper)(&events);
 
-        Ok(NodeOutput::new().with_updates(updates))
+        // Convert agent events to stream events for tracing
+        let mut output = NodeOutput::new().with_updates(updates);
+        for event in &events {
+            if let Ok(json) = serde_json::to_value(event) {
+                output = output.with_event(StreamEvent::custom(&self.name, "agent_event", json));
+            }
+        }
+
+        Ok(output)
     }
 }
 
@@ -351,7 +359,7 @@ struct GraphInvocationContext {
     invocation_id: String,
     user_content: adk_core::Content,
     agent: Arc<dyn adk_core::Agent>,
-    session: GraphSession,
+    session: Arc<GraphSession>,
     run_config: adk_core::RunConfig,
     ended: std::sync::atomic::AtomicBool,
 }
@@ -363,11 +371,14 @@ impl GraphInvocationContext {
         agent: Arc<dyn adk_core::Agent>,
     ) -> Self {
         let invocation_id = uuid::Uuid::new_v4().to_string();
+        let session = Arc::new(GraphSession::new(session_id));
+        // Add user content to history
+        session.append_content(user_content.clone());
         Self {
             invocation_id,
             user_content,
             agent,
-            session: GraphSession::new(session_id),
+            session,
             run_config: adk_core::RunConfig::default(),
             ended: std::sync::atomic::AtomicBool::new(false),
         }
@@ -425,7 +436,7 @@ impl adk_core::InvocationContext for GraphInvocationContext {
     }
 
     fn session(&self) -> &dyn adk_core::Session {
-        &self.session
+        self.session.as_ref()
     }
 
     fn run_config(&self) -> &adk_core::RunConfig {
@@ -445,11 +456,18 @@ impl adk_core::InvocationContext for GraphInvocationContext {
 struct GraphSession {
     id: String,
     state: GraphState,
+    history: std::sync::RwLock<Vec<adk_core::Content>>,
 }
 
 impl GraphSession {
     fn new(id: String) -> Self {
-        Self { id, state: GraphState::new() }
+        Self { id, state: GraphState::new(), history: std::sync::RwLock::new(Vec::new()) }
+    }
+    
+    fn append_content(&self, content: adk_core::Content) {
+        if let Ok(mut h) = self.history.write() {
+            h.push(content);
+        }
     }
 }
 
@@ -471,7 +489,11 @@ impl adk_core::Session for GraphSession {
     }
 
     fn conversation_history(&self) -> Vec<adk_core::Content> {
-        vec![]
+        self.history.read().ok().map(|h| h.clone()).unwrap_or_default()
+    }
+    
+    fn append_to_history(&self, content: adk_core::Content) {
+        self.append_content(content);
     }
 }
 

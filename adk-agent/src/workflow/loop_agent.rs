@@ -80,6 +80,10 @@ impl Agent for LoopAgent {
                     while let Some(result) = stream.next().await {
                         match result {
                             Ok(event) => {
+                                // Append content to session history for sequential agent support
+                                if let Some(ref content) = event.llm_response.content {
+                                    ctx.session().append_to_history(content.clone());
+                                }
                                 if event.actions.escalate {
                                     should_exit = true;
                                 }
