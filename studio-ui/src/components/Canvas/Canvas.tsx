@@ -1389,7 +1389,22 @@ Ok(json!({"result": result, "operation": operation}))`
                       className="text-xs bg-gray-700 px-2 py-1 rounded hover:bg-gray-600"
                     >Copy</button>
                   </div>
-                  <pre className="bg-gray-900 p-4 rounded text-xs overflow-x-auto whitespace-pre">{file.content}</pre>
+                  <div className="border border-gray-700 rounded overflow-hidden">
+                    <Editor
+                      height={Math.min(600, file.content.split('\n').length * 19 + 20)}
+                      language={file.path.endsWith('.toml') ? 'toml' : 'rust'}
+                      value={file.content}
+                      theme="vs-dark"
+                      options={{
+                        readOnly: true,
+                        minimap: { enabled: false },
+                        scrollBeyondLastLine: false,
+                        fontSize: 12,
+                        lineNumbers: 'on',
+                        folding: true,
+                      }}
+                    />
+                  </div>
                 </div>
               ))}
             </div>
