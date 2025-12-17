@@ -212,7 +212,7 @@ export function Canvas() {
             <div 
               key={subId} 
               className={`rounded p-2 cursor-pointer ${isParallel ? '' : idx > 0 ? 'mt-2 border-t border-gray-600 pt-2' : ''} ${isSelected ? 'bg-gray-600 ring-2 ring-blue-400' : 'bg-gray-800 hover:bg-gray-700'}`}
-              onClick={(e) => { e.stopPropagation(); setSelectedSubAgent(isSelected ? null : {parent: id, sub: subId}); }}
+              onClick={(e) => { e.stopPropagation(); setSelectedSubAgent(isSelected ? null : {parent: id, sub: subId}); selectNode(isSelected ? null : subId); }}
               onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); }}
               onDrop={(e) => {
                 e.preventDefault();
@@ -222,6 +222,7 @@ export function Canvas() {
                 if (toolType && subAgent) {
                   addToolToAgent(subId, toolType);
                   setSelectedSubAgent({parent: id, sub: subId});
+                  selectNode(subId);
                 }
               }}
             >
@@ -262,6 +263,7 @@ export function Canvas() {
                           if (isConfigurable) {
                             e.stopPropagation();
                             setSelectedSubAgent({parent: id, sub: subId});
+                            selectNode(subId);
                             selectTool(toolConfigId);
                           }
                         }}
@@ -673,12 +675,12 @@ export function Canvas() {
                     if (isMultiTool) {
                       addToolToAgent(selectedNodeId, type);
                       const newToolId = `${selectedNodeId}_${type}_${toolCount + 1}`;
-                      if (configurable) selectTool(newToolId);
+                      if (configurable) setTimeout(() => selectTool(newToolId), 0);
                     } else if (isAdded) {
                       removeToolFromAgent(selectedNodeId, type);
                     } else {
                       addToolToAgent(selectedNodeId, type);
-                      if (configurable) selectTool(`${selectedNodeId}_${type}`);
+                      if (configurable) setTimeout(() => selectTool(`${selectedNodeId}_${type}`), 0);
                     }
                   }}
                 >
@@ -877,12 +879,14 @@ export function Canvas() {
                           }
                         }
                         return (
-                          <span key={t} className={`text-xs px-2 py-1 rounded flex items-center gap-1 ${toolConfig ? 'bg-green-800' : 'bg-gray-700'}`}>
+                          <span 
+                            key={t} 
+                            className={`text-xs px-2 py-1 rounded flex items-center gap-1 ${toolConfig ? 'bg-green-800' : 'bg-gray-700'} ${isConfigurable ? 'cursor-pointer hover:bg-gray-600' : ''}`}
+                            onClick={() => isConfigurable && selectTool(toolId)}
+                          >
                             {tool?.icon} {displayName}
-                            {isConfigurable && (
-                              <button onClick={() => selectTool(toolId)} className="ml-1 text-blue-400 hover:text-blue-300">⚙</button>
-                            )}
-                            <button onClick={() => removeToolFromAgent(selectedNodeId!, t)} className="ml-1 text-red-400 hover:text-red-300">×</button>
+                            {isConfigurable && <span className="text-blue-400">⚙</span>}
+                            <button onClick={(e) => { e.stopPropagation(); removeToolFromAgent(selectedNodeId!, t); }} className="ml-1 text-red-400 hover:text-red-300">×</button>
                           </span>
                         );
                       })}
