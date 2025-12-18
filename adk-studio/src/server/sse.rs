@@ -160,9 +160,13 @@ pub async fn stream_handler(
                         let result = fields.and_then(|f| f.get("tool.result")).and_then(|v| v.as_str()).unwrap_or("");
                         yield Ok(Event::default().event("tool_result").data(serde_json::json!({"name": name, "result": result}).to_string()));
                     } else if msg == "Starting agent execution" {
-                        // Extract agent name from span
+                        // Emit node_start for sub-agent
                         let agent = json.get("span").and_then(|s| s.get("agent.name")).and_then(|v| v.as_str()).unwrap_or("");
-                        yield Ok(Event::default().event("log").data(serde_json::json!({"agent": agent, "message": "Starting..."}).to_string()));
+                        yield Ok(Event::default().event("trace").data(serde_json::json!({"type": "node_start", "node": agent, "step": 0}).to_string()));
+                    } else if msg == "Agent execution complete" {
+                        // Emit node_end for sub-agent - agent name is in fields
+                        let agent = fields.and_then(|f| f.get("agent.name")).and_then(|v| v.as_str()).unwrap_or("");
+                        yield Ok(Event::default().event("trace").data(serde_json::json!({"type": "node_end", "node": agent, "step": 0, "duration_ms": 0}).to_string()));
                     } else if msg == "Generating content" {
                         // Model call - extract details
                         let span = json.get("span");

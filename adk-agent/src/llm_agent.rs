@@ -795,6 +795,7 @@ impl Agent for LlmAgent {
 
                 if !has_function_calls {
                     // No function calls, we're done
+                    tracing::info!(agent.name = %agent_name, "Agent execution complete");
                     break;
                 }
 
