@@ -15,19 +15,24 @@ type Tab = 'chat' | 'events';
 interface Props {
   onFlowPhase?: (phase: FlowPhase) => void;
   onActiveAgent?: (agent: string | null) => void;
+  onIteration?: (iter: number) => void;
   binaryPath?: string | null;
 }
 
-export function TestConsole({ onFlowPhase, onActiveAgent, binaryPath }: Props) {
+export function TestConsole({ onFlowPhase, onActiveAgent, onIteration, binaryPath }: Props) {
   const { currentProject } = useStore();
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [activeTab, setActiveTab] = useState<Tab>('chat');
-  const { send, cancel, isStreaming, streamingText, currentAgent, toolCalls, events, sessionId, newSession } = useSSE(currentProject?.id ?? null, binaryPath);
+  const { send, cancel, isStreaming, streamingText, currentAgent, toolCalls, events, sessionId, newSession, iteration } = useSSE(currentProject?.id ?? null, binaryPath);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const eventsEndRef = useRef<HTMLDivElement>(null);
   const sendingRef = useRef(false);
   const lastAgentRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    onIteration?.(iteration);
+  }, [iteration, onIteration]);
 
   useEffect(() => {
     if (currentAgent) {

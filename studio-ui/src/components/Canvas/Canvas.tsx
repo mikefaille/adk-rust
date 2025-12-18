@@ -80,6 +80,7 @@ export function Canvas() {
   const [showConsole, setShowConsole] = useState(true);
   const [flowPhase, setFlowPhase] = useState<FlowPhase>('idle');
   const [activeAgent, setActiveAgent] = useState<string | null>(null);
+  const [iteration, setIteration] = useState(0);
   const [selectedSubAgent, setSelectedSubAgent] = useState<{parent: string, sub: string} | null>(null);
   const [compiledCode, setCompiledCode] = useState<GeneratedProject | null>(null);
   const [buildOutput, setBuildOutput] = useState<{success: boolean, output: string, path: string | null} | null>(null);
@@ -278,9 +279,10 @@ export function Canvas() {
             </div>
           );
         });
+        const isLoopActive = agent.type === 'loop' && activeAgent && agent.sub_agents?.includes(activeAgent);
         const config = {
           sequential: { icon: '⛓', label: 'Sequential Agent', bg: '#1e3a5f', border: '#60a5fa' },
-          loop: { icon: '🔄', label: `Loop Agent (${agent.max_iterations || 3}x)`, bg: '#3d1e5f', border: '#a855f7' },
+          loop: { icon: '🔄', label: isLoopActive ? `Loop Agent (iter ${iteration + 1}/${agent.max_iterations || 3})` : `Loop Agent (${agent.max_iterations || 3}x)`, bg: '#3d1e5f', border: '#a855f7' },
           parallel: { icon: '⚡', label: 'Parallel Agent', bg: '#1e5f3d', border: '#34d399' },
         }[agent.type]!;
         newNodes.push({
@@ -387,7 +389,7 @@ export function Canvas() {
       }
     });
     setNodes(newNodes);
-  }, [currentProject, setNodes, selectedSubAgent, removeSubAgent, activeAgent, selectNode, selectTool]);
+  }, [currentProject, setNodes, selectedSubAgent, removeSubAgent, activeAgent, iteration, selectNode, selectTool]);
 
   // Handle Delete key for selected tool
   useEffect(() => {
@@ -444,19 +446,20 @@ export function Canvas() {
       // Create container with 2 default sub-agents
       const sub1 = `${id}_agent_1`;
       const sub2 = `${id}_agent_2`;
+      const isLoop = agentType === 'loop';
       addAgent(sub1, {
         type: 'llm',
         model: 'gemini-2.0-flash',
-        instruction: 'You are agent 1.',
-        tools: [],
+        instruction: isLoop ? 'Refine the content. When satisfied, call exit_loop.' : 'You are agent 1.',
+        tools: isLoop ? ['exit_loop'] : [],
         sub_agents: [],
         position: { x: 0, y: 0 },
       });
       addAgent(sub2, {
         type: 'llm',
         model: 'gemini-2.0-flash',
-        instruction: 'You are agent 2.',
-        tools: [],
+        instruction: isLoop ? 'Review and improve. Call exit_loop when done.' : 'You are agent 2.',
+        tools: isLoop ? ['exit_loop'] : [],
         sub_agents: [],
         position: { x: 0, y: 0 },
       });
@@ -744,16 +747,23 @@ export function Canvas() {
               /* Container Agent Properties */
               <div>
                 {selectedAgent.type === 'loop' && (
-                  <div className="mb-4">
-                    <label className="block text-sm text-gray-400 mb-1">Max Iterations</label>
-                    <input
-                      type="number"
-                      min="1"
-                      className="w-full px-2 py-1 bg-studio-bg border border-gray-600 rounded text-sm"
-                      value={selectedAgent.max_iterations || 3}
-                      onChange={(e) => updateAgent(selectedNodeId!, { max_iterations: parseInt(e.target.value) || 3 })}
-                    />
-                  </div>
+                  <>
+                    <div className="mb-4 p-2 bg-purple-900/50 border border-purple-600 rounded text-xs">
+                      <div className="font-semibold text-purple-400 mb-1">💡 Loop Agent Tips</div>
+                      <p className="text-purple-200">Sub-agents run repeatedly until max iterations or exit_loop tool is called.</p>
+                      <p className="text-purple-200 mt-1">Add the <span className="font-mono bg-purple-800 px-1 rounded">exit_loop</span> tool to let the agent decide when to stop.</p>
+                    </div>
+                    <div className="mb-4">
+                      <label className="block text-sm text-gray-400 mb-1">Max Iterations</label>
+                      <input
+                        type="number"
+                        min="1"
+                        className="w-full px-2 py-1 bg-studio-bg border border-gray-600 rounded text-sm"
+                        value={selectedAgent.max_iterations || 3}
+                        onChange={(e) => updateAgent(selectedNodeId!, { max_iterations: parseInt(e.target.value) || 3 })}
+                      />
+                    </div>
+                  </>
                 )}
                 <label className="block text-sm text-gray-400 mb-2">
                   Sub-Agents {selectedAgent.type === 'parallel' ? '(run concurrently)' : '(in order)'}
@@ -773,6 +783,7 @@ export function Canvas() {
                       <label className="block text-xs text-gray-400 mb-1">Instruction</label>
                       <textarea
                         className="w-full px-2 py-1 bg-studio-bg border border-gray-600 rounded text-xs h-20"
+                        placeholder={selectedAgent.type === 'loop' ? 'Refine the content iteratively. When satisfied, call exit_loop to finish.' : ''}
                         value={subAgent.instruction}
                         onChange={(e) => updateAgent(subId, { instruction: e.target.value })}
                       />
@@ -1432,7 +1443,7 @@ Ok(json!({"result": result, "operation": operation}))`
       {/* Test Console */}
       {showConsole && hasAgents && builtBinaryPath && (
         <div className="h-64">
-          <TestConsole onFlowPhase={setFlowPhase} onActiveAgent={setActiveAgent} binaryPath={builtBinaryPath} />
+          <TestConsole onFlowPhase={setFlowPhase} onActiveAgent={setActiveAgent} onIteration={setIteration} binaryPath={builtBinaryPath} />
         </div>
       )}
       {showConsole && hasAgents && !builtBinaryPath && (

@@ -20,10 +20,13 @@ export function useSSE(projectId: string | null, binaryPath?: string | null) {
   const [toolCalls, setToolCalls] = useState<ToolCall[]>([]);
   const [events, setEvents] = useState<TraceEvent[]>([]);
   const [sessionId, setSessionId] = useState<string | null>(null);
+  const [iteration, setIteration] = useState(0);
   const esRef = useRef<EventSource | null>(null);
   const textRef = useRef('');
   const agentRef = useRef('');
   const sessionRef = useRef<string | null>(null);
+  const iterRef = useRef(0);
+  const seenAgentsRef = useRef<Set<string>>(new Set());
 
   const addEvent = (type: TraceEvent['type'], data: string, agent?: string, screenshot?: string) => {
     setEvents(prev => [...prev, { type, timestamp: Date.now(), data, agent: agent || agentRef.current, screenshot }]);
@@ -35,9 +38,12 @@ export function useSSE(projectId: string | null, binaryPath?: string | null) {
 
       textRef.current = '';
       agentRef.current = '';
+      iterRef.current = 0;
+      seenAgentsRef.current = new Set();
       setStreamingText('');
       setCurrentAgent('');
       setToolCalls([]);
+      setIteration(0);
       // Append new user event, don't clear history
       setEvents(prev => [...prev, { type: 'user', timestamp: Date.now(), data: input }]);
       setIsStreaming(true);
@@ -78,9 +84,17 @@ export function useSSE(projectId: string | null, binaryPath?: string | null) {
         try {
           const trace = JSON.parse(e.data);
           if (trace.type === 'node_start') {
-            agentRef.current = trace.node;
-            setCurrentAgent(trace.node);
-            addEvent('agent_start', `Step ${trace.step}`, trace.node);
+            const node = trace.node;
+            // Track iterations: if we see an agent we've seen before, increment iteration
+            if (seenAgentsRef.current.has(node)) {
+              iterRef.current++;
+              setIteration(iterRef.current);
+              seenAgentsRef.current.clear();
+            }
+            seenAgentsRef.current.add(node);
+            agentRef.current = node;
+            setCurrentAgent(node);
+            addEvent('agent_start', `Iter ${iterRef.current + 1}, Step ${trace.step}`, node);
           } else if (trace.type === 'node_end') {
             addEvent('agent_end', `${trace.duration_ms}ms`, trace.node);
           } else if (trace.type === 'state') {
@@ -184,5 +198,5 @@ export function useSSE(projectId: string | null, binaryPath?: string | null) {
     setEvents([]);
   }, []);
 
-  return { send, cancel, isStreaming, streamingText, currentAgent, toolCalls, events, clearEvents, sessionId, newSession };
+  return { send, cancel, isStreaming, streamingText, currentAgent, toolCalls, events, clearEvents, sessionId, newSession, iteration };
 }
