@@ -268,6 +268,10 @@ name = "graph_checkpoint"
 path = "graph_checkpoint/main.rs"
 
 [[example]]
+name = "graph_streaming"
+path = "graph_streaming/main.rs"
+
+[[example]]
 name = "eval_basic"
 path = "eval_basic/main.rs"
 

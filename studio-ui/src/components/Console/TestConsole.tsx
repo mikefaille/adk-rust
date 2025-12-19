@@ -16,10 +16,11 @@ interface Props {
   onFlowPhase?: (phase: FlowPhase) => void;
   onActiveAgent?: (agent: string | null) => void;
   onIteration?: (iter: number) => void;
+  onThought?: (agent: string, thought: string | null) => void;
   binaryPath?: string | null;
 }
 
-export function TestConsole({ onFlowPhase, onActiveAgent, onIteration, binaryPath }: Props) {
+export function TestConsole({ onFlowPhase, onActiveAgent, onIteration, onThought, binaryPath }: Props) {
   const { currentProject } = useStore();
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
@@ -48,6 +49,17 @@ export function TestConsole({ onFlowPhase, onActiveAgent, onIteration, binaryPat
   useEffect(() => {
     eventsEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [events]);
+
+  useEffect(() => {
+    // Use currentAgent or fallback to lastAgentRef for timing issues
+    const agent = currentAgent || lastAgentRef.current;
+    if (streamingText && agent) {
+      console.log('[TestConsole] Emitting thought:', agent, streamingText.slice(-50));
+      onThought?.(agent, streamingText.slice(-150));
+    } else if (!isStreaming && lastAgentRef.current) {
+      onThought?.(lastAgentRef.current, null);
+    }
+  }, [streamingText, currentAgent, isStreaming, onThought]);
 
   useEffect(() => {
     if (streamingText) {

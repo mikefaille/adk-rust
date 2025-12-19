@@ -2,8 +2,7 @@ import { useCallback } from 'react';
 import { useReactFlow, Node, Edge } from '@xyflow/react';
 import dagre from 'dagre';
 import type { LayoutConfig, LayoutMode } from '../types/layout';
-
-const defaultConfig: LayoutConfig = { direction: 'TB', nodeSpacing: 50, rankSpacing: 80 };
+import { getLayoutConfig } from '../layout';
 
 export function useLayout() {
   const { getNodes, getEdges, setNodes, fitView } = useReactFlow();
@@ -22,11 +21,7 @@ export function useLayout() {
     if (nodes.length === 0) return;
 
     const mode = detectMode(nodes, edges);
-    const { direction, nodeSpacing, rankSpacing } = { 
-      ...defaultConfig, 
-      direction: mode === 'pipeline' ? 'LR' : 'TB',
-      ...config 
-    };
+    const { direction, nodeSpacing, rankSpacing } = getLayoutConfig(mode, config);
 
     const g = new dagre.graphlib.Graph();
     g.setGraph({ rankdir: direction, nodesep: nodeSpacing, ranksep: rankSpacing });

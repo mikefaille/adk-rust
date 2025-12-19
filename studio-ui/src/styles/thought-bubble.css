@@ -1,0 +1,29 @@
+.thought-bubble {
+  position: absolute;
+  background: linear-gradient(135deg, rgba(59, 130, 246, 0.95), rgba(37, 99, 235, 0.95));
+  border-radius: 12px;
+  padding: 8px 12px;
+  max-width: 280px;
+  font-size: 12px;
+  color: white;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+  z-index: 1000;
+  backdrop-filter: blur(8px);
+}
+
+.thought-right { left: calc(100% + 16px); top: 50%; transform: translateY(-50%); }
+.thought-top { bottom: calc(100% + 16px); left: 50%; transform: translateX(-50%); }
+
+.thought-pointer { position: absolute; width: 0; height: 0; }
+.thought-right .thought-pointer { left: -8px; top: 50%; transform: translateY(-50%); border: 8px solid transparent; border-right-color: rgba(59, 130, 246, 0.95); }
+.thought-top .thought-pointer { bottom: -8px; left: 50%; transform: translateX(-50%); border: 8px solid transparent; border-top-color: rgba(59, 130, 246, 0.95); }
+
+.thought-content { display: flex; align-items: flex-start; gap: 6px; }
+.thought-icon { flex-shrink: 0; }
+.thought-text { line-height: 1.4; }
+
+.thought-tool { background: linear-gradient(135deg, rgba(234, 179, 8, 0.95), rgba(202, 138, 4, 0.95)); }
+.thought-decision { background: linear-gradient(135deg, rgba(168, 85, 247, 0.95), rgba(139, 92, 246, 0.95)); }
+
+.cursor-blink { animation: blink 1s infinite; margin-left: 2px; }
+@keyframes blink { 0%, 50% { opacity: 1; } 51%, 100% { opacity: 0; } }

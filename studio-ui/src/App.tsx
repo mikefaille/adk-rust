@@ -1,4 +1,5 @@
 import { useEffect } from 'react';
+import { ReactFlowProvider } from '@xyflow/react';
 import { useStore } from './store';
 import { ProjectList } from './components/Projects/ProjectList';
 import { Canvas } from './components/Canvas/Canvas';
@@ -21,7 +22,13 @@ export default function App() {
         )}
       </header>
       <main className="flex-1 overflow-hidden">
-        {currentProject ? <Canvas /> : <ProjectList />}
+        {currentProject ? (
+          <ReactFlowProvider>
+            <Canvas />
+          </ReactFlowProvider>
+        ) : (
+          <ProjectList />
+        )}
       </main>
     </div>
   );

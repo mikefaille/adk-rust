@@ -115,13 +115,67 @@ impl<'a> PregelExecutor<'a> {
                 }
 
                 // Emit node_start events BEFORE execution (in Debug mode)
-                if matches!(mode, StreamMode::Debug | StreamMode::Custom) {
+                if matches!(mode, StreamMode::Debug | StreamMode::Custom | StreamMode::Messages) {
                     for node_name in &self.pending_nodes {
                         yield Ok(StreamEvent::node_start(node_name, self.step));
                     }
                 }
 
-                // Execute super-step
+                // For Messages mode, stream from nodes directly
+                if matches!(mode, StreamMode::Messages) {
+                    let mut result = SuperStepResult::default();
+                    
+                    for node_name in &self.pending_nodes {
+                        if let Some(node) = self.graph.nodes.get(node_name) {
+                            let ctx = NodeContext::new(self.state.clone(), self.config.clone(), self.step);
+                            let start = std::time::Instant::now();
+                            
+                            let mut node_stream = node.execute_stream(&ctx);
+                            let mut collected_events = Vec::new();
+                            
+                            while let Some(event_result) = node_stream.next().await {
+                                match event_result {
+                                    Ok(event) => {
+                                        // Yield Message events immediately
+                                        if matches!(event, StreamEvent::Message { .. }) {
+                                            yield Ok(event.clone());
+                                        }
+                                        collected_events.push(event);
+                                    }
+                                    Err(e) => {
+                                        yield Err(e);
+                                        return;
+                                    }
+                                }
+                            }
+                            
+                            let duration_ms = start.elapsed().as_millis() as u64;
+                            result.executed_nodes.push(node_name.clone());
+                            result.events.push(StreamEvent::node_end(node_name, self.step, duration_ms));
+                            result.events.extend(collected_events);
+                            
+                            // Get output from execute for state updates
+                            if let Ok(output) = node.execute(&ctx).await {
+                                for (key, value) in output.updates {
+                                    self.graph.schema.apply_update(&mut self.state, &key, value);
+                                }
+                            }
+                        }
+                    }
+                    
+                    // Yield node_end events
+                    for event in &result.events {
+                        if matches!(event, StreamEvent::NodeEnd { .. }) {
+                            yield Ok(event.clone());
+                        }
+                    }
+                    
+                    self.pending_nodes = self.graph.get_next_nodes(&result.executed_nodes, &self.state);
+                    self.step += 1;
+                    continue;
+                }
+
+                // Execute super-step (non-streaming)
                 let result = match self.execute_super_step().await {
                     Ok(r) => r,
                     Err(e) => {

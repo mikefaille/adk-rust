@@ -149,6 +149,24 @@ pub trait Node: Send + Sync {
 
     /// Execute the node and return state updates
     async fn execute(&self, ctx: &NodeContext) -> Result<NodeOutput>;
+
+    /// Stream execution events (default: wraps execute)
+    fn execute_stream<'a>(
+        &'a self,
+        ctx: &'a NodeContext,
+    ) -> Pin<Box<dyn futures::Stream<Item = Result<StreamEvent>> + Send + 'a>> {
+        let _name = self.name().to_string();
+        Box::pin(async_stream::stream! {
+            match self.execute(ctx).await {
+                Ok(output) => {
+                    for event in output.events {
+                        yield Ok(event);
+                    }
+                }
+                Err(e) => yield Err(e),
+            }
+        })
+    }
 }
 
 /// Type alias for boxed node
@@ -351,6 +369,73 @@ impl Node for AgentNode {
         }
 
         Ok(output)
+    }
+
+    fn execute_stream<'a>(
+        &'a self,
+        ctx: &'a NodeContext,
+    ) -> Pin<Box<dyn futures::Stream<Item = Result<StreamEvent>> + Send + 'a>> {
+        use futures::StreamExt;
+        let name = self.name.clone();
+        let agent = self.agent.clone();
+        let input_mapper = &self.input_mapper;
+        let thread_id = ctx.config.thread_id.clone();
+        let content = (input_mapper)(&ctx.state);
+
+        Box::pin(async_stream::stream! {
+            let invocation_ctx = Arc::new(GraphInvocationContext::new(
+                thread_id,
+                content,
+                agent.clone(),
+            ));
+
+            let stream = match agent.run(invocation_ctx).await {
+                Ok(s) => s,
+                Err(e) => {
+                    yield Err(crate::error::GraphError::NodeExecutionFailed {
+                        node: name.clone(),
+                        message: e.to_string(),
+                    });
+                    return;
+                }
+            };
+
+            tokio::pin!(stream);
+            let mut all_events = Vec::new();
+
+            while let Some(result) = stream.next().await {
+                match result {
+                    Ok(event) => {
+                        // Emit streaming event immediately
+                        if let Some(content) = event.content() {
+                            let text: String = content.parts.iter().filter_map(|p| p.text()).collect();
+                            if !text.is_empty() {
+                                yield Ok(StreamEvent::Message {
+                                    node: name.clone(),
+                                    content: text,
+                                    is_final: false,
+                                });
+                            }
+                        }
+                        all_events.push(event);
+                    }
+                    Err(e) => {
+                        yield Err(crate::error::GraphError::NodeExecutionFailed {
+                            node: name.clone(),
+                            message: e.to_string(),
+                        });
+                        return;
+                    }
+                }
+            }
+
+            // Emit final events
+            for event in &all_events {
+                if let Ok(json) = serde_json::to_value(event) {
+                    yield Ok(StreamEvent::custom(&name, "agent_event", json));
+                }
+            }
+        })
     }
 }
 
