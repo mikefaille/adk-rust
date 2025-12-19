@@ -19,11 +19,23 @@ export interface ProjectSettings {
 
 export interface AgentSchema {
   type: 'llm' | 'tool' | 'sequential' | 'parallel' | 'loop' | 'router' | 'graph' | 'custom';
+  // Basic
   model?: string;
   instruction: string;
+  description?: string;
+  // Advanced
+  global_instruction?: string;
+  output_key?: string;
+  output_schema?: string; // JSON schema string
+  // Behavior
+  include_contents?: 'all' | 'none' | 'last';
+  disallow_transfer_to_parent?: boolean;
+  disallow_transfer_to_peers?: boolean;
+  // Relations
   tools: string[];
   sub_agents: string[];
   position: Position;
+  // Container-specific
   max_iterations?: number;
   routes?: Route[];
 }

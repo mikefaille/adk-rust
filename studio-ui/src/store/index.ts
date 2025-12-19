@@ -23,6 +23,7 @@ interface StudioState {
   // Canvas actions
   selectNode: (id: string | null) => void;
   updateAgent: (id: string, updates: Partial<AgentSchema>) => void;
+  renameAgent: (oldId: string, newId: string) => void;
   addAgent: (id: string, agent: AgentSchema) => void;
   removeAgent: (id: string) => void;
   addEdge: (from: string, to: string) => void;
@@ -92,6 +93,48 @@ export const useStore = create<StudioState>((set, get) => ({
         },
       };
     }),
+
+  renameAgent: (oldId, newId) => {
+    if (oldId === newId) return;
+    set((s) => {
+      if (!s.currentProject || !s.currentProject.agents[oldId]) return s;
+      
+      // Clone agents, add new key, remove old
+      const agents = { ...s.currentProject.agents };
+      agents[newId] = agents[oldId];
+      delete agents[oldId];
+      
+      // Update sub_agents references in containers
+      Object.keys(agents).forEach(id => {
+        if (agents[id].sub_agents?.includes(oldId)) {
+          agents[id] = { ...agents[id], sub_agents: agents[id].sub_agents.map(s => s === oldId ? newId : s) };
+        }
+      });
+      
+      // Update edges
+      const edges = s.currentProject.workflow.edges.map(e => ({
+        ...e,
+        from: e.from === oldId ? newId : e.from,
+        to: e.to === oldId ? newId : e.to,
+      }));
+      
+      // Update tool configs
+      const toolConfigs = { ...s.currentProject.tool_configs };
+      Object.keys(toolConfigs).forEach(key => {
+        if (key.startsWith(`${oldId}_`)) {
+          const newKey = key.replace(`${oldId}_`, `${newId}_`);
+          toolConfigs[newKey] = toolConfigs[key];
+          delete toolConfigs[key];
+        }
+      });
+      
+      return {
+        currentProject: { ...s.currentProject, agents, tool_configs: toolConfigs, workflow: { ...s.currentProject.workflow, edges } },
+        selectedNodeId: s.selectedNodeId === oldId ? newId : s.selectedNodeId,
+      };
+    });
+    get().saveProject();
+  },
 
   addAgent: (id, agent) => {
     set((s) => {

@@ -1,3 +1,4 @@
+import React from 'react';
 import type { AgentSchema, ToolConfig } from '../../types/project';
 import { TOOL_TYPES } from './ToolPalette';
 
@@ -7,20 +8,46 @@ interface Props {
   agents: Record<string, AgentSchema>;
   toolConfigs: Record<string, ToolConfig>;
   onUpdate: (id: string, updates: Partial<AgentSchema>) => void;
+  onRename: (oldId: string, newId: string) => void;
   onAddSubAgent: () => void;
   onClose: () => void;
   onSelectTool: (toolId: string) => void;
   onRemoveTool: (toolType: string) => void;
 }
 
-export function PropertiesPanel({ nodeId, agent, agents, toolConfigs, onUpdate, onAddSubAgent, onClose, onSelectTool, onRemoveTool }: Props) {
+export function PropertiesPanel({ nodeId, agent, agents, toolConfigs, onUpdate, onRename, onAddSubAgent, onClose, onSelectTool, onRemoveTool }: Props) {
   const isContainer = agent.type === 'sequential' || agent.type === 'loop' || agent.type === 'parallel';
+  const [editingName, setEditingName] = React.useState(false);
+  const [newName, setNewName] = React.useState(nodeId);
+
+  const handleRename = () => {
+    const trimmed = newName.trim().replace(/\s+/g, '_');
+    if (trimmed && trimmed !== nodeId && !agents[trimmed]) {
+      onRename(nodeId, trimmed);
+    } else {
+      setNewName(nodeId);
+    }
+    setEditingName(false);
+  };
 
   return (
     <div className="w-72 bg-studio-panel border-l border-gray-700 p-4 overflow-y-auto">
       <div className="flex justify-between items-center mb-4">
-        <h3 className="font-semibold">{nodeId}</h3>
-        <button onClick={onClose} className="px-2 py-1 bg-gray-600 rounded text-xs">Close</button>
+        {editingName ? (
+          <input
+            autoFocus
+            className="flex-1 px-2 py-1 bg-studio-bg border border-blue-500 rounded text-sm font-semibold"
+            value={newName}
+            onChange={(e) => setNewName(e.target.value)}
+            onBlur={handleRename}
+            onKeyDown={(e) => e.key === 'Enter' && handleRename()}
+          />
+        ) : (
+          <h3 className="font-semibold cursor-pointer hover:text-blue-400" onClick={() => setEditingName(true)} title="Click to rename">
+            {nodeId} <span className="text-xs text-gray-500">✎</span>
+          </h3>
+        )}
+        <button onClick={onClose} className="px-2 py-1 bg-gray-600 rounded text-xs ml-2">Close</button>
       </div>
 
       {isContainer ? (
@@ -132,23 +159,41 @@ function RouterProperties({ nodeId, agent, onUpdate }: { nodeId: string; agent: 
 }
 
 function LlmProperties({ nodeId, agent, toolConfigs, onUpdate, onSelectTool, onRemoveTool }: { nodeId: string; agent: AgentSchema; toolConfigs: Record<string, ToolConfig>; onUpdate: Props['onUpdate']; onSelectTool: (id: string) => void; onRemoveTool: (type: string) => void }) {
+  const [showAdvanced, setShowAdvanced] = React.useState(false);
+
   return (
-    <div>
-      <label className="block text-sm text-gray-400 mb-1">Model</label>
-      <input
-        className="w-full px-2 py-1 bg-studio-bg border border-gray-600 rounded text-sm mb-3"
-        value={agent.model || ''}
-        onChange={(e) => onUpdate(nodeId, { model: e.target.value })}
-      />
-      <label className="block text-sm text-gray-400 mb-1">Instruction</label>
-      <textarea
-        className="w-full px-2 py-1 bg-studio-bg border border-gray-600 rounded text-sm h-24"
-        value={agent.instruction}
-        onChange={(e) => onUpdate(nodeId, { instruction: e.target.value })}
-      />
+    <div className="space-y-4">
+      {/* Basic Settings */}
+      <Section title="Basic">
+        <Field label="Model">
+          <input
+            className="w-full px-2 py-1 bg-studio-bg border border-gray-600 rounded text-sm"
+            value={agent.model || ''}
+            onChange={(e) => onUpdate(nodeId, { model: e.target.value })}
+            placeholder="gemini-2.0-flash"
+          />
+        </Field>
+        <Field label="Instruction">
+          <textarea
+            className="w-full px-2 py-1 bg-studio-bg border border-gray-600 rounded text-sm h-24"
+            value={agent.instruction}
+            onChange={(e) => onUpdate(nodeId, { instruction: e.target.value })}
+            placeholder="You are a helpful assistant..."
+          />
+        </Field>
+        <Field label="Description" hint="Optional agent description">
+          <input
+            className="w-full px-2 py-1 bg-studio-bg border border-gray-600 rounded text-sm"
+            value={agent.description || ''}
+            onChange={(e) => onUpdate(nodeId, { description: e.target.value })}
+            placeholder="What this agent does"
+          />
+        </Field>
+      </Section>
+
+      {/* Tools */}
       {agent.tools.length > 0 && (
-        <div className="mt-3">
-          <label className="block text-sm text-gray-400 mb-1">Tools</label>
+        <Section title="Tools">
           <div className="flex flex-wrap gap-1">
             {agent.tools.map(t => {
               const baseType = t.startsWith('function') ? 'function' : t.startsWith('mcp') ? 'mcp' : t;
@@ -164,8 +209,80 @@ function LlmProperties({ nodeId, agent, toolConfigs, onUpdate, onSelectTool, onR
               );
             })}
           </div>
-        </div>
+        </Section>
       )}
+
+      {/* Advanced Settings (collapsible) */}
+      <div>
+        <button 
+          onClick={() => setShowAdvanced(!showAdvanced)}
+          className="w-full text-left text-xs text-gray-400 hover:text-gray-300 flex items-center gap-1"
+        >
+          <span>{showAdvanced ? '▼' : '▶'}</span> Advanced Settings
+        </button>
+        
+        {showAdvanced && (
+          <div className="mt-2 space-y-3 pl-2 border-l border-gray-700">
+            <Field label="Global Instruction" hint="System-level instruction prepended to all prompts">
+              <textarea
+                className="w-full px-2 py-1 bg-studio-bg border border-gray-600 rounded text-xs h-16"
+                value={agent.global_instruction || ''}
+                onChange={(e) => onUpdate(nodeId, { global_instruction: e.target.value })}
+                placeholder="Always respond in JSON format..."
+              />
+            </Field>
+            <Field label="Output Key" hint="Custom state key for agent output">
+              <input
+                className="w-full px-2 py-1 bg-studio-bg border border-gray-600 rounded text-xs"
+                value={agent.output_key || ''}
+                onChange={(e) => onUpdate(nodeId, { output_key: e.target.value })}
+                placeholder="response (default)"
+              />
+            </Field>
+            <Field label="Output Schema" hint="JSON Schema for structured output">
+              <textarea
+                className="w-full px-2 py-1 bg-studio-bg border border-gray-600 rounded text-xs h-20 font-mono"
+                value={agent.output_schema || ''}
+                onChange={(e) => onUpdate(nodeId, { output_schema: e.target.value })}
+                placeholder='{"type": "object", "properties": {...}}'
+              />
+            </Field>
+            <Field label="Include Contents">
+              <select
+                className="w-full px-2 py-1 bg-studio-bg border border-gray-600 rounded text-xs"
+                value={agent.include_contents || 'all'}
+                onChange={(e) => onUpdate(nodeId, { include_contents: e.target.value as 'all' | 'none' | 'last' })}
+              >
+                <option value="all">All history</option>
+                <option value="last">Last message only</option>
+                <option value="none">None</option>
+              </select>
+            </Field>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// Helper components
+function Section({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <div>
+      <div className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-2">{title}</div>
+      <div className="space-y-2">{children}</div>
+    </div>
+  );
+}
+
+function Field({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) {
+  return (
+    <div>
+      <label className="block text-sm text-gray-400 mb-1">
+        {label}
+        {hint && <span className="text-xs text-gray-500 ml-1">({hint})</span>}
+      </label>
+      {children}
     </div>
   );
 }

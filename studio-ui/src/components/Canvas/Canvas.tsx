@@ -18,7 +18,7 @@ import type { FunctionToolConfig, AgentSchema, ToolConfig } from '../../types/pr
 type FlowPhase = 'idle' | 'input' | 'output';
 
 export function Canvas() {
-  const { currentProject, openProject, closeProject, saveProject, selectNode, selectedNodeId, updateAgent: storeUpdateAgent, addEdge: addProjectEdge, removeEdge: removeProjectEdge, addToolToAgent, removeToolFromAgent, addSubAgentToContainer, selectedToolId, selectTool, updateToolConfig: storeUpdateToolConfig } = useStore();
+  const { currentProject, openProject, closeProject, saveProject, selectNode, selectedNodeId, updateAgent: storeUpdateAgent, renameAgent, addEdge: addProjectEdge, removeEdge: removeProjectEdge, addToolToAgent, removeToolFromAgent, addSubAgentToContainer, selectedToolId, selectTool, updateToolConfig: storeUpdateToolConfig } = useStore();
   const [showConsole, setShowConsole] = useState(true);
   const [flowPhase, setFlowPhase] = useState<FlowPhase>('idle');
   const [activeAgent, setActiveAgent] = useState<string | null>(null);
@@ -148,7 +148,7 @@ export function Canvas() {
         </div>
 
         {selectedAgent && selectedNodeId && (
-          <PropertiesPanel nodeId={selectedNodeId} agent={selectedAgent} agents={currentProject.agents} toolConfigs={currentProject.tool_configs || {}} onUpdate={updateAgent} onAddSubAgent={() => addSubAgentToContainer(selectedNodeId)} onClose={() => selectNode(null)} onSelectTool={selectTool} onRemoveTool={t => removeToolFromAgent(selectedNodeId, t)} />
+          <PropertiesPanel nodeId={selectedNodeId} agent={selectedAgent} agents={currentProject.agents} toolConfigs={currentProject.tool_configs || {}} onUpdate={updateAgent} onRename={renameAgent} onAddSubAgent={() => addSubAgentToContainer(selectedNodeId)} onClose={() => selectNode(null)} onSelectTool={selectTool} onRemoveTool={t => removeToolFromAgent(selectedNodeId, t)} />
         )}
         {selectedToolId && currentProject && (
           <ToolConfigPanel toolId={selectedToolId} config={currentProject.tool_configs?.[selectedToolId] || null} onUpdate={c => updateToolConfig(selectedToolId, c)} onClose={() => selectTool(null)} onOpenCodeEditor={() => setShowCodeEditor(true)} />
