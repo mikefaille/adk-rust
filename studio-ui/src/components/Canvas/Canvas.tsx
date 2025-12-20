@@ -32,7 +32,7 @@ export function Canvas() {
   const [showCodeEditor, setShowCodeEditor] = useState(false);
 
   const { nodes, edges, onNodesChange, onEdgesChange } = useCanvasNodes(currentProject, { activeAgent, iteration, flowPhase, thoughts });
-  const { applyLayout, fitToView } = useLayout();
+  const { applyLayout, toggleLayout, fitToView } = useLayout();
   const { createAgent, duplicateAgent, removeAgent } = useAgentActions();
 
   const handleThought = useCallback((agent: string, thought: string | null) => {
@@ -64,7 +64,7 @@ export function Canvas() {
     onDuplicateNode: duplicateAgent,
     onSelectNode: selectNode,
     onSelectTool: selectTool,
-    onAutoLayout: applyLayout,
+    onAutoLayout: toggleLayout,
     onFitView: fitToView,
   });
 
@@ -97,8 +97,11 @@ export function Canvas() {
       return;
     }
     const type = e.dataTransfer.getData('application/reactflow');
-    if (type) createAgent(type);
-  }, [createAgent, selectedNodeId, currentProject, addToolToAgent]);
+    if (type) {
+      createAgent(type);
+      setTimeout(() => applyLayout(), 100);
+    }
+  }, [createAgent, selectedNodeId, currentProject, addToolToAgent, applyLayout]);
 
   const onConnect = useCallback((p: Connection) => p.source && p.target && addProjectEdge(p.source, p.target), [addProjectEdge]);
   const onEdgesDelete = useCallback((eds: Edge[]) => eds.forEach(e => removeProjectEdge(e.source, e.target)), [removeProjectEdge]);
@@ -146,7 +149,7 @@ export function Canvas() {
             <Controls />
             <MiniMap nodeColor={n => n.data?.isActive ? '#4ade80' : '#666'} maskColor="rgba(0,0,0,0.8)" style={{ background: '#1a1a2e' }} />
           </ReactFlow>
-          <CanvasToolbar onAutoLayout={applyLayout} onFitView={fitToView} />
+          <CanvasToolbar onAutoLayout={toggleLayout} onFitView={fitToView} />
         </div>
 
         {selectedAgent && selectedNodeId && (
