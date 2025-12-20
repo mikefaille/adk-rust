@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import type { Project, ProjectMeta, AgentSchema, ToolConfig } from '../types/project';
+import type { LayoutDirection } from '../types/layout';
 import { api } from '../api/client';
 
 interface StudioState {
@@ -11,6 +12,7 @@ interface StudioState {
   currentProject: Project | null;
   selectedNodeId: string | null;
   selectedToolId: string | null;
+  layoutDirection: LayoutDirection;
   
   // Actions
   fetchProjects: () => Promise<void>;
@@ -35,6 +37,9 @@ interface StudioState {
   // Tool config actions
   selectTool: (toolId: string | null) => void;
   updateToolConfig: (toolId: string, config: ToolConfig) => void;
+  
+  // Layout actions
+  setLayoutDirection: (dir: LayoutDirection) => void;
 }
 
 export const useStore = create<StudioState>((set, get) => ({
@@ -43,6 +48,7 @@ export const useStore = create<StudioState>((set, get) => ({
   currentProject: null,
   selectedNodeId: null,
   selectedToolId: null,
+  layoutDirection: 'TB',
 
   fetchProjects: async () => {
     set({ loadingProjects: true });
@@ -305,4 +311,6 @@ export const useStore = create<StudioState>((set, get) => ({
     });
     setTimeout(() => get().saveProject(), 0);
   },
+
+  setLayoutDirection: (dir) => set({ layoutDirection: dir }),
 }));

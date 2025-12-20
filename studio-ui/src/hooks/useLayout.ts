@@ -1,30 +1,25 @@
 import { useCallback } from 'react';
-import { useReactFlow, Node, Edge } from '@xyflow/react';
+import { useReactFlow } from '@xyflow/react';
 import dagre from 'dagre';
-import type { LayoutConfig, LayoutMode } from '../types/layout';
-import { getLayoutConfig } from '../layout';
+import type { LayoutDirection } from '../types/layout';
+import { useStore } from '../store';
 
 export function useLayout() {
   const { getNodes, getEdges, setNodes, fitView } = useReactFlow();
+  const layoutDirection = useStore(s => s.layoutDirection);
+  const setLayoutDirection = useStore(s => s.setLayoutDirection);
 
-  const detectMode = useCallback((nodes: Node[], edges: Edge[]): LayoutMode => {
-    const hasRouter = nodes.some(n => n.type === 'router');
-    const isLinear = edges.length === nodes.length - 1;
-    if (isLinear && !hasRouter) return 'pipeline';
-    if (hasRouter) return 'tree';
-    return 'freeform';
-  }, []);
-
-  const applyLayout = useCallback((config: Partial<LayoutConfig> = {}) => {
+  const applyLayout = useCallback(() => {
     const nodes = getNodes();
     const edges = getEdges();
     if (nodes.length === 0) return;
 
-    const mode = detectMode(nodes, edges);
-    const { direction, nodeSpacing, rankSpacing } = getLayoutConfig(mode, config);
+    // Toggle between TB and LR
+    const newDirection: LayoutDirection = layoutDirection === 'LR' ? 'TB' : 'LR';
+    setLayoutDirection(newDirection);
 
     const g = new dagre.graphlib.Graph();
-    g.setGraph({ rankdir: direction, nodesep: nodeSpacing, ranksep: rankSpacing });
+    g.setGraph({ rankdir: newDirection, nodesep: 40, ranksep: 100 });
     g.setDefaultEdgeLabel(() => ({}));
 
     nodes.forEach(node => g.setNode(node.id, { width: 180, height: 100 }));
@@ -37,9 +32,9 @@ export function useLayout() {
     }));
 
     setTimeout(() => fitView({ padding: 0.2 }), 50);
-  }, [getNodes, getEdges, setNodes, fitView, detectMode]);
+  }, [getNodes, getEdges, setNodes, fitView, layoutDirection, setLayoutDirection]);
 
   const fitToView = useCallback(() => fitView({ padding: 0.2, duration: 300 }), [fitView]);
 
-  return { applyLayout, fitToView, detectMode };
+  return { applyLayout, fitToView, layoutDirection };
 }

@@ -23,7 +23,8 @@ export const ParallelNode = memo(({ data, selected }: Props) => {
         boxShadow: isActive ? '0 0 20px rgba(74, 222, 128, 0.5)' : selected ? '0 0 0 2px #3b82f6' : 'none',
       }}
     >
-      <Handle type="target" position={Position.Top} className="!bg-gray-400" />
+      <Handle type="target" position={Position.Top} id="top" className="!bg-gray-400" />
+      <Handle type="target" position={Position.Left} id="left" className="!bg-gray-400" />
       
       <div className="px-3 py-2">
         <div className="flex items-center gap-2 font-medium text-white text-sm">
@@ -47,7 +48,8 @@ export const ParallelNode = memo(({ data, selected }: Props) => {
         </div>
       </div>
       
-      <Handle type="source" position={Position.Bottom} className="!bg-gray-400" />
+      <Handle type="source" position={Position.Bottom} id="bottom" className="!bg-gray-400" />
+      <Handle type="source" position={Position.Right} id="right" className="!bg-gray-400" />
     </div>
   );
 });

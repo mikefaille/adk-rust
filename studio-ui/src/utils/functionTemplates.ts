@@ -6,21 +6,83 @@ export const FUNCTION_TEMPLATES = [
     icon: '🧮', 
     template: { 
       name: 'calculator', 
-      description: 'Performs arithmetic operations (add, subtract, multiply, divide)', 
+      description: 'Evaluate mathematical expressions with support for +, -, *, /, ^, %, sqrt, sin, cos, tan, log, abs, round, floor, ceil', 
       parameters: [
-        { name: 'operation', param_type: 'string' as const, description: 'Operation: add, subtract, multiply, divide', required: true },
-        { name: 'a', param_type: 'number' as const, description: 'First number', required: true },
-        { name: 'b', param_type: 'number' as const, description: 'Second number', required: true }
+        { name: 'expression', param_type: 'string' as const, description: 'Math expression to evaluate (e.g., "2 + 3 * 4", "sqrt(16)", "sin(3.14159/2)")', required: true }
       ], 
-      code: `let result = match operation {
-    "add" => a + b,
-    "subtract" => a - b,
-    "multiply" => a * b,
-    "divide" if b != 0.0 => a / b,
-    "divide" => return Err(AdkError::Tool("Division by zero".into())),
-    _ => return Err(AdkError::Tool(format!("Unknown operation: {}", operation))),
-};
-Ok(json!({ "result": result }))` 
+      code: `fn eval_expr(expr: &str) -> Result<f64, String> {
+    let expr = expr.trim().to_lowercase();
+    
+    // Handle functions first
+    for func in ["sqrt", "sin", "cos", "tan", "log", "abs", "round", "floor", "ceil"] {
+        if expr.starts_with(func) && expr.contains('(') {
+            let start = expr.find('(').unwrap();
+            let end = expr.rfind(')').ok_or("Missing closing parenthesis")?;
+            let inner = eval_expr(&expr[start+1..end])?;
+            let result = match func {
+                "sqrt" => inner.sqrt(),
+                "sin" => inner.sin(),
+                "cos" => inner.cos(),
+                "tan" => inner.tan(),
+                "log" => inner.ln(),
+                "abs" => inner.abs(),
+                "round" => inner.round(),
+                "floor" => inner.floor(),
+                "ceil" => inner.ceil(),
+                _ => return Err(format!("Unknown function: {}", func)),
+            };
+            return Ok(result);
+        }
+    }
+    
+    // Handle parentheses
+    if let (Some(start), Some(end)) = (expr.find('('), expr.rfind(')')) {
+        let before = &expr[..start];
+        let inner = eval_expr(&expr[start+1..end])?;
+        let after = &expr[end+1..];
+        return eval_expr(&format!("{}{}{}", before, inner, after));
+    }
+    
+    // Handle operators by precedence (low to high)
+    for op in ['+', '-'] {
+        if let Some(pos) = expr.rfind(|c| c == op && !expr[..expr.find(c).unwrap_or(0)].ends_with('e')) {
+            if pos > 0 {
+                let left = eval_expr(&expr[..pos])?;
+                let right = eval_expr(&expr[pos+1..])?;
+                return Ok(if op == '+' { left + right } else { left - right });
+            }
+        }
+    }
+    for op in ['*', '/', '%'] {
+        if let Some(pos) = expr.rfind(op) {
+            let left = eval_expr(&expr[..pos])?;
+            let right = eval_expr(&expr[pos+1..])?;
+            return Ok(match op {
+                '*' => left * right,
+                '/' => if right != 0.0 { left / right } else { return Err("Division by zero".into()) },
+                '%' => left % right,
+                _ => unreachable!(),
+            });
+        }
+    }
+    if let Some(pos) = expr.rfind('^') {
+        let left = eval_expr(&expr[..pos])?;
+        let right = eval_expr(&expr[pos+1..])?;
+        return Ok(left.powf(right));
+    }
+    
+    // Parse number or constant
+    match expr.trim() {
+        "pi" => Ok(std::f64::consts::PI),
+        "e" => Ok(std::f64::consts::E),
+        s => s.parse::<f64>().map_err(|_| format!("Invalid number: {}", s)),
+    }
+}
+
+match eval_expr(expression) {
+    Ok(result) => Ok(json!({ "result": result, "expression": expression })),
+    Err(e) => Err(AdkError::Tool(e))
+}` 
     }
   },
   { 

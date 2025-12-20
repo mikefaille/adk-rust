@@ -8,7 +8,6 @@ interface BaseNodeProps {
   isSelected: boolean;
   color: { bg: string; border: string };
   children?: ReactNode;
-  handles?: { top?: boolean; bottom?: boolean };
 }
 
 export function BaseNode({ 
@@ -18,7 +17,6 @@ export function BaseNode({
   isSelected, 
   color,
   children,
-  handles = { top: true, bottom: true }
 }: BaseNodeProps) {
   return (
     <div 
@@ -33,7 +31,8 @@ export function BaseNode({
             : 'none',
       }}
     >
-      {handles.top && <Handle type="target" position={Position.Top} className="!bg-gray-400" />}
+      <Handle type="target" position={Position.Top} id="top" className="!bg-gray-400" />
+      <Handle type="target" position={Position.Left} id="left" className="!bg-gray-400" />
       
       <div className="px-3 py-2">
         <div className="flex items-center gap-2 font-medium text-white text-sm">
@@ -44,7 +43,8 @@ export function BaseNode({
         {children && <div className="mt-2 border-t border-white/20 pt-2">{children}</div>}
       </div>
       
-      {handles.bottom && <Handle type="source" position={Position.Bottom} className="!bg-gray-400" />}
+      <Handle type="source" position={Position.Bottom} id="bottom" className="!bg-gray-400" />
+      <Handle type="source" position={Position.Right} id="right" className="!bg-gray-400" />
     </div>
   );
 }

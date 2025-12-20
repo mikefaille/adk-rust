@@ -8,6 +8,7 @@ import { nodeTypes } from '../Nodes';
 import { edgeTypes } from '../Edges';
 import { AgentPalette, ToolPalette, PropertiesPanel, ToolConfigPanel } from '../Panels';
 import { CodeModal, BuildModal, CodeEditorModal } from '../Overlays';
+import { CanvasToolbar } from './CanvasToolbar';
 import { api, GeneratedProject } from '../../api/client';
 import { useKeyboardShortcuts } from '../../hooks/useKeyboardShortcuts';
 import { useLayout } from '../../hooks/useLayout';
@@ -139,12 +140,13 @@ export function Canvas() {
           </div>
         </div>
 
-        <div className="flex-1">
+        <div className="flex-1 relative">
           <ReactFlow nodes={nodes} edges={edges} nodeTypes={nodeTypes} edgeTypes={edgeTypes} onNodesChange={onNodesChange} onEdgesChange={onEdgesChange} onEdgesDelete={onEdgesDelete} onNodesDelete={onNodesDelete} onEdgeDoubleClick={onEdgeDoubleClick} onConnect={onConnect} onNodeClick={onNodeClick} onPaneClick={onPaneClick} onDrop={onDrop} onDragOver={onDragOver} deleteKeyCode={['Backspace', 'Delete']} defaultViewport={{ x: 0, y: 0, zoom: 1 }} minZoom={0.1} maxZoom={2}>
             <Background color="#333" gap={20} />
             <Controls />
             <MiniMap nodeColor={n => n.data?.isActive ? '#4ade80' : '#666'} maskColor="rgba(0,0,0,0.8)" style={{ background: '#1a1a2e' }} />
           </ReactFlow>
+          <CanvasToolbar onAutoLayout={applyLayout} onFitView={fitToView} />
         </div>
 
         {selectedAgent && selectedNodeId && (

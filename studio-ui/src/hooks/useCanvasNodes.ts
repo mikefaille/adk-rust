@@ -1,6 +1,7 @@
 import { useEffect } from 'react';
 import { Node, Edge, useNodesState, useEdgesState } from '@xyflow/react';
 import type { Project, Edge as WorkflowEdge } from '../types/project';
+import { useStore } from '../store';
 
 interface ExecutionState {
   activeAgent: string | null;
@@ -13,6 +14,8 @@ export function useCanvasNodes(project: Project | null, execution: ExecutionStat
   const [nodes, setNodes, onNodesChange] = useNodesState<Node>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
   const { activeAgent, iteration, flowPhase, thoughts = {} } = execution;
+  const layoutDirection = useStore(s => s.layoutDirection);
+  const isHorizontal = layoutDirection === 'LR' || layoutDirection === 'RL';
 
   // Build nodes when project or active agent changes
   useEffect(() => {
@@ -32,8 +35,8 @@ export function useCanvasNodes(project: Project | null, execution: ExecutionStat
     topLevelAgents.forEach(id => { if (!sortedAgents.includes(id)) sortedAgents.push(id); });
 
     const newNodes: Node[] = [
-      { id: 'START', position: { x: 50, y: 50 }, data: { label: '▶ START' }, type: 'input', style: { background: '#1a472a', border: '2px solid #4ade80', borderRadius: 8, padding: 10, color: '#fff' } },
-      { id: 'END', position: { x: 50, y: 150 + sortedAgents.length * 150 }, data: { label: '⏹ END' }, type: 'output', style: { background: '#4a1a1a', border: '2px solid #f87171', borderRadius: 8, padding: 10, color: '#fff' } },
+      { id: 'START', position: { x: 50, y: 50 }, data: {}, type: 'start' },
+      { id: 'END', position: { x: 50, y: 150 + sortedAgents.length * 150 }, data: {}, type: 'end' },
     ];
 
     sortedAgents.forEach((id, i) => {
@@ -58,13 +61,22 @@ export function useCanvasNodes(project: Project | null, execution: ExecutionStat
     ));
   }, [thoughts, setNodes]);
 
+  // Rebuild edges when project, execution state, or layout direction changes
   useEffect(() => {
     if (!project) return;
     setEdges(project.workflow.edges.map((e: WorkflowEdge, i: number) => {
       const animated = (activeAgent && e.to === activeAgent) || (flowPhase === 'input' && e.from === 'START') || (flowPhase === 'output' && e.to === 'END');
-      return { id: `e${i}`, source: e.from, target: e.to, type: 'animated', data: { animated } };
+      return { 
+        id: `e${i}-${layoutDirection}`,
+        source: e.from, 
+        target: e.to, 
+        type: 'animated', 
+        data: { animated },
+        sourceHandle: isHorizontal ? 'right' : 'bottom',
+        targetHandle: isHorizontal ? 'left' : 'top',
+      };
     }));
-  }, [project, flowPhase, activeAgent, setEdges]);
+  }, [project, flowPhase, activeAgent, setEdges, layoutDirection, isHorizontal]);
 
   return { nodes, edges, setNodes, setEdges, onNodesChange, onEdgesChange };
 }
