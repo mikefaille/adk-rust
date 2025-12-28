@@ -5,14 +5,8 @@ use anyhow::Result;
 
 pub fn generate_rust_project(project: &ProjectSchema) -> Result<GeneratedProject> {
     let files = vec![
-        GeneratedFile {
-            path: "src/main.rs".to_string(),
-            content: generate_main_rs(project),
-        },
-        GeneratedFile {
-            path: "Cargo.toml".to_string(),
-            content: generate_cargo_toml(project),
-        },
+        GeneratedFile { path: "src/main.rs".to_string(), content: generate_main_rs(project) },
+        GeneratedFile { path: "Cargo.toml".to_string(), content: generate_cargo_toml(project) },
     ];
 
     Ok(GeneratedProject { files })

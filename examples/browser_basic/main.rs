@@ -296,8 +296,7 @@ If an action fails, explain what went wrong."#,
             let props = schema.get("properties").and_then(|p| p.as_object());
             if let Some(props) = props {
                 for (prop_name, prop_value) in props {
-                    let desc =
-                        prop_value.get("description").and_then(|d| d.as_str()).unwrap_or("");
+                    let desc = prop_value.get("description").and_then(|d| d.as_str()).unwrap_or("");
                     println!("     - {}: {}", prop_name, desc);
                 }
             }
