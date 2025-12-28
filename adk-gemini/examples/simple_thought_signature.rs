@@ -1,5 +1,5 @@
 use display_error_chain::DisplayErrorChain;
-use gemini_rust::{FunctionCallingMode, FunctionDeclaration, Gemini, ThinkingConfig, Tool};
+use adk_gemini::{FunctionCallingMode, FunctionDeclaration, Gemini, ThinkingConfig, Tool};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::env;

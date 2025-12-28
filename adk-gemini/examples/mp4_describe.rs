@@ -3,7 +3,7 @@
 
 use base64::{engine::general_purpose, Engine as _};
 use display_error_chain::DisplayErrorChain;
-use gemini_rust::{Content, Gemini};
+use adk_gemini::{Content, Gemini};
 use std::env;
 use std::fs::File;
 use std::io::Read;
@@ -52,9 +52,9 @@ async fn do_main() -> Result<(), Box<dyn std::error::Error>> {
     let response1 = gemini
         .generate_content()
         .with_user_message("Please describe the content of this video (Message example)")
-        .with_message(gemini_rust::Message {
+        .with_message(adk_gemini::Message {
             content: video_content,
-            role: gemini_rust::Role::User,
+            role: adk_gemini::Role::User,
         })
         .execute()
         .await?;

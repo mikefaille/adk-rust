@@ -1,6 +1,6 @@
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use display_error_chain::DisplayErrorChain;
-use gemini_rust::{Gemini, GenerationConfig};
+use adk_gemini::{Gemini, GenerationConfig};
 use std::env;
 use std::fs;
 use std::process::ExitCode;
@@ -60,14 +60,14 @@ async fn do_main() -> Result<(), Box<dyn std::error::Error>> {
 
             for (j, part) in parts.iter().enumerate() {
                 match part {
-                    gemini_rust::Part::Text { text, .. } => {
+                    adk_gemini::Part::Text { text, .. } => {
                         info!(
                             response_number = j + 1,
                             text = text,
                             "text response received"
                         );
                     }
-                    gemini_rust::Part::InlineData { inline_data } => {
+                    adk_gemini::Part::InlineData { inline_data } => {
                         info!(
                             response_number = j + 1,
                             mime_type = inline_data.mime_type,
@@ -159,7 +159,7 @@ async fn do_main() -> Result<(), Box<dyn std::error::Error>> {
 
 /// Helper function to save generated images from a response
 fn save_generated_images(
-    response: &gemini_rust::GenerationResponse,
+    response: &adk_gemini::GenerationResponse,
     prefix: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     for candidate in response.candidates.iter() {
@@ -169,10 +169,10 @@ fn save_generated_images(
 
             for part in parts.iter() {
                 match part {
-                    gemini_rust::Part::Text { text, .. } => {
+                    adk_gemini::Part::Text { text, .. } => {
                         text_parts.push(text.clone());
                     }
-                    gemini_rust::Part::InlineData { inline_data } => {
+                    adk_gemini::Part::InlineData { inline_data } => {
                         image_count += 1;
                         match BASE64.decode(&inline_data.data) {
                             Ok(image_bytes) => {

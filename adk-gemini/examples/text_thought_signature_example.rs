@@ -3,7 +3,7 @@
 /// This example shows how to handle text responses that include thought signatures,
 /// as seen in the Gemini 2.5 Flash API response format.
 use display_error_chain::DisplayErrorChain;
-use gemini_rust::{Content, GenerationResponse, Part};
+use adk_gemini::{Content, GenerationResponse, Part};
 use serde_json::json;
 use std::process::ExitCode;
 use tracing::info;

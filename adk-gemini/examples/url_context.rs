@@ -50,7 +50,7 @@ making the content available to the model for analysis and response generation.
 */
 
 use display_error_chain::DisplayErrorChain;
-use gemini_rust::{Gemini, Tool};
+use adk_gemini::{Gemini, Tool};
 use std::env;
 use std::process::ExitCode;
 use tracing::info;

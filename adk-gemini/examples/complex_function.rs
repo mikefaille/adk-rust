@@ -1,6 +1,6 @@
 use std::{collections::VecDeque, env};
 
-use gemini_rust::{
+use adk_gemini::{
     Content, FunctionCall, FunctionCallingMode, FunctionDeclaration, FunctionResponse, Gemini,
     Part, Role, ThinkingConfig,
 };

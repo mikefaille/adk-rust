@@ -1,6 +1,6 @@
 use display_error_chain::DisplayErrorChain;
-use gemini_rust::tools::Behavior;
-use gemini_rust::{
+use adk_gemini::tools::Behavior;
+use adk_gemini::{
     Content, FunctionCall, FunctionCallingMode, FunctionDeclaration, Gemini, Message, Role, Tool,
 };
 use schemars::JsonSchema;

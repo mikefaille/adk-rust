@@ -17,7 +17,7 @@
 //! ```
 
 use display_error_chain::DisplayErrorChain;
-use gemini_rust::{BatchStatus, Gemini};
+use adk_gemini::{BatchStatus, Gemini};
 use std::env;
 use std::process::ExitCode;
 use tracing::{info, warn};

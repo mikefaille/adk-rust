@@ -1,6 +1,6 @@
 use base64::{engine::general_purpose, Engine as _};
 use display_error_chain::DisplayErrorChain;
-use gemini_rust::{Gemini, GenerationConfig, Part, PrebuiltVoiceConfig, SpeechConfig, VoiceConfig};
+use adk_gemini::{Gemini, GenerationConfig, Part, PrebuiltVoiceConfig, SpeechConfig, VoiceConfig};
 use std::fs::File;
 use std::io::Write;
 use std::process::ExitCode;

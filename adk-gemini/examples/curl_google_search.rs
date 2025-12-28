@@ -1,5 +1,5 @@
 use display_error_chain::DisplayErrorChain;
-use gemini_rust::{Content, Gemini, Part, Tool};
+use adk_gemini::{Content, Gemini, Part, Tool};
 use std::env;
 use std::process::ExitCode;
 use tracing::info;

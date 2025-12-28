@@ -31,13 +31,13 @@ fn llm_agent(instruction: &str) -> AgentSchema {
 }
 
 fn get_main_rs(project: &ProjectSchema) -> String {
-    let gen = generate_rust_project(project).unwrap();
-    gen.files.iter().find(|f| f.path == "src/main.rs").unwrap().content.clone()
+    let r#gen = generate_rust_project(project).unwrap();
+    r#gen.files.iter().find(|f| f.path == "src/main.rs").unwrap().content.clone()
 }
 
 fn get_cargo_toml(project: &ProjectSchema) -> String {
-    let gen = generate_rust_project(project).unwrap();
-    gen.files.iter().find(|f| f.path == "Cargo.toml").unwrap().content.clone()
+    let r#gen = generate_rust_project(project).unwrap();
+    r#gen.files.iter().find(|f| f.path == "Cargo.toml").unwrap().content.clone()
 }
 
 // =============================================================================

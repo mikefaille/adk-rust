@@ -1,6 +1,6 @@
 use base64::{engine::general_purpose, Engine as _};
 use display_error_chain::DisplayErrorChain;
-use gemini_rust::{Gemini, GenerationConfig};
+use adk_gemini::{Gemini, GenerationConfig};
 use std::env;
 use std::fs::File;
 use std::io::Read;

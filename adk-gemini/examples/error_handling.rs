@@ -1,7 +1,7 @@
 use std::process::ExitCode;
 
 use display_error_chain::DisplayErrorChain;
-use gemini_rust::{ClientError, Gemini, Model, TaskType};
+use adk_gemini::{ClientError, Gemini, Model, TaskType};
 use tracing::{error, info};
 
 async fn do_main(api_key: &str) -> Result<(), ClientError> {
@@ -36,12 +36,12 @@ async fn main() -> ExitCode {
 
     let api_key = std::env::var("GEMINI_API_KEY").expect("no gemini api key provided");
 
-    if let Err(err) = do_main(&api_key).await {
+    match do_main(&api_key).await { Err(err) => {
         let formatted = DisplayErrorChain::new(err).to_string();
         error!(error = formatted, "request failed");
         ExitCode::FAILURE
-    } else {
+    } _ => {
         info!("embedding request completed successfully");
         ExitCode::SUCCESS
-    }
+    }}
 }

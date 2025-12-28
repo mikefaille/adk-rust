@@ -8,7 +8,7 @@
 //! 5. Properly handling the result
 
 use display_error_chain::DisplayErrorChain;
-use gemini_rust::{Batch, BatchHandleError, BatchStatus, Gemini, Message};
+use adk_gemini::{Batch, BatchHandleError, BatchStatus, Gemini, Message};
 use std::process::ExitCode;
 use std::{env, sync::Arc, time::Duration};
 use tokio::{signal, sync::Mutex};
@@ -107,7 +107,7 @@ async fn do_main() -> Result<(), Box<dyn std::error::Error>> {
         // The lock is released immediately after this block.
         let mut batch_to_cancel = batch_clone.lock().await;
 
-        if let Some(batch) = batch_to_cancel.take() {
+        match batch_to_cancel.take() { Some(batch) => {
             // Cancel the batch operation
             match batch.cancel().await {
                 Ok(()) => {
@@ -126,9 +126,9 @@ async fn do_main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
             }
-        } else {
+        } _ => {
             info!("batch was already processed");
-        }
+        }}
     });
 
     // Wait for a short moment to ensure the cancel task is ready
@@ -146,13 +146,13 @@ async fn do_main() -> Result<(), Box<dyn std::error::Error>> {
 
                 // Log details about the results
                 match final_status {
-                    gemini_rust::BatchStatus::Succeeded { .. } => {
+                    adk_gemini::BatchStatus::Succeeded { .. } => {
                         info!("batch succeeded");
                     }
-                    gemini_rust::BatchStatus::Cancelled => {
+                    adk_gemini::BatchStatus::Cancelled => {
                         info!("batch was cancelled as requested");
                     }
-                    gemini_rust::BatchStatus::Expired => {
+                    adk_gemini::BatchStatus::Expired => {
                         warn!("batch expired");
                     }
                     _ => {

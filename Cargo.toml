@@ -35,15 +35,19 @@ exclude = [
     "learning",
 ]
 
+[profile.dev]
+debug = 1
+split-debuginfo = "packed"
+
 [profile.release]
 strip = true
 opt-level = 3
 lto = true
 
 [workspace.package]
-version = "0.1.7"
-edition = "2021"
-rust-version = "1.75"
+version = "0.1.8"
+edition = "2024"
+rust-version = "1.85.0"
 license = "Apache-2.0"
 authors = ["James Karanja Maina <james.karanja@zavora.ai>"]
 homepage = "https://www.zavora.ai"

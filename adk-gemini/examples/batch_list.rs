@@ -11,7 +11,7 @@
 
 use display_error_chain::DisplayErrorChain;
 use futures::StreamExt;
-use gemini_rust::Gemini;
+use adk_gemini::Gemini;
 use std::process::ExitCode;
 use tracing::{error, info};
 

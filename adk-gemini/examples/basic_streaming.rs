@@ -1,6 +1,6 @@
 use display_error_chain::DisplayErrorChain;
 use futures::TryStreamExt;
-use gemini_rust::Gemini;
+use adk_gemini::Gemini;
 use std::env;
 use std::io::{self, Write};
 use std::process::ExitCode;

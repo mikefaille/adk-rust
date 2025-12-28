@@ -12,7 +12,7 @@
 //! ```
 
 use display_error_chain::DisplayErrorChain;
-use gemini_rust::{Batch, BatchHandleError, BatchStatus, Gemini, Message};
+use adk_gemini::{Batch, BatchHandleError, BatchStatus, Gemini, Message};
 use std::process::ExitCode;
 use std::time::Duration;
 use tracing::{error, info, warn};

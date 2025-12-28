@@ -1,5 +1,5 @@
 use display_error_chain::DisplayErrorChain;
-use gemini_rust::Gemini;
+use adk_gemini::Gemini;
 use serde_json::json;
 use std::env;
 use std::process::ExitCode;

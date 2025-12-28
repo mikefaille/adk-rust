@@ -1,6 +1,6 @@
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use display_error_chain::DisplayErrorChain;
-use gemini_rust::Gemini;
+use adk_gemini::Gemini;
 use std::env;
 use std::fs;
 use std::process::ExitCode;
@@ -55,7 +55,7 @@ async fn do_main() -> Result<(), Box<dyn std::error::Error>> {
     for candidate in base_response.candidates.iter() {
         if let Some(parts) = &candidate.content.parts {
             for part in parts.iter() {
-                if let gemini_rust::Part::InlineData { inline_data } = part {
+                if let adk_gemini::Part::InlineData { inline_data } = part {
                     base_image_data = Some(inline_data.data.clone());
                     let image_bytes = BASE64.decode(&inline_data.data)?;
                     fs::write("base_landscape.png", image_bytes)?;
@@ -130,7 +130,7 @@ async fn do_main() -> Result<(), Box<dyn std::error::Error>> {
 
 /// Helper function to save generated images from a response
 fn save_generated_images(
-    response: &gemini_rust::GenerationResponse,
+    response: &adk_gemini::GenerationResponse,
     prefix: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut image_count = 0;
@@ -139,12 +139,12 @@ fn save_generated_images(
         if let Some(parts) = &candidate.content.parts {
             for part in parts.iter() {
                 match part {
-                    gemini_rust::Part::Text { text, .. } => {
+                    adk_gemini::Part::Text { text, .. } => {
                         if !text.trim().is_empty() {
                             info!(text = text.trim(), prefix = prefix, "model text response");
                         }
                     }
-                    gemini_rust::Part::InlineData { inline_data } => {
+                    adk_gemini::Part::InlineData { inline_data } => {
                         image_count += 1;
                         match BASE64.decode(&inline_data.data) {
                             Ok(image_bytes) => {

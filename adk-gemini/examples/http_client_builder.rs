@@ -1,5 +1,5 @@
 use display_error_chain::DisplayErrorChain;
-use gemini_rust::{GeminiBuilder, Model};
+use adk_gemini::{GeminiBuilder, Model};
 use reqwest::ClientBuilder;
 use std::env;
 use std::process::ExitCode;

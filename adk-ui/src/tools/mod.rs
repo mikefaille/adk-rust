@@ -20,7 +20,7 @@ pub use render_progress::RenderProgressTool;
 pub use render_table::RenderTableTool;
 pub use render_toast::RenderToastTool;
 
-use schemars::{gen::SchemaSettings, JsonSchema};
+use schemars::{r#gen::SchemaSettings, JsonSchema};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -33,7 +33,7 @@ where
         s.inline_subschemas = true;
         s.meta_schema = None;
     });
-    let generator = schemars::gen::SchemaGenerator::new(settings);
+    let generator = schemars::r#gen::SchemaGenerator::new(settings);
     let mut schema = generator.into_root_schema_for::<T>();
     schema.schema.metadata().title = None;
 

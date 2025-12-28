@@ -1,6 +1,6 @@
 use display_error_chain::DisplayErrorChain;
 use futures::TryStreamExt;
-use gemini_rust::{FunctionDeclaration, Gemini, ThinkingConfig};
+use adk_gemini::{FunctionDeclaration, Gemini, ThinkingConfig};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::env;

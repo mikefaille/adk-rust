@@ -1,6 +1,6 @@
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use display_error_chain::DisplayErrorChain;
-use gemini_rust::{Gemini, GenerationConfig};
+use adk_gemini::{Gemini, GenerationConfig};
 use std::env;
 use std::fs;
 use std::process::ExitCode;
@@ -62,10 +62,10 @@ async fn do_main() -> Result<(), Box<dyn std::error::Error>> {
         if let Some(parts) = &candidate.content.parts {
             for part in parts.iter() {
                 match part {
-                    gemini_rust::Part::Text { text, .. } => {
+                    adk_gemini::Part::Text { text, .. } => {
                         info!(response = text, "model text response received");
                     }
-                    gemini_rust::Part::InlineData { inline_data } => {
+                    adk_gemini::Part::InlineData { inline_data } => {
                         info!(mime_type = inline_data.mime_type, "image generated");
 
                         // Decode and save the image

@@ -1,5 +1,5 @@
 use display_error_chain::DisplayErrorChain;
-use gemini_rust::{
+use adk_gemini::{
     Content, FunctionCallingMode, FunctionDeclaration, Gemini, GenerationConfig, Message, Role,
 };
 use schemars::JsonSchema;

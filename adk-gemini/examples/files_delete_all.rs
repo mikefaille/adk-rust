@@ -1,7 +1,7 @@
 //! Deletes all files associated with the API key.
 use display_error_chain::DisplayErrorChain;
 use futures::stream::TryStreamExt;
-use gemini_rust::{ClientError, Gemini};
+use adk_gemini::{ClientError, Gemini};
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tracing::{error, info};
