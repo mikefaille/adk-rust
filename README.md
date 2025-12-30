@@ -76,6 +76,11 @@ export ANTHROPIC_API_KEY="your-api-key"
 
 # For DeepSeek
 export DEEPSEEK_API_KEY="your-api-key"
+
+# For Groq
+export GROQ_API_KEY="your-api-key"
+
+# For Ollama (no key, just run: ollama serve)
 ```
 
 ### Basic Example (Gemini)
@@ -166,6 +171,48 @@ async fn main() -> Result<()> {
 }
 ```
 
+### Groq Example (Ultra-Fast)
+
+```rust
+use adk_agent::LlmAgentBuilder;
+use adk_model::groq::{GroqClient, GroqConfig};
+use std::sync::Arc;
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let api_key = std::env::var("GROQ_API_KEY")?;
+    let model = GroqClient::new(GroqConfig::llama70b(api_key))?;
+
+    let agent = LlmAgentBuilder::new("assistant")
+        .instruction("You are a helpful assistant.")
+        .model(Arc::new(model))
+        .build()?;
+
+    Ok(())
+}
+```
+
+### Ollama Example (Local)
+
+```rust
+use adk_agent::LlmAgentBuilder;
+use adk_model::ollama::{OllamaModel, OllamaConfig};
+use std::sync::Arc;
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    // Requires: ollama serve && ollama pull llama3.2
+    let model = OllamaModel::new(OllamaConfig::new("llama3.2"))?;
+
+    let agent = LlmAgentBuilder::new("assistant")
+        .instruction("You are a helpful assistant.")
+        .model(Arc::new(model))
+        .build()?;
+
+    Ok(())
+}
+```
+
 ### Run Examples
 
 ```bash
@@ -180,6 +227,14 @@ cargo run --example openai_tools --features openai
 cargo run --example deepseek_basic --features deepseek
 cargo run --example deepseek_reasoner --features deepseek
 cargo run --example deepseek_tools --features deepseek
+
+# Groq examples (requires --features groq)
+cargo run --example groq_basic --features groq
+cargo run --example groq_tools --features groq
+
+# Ollama examples (requires --features ollama)
+cargo run --example ollama_basic --features ollama
+cargo run --example ollama_tools --features ollama
 
 # REST API server
 cargo run --example server

@@ -14,6 +14,8 @@ LLM model integrations for Rust Agent Development Kit (ADK-Rust) with Gemini, Op
 - **OpenAI** - GPT-5.2, GPT-5.1, GPT-5, GPT-4o, GPT-4o-mini, Azure OpenAI
 - **Anthropic** - Claude Opus 4.5, Claude Sonnet 4.5, Claude Sonnet 4, Claude 3.5
 - **DeepSeek** - DeepSeek-Chat, DeepSeek-Reasoner with thinking mode
+- **Groq** - Ultra-fast inference (LLaMA 3.3, Mixtral, Gemma)
+- **Ollama** - Local LLMs (LLaMA, Mistral, Qwen, Gemma, etc.)
 - **Streaming** - Real-time response streaming for all providers
 - **Multimodal** - Text, images, audio, video, and PDF input
 
@@ -120,6 +122,46 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+### Groq (Ultra-Fast)
+
+```rust
+use adk_model::groq::{GroqClient, GroqConfig};
+use adk_agent::LlmAgentBuilder;
+use std::sync::Arc;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let api_key = std::env::var("GROQ_API_KEY")?;
+    let model = GroqClient::new(GroqConfig::llama70b(api_key))?;
+
+    let agent = LlmAgentBuilder::new("assistant")
+        .model(Arc::new(model))
+        .build()?;
+
+    Ok(())
+}
+```
+
+### Ollama (Local)
+
+```rust
+use adk_model::ollama::{OllamaModel, OllamaConfig};
+use adk_agent::LlmAgentBuilder;
+use std::sync::Arc;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Requires: ollama serve && ollama pull llama3.2
+    let model = OllamaModel::new(OllamaConfig::new("llama3.2"))?;
+
+    let agent = LlmAgentBuilder::new("assistant")
+        .model(Arc::new(model))
+        .build()?;
+
+    Ok(())
+}
+```
+
 ## Supported Models
 
 ### Google Gemini
@@ -171,6 +213,38 @@ See [Anthropic models documentation](https://docs.anthropic.com/claude/docs/mode
 
 See [DeepSeek API documentation](https://api-docs.deepseek.com/) for the full list.
 
+### Groq
+
+| Model | Description |
+|-------|-------------|
+| `llama-3.3-70b-versatile` | LLaMA 3.3 70B - Most capable |
+| `llama-3.1-8b-instant` | LLaMA 3.1 8B - Ultra fast |
+| `mixtral-8x7b-32768` | Mixtral 8x7B - 32K context |
+| `gemma2-9b-it` | Gemma 2 9B |
+
+**Features:**
+- **Ultra-Fast** - LPU-based inference (fastest in the industry)
+- **Tool Calling** - Full function calling support
+- **Large Context** - Up to 128K tokens
+
+See [Groq documentation](https://console.groq.com/docs/models) for the full list.
+
+### Ollama (Local)
+
+| Model | Description |
+|-------|-------------|
+| `llama3.2` | LLaMA 3.2 - Fast and capable |
+| `mistral` | Mistral 7B |
+| `qwen2.5` | Qwen 2.5 with tool support |
+| `gemma2` | Gemma 2 |
+
+**Features:**
+- **Local Inference** - No API key required
+- **Privacy** - Data stays on your machine
+- **Tool Calling** - Full function calling support
+
+See [Ollama library](https://ollama.com/library) for all available models.
+
 ## Features
 
 - **Streaming** - Real-time response streaming for all providers
@@ -193,6 +267,12 @@ ANTHROPIC_API_KEY=your-anthropic-api-key
 
 # DeepSeek
 DEEPSEEK_API_KEY=your-deepseek-api-key
+
+# Groq
+GROQ_API_KEY=your-groq-api-key
+
+# Ollama (no key needed, just start the server)
+# ollama serve
 ```
 
 ## Feature Flags
@@ -209,6 +289,8 @@ adk-model = { version = "0.1.8", features = ["gemini"] }
 adk-model = { version = "0.1.8", features = ["openai"] }
 adk-model = { version = "0.1.8", features = ["anthropic"] }
 adk-model = { version = "0.1.8", features = ["deepseek"] }
+adk-model = { version = "0.1.8", features = ["groq"] }
+adk-model = { version = "0.1.8", features = ["ollama"] }
 ```
 
 ## Related Crates
