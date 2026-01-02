@@ -235,6 +235,10 @@ cargo run --example groq_tools --features groq
 # Ollama examples (requires --features ollama)
 cargo run --example ollama_basic --features ollama
 cargo run --example ollama_tools --features ollama
+cargo run --example ollama_mcp --features ollama        # MCP integration
+cargo run --example ollama_parallel --features ollama   # Parallel agents
+cargo run --example ollama_sequential --features ollama # Sequential pipeline
+cargo run --example ollama_supervisor --features ollama # Supervisor pattern
 
 # REST API server
 cargo run --example server

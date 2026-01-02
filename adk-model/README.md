@@ -235,13 +235,14 @@ See [Groq documentation](https://console.groq.com/docs/models) for the full list
 |-------|-------------|
 | `llama3.2` | LLaMA 3.2 - Fast and capable |
 | `mistral` | Mistral 7B |
-| `qwen2.5` | Qwen 2.5 with tool support |
+| `qwen2.5:7b` | Qwen 2.5 with excellent tool support (recommended) |
 | `gemma2` | Gemma 2 |
 
 **Features:**
 - **Local Inference** - No API key required
 - **Privacy** - Data stays on your machine
-- **Tool Calling** - Full function calling support
+- **Tool Calling** - Full function calling support (uses non-streaming for reliability)
+- **MCP Integration** - Connect to MCP servers for external tools
 
 See [Ollama library](https://ollama.com/library) for all available models.
 
