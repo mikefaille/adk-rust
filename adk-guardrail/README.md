@@ -19,10 +19,10 @@ Guardrails framework for ADK agents - input/output validation, content filtering
 
 ```toml
 [dependencies]
-adk-guardrail = "0.1.8"
+adk-guardrail = "0.1.9"
 
 # With JSON schema validation (default)
-adk-guardrail = { version = "0.1.8", features = ["schema"] }
+adk-guardrail = { version = "0.1.9", features = ["schema"] }
 ```
 
 ## Quick Start

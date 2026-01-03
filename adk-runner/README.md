@@ -20,14 +20,14 @@ Agent execution runtime for Rust Agent Development Kit (ADK-Rust) agents.
 
 ```toml
 [dependencies]
-adk-runner = "0.1.8"
+adk-runner = "0.1.9"
 ```
 
 Or use the meta-crate:
 
 ```toml
 [dependencies]
-adk-rust = { version = "0.1.8", features = ["runner"] }
+adk-rust = { version = "0.1.9", features = ["runner"] }
 ```
 
 ## Quick Start

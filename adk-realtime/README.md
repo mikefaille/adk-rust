@@ -51,7 +51,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-adk-realtime = { version = "0.1.8", features = ["openai"] }
+adk-realtime = { version = "0.1.9", features = ["openai"] }
 ```
 
 ### Using RealtimeAgent (Recommended)

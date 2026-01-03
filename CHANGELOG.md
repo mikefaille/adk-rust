@@ -63,7 +63,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Non-exhaustive pattern match for `Part::FileData` in `adk-server/src/a2a/parts.rs`
 - Non-exhaustive pattern match for `Part::FileData` in `adk-cli/src/console.rs`
 
-## [0.1.8] - 2025-12-28
+## [0.1.9] - 2025-12-28
 
 ### ⭐ Highlights
 - **ADK Studio**: Complete visual agent builder with drag-and-drop workflow design
@@ -109,8 +109,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Standardized workspace dependencies for consistency
 
 ### Changed
-- All ADK crates bumped to version 0.1.8
-- Generated `Cargo.toml` now uses ADK version 0.1.8
+- All ADK crates bumped to version 0.1.9
+- Generated `Cargo.toml` now uses ADK version 0.1.9
 - Improved sub-agent display in containers (robot icon, LLM Agent label, tool descriptions)
 - Sequential agent now properly passes conversation history between sub-agents
 - Output mapper now accumulates text correctly across agent events
@@ -391,8 +391,8 @@ Initial release - Published to crates.io.
 - Google API key for Gemini
 
 [Unreleased]: https://github.com/zavora-ai/adk-rust/compare/v0.1.9...HEAD
-[0.1.9]: https://github.com/zavora-ai/adk-rust/compare/v0.1.8...v0.1.9
-[0.1.8]: https://github.com/zavora-ai/adk-rust/compare/v0.1.7...v0.1.8
+[0.1.9]: https://github.com/zavora-ai/adk-rust/compare/v0.1.9...v0.1.9
+[0.1.9]: https://github.com/zavora-ai/adk-rust/compare/v0.1.7...v0.1.9
 [0.1.7]: https://github.com/zavora-ai/adk-rust/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/zavora-ai/adk-rust/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/zavora-ai/adk-rust/compare/v0.1.4...v0.1.5
