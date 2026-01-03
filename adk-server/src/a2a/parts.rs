@@ -19,6 +19,15 @@ pub fn adk_parts_to_a2a(
                     uri: None,
                 }))
             }
+            Part::FileData { mime_type, file_uri } => {
+                // FileData contains a URI reference to a file
+                Ok(crate::a2a::Part::file(crate::a2a::FileContent {
+                    name: None,
+                    mime_type: Some(mime_type.clone()),
+                    bytes: None,
+                    uri: Some(file_uri.clone()),
+                }))
+            }
             Part::FunctionCall { name, args, id } => {
                 let is_long_running = long_running_ids.contains(name);
                 let mut data = Map::new();

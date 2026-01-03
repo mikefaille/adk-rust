@@ -1,7 +1,15 @@
 # Rust
 /target/
+**/target/
 **/*.rs.bk
 *.pdb
+
+# Cargo.lock for excluded crates
+adk-mistralrs/Cargo.lock
+
+# Generated output files
+/output/
+**/output/
 
 # IDE
 .idea/
@@ -19,6 +27,7 @@
 # Testing
 *.profraw
 *.profdata
+*.proptest-regressions
 
 # Documentation
 /target/doc/
@@ -75,3 +84,4 @@ docs/ADK-STUDIO-FUNCTION-TOOLS.md
 docs/ADK-STUDIO-GRAPH-DESIGN.md
 studio-ui/node_modules/
 studio-ui/node_modules/
+mistral-rs-ref/

@@ -437,6 +437,51 @@ name = "auth_google"
 path = "auth_google/main.rs"
 required-features = ["sso"]
 
+[[example]]
+name = "mistralrs_basic"
+path = "mistralrs_basic/main.rs"
+required-features = ["mistralrs"]
+
+[[example]]
+name = "mistralrs_tools"
+path = "mistralrs_tools/main.rs"
+required-features = ["mistralrs"]
+
+[[example]]
+name = "mistralrs_vision"
+path = "mistralrs_vision/main.rs"
+required-features = ["mistralrs"]
+
+[[example]]
+name = "mistralrs_isq"
+path = "mistralrs_isq/main.rs"
+required-features = ["mistralrs"]
+
+[[example]]
+name = "mistralrs_lora"
+path = "mistralrs_lora/main.rs"
+required-features = ["mistralrs"]
+
+[[example]]
+name = "mistralrs_multimodel"
+path = "mistralrs_multimodel/main.rs"
+required-features = ["mistralrs"]
+
+[[example]]
+name = "mistralrs_mcp"
+path = "mistralrs_mcp/main.rs"
+required-features = ["mistralrs"]
+
+[[example]]
+name = "mistralrs_speech"
+path = "mistralrs_speech/main.rs"
+required-features = ["mistralrs"]
+
+[[example]]
+name = "mistralrs_diffusion"
+path = "mistralrs_diffusion/main.rs"
+required-features = ["mistralrs"]
+
 [features]
 default = []
 openai = ["adk-model/openai"]
@@ -444,6 +489,7 @@ anthropic = ["adk-model/anthropic"]
 deepseek = ["adk-model/deepseek"]
 ollama = ["adk-model/ollama"]
 groq = ["adk-model/groq"]
+mistralrs = ["dep:adk-mistralrs"]
 realtime-openai = ["adk-realtime/openai"]
 realtime-gemini = ["adk-realtime/gemini"]
 browser = ["dep:adk-browser", "dep:reqwest"]
@@ -468,6 +514,9 @@ adk-ui.workspace = true
 adk-auth.workspace = true
 adk-browser = { workspace = true, optional = true }
 adk-guardrail = { workspace = true, optional = true }
+# adk-mistralrs is excluded from workspace to prevent --all-features failures
+# It must be built explicitly: cargo build -p adk-mistralrs
+adk-mistralrs = { path = "../adk-mistralrs", optional = true }
 tokio.workspace = true
 reqwest = { workspace = true, optional = true }
 base64 = "0.22"
@@ -482,3 +531,5 @@ axum = "0.8"
 async-trait.workspace = true
 dotenvy = "0.15"
 rmcp = { version = "0.9", features = ["client", "transport-child-process"] }
+rustyline = "15"
+image = "0.25"

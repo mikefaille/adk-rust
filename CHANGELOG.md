@@ -5,6 +5,64 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.9] - 2026-01-03
+
+### ⭐ Highlights
+- **mistral.rs Integration**: Complete native local LLM inference via `adk-mistralrs` crate
+- **Production-Ready Error Handling**: Comprehensive error types with actionable suggestions
+- **Diagnostic Logging**: Structured tracing with timing spans for model loading and inference
+- **Performance Benchmarks**: Criterion benchmarks for configuration and conversion operations
+
+### Added
+- **adk-mistralrs** (`adk-mistralrs`): Native mistral.rs integration for local LLM inference
+  - `MistralRsModel`: Basic text generation implementing ADK `Llm` trait
+  - `MistralRsAdapterModel`: LoRA/X-LoRA adapter support with hot-swapping
+  - `MistralRsVisionModel`: Vision-language model support for image understanding
+  - `MistralRsEmbeddingModel`: Semantic embeddings for RAG and search
+  - `MistralRsSpeechModel`: Text-to-speech synthesis with multi-speaker support
+  - `MistralRsDiffusionModel`: Image generation with FLUX models
+  - `MistralRsMultiModel`: Multi-model serving with routing
+  - ISQ (In-Situ Quantization) support for memory-efficient inference
+  - PagedAttention for longer context windows
+  - UQFF pre-quantized model loading for faster startup
+  - MCP client integration for external tools
+  - MatFormer support for Gemma 3n models
+  - Multi-GPU model splitting across devices
+- **Error handling improvements**:
+  - Structured error types with contextual fields (model_id, reason, suggestion)
+  - Convenience constructors for common error patterns
+  - Error classification methods (`is_recoverable()`, `is_config_error()`, `is_resource_error()`)
+  - Actionable suggestions based on error content
+- **Diagnostic logging**:
+  - `tracing_utils` module with timing utilities
+  - `TimingGuard` for automatic operation timing
+  - Logging functions for model loading, inference, embeddings, image/speech generation
+  - Token throughput metrics in inference logs
+- **CI integration**:
+  - `.github/workflows/mistralrs-tests.yml` for mistral.rs-specific testing
+  - Separate jobs for unit tests, property tests, doc tests, and clippy
+  - Optional integration tests with manual trigger
+- **Performance benchmarks**:
+  - Criterion benchmarks for configuration, error creation, type conversions
+  - MCP configuration benchmarks
+  - Optional inference benchmarks behind `bench-inference` feature flag
+- **Property tests**:
+  - 21 error message quality tests validating contextual information and suggestions
+  - Tests for error classification consistency
+  - Tests for all error types (model load, inference, adapters, media processing, etc.)
+- **FileData Part support**: Added `Part::FileData` variant handling in `adk-server` and `adk-cli`
+- **New examples**: `mistralrs_speech` (TTS) and `mistralrs_diffusion` (image generation)
+
+### Changed
+- All ADK crates bumped to version 0.1.9
+- `adk-mistralrs` version updated to 0.1.9
+- Updated README with benchmark documentation and performance tips
+- Enhanced error messages with platform-specific suggestions (CUDA, Metal)
+
+### Fixed
+- Non-exhaustive pattern match for `Part::FileData` in `adk-server/src/a2a/parts.rs`
+- Non-exhaustive pattern match for `Part::FileData` in `adk-cli/src/console.rs`
+
 ## [0.1.8] - 2025-12-28
 
 ### ⭐ Highlights
@@ -332,7 +390,8 @@ Initial release - Published to crates.io.
 - Tokio async runtime
 - Google API key for Gemini
 
-[Unreleased]: https://github.com/zavora-ai/adk-rust/compare/v0.1.8...HEAD
+[Unreleased]: https://github.com/zavora-ai/adk-rust/compare/v0.1.9...HEAD
+[0.1.9]: https://github.com/zavora-ai/adk-rust/compare/v0.1.8...v0.1.9
 [0.1.8]: https://github.com/zavora-ai/adk-rust/compare/v0.1.7...v0.1.8
 [0.1.7]: https://github.com/zavora-ai/adk-rust/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/zavora-ai/adk-rust/compare/v0.1.5...v0.1.6

@@ -24,7 +24,7 @@ ADK-Rust provides a comprehensive framework for building AI agents in Rust, feat
 ## ADK-Rust Studio
 
 [![adk-studio](https://img.shields.io/crates/v/adk-studio.svg)](https://crates.io/crates/adk-studio)
-![New](https://img.shields.io/badge/new-v0.1.8-brightgreen)
+![New](https://img.shields.io/badge/new-v0.1.9-brightgreen)
 
 A new visual development environment for building AI agents with drag-and-drop, powered by ADK-Rust:
 
@@ -52,14 +52,14 @@ Requires Rust 1.85 or later (Rust 2024 edition). Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-adk-rust = "0.1.8"
+adk-rust = "0.1.9"
 
 # Or individual crates
-adk-core = "0.1.8"
-adk-agent = "0.1.8"
-adk-model = "0.1.8"  # Add features for providers: features = ["openai", "anthropic"]
-adk-tool = "0.1.8"
-adk-runner = "0.1.8"
+adk-core = "0.1.9"
+adk-agent = "0.1.9"
+adk-model = "0.1.9"  # Add features for providers: features = ["openai", "anthropic"]
+adk-tool = "0.1.9"
+adk-runner = "0.1.9"
 ```
 
 Set your API key:
@@ -251,6 +251,71 @@ cargo run --example parallel_agent
 ls examples/
 ```
 
+## Building from Source
+
+### Using Make (Recommended)
+
+```bash
+# See all available commands
+make help
+
+# Build all crates (CPU-only, works on all systems)
+make build
+
+# Build with all features (safe - adk-mistralrs excluded)
+make build-all
+
+# Build all examples
+make examples
+
+# Run tests
+make test
+
+# Run clippy lints
+make clippy
+```
+
+### Manual Build
+
+```bash
+# Build workspace (CPU-only)
+cargo build --workspace
+
+# Build with all features (works without CUDA)
+cargo build --workspace --all-features
+
+# Build examples with common features
+cargo build --examples --features "openai,anthropic,deepseek,ollama,groq,browser,guardrails,sso"
+```
+
+### Local LLM with mistral.rs
+
+`adk-mistralrs` is excluded from the workspace by default to allow `--all-features` to work without CUDA toolkit. Build it explicitly:
+
+```bash
+# CPU-only (works on all systems)
+make build-mistralrs
+# or: cargo build --manifest-path adk-mistralrs/Cargo.toml
+
+# macOS with Apple Silicon (Metal GPU)
+make build-mistralrs-metal
+# or: cargo build --manifest-path adk-mistralrs/Cargo.toml --features metal
+
+# NVIDIA GPU (requires CUDA toolkit)
+make build-mistralrs-cuda
+# or: cargo build --manifest-path adk-mistralrs/Cargo.toml --features cuda
+```
+
+### Running mistralrs Examples
+
+```bash
+# Build and run examples with mistralrs
+cargo run --example mistralrs_basic --features mistralrs
+
+# With Metal GPU acceleration (macOS)
+cargo run --example mistralrs_basic --features mistralrs,metal
+```
+
 ## Architecture
 
 ![ADK-Rust Architecture](assets/architecture.png)
@@ -263,7 +328,8 @@ ADK-Rust follows a clean layered architecture from application interface down to
 |-------|---------|--------------|
 | `adk-core` | Foundational traits and types | `Agent` trait, `Content`, `Part`, error types, streaming primitives |
 | `adk-agent` | Agent implementations | `LlmAgent`, `SequentialAgent`, `ParallelAgent`, `LoopAgent`, builder patterns |
-| `adk-model` | LLM integrations | Gemini, OpenAI, Anthropic clients, streaming, function calling |
+| `adk-model` | LLM integrations | Gemini, OpenAI, Anthropic, Ollama clients, streaming, function calling |
+| `adk-mistralrs` | Native local inference | mistral.rs integration, ISQ quantization, LoRA adapters (git-only) |
 | `adk-tool` | Tool system and extensibility | `FunctionTool`, Google Search, MCP protocol, schema validation |
 | `adk-session` | Session and state management | SQLite/in-memory backends, conversation history, state persistence |
 | `adk-artifact` | Artifact storage system | File-based storage, MIME type handling, image/PDF/video support |
@@ -514,10 +580,51 @@ ADK supports multiple LLM providers with a unified API:
 | OpenAI | `gpt-4.1`, `gpt-4.1-mini`, `o3-mini`, `gpt-4o` | `openai` |
 | Anthropic | `claude-sonnet-4`, `claude-opus-4`, `claude-haiku-4` | `anthropic` |
 | DeepSeek | `deepseek-chat`, `deepseek-reasoner` | `deepseek` |
+| Groq | `llama-3.3-70b-versatile`, `mixtral-8x7b-32768` | `groq` |
+| Ollama | `llama3.2`, `mistral`, `phi3` | `ollama` |
+| mistral.rs | Phi-3, Mistral, Llama, Gemma, LLaVa, FLUX | git dependency |
 
 All providers support streaming, function calling, and multimodal inputs (where available).
 
 **DeepSeek-specific features**: Thinking mode (chain-of-thought reasoning), context caching (10x cost reduction for repeated prefixes).
+
+### Local Inference with mistral.rs
+
+For native local inference without external dependencies, use the `adk-mistralrs` crate:
+
+```rust
+use adk_mistralrs::{MistralRsModel, MistralRsConfig, ModelSource, QuantizationLevel};
+use adk_agent::LlmAgentBuilder;
+use std::sync::Arc;
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    // Load model with ISQ quantization for reduced memory
+    let config = MistralRsConfig::builder()
+        .model_source(ModelSource::huggingface("microsoft/Phi-3.5-mini-instruct"))
+        .isq(QuantizationLevel::Q4_0)
+        .paged_attention(true)
+        .build();
+
+    let model = MistralRsModel::new(config).await?;
+
+    let agent = LlmAgentBuilder::new("local-assistant")
+        .instruction("You are a helpful assistant running locally.")
+        .model(Arc::new(model))
+        .build()?;
+
+    Ok(())
+}
+```
+
+**Note**: `adk-mistralrs` is not on crates.io due to git dependencies. Add via:
+```toml
+adk-mistralrs = { git = "https://github.com/zavora-ai/adk-rust" }
+# With Metal: features = ["metal"]
+# With CUDA: features = ["cuda"]
+```
+
+**Features**: ISQ quantization, PagedAttention, multi-GPU splitting, LoRA/X-LoRA adapters, vision/speech/diffusion models, MCP integration.
 
 ### Production Features
 
@@ -604,25 +711,25 @@ Add to your `Cargo.toml`:
 ```toml
 [dependencies]
 # All-in-one crate
-adk-rust = "0.1.8"
+adk-rust = "0.1.9"
 
 # Or individual crates for finer control
-adk-core = "0.1.8"
-adk-agent = "0.1.8"
-adk-model = { version = "0.1.8", features = ["openai", "anthropic"] }  # Enable providers
-adk-tool = "0.1.8"
-adk-runner = "0.1.8"
+adk-core = "0.1.9"
+adk-agent = "0.1.9"
+adk-model = { version = "0.1.9", features = ["openai", "anthropic"] }  # Enable providers
+adk-tool = "0.1.9"
+adk-runner = "0.1.9"
 
 # Optional dependencies
-adk-session = { version = "0.1.8", optional = true }
-adk-artifact = { version = "0.1.8", optional = true }
-adk-memory = { version = "0.1.8", optional = true }
-adk-server = { version = "0.1.8", optional = true }
-adk-cli = { version = "0.1.8", optional = true }
-adk-realtime = { version = "0.1.8", features = ["openai"], optional = true }
-adk-graph = { version = "0.1.8", features = ["sqlite"], optional = true }
-adk-browser = { version = "0.1.8", optional = true }
-adk-eval = { version = "0.1.8", optional = true }
+adk-session = { version = "0.1.9", optional = true }
+adk-artifact = { version = "0.1.9", optional = true }
+adk-memory = { version = "0.1.9", optional = true }
+adk-server = { version = "0.1.9", optional = true }
+adk-cli = { version = "0.1.9", optional = true }
+adk-realtime = { version = "0.1.9", features = ["openai"], optional = true }
+adk-graph = { version = "0.1.9", features = ["sqlite"], optional = true }
+adk-browser = { version = "0.1.9", optional = true }
+adk-eval = { version = "0.1.9", optional = true }
 ```
 
 ## Examples
@@ -684,6 +791,15 @@ See [examples/](examples/) directory for complete, runnable examples:
 - `guardrail_schema/` - JSON schema validation
 - `guardrail_agent/` - Full agent integration with guardrails
 
+**mistral.rs Local Inference** (requires git dependency)
+- `mistralrs_basic/` - Basic text generation with local models
+- `mistralrs_tools/` - Function calling with mistral.rs
+- `mistralrs_vision/` - Image understanding with vision models
+- `mistralrs_isq/` - In-situ quantization for memory efficiency
+- `mistralrs_lora/` - LoRA adapter usage and hot-swapping
+- `mistralrs_multimodel/` - Multi-model serving
+- `mistralrs_mcp/` - MCP client integration
+
 **Dynamic UI**
 - `ui_agent/` - Agent with UI rendering tools
 - `ui_server/` - UI server with streaming updates
@@ -722,9 +838,10 @@ Contributions welcome! Please open an issue or pull request on GitHub.
 
 ## Roadmap
 
-**Implemented** (v0.1.8):
+**Implemented** (v0.1.9):
 - Core framework and agent types
-- Multi-provider LLM support (Gemini, OpenAI, Anthropic, DeepSeek)
+- Multi-provider LLM support (Gemini, OpenAI, Anthropic, DeepSeek, Groq, Ollama)
+- **Native local inference** (adk-mistralrs) with ISQ quantization, LoRA adapters, vision/speech/diffusion
 - Tool system with MCP support
 - Agent Tool - Use agents as callable tools
 - Session and artifact management

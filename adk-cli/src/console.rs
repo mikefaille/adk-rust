@@ -110,6 +110,7 @@ impl StreamPrinter {
                 self.print_tool_response(name, response)
             }
             Part::InlineData { mime_type, data } => self.print_inline_data(mime_type, data.len()),
+            Part::FileData { mime_type, file_uri } => self.print_file_data(mime_type, file_uri),
         }
     }
 
@@ -183,6 +184,11 @@ impl StreamPrinter {
 
     fn print_inline_data(&self, mime_type: &str, len: usize) {
         print!("\n[inline-data] mime={} bytes={}\n", mime_type, len);
+        let _ = io::stdout().flush();
+    }
+
+    fn print_file_data(&self, mime_type: &str, file_uri: &str) {
+        print!("\n[file-data] mime={} uri={}\n", mime_type, file_uri);
         let _ = io::stdout().flush();
     }
 }

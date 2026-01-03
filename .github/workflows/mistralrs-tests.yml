@@ -1,0 +1,204 @@
+name: mistral.rs Integration Tests
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'adk-mistralrs/**'
+      - '.github/workflows/mistralrs-tests.yml'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'adk-mistralrs/**'
+      - '.github/workflows/mistralrs-tests.yml'
+  workflow_dispatch:  # Allow manual triggering
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_HOME: /home/runner/.cargo
+  CARGO_INCREMENTAL: 0
+  # Disable model downloads in CI by default
+  MISTRALRS_SKIP_DOWNLOAD: "1"
+
+jobs:
+  # Unit tests and property tests (no model downloads required)
+  unit-tests:
+    name: Unit & Property Tests
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Free disk space
+      run: |
+        sudo rm -rf /usr/local/lib/android
+        sudo rm -rf /usr/share/dotnet
+        df -h
+    
+    - uses: dtolnay/rust-toolchain@stable
+    
+    - name: Install mold linker
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y mold
+    
+    - uses: Swatinem/rust-cache@v2
+      with:
+        key: mistralrs-${{ runner.os }}
+        cache-on-failure: true
+        save-if: ${{ github.ref == 'refs/heads/main' }}
+    
+    - name: Run adk-mistralrs unit tests
+      env:
+        RUSTFLAGS: "-C link-arg=-fuse-ld=mold -C debuginfo=0"
+      run: cargo test -p adk-mistralrs --lib -j 2
+    
+    - name: Run adk-mistralrs property tests
+      env:
+        RUSTFLAGS: "-C link-arg=-fuse-ld=mold -C debuginfo=0"
+      run: |
+        cargo test -p adk-mistralrs --test config_property_tests -j 2
+        cargo test -p adk-mistralrs --test adapter_property_tests -j 2
+        cargo test -p adk-mistralrs --test error_property_tests -j 2
+        cargo test -p adk-mistralrs --test mcp_property_tests -j 2
+        cargo test -p adk-mistralrs --test multimodel_property_tests -j 2
+        cargo test -p adk-mistralrs --test embedding_property_tests -j 2
+    
+    - name: Run conversion tests
+      env:
+        RUSTFLAGS: "-C link-arg=-fuse-ld=mold -C debuginfo=0"
+      run: |
+        cargo test -p adk-mistralrs --test tool_conversion_tests -j 2
+        cargo test -p adk-mistralrs --test image_content_tests -j 2
+        cargo test -p adk-mistralrs --test audio_content_tests -j 2
+        cargo test -p adk-mistralrs --test multimodal_generation_tests -j 2
+    
+    - name: Run other tests
+      env:
+        RUSTFLAGS: "-C link-arg=-fuse-ld=mold -C debuginfo=0"
+      run: |
+        cargo test -p adk-mistralrs --test chat_template_tests -j 2
+        cargo test -p adk-mistralrs --test matformer_tests -j 2
+        cargo test -p adk-mistralrs --test diffusion_config_tests -j 2
+        cargo test -p adk-mistralrs --test voice_config_tests -j 2
+        cargo test -p adk-mistralrs --test llm_trait_tests -j 2
+
+  # Documentation tests
+  doc-tests:
+    name: Documentation Tests
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Free disk space
+      run: |
+        sudo rm -rf /usr/local/lib/android
+        sudo rm -rf /usr/share/dotnet
+        df -h
+    
+    - uses: dtolnay/rust-toolchain@stable
+    
+    - name: Install mold linker
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y mold
+    
+    - uses: Swatinem/rust-cache@v2
+      with:
+        key: mistralrs-docs-${{ runner.os }}
+        cache-on-failure: true
+        save-if: ${{ github.ref == 'refs/heads/main' }}
+    
+    - name: Run doc tests
+      env:
+        RUSTFLAGS: "-C link-arg=-fuse-ld=mold -C debuginfo=0"
+      run: cargo test -p adk-mistralrs --doc -j 2
+
+  # Clippy linting for adk-mistralrs
+  clippy:
+    name: Clippy Lint
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Free disk space
+      run: |
+        sudo rm -rf /usr/local/lib/android
+        sudo rm -rf /usr/share/dotnet
+        df -h
+    
+    - uses: dtolnay/rust-toolchain@stable
+      with:
+        components: clippy
+    
+    - name: Install mold linker
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y mold
+    
+    - uses: Swatinem/rust-cache@v2
+      with:
+        key: mistralrs-clippy-${{ runner.os }}
+        cache-on-failure: true
+        save-if: ${{ github.ref == 'refs/heads/main' }}
+    
+    - name: Run clippy on adk-mistralrs
+      env:
+        RUSTFLAGS: "-C link-arg=-fuse-ld=mold -C debuginfo=0"
+      run: cargo clippy -p adk-mistralrs --all-targets -- -D warnings
+
+  # Integration tests with small model (optional, requires HuggingFace token)
+  # These tests are marked as #[ignore] and require manual triggering
+  integration-tests:
+    name: Integration Tests (Manual)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Free disk space
+      run: |
+        sudo rm -rf /usr/local/lib/android
+        sudo rm -rf /usr/share/dotnet
+        sudo rm -rf /opt/ghc
+        sudo rm -rf /usr/local/share/boost
+        df -h
+    
+    - uses: dtolnay/rust-toolchain@stable
+    
+    - name: Install mold linker
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y mold
+    
+    - uses: Swatinem/rust-cache@v2
+      with:
+        key: mistralrs-integration-${{ runner.os }}
+        cache-on-failure: true
+        save-if: ${{ github.ref == 'refs/heads/main' }}
+    
+    - name: Run integration tests (ignored tests)
+      env:
+        RUSTFLAGS: "-C link-arg=-fuse-ld=mold -C debuginfo=0"
+        HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      run: |
+        # Run ignored tests that require model downloads
+        # Note: These tests may take a long time and require significant disk space
+        cargo test -p adk-mistralrs --test llm_trait_tests -- --ignored --nocapture || true
+      continue-on-error: true
+
+  # Summary job
+  summary:
+    name: Test Summary
+    runs-on: ubuntu-latest
+    needs: [unit-tests, doc-tests, clippy]
+    if: always()
+    steps:
+    - name: Check results
+      run: |
+        if [ "${{ needs.unit-tests.result }}" == "failure" ] || \
+           [ "${{ needs.doc-tests.result }}" == "failure" ] || \
+           [ "${{ needs.clippy.result }}" == "failure" ]; then
+          echo "One or more jobs failed"
+          exit 1
+        fi
+        echo "All required jobs passed!"

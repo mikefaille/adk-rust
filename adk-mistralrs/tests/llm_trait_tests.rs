@@ -60,22 +60,16 @@ async fn test_llm_generate_content_integration() {
     let content = Content::new("user").with_text("Say hello in one word.");
     let request = LlmRequest::new("test", vec![content]);
 
-    let stream = model
-        .generate_content(request, false)
-        .await
-        .expect("Failed to generate content");
+    let stream = model.generate_content(request, false).await.expect("Failed to generate content");
 
     // Collect stream results
     use futures::StreamExt;
     let responses: Vec<_> = stream.collect().await;
 
     assert!(!responses.is_empty(), "Response stream should not be empty");
-    
+
     // Check that at least one response has content
-    let has_content = responses.iter().any(|r| {
-        r.as_ref()
-            .map(|resp| resp.content.is_some())
-            .unwrap_or(false)
-    });
+    let has_content =
+        responses.iter().any(|r| r.as_ref().map(|resp| resp.content.is_some()).unwrap_or(false));
     assert!(has_content, "At least one response should have content");
 }

@@ -1,0 +1,18 @@
+# Build artifacts (excluded from workspace, has own target/)
+/target/
+Cargo.lock
+
+# Generated output files
+/output/
+
+# Downloaded models for local testing
+/models/
+
+# Model cache files
+*.safetensors
+*.bin
+*.gguf
+*.uqff
+
+# Proptest regressions
+*.proptest-regressions

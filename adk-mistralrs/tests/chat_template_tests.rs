@@ -21,8 +21,7 @@ fn arb_chat_template() -> impl Strategy<Value = String> {
 
 // Strategy for generating tokenizer paths
 fn arb_tokenizer_path() -> impl Strategy<Value = PathBuf> {
-    "[a-z/]{5,20}/tokenizer\\.json"
-        .prop_map(|s| PathBuf::from(s))
+    "[a-z/]{5,20}/tokenizer\\.json".prop_map(PathBuf::from)
 }
 
 proptest! {
@@ -86,7 +85,8 @@ fn test_default_config_has_no_chat_template() {
 
 #[test]
 fn test_chat_template_with_special_characters() {
-    let template = "{% if messages[0]['role'] == 'system' %}{{ messages[0]['content'] }}{% endif %}";
+    let template =
+        "{% if messages[0]['role'] == 'system' %}{{ messages[0]['content'] }}{% endif %}";
     let config = MistralRsConfig::builder()
         .model_source(ModelSource::huggingface("test/model"))
         .chat_template(template.to_string())

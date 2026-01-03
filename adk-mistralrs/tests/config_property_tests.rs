@@ -7,8 +7,8 @@
 //! **Validates: Requirements 2.4, 2.5, 3.1, 4.1, 4.3**
 
 use adk_mistralrs::{
-    AdapterConfig, AdapterType, DataType, Device, DeviceConfig, IsqConfig,
-    MistralRsConfig, ModelArchitecture, ModelSource, QuantizationLevel,
+    DataType, Device, DeviceConfig, IsqConfig, MistralRsConfig, ModelArchitecture, ModelSource,
+    QuantizationLevel,
 };
 use proptest::prelude::*;
 use std::collections::HashMap;
@@ -63,9 +63,9 @@ fn arb_quantization_level() -> impl Strategy<Value = QuantizationLevel> {
 fn arb_model_source() -> impl Strategy<Value = ModelSource> {
     prop_oneof![
         "[a-z]{3,10}/[a-z]{3,10}".prop_map(ModelSource::huggingface),
-        "/[a-z/]{5,20}".prop_map(|s| ModelSource::local(s)),
-        "/[a-z/]{5,20}\\.gguf".prop_map(|s| ModelSource::gguf(s)),
-        "/[a-z/]{5,20}\\.uqff".prop_map(|s| ModelSource::uqff(s)),
+        "/[a-z/]{5,20}".prop_map(ModelSource::local),
+        "/[a-z/]{5,20}\\.gguf".prop_map(ModelSource::gguf),
+        "/[a-z/]{5,20}\\.uqff".prop_map(ModelSource::uqff),
     ]
 }
 
@@ -167,5 +167,59 @@ proptest! {
         prop_assert_eq!(config.top_k, Some(top_k));
         prop_assert_eq!(config.max_tokens, Some(max_tokens));
         prop_assert_eq!(config.num_ctx, Some(num_ctx));
+    }
+
+    /// **Feature: mistral-rs-integration, Property: ISQ Config Completeness**
+    /// *For any* quantization level, the IsqConfig SHALL correctly store and retrieve it.
+    /// This validates that all ISQ quantization levels are representable.
+    /// **Validates: Requirements 3.1**
+    #[test]
+    fn prop_isq_config_completeness(
+        level in arb_quantization_level(),
+    ) {
+        // Create ISQ config with the level
+        let isq = IsqConfig::new(level);
+
+        // Verify the level is correctly stored
+        prop_assert_eq!(isq.level, level);
+        prop_assert!(isq.layer_overrides.is_none());
+
+        // Verify it can be used in MistralRsConfig
+        let config = MistralRsConfig::builder()
+            .model_source(ModelSource::huggingface("test/model"))
+            .isq(level)
+            .build();
+
+        prop_assert!(config.isq.is_some());
+        prop_assert_eq!(config.isq.as_ref().unwrap().level, level);
+    }
+
+    /// **Feature: mistral-rs-integration, Property 10: Context Length Configuration**
+    /// *For any* `num_ctx` value set in config, the model SHALL accept prompts up to that length.
+    /// This validates that context length configuration is correctly stored and retrievable.
+    /// **Validates: Requirements 5.3**
+    #[test]
+    fn prop_context_length_configuration(
+        num_ctx in 128usize..32768usize,
+    ) {
+        // Create config with context length
+        let config = MistralRsConfig::builder()
+            .model_source(ModelSource::huggingface("test/model"))
+            .num_ctx(num_ctx)
+            .build();
+
+        // Verify the context length is correctly stored
+        prop_assert!(config.num_ctx.is_some());
+        prop_assert_eq!(config.num_ctx.unwrap(), num_ctx);
+
+        // Verify it can be combined with other settings
+        let config_with_paged = MistralRsConfig::builder()
+            .model_source(ModelSource::huggingface("test/model"))
+            .num_ctx(num_ctx)
+            .paged_attention(true)
+            .build();
+
+        prop_assert_eq!(config_with_paged.num_ctx, Some(num_ctx));
+        prop_assert!(config_with_paged.paged_attention);
     }
 }

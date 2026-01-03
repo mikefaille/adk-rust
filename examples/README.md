@@ -59,6 +59,17 @@ examples/
     ├── eval_rubric/         # Rubric-based scoring
     ├── eval_similarity/     # Response similarity
     └── eval_report/         # Report generation
+
+├── mistralrs_*/             # mistral.rs local inference examples
+│   ├── mistralrs_basic/     # Basic text generation
+│   ├── mistralrs_tools/     # Function calling
+│   ├── mistralrs_vision/    # Image understanding
+│   ├── mistralrs_isq/       # In-situ quantization
+│   ├── mistralrs_lora/      # LoRA adapter usage
+│   ├── mistralrs_multimodel/# Multi-model serving
+│   ├── mistralrs_mcp/       # MCP client integration
+│   ├── mistralrs_speech/    # Text-to-speech synthesis
+│   └── mistralrs_diffusion/ # Image generation with FLUX
 ```
 
 ## Prerequisites
@@ -301,6 +312,77 @@ cargo run --example deepseek_structured --features deepseek
 ```
 Demonstrates: Output schema, JSON responses, product analysis.
 
+### mistral.rs Local Inference Examples
+
+Native local LLM inference using mistral.rs - no external daemon required:
+
+> **Note:** These examples require the `mistralrs` feature and models will be downloaded on first run.
+
+#### mistralrs_basic
+Basic text generation with local model:
+```bash
+cargo run --example mistralrs_basic --features mistralrs
+```
+Demonstrates: MistralRsModel setup, HuggingFace model loading, basic chat completion.
+
+#### mistralrs_tools
+Function calling with local model:
+```bash
+cargo run --example mistralrs_tools --features mistralrs
+```
+Demonstrates: Tool definitions, function calling, weather and calculator tools with local inference.
+
+#### mistralrs_vision
+Image understanding with vision model:
+```bash
+cargo run --example mistralrs_vision --features mistralrs
+```
+Demonstrates: MistralRsVisionModel, image input handling, multimodal inference.
+
+#### mistralrs_isq
+In-situ quantization for memory efficiency:
+```bash
+cargo run --example mistralrs_isq --features mistralrs
+```
+Demonstrates: ISQ quantization levels (Q4_0, Q8_0, etc.), memory-efficient inference.
+
+#### mistralrs_lora
+LoRA adapter usage and hot-swapping:
+```bash
+cargo run --example mistralrs_lora --features mistralrs
+```
+Demonstrates: MistralRsAdapterModel, LoRA adapter loading, runtime adapter swapping.
+
+#### mistralrs_multimodel
+Multi-model serving with routing:
+```bash
+cargo run --example mistralrs_multimodel --features mistralrs
+```
+Demonstrates: MistralRsMultiModel, model routing by name, concurrent model serving.
+
+#### mistralrs_mcp
+MCP client integration with local model:
+```bash
+cargo run --example mistralrs_mcp --features mistralrs
+```
+Demonstrates: MCP server connection, tool discovery, local model with MCP tools.
+
+#### mistralrs_speech
+Text-to-speech synthesis with Dia models:
+```bash
+cargo run --example mistralrs_speech --features mistralrs
+```
+Demonstrates: MistralRsSpeechModel, text-to-speech, multi-speaker dialogue, WAV output.
+
+#### mistralrs_diffusion
+Image generation with FLUX models:
+```bash
+cargo run --example mistralrs_diffusion --features mistralrs
+```
+Demonstrates: MistralRsDiffusionModel, text-to-image, FLUX.1-schnell, configurable image size.
+
+> **Note:** Diffusion models require significant GPU memory (~12-24GB VRAM).
+
 ### Browser Automation Examples
 
 Web browser automation using WebDriver:
@@ -375,11 +457,12 @@ Demonstrates: Custom rubrics, weighted criteria.
 | **OpenAI** | 4+ | openai_basic, openai_tools, openai_multimodal, etc. |
 | **Anthropic** | 2 | anthropic_basic, anthropic_tools |
 | **DeepSeek** | 8 | deepseek_basic, deepseek_reasoner, deepseek_tools, etc. |
+| **mistral.rs** | 9 | mistralrs_basic, mistralrs_tools, mistralrs_vision, mistralrs_speech, mistralrs_diffusion, etc. |
 | **Realtime** | 4+ | realtime_basic, realtime_vad, realtime_tools, etc. |
 | **Graph** | 9 | graph_workflow, graph_react, graph_supervisor, etc. |
 | **Browser** | 5 | browser_basic, browser_agent, browser_interactive, etc. |
 | **Evaluation** | 11 | eval_basic, eval_trajectory, eval_semantic, etc. |
-| **Total** | **50+** | |
+| **Total** | **55+** | |
 
 ## Parity with Go ADK
 
@@ -406,6 +489,7 @@ ADK-Rust includes additional features not in the Go implementation:
 | **OpenAI Integration** | openai_basic, openai_tools, openai_multimodal |
 | **Anthropic Integration** | anthropic_basic, anthropic_tools |
 | **DeepSeek Integration** | deepseek_basic, deepseek_reasoner, deepseek_tools, deepseek_thinking_tools, deepseek_caching, deepseek_sequential, deepseek_supervisor, deepseek_structured |
+| **mistral.rs Local Inference** | mistralrs_basic, mistralrs_tools, mistralrs_vision, mistralrs_isq, mistralrs_lora, mistralrs_multimodel, mistralrs_mcp, mistralrs_speech, mistralrs_diffusion |
 | **Realtime Voice** | realtime_basic, realtime_vad, realtime_tools |
 | **Graph Workflows** | graph_react, graph_supervisor, graph_hitl |
 | **Browser Automation** | browser_agent, browser_interactive |

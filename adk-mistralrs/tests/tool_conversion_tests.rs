@@ -8,7 +8,7 @@
 //! **Validates: Requirements 1.4, 1.5**
 
 use proptest::prelude::*;
-use serde_json::{json, Map, Value};
+use serde_json::{Map, json};
 
 // Import the conversion functions from the crate
 // Note: These are pub functions in convert.rs
@@ -61,9 +61,7 @@ mod convert_helpers {
 
     /// Extract tool parameters from mistral.rs tool format
     pub fn extract_tool_parameters(tool: &Value) -> Option<Value> {
-        tool.get("function")
-            .and_then(|f| f.get("parameters"))
-            .cloned()
+        tool.get("function").and_then(|f| f.get("parameters")).cloned()
     }
 }
 
@@ -199,7 +197,7 @@ proptest! {
         // Collect names from converted tools
         let converted_names: Vec<String> = converted
             .iter()
-            .filter_map(|t| extract_tool_name(t))
+            .filter_map(extract_tool_name)
             .collect();
 
         prop_assert!(converted_names.contains(&name1));
