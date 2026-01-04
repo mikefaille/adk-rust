@@ -674,7 +674,8 @@ impl Agent for LlmAgent {
                         "gcp.vertex.agent.event_id" = %llm_event_id,
                         "gcp.vertex.agent.invocation_id" = %invocation_id,
                         "gcp.vertex.agent.session_id" = %ctx.session_id(),
-                        "gcp.vertex.agent.llm_request" = %request_json
+                        "gcp.vertex.agent.llm_request" = %request_json,
+                        "gcp.vertex.agent.llm_response" = tracing::field::Empty  // Placeholder for later recording
                     );
                     let _llm_guard = llm_span.enter();
                     
