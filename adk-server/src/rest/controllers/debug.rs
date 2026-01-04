@@ -44,16 +44,26 @@ fn convert_to_span_data(attributes: &HashMap<String, String>) -> serde_json::Val
     let start_time: u64 = attributes.get("start_time").and_then(|s| s.parse().ok()).unwrap_or(0);
     let end_time: u64 = attributes.get("end_time").and_then(|s| s.parse().ok()).unwrap_or(0);
     
-    serde_json::json!({
+    // Build JSON object - omit parent_span_id entirely to prevent nesting
+    let mut obj = serde_json::json!({
         "name": attributes.get("span_name").map_or("unknown", |v| v.as_str()),
         "span_id": attributes.get("span_id").map_or("", |v| v.as_str()),
         "trace_id": attributes.get("trace_id").map_or("", |v| v.as_str()),
-        "parent_span_id": serde_json::Value::Null,  // Explicitly null to prevent nesting
-        "start_time": start_time,  // Must be number (nanoseconds)
-        "end_time": end_time,      // Must be number (nanoseconds)
+        "start_time": start_time,
+        "end_time": end_time,
         "attributes": attributes,
         "invoc_id": attributes.get("gcp.vertex.agent.invocation_id").map_or("", |v| v.as_str())
-    })
+    });
+    
+    // Add LLM request/response if present (for UI display)
+    if let Some(llm_req) = attributes.get("gcp.vertex.agent.llm_request") {
+        obj["gcp.vertex.agent.llm_request"] = serde_json::Value::String(llm_req.clone());
+    }
+    if let Some(llm_resp) = attributes.get("gcp.vertex.agent.llm_response") {
+        obj["gcp.vertex.agent.llm_response"] = serde_json::Value::String(llm_resp.clone());
+    }
+    
+    obj
 }
 
 // Get all spans for a session (UI-compatible format)
