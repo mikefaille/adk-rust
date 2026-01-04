@@ -7,6 +7,7 @@ use adk_core::{
 use async_stream::stream;
 use async_trait::async_trait;
 use std::sync::{Arc, Mutex};
+use tracing::Instrument;
 
 use crate::guardrails::GuardrailSet;
 
@@ -831,34 +832,37 @@ impl Agent for LlmAgent {
 
                             // Find and execute tool
                             let (tool_result, tool_actions) = if let Some(tool) = tools.iter().find(|t| t.name() == name) {
-                                // Create a span for tool execution (captured by trace exporter)
-                                let tool_span = tracing::info_span!(
-                                    "execute_tool",
-                                    tool.name = %name,
-                                    "gcp.vertex.agent.event_id" = %format!("{}_{}", invocation_id, name),
-                                    "gcp.vertex.agent.invocation_id" = %invocation_id,
-                                    "gcp.vertex.agent.session_id" = %ctx.session_id()
-                                );
-                                let _guard = tool_span.enter();
-                                
-                                tracing::info!(tool.name = %name, tool.args = %args, "tool_call");
-
                                 // ✅ Use AgentToolContext that preserves parent context
                                 let tool_ctx: Arc<dyn ToolContext> = Arc::new(AgentToolContext::new(
                                     ctx.clone(),
                                     format!("{}_{}", invocation_id, name),
                                 ));
 
-                                let result = match tool.execute(tool_ctx.clone(), args.clone()).await {
-                                    Ok(result) => {
-                                        tracing::info!(tool.name = %name, tool.result = %result, "tool_result");
-                                        result
+                                // Create span name following adk-go pattern: "execute_tool {name}"
+                                let span_name = format!("execute_tool {}", name);
+                                let tool_span = tracing::info_span!(
+                                    "",
+                                    otel.name = %span_name,
+                                    tool.name = %name,
+                                    "gcp.vertex.agent.event_id" = %format!("{}_{}", invocation_id, name),
+                                    "gcp.vertex.agent.invocation_id" = %invocation_id,
+                                    "gcp.vertex.agent.session_id" = %ctx.session_id()
+                                );
+
+                                // Use instrument() for proper async span handling
+                                let result = async {
+                                    tracing::info!(tool.name = %name, tool.args = %args, "tool_call");
+                                    match tool.execute(tool_ctx.clone(), args.clone()).await {
+                                        Ok(result) => {
+                                            tracing::info!(tool.name = %name, tool.result = %result, "tool_result");
+                                            result
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!(tool.name = %name, error = %e, "tool_error");
+                                            serde_json::json!({ "error": e.to_string() })
+                                        }
                                     }
-                                    Err(e) => {
-                                        tracing::warn!(tool.name = %name, error = %e, "tool_error");
-                                        serde_json::json!({ "error": e.to_string() })
-                                    }
-                                };
+                                }.instrument(tool_span).await;
 
                                 (result, tool_ctx.actions())
                             } else {

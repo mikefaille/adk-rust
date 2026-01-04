@@ -149,14 +149,16 @@ where
         let end_time = std::time::Instant::now();
         let duration_nanos = timing.map(|t| end_time.duration_since(t.start_time).as_nanos() as u64).unwrap_or(0);
         
-        // Get span metadata
-        let metadata = span.metadata();
-        let span_name = metadata.name();
-        
         // Get captured fields
         let mut attributes = extensions.get::<SpanFields>()
             .map(|f| f.0.clone())
             .unwrap_or_default();
+        
+        // Get span name - prefer otel.name attribute (for dynamic names), fallback to metadata
+        let metadata = span.metadata();
+        let span_name = attributes.get("otel.name")
+            .cloned()
+            .unwrap_or_else(|| metadata.name().to_string());
         
         // Add span metadata and actual timing with unique IDs
         let now_nanos = std::time::SystemTime::now()
@@ -169,7 +171,7 @@ where
             .cloned()
             .unwrap_or_else(|| format!("{:016x}", id.into_u64()));
             
-        attributes.insert("span_name".to_string(), span_name.to_string());
+        attributes.insert("span_name".to_string(), span_name.clone());
         attributes.insert("trace_id".to_string(), event_id.clone());
         attributes.insert("span_id".to_string(), event_id);
         attributes.insert("start_time".to_string(), (now_nanos - duration_nanos).to_string());
@@ -178,7 +180,7 @@ where
         // Don't set parent_span_id to keep all spans at same level like ADK-Go
         
         // Export the span
-        self.exporter.export_span(span_name, attributes);
+        self.exporter.export_span(&span_name, attributes);
     }
 }
 
