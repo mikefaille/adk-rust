@@ -102,14 +102,12 @@ where
         let span = ctx.span(id).expect("Span not found");
         let mut extensions = span.extensions_mut();
         
-        // Capture start time
-        if extensions.get_mut::<u128>().is_none() {
-            let start = SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_micros();
-            extensions.insert(start);
-        }
+        // Capture start time - always set it, don't check if it exists
+        let start = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u128; // Use nanoseconds directly
+        extensions.insert(start);
 
         // Capture fields
         let mut visitor = JsonVisitor::default();
@@ -170,16 +168,16 @@ where
     fn on_close(&self, id: Id, ctx: Context<'_, S>) {
         let span = ctx.span(&id).expect("Span not found");
         let extensions = span.extensions();
-        let start_time_micros = extensions.get::<u128>().copied().unwrap_or(0);
+        let start_time_nanos = extensions.get::<u128>().copied().unwrap_or(0);
         
-        let end_time_micros = SystemTime::now()
+        let end_time_nanos = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap_or_default()
-            .as_micros();
+            .as_nanos() as u128;
             
-        // Convert to nanoseconds string for OTLP
-        let start_ns = format!("{}000", start_time_micros);
-        let end_ns = format!("{}000", end_time_micros);
+        // Convert to nanoseconds string for OTLP (already in nanos)
+        let start_ns = start_time_nanos.to_string();
+        let end_ns = end_time_nanos.to_string();
 
         // Extract metadata
         let metadata = span.metadata();
