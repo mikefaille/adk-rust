@@ -664,7 +664,21 @@ impl Agent for LlmAgent {
                 } else {
                     // Record LLM request for tracing
                     let request_json = serde_json::to_string(&request).unwrap_or_default();
-                    tracing::Span::current().record("gcp.vertex.agent.llm_request", &request_json);
+                    
+                    // Create call_llm span with GCP attributes (works for all model types)
+                    let llm_ts = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_nanos();
+                    let llm_event_id = format!("{}_llm_{}", invocation_id, llm_ts);
+                    let llm_span = tracing::info_span!(
+                        "call_llm",
+                        "gcp.vertex.agent.event_id" = %llm_event_id,
+                        "gcp.vertex.agent.invocation_id" = %invocation_id,
+                        "gcp.vertex.agent.session_id" = %ctx.session_id(),
+                        "gcp.vertex.agent.llm_request" = %request_json
+                    );
+                    let _llm_guard = llm_span.enter();
                     
                     // Call model with STREAMING ENABLED
                     let mut response_stream = model.generate_content(request, true).await?;
