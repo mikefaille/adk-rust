@@ -90,3 +90,12 @@ pub async fn get_graph(
     let dot_src = "digraph G { Agent -> User [label=\"response\"]; }".to_string();
     Ok(Json(GraphResponse { dot_src }))
 }
+
+/// Get evaluation sets for an app (stub - returns empty array)
+pub async fn get_eval_sets(
+    State(_controller): State<DebugController>,
+    Path(_app_name): Path<String>,
+) -> Result<Json<Vec<serde_json::Value>>, StatusCode> {
+    // Stub: Return empty array - eval sets not yet implemented
+    Ok(Json(Vec::new()))
+}
