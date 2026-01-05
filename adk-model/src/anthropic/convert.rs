@@ -34,11 +34,11 @@ pub fn content_to_message(content: &Content) -> MessageParam {
                 input: args.clone(),
                 cache_control: None,
             })),
-            Part::FunctionResponse { name: _, response, id } => {
+            Part::FunctionResponse { function_response, id } => {
                 Some(ContentBlock::ToolResult(ToolResultBlock {
                     tool_use_id: id.clone().unwrap_or_else(|| "unknown".to_string()),
                     content: Some(ToolResultBlockContent::String(
-                        serde_json::to_string(response).unwrap_or_default(),
+                        serde_json::to_string(&function_response.response).unwrap_or_default(),
                     )),
                     is_error: None,
                     cache_control: None,

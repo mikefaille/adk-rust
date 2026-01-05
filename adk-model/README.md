@@ -109,10 +109,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let api_key = std::env::var("DEEPSEEK_API_KEY")?;
 
     // Standard chat model
-    let model = DeepSeekClient::new(DeepSeekConfig::chat(api_key))?;
+    let model = DeepSeekClient::chat(api_key)?;
 
     // Or use the reasoner model with chain-of-thought
-    // let model = DeepSeekClient::new(DeepSeekConfig::reasoner(api_key))?;
+    // let model = DeepSeekClient::reasoner(api_key)?;
 
     let agent = LlmAgentBuilder::new("assistant")
         .model(Arc::new(model))

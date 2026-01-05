@@ -86,12 +86,13 @@ export GROQ_API_KEY="your-api-key"
 ### Basic Example (Gemini)
 
 ```rust
-use adk_agent::LlmAgentBuilder;
-use adk_model::gemini::GeminiModel;
-use std::sync::Arc;
+use adk_rust::prelude::*;
+use adk_rust::Launcher;
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    dotenvy::dotenv().ok();
+    let api_key = std::env::var("GOOGLE_API_KEY")?;
     let model = GeminiModel::new(&api_key, "gemini-2.5-flash")?;
 
     let agent = LlmAgentBuilder::new("assistant")
@@ -100,7 +101,7 @@ async fn main() -> Result<()> {
         .model(Arc::new(model))
         .build()?;
 
-    // Run agent (see examples for full usage)
+    Launcher::new(Arc::new(agent)).run().await?;
     Ok(())
 }
 ```
@@ -108,19 +109,21 @@ async fn main() -> Result<()> {
 ### OpenAI Example
 
 ```rust
-use adk_agent::LlmAgentBuilder;
-use adk_model::openai::OpenAIModel;
-use std::sync::Arc;
+use adk_rust::prelude::*;
+use adk_rust::Launcher;
 
 #[tokio::main]
-async fn main() -> Result<()> {
-    let model = OpenAIModel::from_env("gpt-4.1")?;
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    dotenvy::dotenv().ok();
+    let api_key = std::env::var("OPENAI_API_KEY")?;
+    let model = OpenAIClient::new(OpenAIConfig::new(api_key, "gpt-4o"))?;
 
     let agent = LlmAgentBuilder::new("assistant")
         .instruction("You are a helpful assistant.")
         .model(Arc::new(model))
         .build()?;
 
+    Launcher::new(Arc::new(agent)).run().await?;
     Ok(())
 }
 ```
@@ -128,19 +131,21 @@ async fn main() -> Result<()> {
 ### Anthropic Example
 
 ```rust
-use adk_agent::LlmAgentBuilder;
-use adk_model::anthropic::AnthropicModel;
-use std::sync::Arc;
+use adk_rust::prelude::*;
+use adk_rust::Launcher;
 
 #[tokio::main]
-async fn main() -> Result<()> {
-    let model = AnthropicModel::from_env("claude-sonnet-4")?;
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    dotenvy::dotenv().ok();
+    let api_key = std::env::var("ANTHROPIC_API_KEY")?;
+    let model = AnthropicClient::new(AnthropicConfig::new(api_key, "claude-sonnet-4-20250514"))?;
 
     let agent = LlmAgentBuilder::new("assistant")
         .instruction("You are a helpful assistant.")
         .model(Arc::new(model))
         .build()?;
 
+    Launcher::new(Arc::new(agent)).run().await?;
     Ok(())
 }
 ```
@@ -148,25 +153,26 @@ async fn main() -> Result<()> {
 ### DeepSeek Example
 
 ```rust
-use adk_agent::LlmAgentBuilder;
-use adk_model::deepseek::{DeepSeekClient, DeepSeekConfig};
-use std::sync::Arc;
+use adk_rust::prelude::*;
+use adk_rust::Launcher;
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    dotenvy::dotenv().ok();
     let api_key = std::env::var("DEEPSEEK_API_KEY")?;
 
     // Standard chat model
-    let model = DeepSeekClient::new(DeepSeekConfig::chat(api_key))?;
+    let model = DeepSeekClient::chat(api_key)?;
 
     // Or use reasoner for chain-of-thought reasoning
-    // let model = DeepSeekClient::new(DeepSeekConfig::reasoner(api_key))?;
+    // let model = DeepSeekClient::reasoner(api_key)?;
 
     let agent = LlmAgentBuilder::new("assistant")
         .instruction("You are a helpful assistant.")
         .model(Arc::new(model))
         .build()?;
 
+    Launcher::new(Arc::new(agent)).run().await?;
     Ok(())
 }
 ```
@@ -174,12 +180,12 @@ async fn main() -> Result<()> {
 ### Groq Example (Ultra-Fast)
 
 ```rust
-use adk_agent::LlmAgentBuilder;
-use adk_model::groq::{GroqClient, GroqConfig};
-use std::sync::Arc;
+use adk_rust::prelude::*;
+use adk_rust::Launcher;
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    dotenvy::dotenv().ok();
     let api_key = std::env::var("GROQ_API_KEY")?;
     let model = GroqClient::new(GroqConfig::llama70b(api_key))?;
 
@@ -188,6 +194,7 @@ async fn main() -> Result<()> {
         .model(Arc::new(model))
         .build()?;
 
+    Launcher::new(Arc::new(agent)).run().await?;
     Ok(())
 }
 ```
@@ -195,12 +202,12 @@ async fn main() -> Result<()> {
 ### Ollama Example (Local)
 
 ```rust
-use adk_agent::LlmAgentBuilder;
-use adk_model::ollama::{OllamaModel, OllamaConfig};
-use std::sync::Arc;
+use adk_rust::prelude::*;
+use adk_rust::Launcher;
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    dotenvy::dotenv().ok();
     // Requires: ollama serve && ollama pull llama3.2
     let model = OllamaModel::new(OllamaConfig::new("llama3.2"))?;
 
@@ -209,6 +216,7 @@ async fn main() -> Result<()> {
         .model(Arc::new(model))
         .build()?;
 
+    Launcher::new(Arc::new(agent)).run().await?;
     Ok(())
 }
 ```

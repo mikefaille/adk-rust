@@ -204,10 +204,10 @@ pub fn content_to_message(content: &Content) -> Message {
                     },
                 });
             }
-            Part::FunctionResponse { name: _, response, id } => {
+            Part::FunctionResponse { function_response, id } => {
                 // Tool response - set tool_call_id and content
                 tool_call_id = id.clone();
-                text_parts.push(serde_json::to_string(response).unwrap_or_default());
+                text_parts.push(serde_json::to_string(&function_response.response).unwrap_or_default());
             }
             _ => {} // Skip other part types
         }

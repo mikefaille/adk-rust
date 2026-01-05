@@ -50,11 +50,11 @@ pub fn content_to_message(content: &Content) -> ChatCompletionRequestMessage {
         }
         "function" | "tool" => {
             // Tool response message
-            if let Some(Part::FunctionResponse { name: _, response, id }) = content.parts.first() {
+            if let Some(Part::FunctionResponse { function_response, id }) = content.parts.first() {
                 let tool_call_id = id.clone().unwrap_or_else(|| "unknown".to_string());
                 ChatCompletionRequestToolMessageArgs::default()
                     .tool_call_id(tool_call_id)
-                    .content(serde_json::to_string(response).unwrap_or_default())
+                    .content(serde_json::to_string(&function_response.response).unwrap_or_default())
                     .build()
                     .unwrap()
                     .into()

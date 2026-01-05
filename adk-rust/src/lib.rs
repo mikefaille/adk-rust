@@ -693,6 +693,22 @@ pub mod prelude {
     #[cfg(feature = "models")]
     pub use crate::model::GeminiModel;
 
+    // Model providers (when specific features are enabled)
+    #[cfg(feature = "openai")]
+    pub use crate::model::openai::{OpenAIClient, OpenAIConfig};
+
+    #[cfg(feature = "anthropic")]
+    pub use crate::model::anthropic::{AnthropicClient, AnthropicConfig};
+
+    #[cfg(feature = "deepseek")]
+    pub use crate::model::deepseek::{DeepSeekClient, DeepSeekConfig};
+
+    #[cfg(feature = "groq")]
+    pub use crate::model::groq::{GroqClient, GroqConfig};
+
+    #[cfg(feature = "ollama")]
+    pub use crate::model::ollama::{OllamaConfig, OllamaModel};
+
     // Tools
     #[cfg(feature = "tools")]
     pub use crate::tool::{
