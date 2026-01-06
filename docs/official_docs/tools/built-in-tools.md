@@ -16,7 +16,7 @@ ADK-Rust provides several built-in tools that extend agent capabilities without 
 
 ### Basic Usage
 
-```rust,no_run
+```rust
 use adk_rust::prelude::*;
 use std::sync::Arc;
 
@@ -55,7 +55,7 @@ Unlike regular function tools, `GoogleSearchTool` operates differently:
 
 The tool implementation returns an error if called directly because the actual search happens within the Gemini API:
 
-```rust,ignore
+```rust
 // This is handled internally - you don't call it directly
 async fn execute(&self, _ctx: Arc<dyn ToolContext>, _args: Value) -> Result<Value> {
     Err(AdkError::Tool("GoogleSearch is handled internally by Gemini".to_string()))
@@ -80,7 +80,7 @@ async fn execute(&self, _ctx: Arc<dyn ToolContext>, _args: Value) -> Result<Valu
 
 ### Example Queries
 
-```rust,ignore
+```rust
 // The agent will automatically use Google Search for queries like:
 // - "What's the weather forecast for New York this week?"
 // - "Who won the latest championship game?"
@@ -93,7 +93,7 @@ async fn execute(&self, _ctx: Arc<dyn ToolContext>, _args: Value) -> Result<Valu
 
 ### Basic Usage
 
-```rust,no_run
+```rust
 use adk_rust::prelude::*;
 use std::sync::Arc;
 
@@ -150,7 +150,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 2. **Always set max_iterations**: Prevent infinite loops as a safety measure
 3. **Meaningful instructions**: Help the agent understand when to exit
 
-```rust,ignore
+```rust
 // Good: Clear exit criteria
 .instruction(
     "Improve the text until it:\n\
@@ -170,7 +170,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 
 ### Basic Usage
 
-```rust,no_run
+```rust
 use adk_rust::prelude::*;
 use std::sync::Arc;
 
@@ -249,7 +249,7 @@ For `LoadArtifactsTool` to work, you need:
 2. Artifacts previously saved to the service
 3. The tool added to the agent
 
-```rust,ignore
+```rust
 use adk_rust::prelude::*;
 use std::sync::Arc;
 
@@ -265,7 +265,7 @@ let runner = Runner::new(agent)
 
 You can use multiple built-in tools together:
 
-```rust,no_run
+```rust
 use adk_rust::prelude::*;
 use std::sync::Arc;
 
@@ -297,7 +297,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 
 You can create your own tools following the same pattern as built-in tools by implementing the `Tool` trait:
 
-```rust,ignore
+```rust
 use adk_rust::prelude::*;
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -332,7 +332,7 @@ impl Tool for MyCustomTool {
 
 ### GoogleSearchTool
 
-```rust,ignore
+```rust
 impl GoogleSearchTool {
     /// Create a new GoogleSearchTool instance
     pub fn new() -> Self;
@@ -341,7 +341,7 @@ impl GoogleSearchTool {
 
 ### ExitLoopTool
 
-```rust,ignore
+```rust
 impl ExitLoopTool {
     /// Create a new ExitLoopTool instance
     pub fn new() -> Self;
@@ -350,7 +350,7 @@ impl ExitLoopTool {
 
 ### LoadArtifactsTool
 
-```rust,ignore
+```rust
 impl LoadArtifactsTool {
     /// Create a new LoadArtifactsTool instance
     pub fn new() -> Self;
@@ -367,3 +367,7 @@ impl Default for LoadArtifactsTool {
 - [MCP Tools](mcp-tools.md) - Using MCP servers as tool providers
 - [Workflow Agents](../agents/workflow-agents.md) - Using ExitLoopTool with LoopAgent
 - [Artifacts](../artifacts/artifacts.md) - Managing binary data with artifacts
+
+---
+
+**Previous**: [← Function Tools](function-tools.md) | **Next**: [Browser Tools →](browser-tools.md)

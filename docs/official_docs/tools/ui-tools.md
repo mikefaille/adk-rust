@@ -2,6 +2,99 @@
 
 The `adk-ui` crate enables AI agents to dynamically generate rich user interfaces through tool calls. Agents can render forms, cards, alerts, tables, charts, and more - all through a type-safe Rust API that serializes to JSON for frontend consumption.
 
+## What You'll Build
+
+![ADK UI Agent](images/adk-ui.jpg)
+
+**Key Concepts:**
+- **Forms** - Collect user input with various field types
+- **Cards** - Display information with action buttons
+- **Tables** - Present structured data in rows/columns
+- **Charts** - Visualize data with bar, line, area, pie charts
+- **Alerts** - Show notifications and status messages
+- **Modals** - Confirmation dialogs and focused interactions
+- **Toasts** - Brief status notifications
+
+### Example: Analytics Dashboard
+
+![ADK UI Analytics](images/adk-ui-agent-analytics.jpg)
+
+### Example: Registration Form
+
+![ADK UI Registration](images/adk-ui-register.jpg)
+
+---
+
+## How It Works
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ STEP 1: User requests something                                             │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│   User: "I want to register for an account"                                 │
+│                                                                             │
+│                              ↓                                              │
+│                                                                             │
+│   ┌──────────────────────────────────────┐                                  │
+│   │         AI AGENT (LLM)              │                                  │
+│   │  "I should show a registration form" │                                  │
+│   └──────────────────────────────────────┘                                  │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+                              ↓
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ STEP 2: Agent calls render_form tool                                        │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│   📞 Tool Call: render_form({                                               │
+│     title: "Registration",                                                  │
+│     fields: [                                                               │
+│       {name: "email", type: "email"},                                       │
+│       {name: "password", type: "password"}                                  │
+│     ]                                                                       │
+│   })                                                                        │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+                              ↓
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ STEP 3: Frontend renders the form                                           │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│   ┌─────────────────────────────────────────────────┐                       │
+│   │  📋 Registration                               │                       │
+│   │  ────────────────────────────────────────────  │                       │
+│   │  Email:    [________________________]          │                       │
+│   │  Password: [________________________]          │                       │
+│   │                                                │                       │
+│   │  [           Register           ]              │                       │
+│   └─────────────────────────────────────────────────┘                       │
+│                                                                             │
+│   ✅ User sees an interactive form, fills it out, clicks Register           │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+                              ↓
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ STEP 4: Form submission sent back to agent                                  │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│   📩 Event: {                                                               │
+│     type: "form_submit",                                                    │
+│     data: { email: "user@example.com", password: "***" }                    │
+│   }                                                                         │
+│                                                                             │
+│   Agent: "Great! I'll process your registration and show a success alert"  │
+│                                                                             │
+│   📞 Tool Call: render_alert({                                              │
+│     title: "Registration Complete!",                                        │
+│     variant: "success"                                                      │
+│   })                                                                        │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
 ## Overview
 
 UI tools allow agents to:
@@ -29,7 +122,7 @@ adk-model = "{{version}}"
 
 ### Basic Usage
 
-```rust,no_run
+```rust
 use adk_rust::prelude::*;
 use adk_rust::ui::UiToolset;
 use std::sync::Arc;
@@ -80,6 +173,37 @@ Render interactive forms to collect user input.
   ],
   "submit_label": "Register"
 }
+```
+
+**Renders as:**
+```
+┌─────────────────────────────────────────────────┐
+│  📋 Registration Form                          │
+│  Create your account                           │
+│  ─────────────────────────────────────────────  │
+│                                                │
+│  Username *                                    │
+│  ┌─────────────────────────────────────────┐   │
+│  │                                         │   │
+│  └─────────────────────────────────────────┘   │
+│                                                │
+│  Email *                                       │
+│  ┌─────────────────────────────────────────┐   │
+│  │                                         │   │
+│  └─────────────────────────────────────────┘   │
+│                                                │
+│  Password *                                    │
+│  ┌─────────────────────────────────────────┐   │
+│  │ ••••••••                                │   │
+│  └─────────────────────────────────────────┘   │
+│                                                │
+│  Subscribe to newsletter  [○]                  │
+│                                                │
+│  ┌─────────────────────────────────────────┐   │
+│  │             Register                    │   │
+│  └─────────────────────────────────────────┘   │
+│                                                │
+└─────────────────────────────────────────────────┘
 ```
 
 **Field types**: `text`, `email`, `password`, `number`, `date`, `select`, `multiselect`, `switch`, `slider`, `textarea`
@@ -255,7 +379,7 @@ Show brief toast notifications for status updates.
 
 Select only the tools your agent needs:
 
-```rust,ignore
+```rust
 let toolset = UiToolset::new()
     .without_chart()      // Disable charts
     .without_table()      // Disable tables
@@ -271,7 +395,7 @@ let forms_only = UiToolset::forms_only();
 
 When users interact with rendered UI (submit forms, click buttons), events are sent back to the agent:
 
-```rust,ignore
+```rust
 use adk_ui::{UiEvent, UiEventType};
 
 // UiEvent structure
@@ -289,7 +413,7 @@ let message = ui_event.to_message();
 
 For real-time UI updates, use `UiUpdate` to patch components by ID:
 
-```rust,ignore
+```rust
 use adk_ui::{UiUpdate, UiOperation};
 
 let update = UiUpdate {
@@ -318,14 +442,16 @@ All 28 component types support optional `id` fields for streaming updates:
 
 ## React Client
 
-A reference React implementation is provided in `examples/ui_react_client/`:
+A reference React implementation is provided:
 
 ```bash
-# Start the UI server
-GOOGLE_API_KEY=... cargo run --example ui_server
+cd doc-test/tools/ui_test
 
-# Start the React client
-cd examples/ui_react_client
+# Start the UI server
+cargo run --bin ui_server
+
+# In another terminal, start the React client
+cd ui_react_client
 npm install && npm run dev -- --host
 ```
 
@@ -360,9 +486,11 @@ Three examples demonstrate UI tools:
 
 | Example | Description | Run Command |
 |---------|-------------|-------------|
-| `ui_agent` | Console demo | `cargo run --example ui_agent` |
-| `ui_server` | HTTP server with SSE | `cargo run --example ui_server` |
-| `ui_react_client` | React frontend | `cd examples/ui_react_client && npm run dev` |
+| `ui_agent` | Console demo | `cargo run --bin ui_agent` |
+| `ui_server` | HTTP server with SSE | `cargo run --bin ui_server` |
+| `ui_react_client` | React frontend | `cd ui_react_client && npm run dev` |
+
+Run from `doc-test/tools/ui_test/`.
 
 ## Sample Prompts
 
@@ -407,3 +535,8 @@ Test the UI tools with these prompts:
 # Dashboards
 "Show system status dashboard"
 ```
+
+
+---
+
+**Previous**: [← Browser Tools](browser-tools.md) | **Next**: [MCP Tools →](mcp-tools.md)

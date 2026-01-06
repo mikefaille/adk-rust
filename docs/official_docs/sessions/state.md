@@ -18,7 +18,7 @@ The prefix system enables different scoping levels:
 
 The `State` trait defines the interface for state access:
 
-```rust,ignore
+```rust
 use serde_json::Value;
 use std::collections::HashMap;
 
@@ -36,7 +36,7 @@ pub trait State: Send + Sync {
 
 There's also a `ReadonlyState` trait for read-only access:
 
-```rust,ignore
+```rust
 pub trait ReadonlyState: Send + Sync {
     fn get(&self, key: &str) -> Option<Value>;
     fn all(&self) -> HashMap<String, Value>;
@@ -51,7 +51,7 @@ ADK-Rust uses three key prefixes to control state scoping:
 
 State shared across all users and sessions of an application.
 
-```rust,ignore
+```rust
 use adk_rust::session::KEY_PREFIX_APP;
 
 // KEY_PREFIX_APP = "app:"
@@ -67,7 +67,7 @@ Use cases:
 
 State shared across all sessions for a specific user.
 
-```rust,ignore
+```rust
 use adk_rust::session::KEY_PREFIX_USER;
 
 // KEY_PREFIX_USER = "user:"
@@ -83,7 +83,7 @@ Use cases:
 
 State that is cleared after each invocation. Not persisted.
 
-```rust,ignore
+```rust
 use adk_rust::session::KEY_PREFIX_TEMP;
 
 // KEY_PREFIX_TEMP = "temp:"
@@ -99,7 +99,7 @@ Use cases:
 
 Keys without a prefix are session-scoped (default behavior).
 
-```rust,ignore
+```rust
 let key = "conversation_topic";  // Session-scoped
 ```
 
@@ -112,7 +112,7 @@ Use cases:
 
 State can be initialized when creating a session:
 
-```rust,ignore
+```rust
 use adk_rust::prelude::*;
 use adk_rust::session::{CreateRequest, KEY_PREFIX_APP, KEY_PREFIX_USER};
 use serde_json::json;
@@ -151,7 +151,7 @@ let session = service.create(CreateRequest {
 
 Access state through the session's `state()` method:
 
-```rust,ignore
+```rust
 use serde_json::json;
 
 let state = session.state();
@@ -177,7 +177,7 @@ for (key, value) in all_state {
 
 State is typically updated through event actions. When an event is appended to a session, its `state_delta` is applied:
 
-```rust,ignore
+```rust
 use adk_rust::session::{Event, EventActions};
 use serde_json::json;
 use std::collections::HashMap;
@@ -224,7 +224,7 @@ The session service handles state scoping automatically:
 
 ## Example: Multi-Scope State
 
-```rust,no_run
+```rust
 use adk_rust::prelude::*;
 use adk_rust::session::{CreateRequest, GetRequest, KEY_PREFIX_APP, KEY_PREFIX_USER, KEY_PREFIX_TEMP};
 use serde_json::json;
@@ -279,7 +279,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 
 State values can be injected into agent instructions using `{key}` syntax:
 
-```rust,ignore
+```rust
 use adk_rust::prelude::*;
 use std::sync::Arc;
 
@@ -295,7 +295,7 @@ When the agent runs, `{user:name}`, `{topic}`, and `{user:language}` are replace
 
 ### 1. Use Appropriate Scopes
 
-```rust,ignore
+```rust
 // ✅ Good: User preferences in user scope
 "user:theme"
 "user:timezone"
@@ -314,7 +314,7 @@ When the agent runs, `{user:name}`, `{topic}`, and `{user:language}` are replace
 
 ### 2. Use Temporary State for Intermediate Data
 
-```rust,ignore
+```rust
 // ✅ Good: Intermediate results in temp scope
 "temp:search_results"
 "temp:current_step"
@@ -325,7 +325,7 @@ When the agent runs, `{user:name}`, `{topic}`, and `{user:language}` are replace
 
 ### 3. Keep State Keys Consistent
 
-```rust,ignore
+```rust
 // ✅ Good: Consistent naming convention
 "user:preferences.theme"
 "user:preferences.language"
@@ -341,3 +341,8 @@ When the agent runs, `{user:name}`, `{topic}`, and `{user:language}` are replace
 - [Sessions](sessions.md) - Session management overview
 - [Events](../events/events.md) - Event structure and state_delta
 - [LlmAgent](../agents/llm-agent.md) - Instruction templating
+
+
+---
+
+**Previous**: [← Sessions](sessions.md) | **Next**: [Callbacks →](../callbacks/callbacks.md)

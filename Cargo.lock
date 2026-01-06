@@ -3804,6 +3804,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "mcp_test"
+version = "0.1.0"
+dependencies = [
+ "adk-cli",
+ "adk-core",
+ "adk-rust",
+ "adk-tool",
+ "anyhow",
+ "async-trait",
+ "dotenvy",
+ "rmcp",
+ "tokio",
+]
+
+[[package]]
 name = "md-5"
 version = "0.10.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4116,15 +4131,6 @@ checksum = "ac9557c559cd6fc9867e122e20d2cbefc9ca29d80d027a8e39310920ed2f0a97"
 dependencies = [
  "num-traits",
  "pxfm",
-]
-
-[[package]]
-name = "multi_agent_test"
-version = "0.1.0"
-dependencies = [
- "adk-rust",
- "dotenvy",
- "tokio",
 ]
 
 [[package]]
@@ -8740,16 +8746,6 @@ name = "wit-bindgen"
 version = "0.46.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f17a85883d4e6d00e8a97c586de764dabcc06133f7f1d55dce5cdc070ad7fe59"
-
-[[package]]
-name = "workflow_test"
-version = "0.1.0"
-dependencies = [
- "adk-rust",
- "dotenvy",
- "serde_json",
- "tokio",
-]
 
 [[package]]
 name = "writeable"

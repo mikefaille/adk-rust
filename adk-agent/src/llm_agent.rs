@@ -981,10 +981,13 @@ impl Agent for LlmAgent {
                     }
                 }
 
-                // If all function calls were from long-running tools, treat as final response
-                // The tools have been executed and returned pending status - don't continue the loop
+                // If all function calls were from long-running tools, we need ONE more model call
+                // to let the model generate a user-friendly response about the pending task
+                // But we mark this as the final iteration to prevent infinite loops
                 if all_calls_are_long_running {
-                    break;
+                    // Continue to next iteration for model to respond, but this will be the last
+                    // The model will see the tool response and generate text like "Started task X..."
+                    // On next iteration, there won't be function calls, so we'll break naturally
                 }
             }
 

@@ -14,12 +14,19 @@ Benefits of MCP integration:
 - **Language agnostic** - Use tools written in any language
 - **Growing ecosystem** - Access thousands of existing MCP servers
 
-## Basic Usage
+## Prerequisites
+
+MCP servers are typically distributed as npm packages. You'll need:
+- Node.js and npm installed
+- An LLM API key (Gemini, OpenAI, etc.)
+
+## Quick Start
 
 Connect to an MCP server and use its tools:
 
-```rust,no_run
+```rust
 use adk_agent::LlmAgentBuilder;
+use adk_core::{Content, Part, ReadonlyContext, Toolset};
 use adk_model::GeminiModel;
 use adk_tool::McpToolset;
 use rmcp::{ServiceExt, transport::TokioChildProcess};
@@ -27,60 +34,120 @@ use tokio::process::Command;
 use std::sync::Arc;
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let api_key = std::env::var("GEMINI_API_KEY")?;
-    let model = GeminiModel::new(&api_key, "gemini-2.5-flash")?;
+async fn main() -> anyhow::Result<()> {
+    dotenvy::dotenv().ok();
+    let api_key = std::env::var("GOOGLE_API_KEY")?;
+    let model = Arc::new(GeminiModel::new(&api_key, "gemini-2.0-flash")?);
 
-    // 1. Create MCP client connection to a local server
-    let client = ().serve(TokioChildProcess::new(
-        Command::new("npx")
-            .arg("-y")
-            .arg("@modelcontextprotocol/server-everything")
-    )?).await?;
+    // 1. Start MCP server and connect
+    let mut cmd = Command::new("npx");
+    cmd.arg("-y").arg("@modelcontextprotocol/server-everything");
+
+    let client = ().serve(TokioChildProcess::new(cmd)?).await?;
 
     // 2. Create toolset from the client
-    let toolset = McpToolset::new(client);
+    let toolset = McpToolset::new(client)
+        .with_tools(&["echo", "add"]);  // Only expose these tools
 
-    // 3. Add to agent
-    let agent = LlmAgentBuilder::new("mcp_agent")
-        .description("Agent with MCP tools")
-        .model(Arc::new(model))
-        .toolset(Arc::new(toolset))
-        .build()?;
+    // 3. Get cancellation token for cleanup
+    let cancel_token = toolset.cancellation_token().await;
+
+    // 4. Discover tools and add to agent
+    let ctx: Arc<dyn ReadonlyContext> = Arc::new(SimpleContext);
+    let tools = toolset.tools(ctx).await?;
+
+    let mut builder = LlmAgentBuilder::new("mcp_agent")
+        .model(model)
+        .instruction("You have MCP tools. Use 'echo' to repeat messages, 'add' to sum numbers.");
+
+    for tool in tools {
+        builder = builder.tool(tool);
+    }
+
+    let agent = builder.build()?;
+
+    // 5. Run interactive console
+    adk_cli::console::run_console(
+        Arc::new(agent),
+        "mcp_demo".to_string(),
+        "user".to_string(),
+    ).await?;
+
+    // 6. Cleanup: shutdown MCP server
+    cancel_token.cancel();
 
     Ok(())
 }
+
+// Minimal context for tool discovery
+struct SimpleContext;
+
+#[async_trait::async_trait]
+impl ReadonlyContext for SimpleContext {
+    fn invocation_id(&self) -> &str { "init" }
+    fn agent_name(&self) -> &str { "init" }
+    fn user_id(&self) -> &str { "user" }
+    fn app_name(&self) -> &str { "mcp" }
+    fn session_id(&self) -> &str { "init" }
+    fn branch(&self) -> &str { "main" }
+    fn user_content(&self) -> &Content {
+        static CONTENT: std::sync::OnceLock<Content> = std::sync::OnceLock::new();
+        CONTENT.get_or_init(|| Content::new("user").with_text("init"))
+    }
+}
 ```
 
-## McpToolset Configuration
+Run with:
+```bash
+GOOGLE_API_KEY=your_key cargo run --bin basic
+```
 
-### Custom Name
+## McpToolset API
 
-Set a custom name for the toolset:
+### Creating a Toolset
 
-```rust,ignore
+```rust
+use adk_tool::McpToolset;
+
+// Basic creation
+let toolset = McpToolset::new(client);
+
+// With custom name
 let toolset = McpToolset::new(client)
     .with_name("filesystem-tools");
 ```
 
 ### Tool Filtering
 
-Filter which tools to expose using a predicate function:
+Filter which tools to expose:
 
-```rust,ignore
-// Only expose specific tools
+```rust
+// Filter by predicate function
 let toolset = McpToolset::new(client)
     .with_filter(|name| {
         matches!(name, "read_file" | "write_file" | "list_directory")
     });
-```
 
-Or use the convenience method for exact name matching:
-
-```rust,ignore
+// Filter by exact names (convenience method)
 let toolset = McpToolset::new(client)
     .with_tools(&["echo", "add", "get_time"]);
 ```
+
+### Cleanup with Cancellation Token
+
+Always get a cancellation token to cleanly shutdown the MCP server:
+
+```rust
+let toolset = McpToolset::new(client);
+let cancel_token = toolset.cancellation_token().await;
+
+// ... use the toolset ...
+
+// Before exiting, shutdown the MCP server
+cancel_token.cancel();
+```
+
+This prevents EPIPE errors and ensures clean process termination.
 
 ## Connecting to MCP Servers
 
@@ -88,31 +155,28 @@ let toolset = McpToolset::new(client)
 
 Connect to a local MCP server via standard input/output:
 
-```rust,ignore
+```rust
 use rmcp::{ServiceExt, transport::TokioChildProcess};
 use tokio::process::Command;
 
 // NPM package server
-let client = ().serve(TokioChildProcess::new(
-    Command::new("npx")
-        .arg("-y")
-        .arg("@modelcontextprotocol/server-filesystem")
-        .arg("/path/to/allowed/directory")
-)?).await?;
+let mut cmd = Command::new("npx");
+cmd.arg("-y")
+    .arg("@modelcontextprotocol/server-filesystem")
+    .arg("/path/to/allowed/directory");
+let client = ().serve(TokioChildProcess::new(cmd)?).await?;
 
 // Local binary server
-let client = ().serve(TokioChildProcess::new(
-    Command::new("./my-mcp-server")
-        .arg("--config")
-        .arg("config.json")
-)?).await?;
+let mut cmd = Command::new("./my-mcp-server");
+cmd.arg("--config").arg("config.json");
+let client = ().serve(TokioChildProcess::new(cmd)?).await?;
 ```
 
 ### Remote Servers (SSE)
 
 Connect to a remote MCP server via Server-Sent Events:
 
-```rust,ignore
+```rust
 use rmcp::{ServiceExt, transport::SseClient};
 
 let client = ().serve(
@@ -124,14 +188,15 @@ let client = ().serve(
 
 The `McpToolset` automatically discovers tools from the connected server:
 
-```rust,ignore
+```rust
 use adk_core::{ReadonlyContext, Toolset};
 
 // Get discovered tools
 let tools = toolset.tools(ctx).await?;
 
+println!("Discovered {} tools:", tools.len());
 for tool in &tools {
-    println!("Tool: {} - {}", tool.name(), tool.description());
+    println!("  - {}: {}", tool.name(), tool.description());
 }
 ```
 
@@ -140,79 +205,50 @@ Each discovered tool:
 - Includes parameter schemas for LLM accuracy
 - Executes via the MCP protocol when called
 
-## Complete Example
+## Adding Tools to Agent
 
-Here's a full example using the MCP "everything" test server:
+There are two patterns for adding MCP tools to an agent:
 
-```rust,no_run
-use adk_agent::LlmAgentBuilder;
-use adk_core::{Agent, Content, InvocationContext, Part, ReadonlyContext, RunConfig, Session, State};
-use adk_model::GeminiModel;
-use adk_tool::McpToolset;
-use async_trait::async_trait;
-use futures::StreamExt;
-use rmcp::{ServiceExt, transport::TokioChildProcess};
-use serde_json::Value;
-use std::collections::HashMap;
-use std::sync::Arc;
-use tokio::process::Command;
+### Pattern 1: Add as Toolset
 
-// ... (Session and Context implementations)
+```rust
+let toolset = McpToolset::new(client);
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let api_key = std::env::var("GEMINI_API_KEY")?;
-    let model = GeminiModel::new(&api_key, "gemini-2.5-flash")?;
+let agent = LlmAgentBuilder::new("agent")
+    .model(model)
+    .toolset(Arc::new(toolset))
+    .build()?;
+```
 
-    // Connect to MCP server
-    let client = ().serve(TokioChildProcess::new(
-        Command::new("npx")
-            .arg("-y")
-            .arg("@modelcontextprotocol/server-everything")
-    )?).await?;
+### Pattern 2: Add Individual Tools
 
-    // Create filtered toolset
-    let toolset = McpToolset::new(client)
-        .with_name("everything-tools")
-        .with_filter(|name| {
-            matches!(name, "echo" | "add" | "getAlerts")
-        });
+This gives you more control over which tools are added:
 
-    // Build agent
-    let agent = LlmAgentBuilder::new("mcp_demo")
-        .description("Demo agent with MCP tools")
-        .instruction(
-            "You have access to MCP tools. Use 'echo' to repeat messages, \
-             'add' to add numbers, and 'getAlerts' for weather alerts."
-        )
-        .model(Arc::new(model))
-        .toolset(Arc::new(toolset))
-        .build()?;
+```rust
+let toolset = McpToolset::new(client)
+    .with_tools(&["echo", "add"]);
 
-    // Run agent
-    let ctx = Arc::new(MockContext::new("Echo 'Hello MCP!' and then add 5 + 3"));
-    let mut stream = agent.run(ctx).await?;
+let tools = toolset.tools(ctx).await?;
 
-    while let Some(result) = stream.next().await {
-        if let Ok(event) = result {
-            if let Some(content) = event.llm_response.content {
-                for part in content.parts {
-                    if let Part::Text { text } = part {
-                        print!("{}", text);
-                    }
-                }
-            }
-        }
-    }
-    println!();
+let mut builder = LlmAgentBuilder::new("agent")
+    .model(model);
 
-    Ok(())
+for tool in tools {
+    builder = builder.tool(tool);
 }
+
+let agent = builder.build()?;
 ```
 
 ## Popular MCP Servers
 
 Here are some commonly used MCP servers you can integrate:
+
+### Everything Server (Testing)
+```bash
+npx -y @modelcontextprotocol/server-everything
+```
+Tools: `echo`, `add`, `longRunningOperation`, `sampleLLM`, `getAlerts`, `printEnv`
 
 ### Filesystem Server
 ```bash
@@ -244,7 +280,7 @@ Find more servers at the [MCP Server Registry](https://github.com/modelcontextpr
 
 Handle MCP connection and execution errors:
 
-```rust,ignore
+```rust
 use adk_core::AdkError;
 
 match toolset.tools(ctx).await {
@@ -268,19 +304,110 @@ Common errors:
 ## Best Practices
 
 1. **Filter tools** - Only expose tools the agent needs to reduce confusion
-2. **Handle errors** - MCP servers may fail; implement appropriate error handling
-3. **Use local servers** - For development, stdio transport is simpler than remote
-4. **Check server status** - Verify MCP server is running before creating toolset
-5. **Resource cleanup** - The client connection is dropped when toolset is dropped
+2. **Use cancellation tokens** - Always call `cancel()` before exiting to cleanup
+3. **Handle errors** - MCP servers may fail; implement appropriate error handling
+4. **Use local servers** - For development, stdio transport is simpler than remote
+5. **Check server status** - Verify MCP server is running before creating toolset
+
+## Complete Example
+
+Here's a full working example with proper cleanup:
+
+```rust
+use adk_agent::LlmAgentBuilder;
+use adk_core::{Content, Part, ReadonlyContext, Toolset};
+use adk_model::GeminiModel;
+use adk_tool::McpToolset;
+use rmcp::{ServiceExt, transport::TokioChildProcess};
+use std::sync::Arc;
+use tokio::process::Command;
+
+struct SimpleContext;
+
+#[async_trait::async_trait]
+impl ReadonlyContext for SimpleContext {
+    fn invocation_id(&self) -> &str { "init" }
+    fn agent_name(&self) -> &str { "init" }
+    fn user_id(&self) -> &str { "user" }
+    fn app_name(&self) -> &str { "mcp" }
+    fn session_id(&self) -> &str { "init" }
+    fn branch(&self) -> &str { "main" }
+    fn user_content(&self) -> &Content {
+        static CONTENT: std::sync::OnceLock<Content> = std::sync::OnceLock::new();
+        CONTENT.get_or_init(|| Content::new("user").with_text("init"))
+    }
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    dotenvy::dotenv().ok();
+
+    let api_key = std::env::var("GOOGLE_API_KEY")?;
+    let model = Arc::new(GeminiModel::new(&api_key, "gemini-2.0-flash")?);
+
+    println!("Starting MCP server...");
+    let mut cmd = Command::new("npx");
+    cmd.arg("-y").arg("@modelcontextprotocol/server-everything");
+
+    let client = ().serve(TokioChildProcess::new(cmd)?).await?;
+    println!("MCP server connected!");
+
+    // Create filtered toolset
+    let toolset = McpToolset::new(client)
+        .with_name("everything-tools")
+        .with_filter(|name| matches!(name, "echo" | "add" | "printEnv"));
+
+    // Get cancellation token for cleanup
+    let cancel_token = toolset.cancellation_token().await;
+
+    // Discover tools
+    let ctx = Arc::new(SimpleContext) as Arc<dyn ReadonlyContext>;
+    let tools = toolset.tools(ctx).await?;
+
+    println!("Discovered {} tools:", tools.len());
+    for tool in &tools {
+        println!("  - {}: {}", tool.name(), tool.description());
+    }
+
+    // Build agent with tools
+    let mut builder = LlmAgentBuilder::new("mcp_demo")
+        .model(model)
+        .instruction(
+            "You have access to MCP tools:\n\
+             - echo: Repeat a message back\n\
+             - add: Add two numbers (a + b)\n\
+             - printEnv: Print environment variables"
+        );
+
+    for tool in tools {
+        builder = builder.tool(tool);
+    }
+
+    let agent = builder.build()?;
+
+    // Run interactive console
+    let result = adk_cli::console::run_console(
+        Arc::new(agent),
+        "mcp_demo".to_string(),
+        "user".to_string(),
+    ).await;
+
+    // Cleanup
+    println!("\nShutting down MCP server...");
+    cancel_token.cancel();
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+    result?;
+    Ok(())
+}
+```
 
 ## Advanced: Custom MCP Server
 
 You can create your own MCP server in Rust using the `rmcp` SDK:
 
-```rust,ignore
+```rust
 use rmcp::{tool, tool_router, handler::server::tool::ToolRouter, model::*};
-use tokio::sync::Mutex;
-use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct MyServer {
@@ -290,23 +417,17 @@ pub struct MyServer {
 #[tool_router]
 impl MyServer {
     fn new() -> Self {
-        Self {
-            tool_router: Self::tool_router(),
-        }
+        Self { tool_router: Self::tool_router() }
     }
 
     #[tool(description = "Add two numbers")]
     async fn add(&self, a: i32, b: i32) -> Result<CallToolResult, ErrorData> {
-        Ok(CallToolResult::success(vec![Content::text(
-            (a + b).to_string()
-        )]))
+        Ok(CallToolResult::success(vec![Content::text((a + b).to_string())]))
     }
 
     #[tool(description = "Multiply two numbers")]
     async fn multiply(&self, a: i32, b: i32) -> Result<CallToolResult, ErrorData> {
-        Ok(CallToolResult::success(vec![Content::text(
-            (a * b).to_string()
-        )]))
+        Ok(CallToolResult::success(vec![Content::text((a * b).to_string())]))
     }
 }
 ```
@@ -320,3 +441,7 @@ See the [rmcp documentation](https://github.com/modelcontextprotocol/rust-sdk) f
 - [LlmAgent](../agents/llm-agent.md) - Adding tools to agents
 - [rmcp SDK](https://github.com/modelcontextprotocol/rust-sdk) - Official Rust MCP SDK
 - [MCP Specification](https://modelcontextprotocol.io/) - Protocol documentation
+
+---
+
+**Previous**: [← UI Tools](ui-tools.md) | **Next**: [Sessions →](../sessions/sessions.md)

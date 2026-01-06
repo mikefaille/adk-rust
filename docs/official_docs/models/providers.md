@@ -1,247 +1,414 @@
-# Model Providers
+# Model Providers (Cloud)
 
-ADK-Rust supports multiple LLM providers through the `adk-model` crate. All providers implement the `Llm` trait, making them interchangeable in your agents.
+ADK-Rust supports multiple cloud LLM providers through the `adk-model` crate. All providers implement the `Llm` trait, making them interchangeable in your agents.
 
-## Supported Providers
+## Overview
 
-| Provider | Models | Feature Flag |
-|----------|--------|--------------|
-| **Gemini** | gemini-2.5-flash, gemini-2.5-pro, gemini-2.0-flash | (default) |
-| **OpenAI** | gpt-4o, gpt-4o-mini, gpt-4-turbo | `openai` |
-| **Anthropic** | claude-opus-4, claude-sonnet-4, claude-3.5-sonnet | `anthropic` |
-| **DeepSeek** | deepseek-chat, deepseek-reasoner | `deepseek` |
-| **Groq** | llama-3.3-70b, mixtral-8x7b, gemma2-9b | `groq` |
-| **Ollama** | llama3.2, mistral, qwen2.5, gemma2 (local) | `ollama` |
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                     Cloud Model Providers                           │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│   • Gemini (Google)    ⭐ Default    - Multimodal, large context    │
+│   • OpenAI (GPT-4o)    🔥 Popular    - Best ecosystem               │
+│   • Anthropic (Claude) 🧠 Smart      - Best reasoning               │
+│   • DeepSeek           💭 Thinking   - Chain-of-thought, cheap      │
+│   • Groq               ⚡ Ultra-Fast  - Fastest inference           │
+│                                                                     │
+│   For local/offline models, see:                                    │
+│   • Ollama     → ollama.md                                          │
+│   • mistral.rs → mistralrs.md                                       │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
 
-## Installation
+## Quick Comparison
+
+| Provider | Best For | Speed | Cost | Key Feature |
+|----------|----------|-------|------|-------------|
+| **Gemini** | General use | ⚡⚡⚡ | 💰 | Multimodal, large context |
+| **OpenAI** | Reliability | ⚡⚡ | 💰💰 | Best ecosystem |
+| **Anthropic** | Complex reasoning | ⚡⚡ | 💰💰 | Safest, most thoughtful |
+| **DeepSeek** | Chain-of-thought | ⚡⚡ | 💰 | Thinking mode, cheap |
+| **Groq** | Speed-critical | ⚡⚡⚡⚡ | 💰 | Fastest inference |
+
+---
+
+## Step 1: Installation
+
+Add the providers you need to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-# All providers
-adk-model = { version = "{{version}}", features = ["all-providers"] }
+# Pick one or more providers:
+adk-model = { version = "0.1", features = ["gemini"] }        # Google Gemini (default)
+adk-model = { version = "0.1", features = ["openai"] }        # OpenAI GPT-4o
+adk-model = { version = "0.1", features = ["anthropic"] }     # Anthropic Claude
+adk-model = { version = "0.1", features = ["deepseek"] }      # DeepSeek
+adk-model = { version = "0.1", features = ["groq"] }          # Groq (ultra-fast)
 
-# Or individual providers
-adk-model = { version = "{{version}}", features = ["openai"] }
-adk-model = { version = "{{version}}", features = ["anthropic"] }
-adk-model = { version = "{{version}}", features = ["deepseek"] }
-adk-model = { version = "{{version}}", features = ["groq"] }
-adk-model = { version = "{{version}}", features = ["ollama"] }
+# Or all cloud providers at once:
+adk-model = { version = "0.1", features = ["all-providers"] }
 ```
 
-## Environment Variables
+## Step 2: Set Your API Key
 
 ```bash
-# Google Gemini
-export GOOGLE_API_KEY="your-api-key"
-
-# OpenAI
-export OPENAI_API_KEY="your-api-key"
-
-# Anthropic
-export ANTHROPIC_API_KEY="your-api-key"
-
-# DeepSeek
-export DEEPSEEK_API_KEY="your-api-key"
-
-# Groq
-export GROQ_API_KEY="your-api-key"
-
-# Ollama (no API key needed - local server)
-# Start with: ollama serve
+export GOOGLE_API_KEY="your-key"      # Gemini
+export OPENAI_API_KEY="your-key"      # OpenAI
+export ANTHROPIC_API_KEY="your-key"   # Anthropic
+export DEEPSEEK_API_KEY="your-key"    # DeepSeek
+export GROQ_API_KEY="your-key"        # Groq
 ```
 
-## Gemini (Google)
+---
 
-Google's Gemini models are the default provider.
+## Gemini (Google) ⭐ Default
+
+> **Best for**: General purpose, multimodal tasks, large documents
+> 
+> **Key highlights**:
+> - 🖼️ Native multimodal (images, video, audio, PDF)
+> - 📚 Up to 2M token context window
+> - 💰 Competitive pricing
+> - ⚡ Fast inference
+
+### Complete Working Example
 
 ```rust
-use adk_model::GeminiModel;
-use adk_agent::LlmAgentBuilder;
+use adk_rust::prelude::*;
+use adk_rust::Launcher;
 use std::sync::Arc;
 
-let api_key = std::env::var("GOOGLE_API_KEY")?;
-let model = GeminiModel::new(&api_key, "gemini-2.5-flash")?;
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    dotenvy::dotenv().ok();
+    
+    let api_key = std::env::var("GOOGLE_API_KEY")?;
+    let model = GeminiModel::new(&api_key, "gemini-2.0-flash")?;
 
-let agent = LlmAgentBuilder::new("assistant")
-    .model(Arc::new(model))
-    .build()?;
+    let agent = LlmAgentBuilder::new("gemini_assistant")
+        .description("Gemini-powered assistant")
+        .instruction("You are a helpful assistant powered by Google Gemini. Be concise.")
+        .model(Arc::new(model))
+        .build()?;
+
+    Launcher::new(Arc::new(agent)).run().await?;
+    Ok(())
+}
 ```
-
-## OpenAI
-
-```rust
-use adk_model::openai::{OpenAIClient, OpenAIConfig};
-use adk_agent::LlmAgentBuilder;
-use std::sync::Arc;
-
-let api_key = std::env::var("OPENAI_API_KEY")?;
-let model = OpenAIClient::new(OpenAIConfig::new(api_key, "gpt-4o"))?;
-
-let agent = LlmAgentBuilder::new("assistant")
-    .model(Arc::new(model))
-    .build()?;
-```
-
-## Anthropic (Claude)
-
-```rust
-use adk_model::anthropic::{AnthropicClient, AnthropicConfig};
-use adk_agent::LlmAgentBuilder;
-use std::sync::Arc;
-
-let api_key = std::env::var("ANTHROPIC_API_KEY")?;
-let model = AnthropicClient::new(AnthropicConfig::new(api_key, "claude-sonnet-4-20250514"))?;
-
-let agent = LlmAgentBuilder::new("assistant")
-    .model(Arc::new(model))
-    .build()?;
-```
-
-## DeepSeek
-
-DeepSeek models with unique features like thinking mode and context caching.
-
-```rust
-use adk_model::deepseek::{DeepSeekClient, DeepSeekConfig};
-use adk_agent::LlmAgentBuilder;
-use std::sync::Arc;
-
-let api_key = std::env::var("DEEPSEEK_API_KEY")?;
-
-// Standard chat model
-let model = DeepSeekClient::new(DeepSeekConfig::chat(api_key))?;
-
-// Or reasoning model with chain-of-thought
-let reasoner = DeepSeekClient::new(DeepSeekConfig::reasoner(api_key))?;
-
-let agent = LlmAgentBuilder::new("assistant")
-    .model(Arc::new(model))
-    .build()?;
-```
-
-### DeepSeek-Specific Features
-
-**Thinking Mode**: The `deepseek-reasoner` model outputs chain-of-thought reasoning:
-
-```rust
-let model = DeepSeekClient::new(DeepSeekConfig::reasoner(api_key))?;
-// Output includes <thinking>...</thinking> tags with reasoning
-```
-
-**Context Caching**: Automatic 10x cost reduction for repeated prefixes (system instructions, documents).
-
-**Tool Calling**: Full function calling support compatible with ADK tools.
-
-## Groq (Ultra-Fast)
-
-Groq provides ultra-fast inference using LPU (Language Processing Unit) technology.
-
-```rust
-use adk_model::groq::{GroqClient, GroqConfig};
-use adk_agent::LlmAgentBuilder;
-use std::sync::Arc;
-
-let api_key = std::env::var("GROQ_API_KEY")?;
-let model = GroqClient::new(GroqConfig::llama70b(api_key))?;
-
-let agent = LlmAgentBuilder::new("assistant")
-    .model(Arc::new(model))
-    .build()?;
-```
-
-### Groq-Specific Features
-
-**Ultra-Fast Inference**: LPU-based inference delivers industry-leading speed.
-
-**Large Context**: Support for up to 128K tokens depending on the model.
-
-**Tool Calling**: Full function calling support with all models.
 
 ### Available Models
 
-```rust
-// LLaMA models
-GroqConfig::llama70b(api_key)     // llama-3.3-70b-versatile
-GroqConfig::llama8b(api_key)      // llama-3.1-8b-instant
+| Model | Description | Context |
+|-------|-------------|---------|
+| `gemini-2.0-flash` | Fast, efficient (recommended) | 1M tokens |
+| `gemini-2.5-flash` | Latest flash model | 1M tokens |
+| `gemini-2.5-pro` | Most capable | 2M tokens |
 
-// Mixtral
-GroqConfig::mixtral(api_key)      // mixtral-8x7b-32768
+### Example Output
 
-// Gemma
-GroqConfig::gemma9b(api_key)      // gemma2-9b-it
+```
+👤 User: What's in this image? [uploads photo of a cat]
+
+🤖 Gemini: I can see a fluffy orange tabby cat sitting on a windowsill. 
+The cat appears to be looking outside, with sunlight illuminating its fur. 
+It has green eyes and distinctive striped markings typical of tabby cats.
 ```
 
-## Ollama (Local)
+---
 
-Ollama enables running LLMs locally without API keys or internet connectivity.
+## OpenAI (GPT-4o) 🔥 Popular
+
+> **Best for**: Production apps, reliable performance, broad capabilities
+> 
+> **Key highlights**:
+> - 🏆 Industry standard
+> - 🔧 Excellent tool/function calling
+> - 📖 Best documentation & ecosystem
+> - 🎯 Consistent, predictable outputs
+
+### Complete Working Example
 
 ```rust
-use adk_model::ollama::{OllamaModel, OllamaConfig};
+use adk_rust::prelude::*;
+use adk_rust::Launcher;
+use std::sync::Arc;
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    dotenvy::dotenv().ok();
+    
+    let api_key = std::env::var("OPENAI_API_KEY")?;
+    let model = OpenAIClient::new(OpenAIConfig::new(&api_key, "gpt-4o"))?;
+
+    let agent = LlmAgentBuilder::new("openai_assistant")
+        .description("OpenAI-powered assistant")
+        .instruction("You are a helpful assistant powered by OpenAI GPT-4o. Be concise.")
+        .model(Arc::new(model))
+        .build()?;
+
+    Launcher::new(Arc::new(agent)).run().await?;
+    Ok(())
+}
+```
+
+### Available Models
+
+| Model | Description | Context |
+|-------|-------------|---------|
+| `gpt-4o` | Most capable, multimodal | 128K tokens |
+| `gpt-4o-mini` | Fast, cost-effective | 128K tokens |
+| `gpt-4-turbo` | Previous flagship | 128K tokens |
+| `o1` | Reasoning model | 128K tokens |
+
+### Example Output
+
+```
+👤 User: Write a haiku about Rust programming
+
+🤖 GPT-4o: Memory so safe,
+Ownership guards every byte—
+Compiler, my friend.
+```
+
+---
+
+## Anthropic (Claude) 🧠 Smart
+
+> **Best for**: Complex reasoning, safety-critical apps, long documents
+> 
+> **Key highlights**:
+> - 🧠 Exceptional reasoning ability
+> - 🛡️ Most safety-focused
+> - 📚 200K token context
+> - ✍️ Excellent writing quality
+
+### Complete Working Example
+
+```rust
+use adk_rust::prelude::*;
+use adk_rust::Launcher;
+use std::sync::Arc;
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    dotenvy::dotenv().ok();
+    
+    let api_key = std::env::var("ANTHROPIC_API_KEY")?;
+    let model = AnthropicClient::new(AnthropicConfig::new(&api_key, "claude-sonnet-4-20250514"))?;
+
+    let agent = LlmAgentBuilder::new("anthropic_assistant")
+        .description("Anthropic-powered assistant")
+        .instruction("You are a helpful assistant powered by Anthropic Claude. Be concise and thoughtful.")
+        .model(Arc::new(model))
+        .build()?;
+
+    Launcher::new(Arc::new(agent)).run().await?;
+    Ok(())
+}
+```
+
+### Available Models
+
+| Model | Description | Context |
+|-------|-------------|---------|
+| `claude-sonnet-4-20250514` | Latest Claude 4 Sonnet | 200K tokens |
+| `claude-opus-4-20250514` | Most capable Claude 4 | 200K tokens |
+| `claude-3-5-sonnet-20241022` | Claude 3.5 Sonnet | 200K tokens |
+
+### Example Output
+
+```
+👤 User: Explain quantum entanglement to a 10-year-old
+
+🤖 Claude: Imagine you have two magic coins. When you flip them, they always 
+land the same way - both heads or both tails - even if one coin is on Earth 
+and the other is on the Moon! Scientists call this "entanglement." The coins 
+are connected in a special way that we can't see, like invisible best friends 
+who always make the same choice at the exact same time.
+```
+
+---
+
+## DeepSeek 💭 Thinking
+
+> **Best for**: Complex problem-solving, math, coding, reasoning tasks
+> 
+> **Key highlights**:
+> - 💭 **Thinking mode** - shows chain-of-thought reasoning
+> - 💰 Very cost-effective (10x cheaper than GPT-4)
+> - 🔄 Context caching for repeated prefixes
+> - 🧮 Strong at math and coding
+
+### Complete Working Example
+
+```rust
+use adk_rust::prelude::*;
+use adk_rust::Launcher;
+use std::sync::Arc;
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    dotenvy::dotenv().ok();
+    
+    let api_key = std::env::var("DEEPSEEK_API_KEY")?;
+    
+    // Standard chat model
+    let model = DeepSeekClient::chat(&api_key)?;
+    
+    // OR: Reasoning model with thinking mode
+    // let model = DeepSeekClient::reasoner(&api_key)?;
+
+    let agent = LlmAgentBuilder::new("deepseek_assistant")
+        .description("DeepSeek-powered assistant")
+        .instruction("You are a helpful assistant powered by DeepSeek. Be concise.")
+        .model(Arc::new(model))
+        .build()?;
+
+    Launcher::new(Arc::new(agent)).run().await?;
+    Ok(())
+}
+```
+
+### Available Models
+
+| Model | Description | Special Feature |
+|-------|-------------|-----------------|
+| `deepseek-chat` | Fast chat model | General purpose |
+| `deepseek-reasoner` | Reasoning model | Shows thinking process |
+
+### Example Output (Reasoner with Thinking Mode)
+
+```
+👤 User: What's 17 × 23?
+
+🤖 DeepSeek: <thinking>
+Let me break this down:
+17 × 23 = 17 × (20 + 3)
+       = 17 × 20 + 17 × 3
+       = 340 + 51
+       = 391
+</thinking>
+
+The answer is 391.
+```
+
+---
+
+## Groq ⚡ Ultra-Fast
+
+> **Best for**: Real-time applications, chatbots, speed-critical tasks
+> 
+> **Key highlights**:
+> - ⚡ **Fastest inference** - 10x faster than competitors
+> - 🔧 LPU (Language Processing Unit) technology
+> - 💰 Competitive pricing
+> - 🦙 Runs LLaMA, Mixtral, Gemma models
+
+### Complete Working Example
+
+```rust
+use adk_rust::prelude::*;
+use adk_rust::Launcher;
+use std::sync::Arc;
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    dotenvy::dotenv().ok();
+    
+    let api_key = std::env::var("GROQ_API_KEY")?;
+    let model = GroqClient::llama70b(&api_key)?;
+
+    let agent = LlmAgentBuilder::new("groq_assistant")
+        .description("Groq-powered assistant")
+        .instruction("You are a helpful assistant powered by Groq. Be concise and fast.")
+        .model(Arc::new(model))
+        .build()?;
+
+    Launcher::new(Arc::new(agent)).run().await?;
+    Ok(())
+}
+```
+
+### Available Models
+
+| Model | Method | Description |
+|-------|--------|-------------|
+| `llama-3.3-70b-versatile` | `GroqClient::llama70b()` | Most capable |
+| `llama-3.1-8b-instant` | `GroqClient::llama8b()` | Fastest |
+| `mixtral-8x7b-32768` | Custom config | Good balance |
+
+### Example Output
+
+```
+👤 User: Quick! Name 5 programming languages
+
+🤖 Groq (in 0.2 seconds): 
+1. Rust
+2. Python
+3. JavaScript
+4. Go
+5. TypeScript
+```
+
+---
+
+## Switching Providers
+
+All providers implement the same `Llm` trait, so switching is easy:
+
+```rust
 use adk_agent::LlmAgentBuilder;
 use std::sync::Arc;
 
-// Requires: ollama serve && ollama pull llama3.2
-let model = OllamaModel::new(OllamaConfig::new("llama3.2"))?;
+// Just change the model - everything else stays the same!
+let model: Arc<dyn adk_core::Llm> = Arc::new(
+    // Pick one:
+    // GeminiModel::new(&api_key, "gemini-2.0-flash")?
+    // OpenAIClient::new(OpenAIConfig::new(&api_key, "gpt-4o"))?
+    // AnthropicClient::new(AnthropicConfig::new(&api_key, "claude-sonnet-4-20250514"))?
+    // DeepSeekClient::chat(&api_key)?
+    // GroqClient::llama70b(&api_key)?
+);
 
 let agent = LlmAgentBuilder::new("assistant")
-    .model(Arc::new(model))
+    .instruction("You are a helpful assistant.")
+    .model(model)
     .build()?;
 ```
 
-### Ollama Setup
-
-1. **Install Ollama**: Download from [ollama.com](https://ollama.com)
-
-2. **Start Server**:
-   ```bash
-   ollama serve
-   ```
-
-3. **Pull Models**:
-   ```bash
-   ollama pull llama3.2
-   ollama pull qwen2.5:7b
-   ollama pull mistral
-   ```
-
-### Recommended Models
-
-| Model | Size | Strengths |
-|-------|------|-----------|
-| `llama3.2` | 3B | Fast, general purpose |
-| `qwen2.5:7b` | 7B | Excellent tool calling |
-| `mistral` | 7B | Code and reasoning |
-| `gemma2` | 9B | Google's efficient model |
-
-### Ollama-Specific Features
-
-**Local Inference**: Complete privacy - data never leaves your machine.
-
-**Tool Calling**: Full function calling support (uses non-streaming for reliability).
-
-**Custom Models**: Support for custom fine-tuned models via Ollama.
-
-**Configuration**:
-```rust
-let config = OllamaConfig::new("qwen2.5:7b")
-    .with_base_url("http://localhost:11434")  // Custom Ollama server
-    .with_temperature(0.7)
-    .with_max_tokens(2048);
-```
+---
 
 ## Examples
 
-- `cargo run --example quickstart` - Gemini
-- `cargo run --example openai_basic --features openai` - OpenAI
-- `cargo run --example anthropic_basic --features anthropic` - Anthropic
-- `cargo run --example deepseek_basic --features deepseek` - DeepSeek
-- `cargo run --example deepseek_reasoner --features deepseek` - Thinking mode
-- `cargo run --example deepseek_tools --features deepseek` - Tool calling
-- `cargo run --example groq_basic --features groq` - Groq ultra-fast
-- `cargo run --example ollama_basic --features ollama` - Local Ollama
-- `cargo run --example ollama_tools --features ollama` - Ollama with tools
+```bash
+# Gemini (default)
+cargo run --example quickstart
+
+# OpenAI
+cargo run --example openai_basic --features openai
+
+# Anthropic
+cargo run --example anthropic_basic --features anthropic
+
+# DeepSeek
+cargo run --example deepseek_basic --features deepseek
+cargo run --example deepseek_reasoner --features deepseek  # Thinking mode
+
+# Groq
+cargo run --example groq_basic --features groq
+```
+
+---
 
 ## Related
 
+- [Ollama (Local)](./ollama.md) - Run models locally with Ollama
+- [Local Models (mistral.rs)](./mistralrs.md) - Native Rust inference
 - [LlmAgent](../agents/llm-agent.md) - Using models with agents
 - [Function Tools](../tools/function-tools.md) - Adding tools to agents
+
+---
+
+**Previous**: [← Realtime Agents](../agents/realtime-agents.md) | **Next**: [Ollama (Local) →](./ollama.md)

@@ -1,7 +1,7 @@
 [package]
 name = "multi_agent_test"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 
 [dependencies]
 adk-rust = { path = "../../adk-rust", features = ["agents", "models", "tools", "runner", "cli"] }

@@ -364,3 +364,7 @@ ADK-Rust's realtime implementation follows the OpenAI Agents SDK pattern:
 | Tools | Function definitions | `Tool` trait + `ToolDefinition` |
 | Handoffs | `transfer_to_agent` | `sub_agents` + auto-generated tool |
 | Callbacks | Hooks | `before_*` / `after_*` callbacks |
+
+---
+
+**Previous**: [← Graph Agents](./graph-agents.md) | **Next**: [Model Providers →](../models/providers.md)

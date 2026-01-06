@@ -535,3 +535,8 @@ println!("Event occurred at: {}", event.timestamp.format("%Y-%m-%d %H:%M:%S"));
 - [Artifacts](../artifacts/artifacts.md) - Managing binary data
 - [Multi-Agent Systems](../agents/multi-agent.md) - Agent transfers and coordination
 - [Callbacks](../callbacks/callbacks.md) - Intercepting and modifying events
+
+
+---
+
+**Previous**: [← Artifacts](../artifacts/artifacts.md) | **Next**: [Telemetry →](../observability/telemetry.md)

@@ -649,4 +649,6 @@ pub use my_agent::MyAgent;
 
 ---
 
+**Previous**: [← Access Control](../security/access-control.md)
+
 **Questions?** Open an issue on [GitHub](https://github.com/zavora-ai/adk-rust/issues).

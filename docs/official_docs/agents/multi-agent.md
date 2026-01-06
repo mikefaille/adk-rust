@@ -60,7 +60,7 @@ echo 'GOOGLE_API_KEY=your-api-key' > .env
 
 Here's a complete working example:
 
-```rust,no_run
+```rust
 use adk_rust::prelude::*;
 use adk_rust::Launcher;
 use std::sync::Arc;
@@ -305,7 +305,7 @@ User: "Create a blog post about electric vehicles"
 
 ### Complete Example Code
 
-```rust,no_run
+```rust
 use adk_rust::prelude::*;
 use adk_rust::Launcher;
 use std::sync::Arc;
@@ -391,7 +391,7 @@ project_manager
 
 Add sub-agents to any `LlmAgent` using the `sub_agent()` builder method:
 
-```rust,no_run
+```rust
 let parent = LlmAgentBuilder::new("parent")
     .description("Coordinates specialized tasks")
     .instruction("Route requests to appropriate specialists.")
@@ -413,7 +413,7 @@ For successful agent transfers, provide clear instructions and descriptions:
 
 ### Parent Agent Instructions
 
-```rust,no_run
+```rust
 let coordinator = LlmAgentBuilder::new("coordinator")
     .description("Main customer service coordinator")
     .instruction("You are a customer service coordinator. Analyze each request:\n\n\
@@ -431,7 +431,7 @@ let coordinator = LlmAgentBuilder::new("coordinator")
 
 ### Sub-Agent Descriptions
 
-```rust,no_run
+```rust
 let billing_agent = LlmAgentBuilder::new("billing_agent")
     .description("Handles billing questions: payments, invoices, subscriptions, refunds")
     .instruction("You are a billing specialist. Help with payment and subscription issues.")
@@ -491,7 +491,7 @@ If transfers aren't working as expected:
 
 ### Basic Usage
 
-```rust,ignore
+```rust
 let agent = LlmAgentBuilder::new("assistant")
     .description("A helpful assistant")
     .global_instruction(
@@ -515,7 +515,7 @@ Both instructions are included in the conversation history, with global instruct
 
 For more advanced scenarios, you can use a global instruction provider that computes the instruction dynamically:
 
-```rust,ignore
+```rust
 use adk_core::GlobalInstructionProvider;
 
 let provider: GlobalInstructionProvider = Arc::new(|ctx| {
@@ -544,7 +544,7 @@ let agent = LlmAgentBuilder::new("assistant")
 
 Both global and agent instructions support state variable injection using `{variable}` syntax:
 
-```rust,ignore
+```rust
 // Set state in a previous agent or tool
 // state["company_name"] = "Acme Corp"
 // state["user_role"] = "manager"
@@ -567,7 +567,7 @@ The framework automatically injects values from the session state into the instr
 
 A central agent routes requests to specialized sub-agents:
 
-```rust,ignore
+```rust
 let billing = LlmAgentBuilder::new("billing")
     .description("Handles billing and payment questions")
     .model(model.clone())
@@ -615,7 +615,7 @@ Assistant: Let me investigate that duplicate charge for you...
 
 Multi-level hierarchies for breaking down complex tasks:
 
-```rust,ignore
+```rust
 // Low-level specialists
 let researcher = LlmAgentBuilder::new("researcher")
     .description("Researches topics and gathers information")
@@ -647,7 +647,7 @@ let project_manager = LlmAgentBuilder::new("project_manager")
 
 Multi-agent systems work well with workflow agents (Sequential, Parallel, Loop):
 
-```rust,ignore
+```rust
 use adk_agent::workflow::{SequentialAgent, ParallelAgent};
 
 // Create specialized agents
@@ -681,7 +681,7 @@ let coordinator = LlmAgentBuilder::new("coordinator")
 
 Agents in a hierarchy communicate through shared session state:
 
-```rust,ignore
+```rust
 // Agent A saves data to state
 let agent_a = LlmAgentBuilder::new("agent_a")
     .instruction("Analyze the topic and save key points.")
@@ -704,7 +704,7 @@ The `output_key` configuration automatically saves an agent's final response to 
 
 The `Launcher` provides an easy way to run and test multi-agent systems:
 
-```rust,ignore
+```rust
 use adk_rust::Launcher;
 
 let coordinator = /* your multi-agent setup */;
@@ -765,3 +765,7 @@ If transfers aren't working:
 - [LLM Agent](llm-agent.md) - Core agent configuration
 - [Workflow Agents](workflow-agents.md) - Sequential, Parallel, and Loop agents
 - [Sessions](../sessions/sessions.md) - Session state management
+
+---
+
+**Previous**: [← Workflow Agents](./workflow-agents.md) | **Next**: [Graph Agents →](./graph-agents.md)

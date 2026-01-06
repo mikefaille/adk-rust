@@ -491,3 +491,8 @@ export RUST_LOG=warn,my_app=info
 - [Callbacks](../callbacks/callbacks.md) - Add telemetry to callbacks
 - [Tools](../tools/function-tools.md) - Instrument custom tools
 - [Deployment](../deployment/server.md) - Production telemetry setup
+
+
+---
+
+**Previous**: [← Events](../events/events.md) | **Next**: [Launcher →](../deployment/launcher.md)

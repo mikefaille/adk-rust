@@ -1,338 +1,349 @@
 # mistral.rs Integration
 
-Native mistral.rs integration for high-performance local inference with `adk-mistralrs`.
+Run LLMs locally with native Rust inference - no external servers, no API keys.
 
-## Overview
+---
 
-`adk-mistralrs` provides native integration with the [mistral.rs](https://github.com/EricLBuehler/mistral.rs) inference engine, enabling:
+## What is mistral.rs?
 
-- **Local Inference**: Run models locally without API dependencies
-- **Hardware Acceleration**: CUDA, Metal, and CPU optimizations
-- **Quantization**: ISQ, GGUF, and UQFF support for memory efficiency
-- **Adapter Support**: LoRA and X-LoRA hot-swapping
-- **High Performance**: Optimized for speed and memory usage
+[mistral.rs](https://github.com/EricLBuehler/mistral.rs) is a high-performance Rust inference engine that runs LLMs directly on your hardware. ADK-Rust integrates it through the `adk-mistralrs` crate.
 
-## Installation
+> **Key highlights**:
+> - 🦀 **Native Rust** - No Python, no external servers
+> - 🔒 **Fully offline** - No API keys or internet required
+> - ⚡ **Hardware acceleration** - CUDA, Metal, CPU optimizations
+> - 📦 **Quantization** - Run large models on limited hardware
+> - 🔧 **LoRA adapters** - Fine-tuned model support with hot-swapping
+> - 👁️ **Vision models** - Image understanding capabilities
+> - 🎯 **Multi-model** - Serve multiple models from one instance
 
-**Note**: `adk-mistralrs` is git-only due to CUDA dependencies and cannot be published to crates.io.
+---
+
+## Step 1: Add Dependencies
+
+Since `adk-mistralrs` depends on git repositories, it cannot be published to crates.io. Add it via git:
 
 ```toml
+[package]
+name = "my-local-agent"
+version = "0.1.0"
+edition = "2024"
+
 [dependencies]
 adk-mistralrs = { git = "https://github.com/zavora-ai/adk-rust" }
+adk-agent = { git = "https://github.com/zavora-ai/adk-rust" }
+adk-rust = { git = "https://github.com/zavora-ai/adk-rust" }
+tokio = { version = "1", features = ["full"] }
+anyhow = "1.0"
 ```
 
-### Hardware Requirements
+For hardware acceleration, add feature flags:
 
-| Feature | Requirement |
-|---------|-------------|
-| **CPU** | Any x86_64 or ARM64 |
-| **CUDA** | NVIDIA GPU with CUDA 11.8+ |
-| **Metal** | Apple Silicon (M1/M2/M3) |
-| **Memory** | 4GB+ RAM (depends on model size) |
+```toml
+# macOS with Apple Silicon
+adk-mistralrs = { git = "https://github.com/zavora-ai/adk-rust", features = ["metal"] }
 
-## Basic Usage
+# NVIDIA GPU (requires CUDA toolkit)
+adk-mistralrs = { git = "https://github.com/zavora-ai/adk-rust", features = ["cuda"] }
+```
 
-### Simple Model Loading
+---
+
+## Step 2: Basic Example
+
+Load a model from HuggingFace and run it locally:
 
 ```rust
-use adk_mistralrs::{MistralRsModel, MistralRsConfig, ModelSource};
 use adk_agent::LlmAgentBuilder;
+use adk_mistralrs::{Llm, MistralRsConfig, MistralRsModel, ModelSource};
+use adk_rust::Launcher;
 use std::sync::Arc;
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Load model from HuggingFace
+async fn main() -> anyhow::Result<()> {
+    // Load model from HuggingFace (downloads on first run)
     let config = MistralRsConfig::builder()
         .model_source(ModelSource::huggingface("microsoft/Phi-3.5-mini-instruct"))
         .build();
 
+    println!("Loading model (this may take a while on first run)...");
     let model = MistralRsModel::new(config).await?;
+    println!("Model loaded: {}", model.name());
 
-    let agent = LlmAgentBuilder::new("assistant")
+    // Create agent
+    let agent = LlmAgentBuilder::new("local_assistant")
+        .description("Local AI assistant powered by mistral.rs")
+        .instruction("You are a helpful assistant running locally. Be concise.")
         .model(Arc::new(model))
         .build()?;
+
+    // Run interactive chat
+    Launcher::new(Arc::new(agent)).run().await?;
 
     Ok(())
 }
 ```
 
-### Configuration Options
+**What happens**:
+1. First run downloads the model from HuggingFace (~2-8GB depending on model)
+2. Model is cached locally in `~/.cache/huggingface/`
+3. Subsequent runs load from cache instantly
+
+---
+
+## Step 3: Reduce Memory with Quantization
+
+Large models need lots of RAM. Use ISQ (In-Situ Quantization) to reduce memory:
 
 ```rust
-use adk_mistralrs::{MistralRsConfig, ModelSource, ModelArchitecture, DataType, Device};
+use adk_agent::LlmAgentBuilder;
+use adk_mistralrs::{Llm, MistralRsConfig, MistralRsModel, ModelSource, QuantizationLevel};
+use adk_rust::Launcher;
+use std::sync::Arc;
 
-let config = MistralRsConfig::builder()
-    .model_source(ModelSource::huggingface("microsoft/Phi-3.5-mini-instruct"))
-    .architecture(ModelArchitecture::Plain)
-    .dtype(DataType::Auto)
-    .device(Device::Auto)  // Auto-detect best device
-    .temperature(0.7)
-    .max_tokens(2048)
-    .paged_attention(true)  // Enable for long contexts
-    .build();
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    // Load model with 4-bit quantization for reduced memory
+    let config = MistralRsConfig::builder()
+        .model_source(ModelSource::huggingface("microsoft/Phi-3.5-mini-instruct"))
+        .isq(QuantizationLevel::Q4_0) // 4-bit quantization
+        .paged_attention(true) // Memory-efficient attention
+        .build();
+
+    println!("Loading quantized model...");
+    let model = MistralRsModel::new(config).await?;
+    println!("Model loaded: {}", model.name());
+
+    let agent = LlmAgentBuilder::new("quantized_assistant")
+        .instruction("You are a helpful assistant. Be concise.")
+        .model(Arc::new(model))
+        .build()?;
+
+    Launcher::new(Arc::new(agent)).run().await?;
+
+    Ok(())
+}
 ```
 
-## Model Sources
+**Quantization levels**:
 
-### HuggingFace Hub
+| Level | Memory Reduction | Quality | Best For |
+|-------|-----------------|---------|----------|
+| `Q4_0` | ~75% | Good | Limited RAM (8GB) |
+| `Q4_1` | ~70% | Better | Balanced |
+| `Q8_0` | ~50% | High | Quality-focused |
+| `Q8_1` | ~50% | Highest | Best quality |
+
+---
+
+## Step 4: LoRA Adapters (Fine-Tuned Models)
+
+Load models with LoRA adapters for specialized tasks:
 
 ```rust
-// Standard model
-ModelSource::huggingface("microsoft/Phi-3.5-mini-instruct")
+use adk_agent::LlmAgentBuilder;
+use adk_mistralrs::{AdapterConfig, Llm, MistralRsAdapterModel, MistralRsConfig, ModelSource};
+use adk_rust::Launcher;
+use std::sync::Arc;
 
-// Specific revision
-ModelSource::huggingface("microsoft/Phi-3.5-mini-instruct@main")
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    // Load base model with LoRA adapter
+    let config = MistralRsConfig::builder()
+        .model_source(ModelSource::huggingface("meta-llama/Llama-3.2-3B-Instruct"))
+        .adapter(AdapterConfig::lora("username/my-lora-adapter"))
+        .build();
+
+    println!("Loading model with LoRA adapter...");
+    let model = MistralRsAdapterModel::new(config).await?;
+    println!("Model loaded: {}", model.name());
+    println!("Available adapters: {:?}", model.available_adapters());
+
+    let agent = LlmAgentBuilder::new("lora_assistant")
+        .instruction("You are a helpful assistant with specialized knowledge.")
+        .model(Arc::new(model))
+        .build()?;
+
+    Launcher::new(Arc::new(agent)).run().await?;
+
+    Ok(())
+}
 ```
 
-### Local Models
-
+**Hot-swap adapters at runtime**:
 ```rust
-// Local directory
-ModelSource::local("/path/to/model")
-
-// GGUF quantized file
-ModelSource::gguf("/path/to/model.gguf")
-
-// UQFF pre-quantized
-ModelSource::uqff("/path/to/model.uqff")
-```
-
-## Hardware Acceleration
-
-### CUDA (NVIDIA)
-
-```toml
-[dependencies]
-adk-mistralrs = { git = "https://github.com/zavora-ai/adk-rust", features = ["cuda"] }
-```
-
-```rust
-use adk_mistralrs::{Device, DeviceConfig};
-
-let config = MistralRsConfig::builder()
-    .device(Device::Cuda(0))  // Use GPU 0
-    .build();
-```
-
-### Metal (Apple Silicon)
-
-```toml
-[dependencies]
-adk-mistralrs = { git = "https://github.com/zavora-ai/adk-rust", features = ["metal"] }
-```
-
-```rust
-let config = MistralRsConfig::builder()
-    .device(Device::Metal)
-    .build();
-```
-
-### CPU Optimization
-
-```toml
-[dependencies]
-adk-mistralrs = { git = "https://github.com/zavora-ai/adk-rust", features = ["mkl"] }
-```
-
-## Quantization
-
-### ISQ (In-Situ Quantization)
-
-Reduce memory usage by quantizing models at runtime:
-
-```rust
-use adk_mistralrs::QuantizationLevel;
-
-let config = MistralRsConfig::builder()
-    .model_source(ModelSource::huggingface("microsoft/Phi-3.5-mini-instruct"))
-    .isq(QuantizationLevel::Q4_0)  // 4-bit quantization
-    .build();
-```
-
-### Quantization Levels
-
-| Level | Memory | Quality | Use Case |
-|-------|--------|---------|----------|
-| `Q4_0` | Lowest | Good | Resource-constrained |
-| `Q4_1` | Low | Better | Balanced |
-| `Q8_0` | Medium | High | Quality-focused |
-| `Q8_1` | Medium | Highest | Best quality |
-
-### Pre-Quantized Models
-
-```rust
-// GGUF quantized model
-let config = MistralRsConfig::builder()
-    .model_source(ModelSource::gguf("/path/to/model-q4_0.gguf"))
-    .build();
-```
-
-## Adapter Support
-
-### LoRA Adapters
-
-```rust
-use adk_mistralrs::{MistralRsAdapterModel, AdapterConfig};
-
-let config = MistralRsConfig::builder()
-    .model_source(ModelSource::huggingface("microsoft/Phi-3.5-mini-instruct"))
-    .adapter_config(AdapterConfig::lora("username/my-lora-adapter"))
-    .build();
-
-let model = MistralRsAdapterModel::new(config).await?;
-
-// Hot-swap adapters at runtime
 model.swap_adapter("another-adapter").await?;
 ```
 
-### X-LoRA (Mixture of Adapters)
+---
+
+## Step 5: Vision Models (Image Understanding)
+
+Process images with vision-language models:
 
 ```rust
-use std::path::PathBuf;
+use adk_mistralrs::{Llm, MistralRsConfig, MistralRsVisionModel, ModelSource};
 
-let config = MistralRsConfig::builder()
-    .model_source(ModelSource::huggingface("base-model"))
-    .adapter_config(AdapterConfig::xlora(
-        "username/xlora-model",
-        PathBuf::from("ordering.json")
-    ))
-    .build();
-```
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let config = MistralRsConfig::builder()
+        .model_source(ModelSource::huggingface("microsoft/Phi-3.5-vision-instruct"))
+        .build();
 
-## Performance Optimization
+    println!("Loading vision model...");
+    let model = MistralRsVisionModel::new(config).await?;
+    println!("Model loaded: {}", model.name());
 
-### Memory Management
+    // Analyze an image
+    let image = image::open("photo.jpg")?;
+    let response = model.generate_with_image("Describe this image.", vec![image]).await?;
 
-```rust
-let config = MistralRsConfig::builder()
-    .paged_attention(true)      // Enable for long contexts
-    .isq(QuantizationLevel::Q4_0)  // Reduce memory usage
-    .max_tokens(1024)           // Limit output length
-    .build();
-```
-
-### Batch Processing
-
-```rust
-// Process multiple requests efficiently
-let requests = vec![
-    LlmRequest::new("What is AI?"),
-    LlmRequest::new("Explain machine learning"),
-];
-
-for request in requests {
-    let response = model.generate_content(request, false).await?;
-    // Process response
+    Ok(())
 }
 ```
 
-## Error Handling
+---
+
+## Step 6: Multi-Model Serving
+
+Serve multiple models from a single instance:
 
 ```rust
-use adk_mistralrs::MistralRsError;
+use adk_mistralrs::{MistralRsConfig, MistralRsMultiModel, ModelSource};
 
-match MistralRsModel::new(config).await {
-    Ok(model) => {
-        // Use model
-    }
-    Err(MistralRsError::ModelNotFound { path }) => {
-        eprintln!("Model not found at: {}", path);
-    }
-    Err(MistralRsError::OutOfMemory { details }) => {
-        eprintln!("Out of memory: {}. Try reducing context length or enabling ISQ.", details);
-    }
-    Err(MistralRsError::DeviceNotAvailable { device }) => {
-        eprintln!("Device {:?} not available. Falling back to CPU.", device);
-    }
-    Err(e) => {
-        eprintln!("Error: {}", e);
-    }
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let multi = MistralRsMultiModel::new();
+
+    // Add models
+    let phi_config = MistralRsConfig::builder()
+        .model_source(ModelSource::huggingface("microsoft/Phi-3.5-mini-instruct"))
+        .build();
+    multi.add_model("phi", phi_config).await?;
+
+    let gemma_config = MistralRsConfig::builder()
+        .model_source(ModelSource::huggingface("google/gemma-2-2b-it"))
+        .build();
+    multi.add_model("gemma", gemma_config).await?;
+
+    // Set default and route requests
+    multi.set_default("phi").await?;
+    println!("Available models: {:?}", multi.model_names().await);
+
+    // Route to specific model
+    // multi.generate_with_model(Some("gemma"), request, false).await?;
+
+    Ok(())
 }
 ```
+
+---
+
+## Model Sources
+
+### HuggingFace Hub (Default)
+
+```rust
+ModelSource::huggingface("microsoft/Phi-3.5-mini-instruct")
+```
+
+### Local Directory
+
+```rust
+ModelSource::local("/path/to/model")
+```
+
+### Pre-Quantized GGUF
+
+```rust
+ModelSource::gguf("/path/to/model.Q4_K_M.gguf")
+```
+
+---
 
 ## Recommended Models
 
-### Small Models (< 4GB)
+| Model | Size | RAM Needed | Best For |
+|-------|------|------------|----------|
+| `microsoft/Phi-3.5-mini-instruct` | 3.8B | 8GB | Fast, general purpose |
+| `microsoft/Phi-3.5-vision-instruct` | 4.2B | 10GB | Vision + text |
+| `Qwen/Qwen2.5-3B-Instruct` | 3B | 6GB | Multilingual, coding |
+| `google/gemma-2-2b-it` | 2B | 4GB | Lightweight |
+| `mistralai/Mistral-7B-Instruct-v0.3` | 7B | 16GB | High quality |
 
-| Model | Size | Strengths |
-|-------|------|-----------|
-| `microsoft/Phi-3.5-mini-instruct` | 3.8B | Fast, instruction-following |
-| `Qwen/Qwen2.5-3B-Instruct` | 3B | Multilingual, coding |
-| `google/gemma-2-2b-it` | 2B | Efficient, Google-trained |
+---
 
-### Medium Models (4-8GB)
+## Hardware Acceleration
 
-| Model | Size | Strengths |
-|-------|------|-----------|
-| `microsoft/Phi-3.5-medium-instruct` | 14B | Balanced performance |
-| `Qwen/Qwen2.5-7B-Instruct` | 7B | Excellent reasoning |
-| `mistralai/Mistral-7B-Instruct-v0.3` | 7B | Strong general purpose |
+### macOS (Apple Silicon)
 
-### Large Models (8GB+)
+```toml
+adk-mistralrs = { git = "https://github.com/zavora-ai/adk-rust", features = ["metal"] }
+```
 
-| Model | Size | Strengths |
-|-------|------|-----------|
-| `Qwen/Qwen2.5-14B-Instruct` | 14B | High quality reasoning |
-| `microsoft/Phi-3.5-vision-instruct` | 4.2B | Vision + text |
+Metal acceleration is automatic on M1/M2/M3 Macs.
 
-## Examples
+### NVIDIA GPU
+
+```toml
+adk-mistralrs = { git = "https://github.com/zavora-ai/adk-rust", features = ["cuda"] }
+```
+
+Requires CUDA toolkit 11.8+.
+
+### CPU Only
+
+No features needed - CPU is the default.
+
+---
+
+## Run Examples
 
 ```bash
 # Basic usage
-cargo run --example mistralrs_basic
+cargo run --bin basic
 
 # With quantization
-cargo run --example mistralrs_quantized
+cargo run --bin quantized
 
 # LoRA adapters
-cargo run --example mistralrs_lora
+cargo run --bin lora
 
 # Multi-model setup
-cargo run --example mistralrs_multimodel
+cargo run --bin multimodel
 
 # Vision models
-cargo run --example mistralrs_vision
+cargo run --bin vision
 ```
 
-## Feature Flags
-
-```toml
-[features]
-default = []
-
-# Hardware acceleration
-cuda = ["mistralrs/cuda"]
-metal = ["mistralrs/metal"]
-mkl = ["mistralrs/mkl"]
-
-# Advanced features
-flash-attn = ["cuda", "mistralrs/flash-attn"]
-```
+---
 
 ## Troubleshooting
 
-### Common Issues
-
-**Out of Memory**: Enable ISQ quantization or use a smaller model.
-
+**Out of Memory**
 ```rust
+// Enable quantization
 .isq(QuantizationLevel::Q4_0)
+// Enable paged attention
+.paged_attention(true)
 ```
 
-**CUDA Not Found**: Install CUDA toolkit or use CPU.
+**Slow First Load**
+- First run downloads the model (~2-8GB)
+- Subsequent runs use cached model
 
-```rust
-.device(Device::Cpu)
-```
+**Model Not Found**
+- Check HuggingFace model ID is correct
+- Ensure internet connection for first download
 
-**Model Loading Slow**: Use pre-quantized GGUF models.
-
-```rust
-ModelSource::gguf("/path/to/model-q4_0.gguf")
-```
+---
 
 ## Related
 
-- [Model Providers](providers.md) - Other LLM providers
+- [Model Providers](providers.md) - Cloud LLM providers
+- [Ollama](ollama.md) - Alternative local model server
 - [LlmAgent](../agents/llm-agent.md) - Using models with agents
-- [mistral.rs Documentation](https://github.com/EricLBuehler/mistral.rs) - Upstream project
+
+---
+
+**Previous**: [← Ollama (Local)](ollama.md) | **Next**: [Function Tools →](../tools/function-tools.md)

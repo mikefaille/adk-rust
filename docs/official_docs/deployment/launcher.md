@@ -250,3 +250,8 @@ cargo run -- serve --port 8080
 - [Sessions](../sessions/sessions.md) - Session management
 - [Artifacts](../artifacts/artifacts.md) - Artifact storage
 - [Observability](../observability/telemetry.md) - Telemetry and logging
+
+
+---
+
+**Previous**: [← Telemetry](../observability/telemetry.md) | **Next**: [Server →](server.md)

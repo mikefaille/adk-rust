@@ -16,7 +16,7 @@ A session represents a single conversation between a user and an agent. Each ses
 
 The `Session` trait defines the interface for session objects:
 
-```rust,ignore
+```rust
 use adk_rust::prelude::*;
 use chrono::{DateTime, Utc};
 
@@ -45,7 +45,7 @@ pub trait Session: Send + Sync {
 
 The `SessionService` trait defines operations for managing sessions:
 
-```rust,ignore
+```rust
 use adk_rust::session::{
     SessionService, CreateRequest, GetRequest, ListRequest, DeleteRequest, Event
 };
@@ -75,7 +75,7 @@ pub trait SessionService: Send + Sync {
 
 Used to create a new session:
 
-```rust,ignore
+```rust
 use adk_rust::session::CreateRequest;
 use std::collections::HashMap;
 
@@ -91,7 +91,7 @@ let request = CreateRequest {
 
 Used to retrieve an existing session:
 
-```rust,ignore
+```rust
 use adk_rust::session::GetRequest;
 
 let request = GetRequest {
@@ -107,7 +107,7 @@ let request = GetRequest {
 
 Used to list all sessions for a user:
 
-```rust,ignore
+```rust
 use adk_rust::session::ListRequest;
 
 let request = ListRequest {
@@ -120,7 +120,7 @@ let request = ListRequest {
 
 Used to delete a session:
 
-```rust,ignore
+```rust
 use adk_rust::session::DeleteRequest;
 
 let request = DeleteRequest {
@@ -138,7 +138,7 @@ ADK-Rust provides two session service implementations:
 
 Stores sessions in memory. Ideal for development, testing, and single-instance deployments.
 
-```rust,no_run
+```rust
 use adk_rust::prelude::*;
 use adk_rust::session::CreateRequest;
 use std::collections::HashMap;
@@ -168,7 +168,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 
 Stores sessions in a SQLite database. Suitable for production deployments requiring persistence.
 
-```rust,no_run
+```rust
 use adk_rust::session::{DatabaseSessionService, CreateRequest};
 use std::collections::HashMap;
 
@@ -205,7 +205,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 
 Sessions are created with a `CreateRequest`. If no `session_id` is provided, a UUID is generated automatically.
 
-```rust,ignore
+```rust
 use adk_rust::prelude::*;
 use adk_rust::session::CreateRequest;
 use std::collections::HashMap;
@@ -233,7 +233,7 @@ let session = service.create(CreateRequest {
 
 Retrieve a session by its identifiers:
 
-```rust,ignore
+```rust
 use adk_rust::session::GetRequest;
 
 let session = service.get(GetRequest {
@@ -252,7 +252,7 @@ println!("Events: {}", session.events().len());
 
 Events are appended to sessions as the conversation progresses. This is typically handled by the Runner, but can be done manually:
 
-```rust,ignore
+```rust
 use adk_rust::session::Event;
 
 let event = Event::new("invocation_123");
@@ -263,7 +263,7 @@ service.append_event(session.id(), event).await?;
 
 List all sessions for a user:
 
-```rust,ignore
+```rust
 use adk_rust::session::ListRequest;
 
 let sessions = service.list(ListRequest {
@@ -283,7 +283,7 @@ for session in sessions {
 
 Delete a session when it's no longer needed:
 
-```rust,ignore
+```rust
 use adk_rust::session::DeleteRequest;
 
 service.delete(DeleteRequest {
@@ -302,7 +302,7 @@ Sessions are typically managed by the `Runner` when executing agents. The Runner
 3. Appends events as the conversation progresses
 4. Updates session state based on agent actions
 
-```rust,ignore
+```rust
 use adk_rust::prelude::*;
 use std::sync::Arc;
 
@@ -328,7 +328,7 @@ let runner = Runner::new(
 
 The `Events` trait provides access to conversation history:
 
-```rust,ignore
+```rust
 pub trait Events: Send + Sync {
     /// Get all events
     fn all(&self) -> Vec<Event>;
@@ -346,7 +346,7 @@ pub trait Events: Send + Sync {
 
 Access events from a session:
 
-```rust,ignore
+```rust
 let events = session.events();
 println!("Total events: {}", events.len());
 
@@ -364,3 +364,8 @@ for event in events.all() {
 - [State Management](state.md) - Managing session state with prefixes
 - [Events](../events/events.md) - Event structure and actions
 - [Runner](../deployment/launcher.md) - Agent execution with sessions
+
+
+---
+
+**Previous**: [← MCP Tools](../tools/mcp-tools.md) | **Next**: [State Management →](state.md)

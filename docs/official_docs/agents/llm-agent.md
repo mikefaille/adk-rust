@@ -29,7 +29,7 @@ echo 'GOOGLE_API_KEY=your-api-key' > .env
 
 Replace `src/main.rs`:
 
-```rust,no_run
+```rust
 use adk_rust::prelude::*;
 use adk_rust::Launcher;
 use std::sync::Arc;
@@ -82,7 +82,7 @@ You: exit
 
 The `instruction()` method defines your agent's personality and behavior. This is the **system prompt** that guides every response:
 
-```rust,no_run
+```rust
 // A formal business assistant
 let formal_agent = LlmAgentBuilder::new("formal_assistant")
     .instruction("You are a professional business consultant. \
@@ -149,7 +149,7 @@ And so, the revolution began...
 
 Instructions support variable injection using `{var}` syntax. Variables are resolved from session state at runtime:
 
-```rust,no_run
+```rust
 let agent = LlmAgentBuilder::new("personalized")
     .instruction("You are helping {user_name}. Their role is {user_role}. \
                  Tailor your responses to their expertise level.")
@@ -166,7 +166,7 @@ let agent = LlmAgentBuilder::new("personalized")
 
 Here's a complete working example:
 
-```rust,no_run
+```rust
 use adk_rust::prelude::*;
 use adk_rust::runner::{Runner, RunnerConfig};
 use adk_rust::session::{CreateRequest, InMemorySessionService, SessionService};
@@ -268,7 +268,7 @@ Tools give your agent abilities beyond conversation—they can fetch data, perfo
 
 `FunctionTool` is the simplest way to create a tool—wrap any async Rust function and the LLM can call it. You provide a name, description, and handler function that receives JSON arguments and returns a JSON result.
 
-```rust,ignore
+```rust
 let weather_tool = FunctionTool::new(
     "get_weather",                              // Tool name (used by LLM)
     "Get the current weather for a city",       // Description (helps LLM decide when to use it)
@@ -310,7 +310,7 @@ echo 'GOOGLE_API_KEY=your-api-key' > .env
 
 Replace `src/main.rs` with an agent that has three tools:
 
-```rust,no_run
+```rust
 use adk_rust::prelude::*;
 use adk_rust::Launcher;
 use serde_json::json;
@@ -397,7 +397,7 @@ Assistant: I don't have access to search functionality at the moment, but I can 
 
 For applications that need structured data, use `output_schema()`:
 
-```rust,no_run
+```rust
 use adk_rust::prelude::*;
 use serde_json::json;
 use std::sync::Arc;
@@ -457,7 +457,7 @@ Output:
 
 Control conversation history visibility:
 
-```rust,ignore
+```rust
 // Full history (default)
 .include_contents(IncludeContents::Default)
 
@@ -469,7 +469,7 @@ Control conversation history visibility:
 
 Save agent responses to session state:
 
-```rust,ignore
+```rust
 .output_key("summary")  // Response saved to state["summary"]
 ```
 
@@ -477,7 +477,7 @@ Save agent responses to session state:
 
 Compute instructions at runtime:
 
-```rust,ignore
+```rust
 .instruction_provider(|ctx| {
     Box::pin(async move {
         let user_id = ctx.user_id();
@@ -490,7 +490,7 @@ Compute instructions at runtime:
 
 Intercept agent behavior:
 
-```rust,ignore
+```rust
 .before_model_callback(|ctx, request| {
     Box::pin(async move {
         println!("About to call LLM with {} messages", request.contents.len());
@@ -521,7 +521,7 @@ Intercept agent behavior:
 
 A production-ready agent with multiple tools (weather, calculator, search) and output saved to session state:
 
-```rust,no_run
+```rust
 use adk_rust::prelude::*;
 use adk_rust::Launcher;
 use serde_json::json;

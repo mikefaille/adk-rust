@@ -499,3 +499,8 @@ open examples/research_paper/frontend.html
 - [Sessions](../sessions/sessions.md) - Session management
 - [Artifacts](../artifacts/artifacts.md) - Artifact storage
 - [Observability](../observability/telemetry.md) - Telemetry and logging
+
+
+---
+
+**Previous**: [← Launcher](launcher.md) | **Next**: [A2A Protocol →](a2a.md)

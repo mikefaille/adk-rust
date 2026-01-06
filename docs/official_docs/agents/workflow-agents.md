@@ -42,7 +42,7 @@ echo 'GOOGLE_API_KEY=your-api-key' > .env
 
 Replace `src/main.rs`:
 
-```rust,no_run
+```rust
 use adk_rust::prelude::*;
 use adk_rust::Launcher;
 use std::sync::Arc;
@@ -154,7 +154,7 @@ and performance guarantees.
 
 ### Complete Example
 
-```rust,no_run
+```rust
 use adk_rust::prelude::*;
 use adk_rust::Launcher;
 use std::sync::Arc;
@@ -264,7 +264,7 @@ To exit a loop early, give an agent the `ExitLoopTool`. When called, it signals 
 
 ### Complete Example
 
-```rust,no_run
+```rust
 use adk_rust::prelude::*;
 use adk_rust::Launcher;
 use std::sync::Arc;
@@ -367,7 +367,7 @@ Final: "Brew your perfect moment"
 
 `ConditionalAgent` branches execution based on a **synchronous, rule-based** condition. Use this for deterministic routing like A/B testing or environment-based routing.
 
-```rust,ignore
+```rust
 ConditionalAgent::new("router", |ctx| ctx.session().state().get("premium")..., premium_agent)
     .with_else(basic_agent)
 ```
@@ -388,7 +388,7 @@ ConditionalAgent::new("router", |ctx| ctx.session().state().get("premium")..., p
 
 ### Complete Example
 
-```rust,no_run
+```rust
 use adk_rust::prelude::*;
 use adk_rust::Launcher;
 use std::sync::Arc;
@@ -490,7 +490,7 @@ Workflow agents can be nested for complex patterns.
 
 ### Sequential + Parallel + Loop
 
-```rust,no_run
+```rust
 use adk_rust::prelude::*;
 use std::sync::Arc;
 
@@ -529,7 +529,7 @@ let full_pipeline = SequentialAgent::new(
 
 To see what's happening inside a workflow, enable tracing:
 
-```rust,no_run
+```rust
 use adk_rust::prelude::*;
 use adk_rust::runner::{Runner, RunnerConfig};
 use adk_rust::futures::StreamExt;
@@ -586,7 +586,7 @@ while let Some(event) = stream.next().await {
 
 ### SequentialAgent
 
-```rust,ignore
+```rust
 SequentialAgent::new("name", vec![agent1, agent2, agent3])
     .with_description("Optional description")
     .before_callback(callback)  // Called before execution
@@ -595,7 +595,7 @@ SequentialAgent::new("name", vec![agent1, agent2, agent3])
 
 ### ParallelAgent
 
-```rust,ignore
+```rust
 ParallelAgent::new("name", vec![agent1, agent2, agent3])
     .with_description("Optional description")
     .before_callback(callback)
@@ -604,7 +604,7 @@ ParallelAgent::new("name", vec![agent1, agent2, agent3])
 
 ### LoopAgent
 
-```rust,ignore
+```rust
 LoopAgent::new("name", vec![agent1, agent2])
     .with_max_iterations(5)     // Safety limit (recommended)
     .with_description("Optional description")
@@ -614,7 +614,7 @@ LoopAgent::new("name", vec![agent1, agent2])
 
 ### ConditionalAgent
 
-```rust,ignore
+```rust
 ConditionalAgent::new("name", |ctx| condition_fn, if_agent)
     .with_else(else_agent)      // Optional else branch
     .with_description("Optional description")
@@ -622,7 +622,7 @@ ConditionalAgent::new("name", |ctx| condition_fn, if_agent)
 
 ### ExitLoopTool
 
-```rust,ignore
+```rust
 // Add to an agent to let it exit a LoopAgent
 .tool(Arc::new(ExitLoopTool::new()))
 ```

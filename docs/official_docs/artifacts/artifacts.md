@@ -17,7 +17,7 @@ Artifacts are scoped by application, user, and session, providing isolation and 
 
 The `Part` enum represents data that can be stored as artifacts:
 
-```rust,ignore
+```rust
 pub enum Part {
     Text { text: String },
     InlineData { mime_type: String, data: Vec<u8> },
@@ -34,7 +34,7 @@ For artifacts, you'll primarily use:
 
 The simplest way to work with artifacts is through the `Artifacts` trait, which is available on agent contexts:
 
-```rust,ignore
+```rust
 use adk_rust::prelude::*;
 
 // In an agent tool or callback
@@ -65,7 +65,7 @@ async fn save_report(ctx: &ToolContext) -> Result<Value> {
 
 The `ArtifactService` trait defines the core operations for artifact management:
 
-```rust,ignore
+```rust
 #[async_trait]
 pub trait ArtifactService: Send + Sync {
     async fn save(&self, req: SaveRequest) -> Result<SaveResponse>;
@@ -80,7 +80,7 @@ pub trait ArtifactService: Send + Sync {
 
 Save an artifact with automatic or explicit versioning:
 
-```rust,ignore
+```rust
 use adk_artifact::{InMemoryArtifactService, SaveRequest};
 use adk_core::Part;
 
@@ -105,7 +105,7 @@ println!("Saved as version: {}", response.version);
 
 Load the latest version or a specific version:
 
-```rust,ignore
+```rust
 use adk_artifact::LoadRequest;
 
 // Load latest version
@@ -138,7 +138,7 @@ match response.part {
 
 List all artifacts in a session:
 
-```rust,ignore
+```rust
 use adk_artifact::ListRequest;
 
 let response = service.list(ListRequest {
@@ -156,7 +156,7 @@ for file_name in response.file_names {
 
 Delete a specific version or all versions:
 
-```rust,ignore
+```rust
 use adk_artifact::DeleteRequest;
 
 // Delete specific version
@@ -182,7 +182,7 @@ service.delete(DeleteRequest {
 
 List all versions of an artifact:
 
-```rust,ignore
+```rust
 use adk_artifact::VersionsRequest;
 
 let response = service.versions(VersionsRequest {
@@ -205,7 +205,7 @@ Artifacts support automatic versioning:
 - Each subsequent save increments the version number
 - You can load, delete, or query specific versions
 
-```rust,ignore
+```rust
 // First save - becomes version 1
 let v1 = service.save(SaveRequest {
     file_name: "data.json".to_string(),
@@ -247,7 +247,7 @@ Artifacts can be scoped at two levels:
 
 By default, artifacts are scoped to a specific session. Each session has its own isolated artifact namespace:
 
-```rust,ignore
+```rust
 // Session 1
 service.save(SaveRequest {
     session_id: "session_1".to_string(),
@@ -269,7 +269,7 @@ service.save(SaveRequest {
 
 Artifacts with the `user:` prefix are shared across all sessions for a user:
 
-```rust,ignore
+```rust
 // Save in session 1
 service.save(SaveRequest {
     session_id: "session_1".to_string(),
@@ -294,7 +294,7 @@ The `user:` prefix enables:
 
 The `InMemoryArtifactService` provides an in-memory implementation suitable for development and testing:
 
-```rust,ignore
+```rust
 use adk_artifact::InMemoryArtifactService;
 use std::sync::Arc;
 
@@ -314,7 +314,7 @@ let agent = LlmAgentBuilder::new("my_agent")
 
 The `ScopedArtifacts` wrapper simplifies artifact operations by automatically injecting session context:
 
-```rust,ignore
+```rust
 use adk_artifact::{ScopedArtifacts, InMemoryArtifactService};
 use std::sync::Arc;
 
@@ -346,7 +346,7 @@ When you want an LLM to analyze an image stored as an artifact, you need to use 
 
 **Why not use a tool?** Tool responses in LLM APIs are JSON text. If a tool returns image data (even base64-encoded), the model sees it as text, not as an actual image. For true multimodal analysis, the image must be included as a `Part::InlineData` in the conversation content.
 
-```rust,ignore
+```rust
 use adk_rust::prelude::*;
 use adk_rust::artifact::{ArtifactService, InMemoryArtifactService, SaveRequest, LoadRequest};
 use std::sync::Arc;
@@ -420,7 +420,7 @@ async fn main() -> Result<()> {
 
 Gemini models can process PDF documents natively using the same BeforeModel callback pattern. PDFs are injected with MIME type `application/pdf`:
 
-```rust,ignore
+```rust
 // Save PDF as artifact
 artifact_service.save(SaveRequest {
     app_name: "my_app".to_string(),
@@ -464,7 +464,7 @@ See `examples/artifacts/chat_pdf.rs` for a complete working example.
 
 ### Storing Generated Images
 
-```rust,ignore
+```rust
 async fn generate_and_save_image(ctx: &ToolContext) -> Result<Value> {
     let artifacts = ctx.artifacts();
     
@@ -489,7 +489,7 @@ async fn generate_and_save_image(ctx: &ToolContext) -> Result<Value> {
 
 ### Loading and Processing Documents
 
-```rust,ignore
+```rust
 async fn process_document(ctx: &ToolContext, filename: &str) -> Result<Value> {
     let artifacts = ctx.artifacts();
     
@@ -514,7 +514,7 @@ async fn process_document(ctx: &ToolContext, filename: &str) -> Result<Value> {
 
 ### Version History
 
-```rust,ignore
+```rust
 async fn show_history(ctx: &ToolContext, filename: &str) -> Result<Value> {
     let artifacts = ctx.artifacts();
     
@@ -548,3 +548,8 @@ For complete API documentation, see:
 - [Sessions](../sessions/sessions.md) - Session management and lifecycle
 - [Callbacks](../callbacks/callbacks.md) - Accessing artifacts in callbacks
 - [Tools](../tools/function-tools.md) - Using artifacts in custom tools
+
+
+---
+
+**Previous**: [← Callbacks](../callbacks/callbacks.md) | **Next**: [Events →](../events/events.md)

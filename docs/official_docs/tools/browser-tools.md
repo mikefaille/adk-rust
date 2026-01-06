@@ -38,7 +38,7 @@ chromedriver --port=4444
 
 ### Basic Usage
 
-```rust,no_run
+```rust
 use adk_browser::{BrowserSession, BrowserToolset, BrowserConfig};
 use adk_agent::LlmAgentBuilder;
 use adk_model::GeminiModel;
@@ -46,16 +46,23 @@ use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Create browser session
-    let config = BrowserConfig::new("http://localhost:4444");
-    let session = BrowserSession::new(config).await?;
+    // Configure browser session
+    let config = BrowserConfig::new()
+        .webdriver_url("http://localhost:4444")
+        .headless(true)
+        .viewport(1920, 1080);
+
+    // Create and start browser session
+    let browser = Arc::new(BrowserSession::new(config));
+    browser.start().await?;
 
     // Create toolset with all 46 tools
-    let toolset = BrowserToolset::new(session);
+    let toolset = BrowserToolset::new(browser.clone());
     let tools = toolset.all_tools();
 
     // Create AI agent with browser tools
-    let model = Arc::new(GeminiModel::from_env("gemini-2.0-flash")?);
+    let api_key = std::env::var("GOOGLE_API_KEY")?;
+    let model = Arc::new(GeminiModel::new(&api_key, "gemini-2.0-flash")?);
 
     let mut builder = LlmAgentBuilder::new("web_agent")
         .model(model)
@@ -67,6 +74,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let agent = builder.build()?;
 
+    // Clean up when done
+    browser.stop().await?;
+
     Ok(())
 }
 ```
@@ -75,124 +85,119 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 Select only the tools your agent needs:
 
-```rust,ignore
-let toolset = BrowserToolset::new(session)
-    .with_navigation(true)   // Navigate, back, forward, refresh
-    .with_extraction(true)   // Extract text, links, HTML
-    .with_interaction(true)  // Click, type, select
-    .with_forms(false)       // Disable form tools
-    .with_screenshots(true)  // Screenshots
-    .with_javascript(false)  // Disable JS execution
+```rust
+let toolset = BrowserToolset::new(browser)
+    .with_navigation(true)   // navigate, back, forward, refresh
+    .with_extraction(true)   // extract_text, extract_attribute, extract_links, page_info, page_source
+    .with_interaction(true)  // click, double_click, type, clear, select
+    .with_wait(true)         // wait_for_element, wait, wait_for_page_load, wait_for_text
+    .with_screenshot(true)   // screenshot
+    .with_js(true)           // evaluate_js, scroll, hover, handle_alert
     .with_cookies(false)     // Disable cookie tools
     .with_frames(false)      // Disable frame tools
     .with_windows(false)     // Disable window tools
     .with_actions(false);    // Disable advanced actions
 
-let tools = toolset.selected_tools();
+let tools = toolset.all_tools();
 ```
 
 ## Available Tools (46 Total)
 
-### Navigation (6 tools)
+### Navigation (4 tools)
 
-| Tool | Description | Arguments |
-|------|-------------|-----------|
-| `browser_navigate` | Navigate to a URL | `url: string` |
-| `browser_back` | Go back in history | none |
-| `browser_forward` | Go forward in history | none |
-| `browser_refresh` | Refresh current page | none |
-| `browser_page_info` | Get current URL and title | none |
-| `browser_close` | Close the browser session | none |
+| Tool | Description |
+|------|-------------|
+| `browser_navigate` | Navigate to a URL |
+| `browser_back` | Go back in history |
+| `browser_forward` | Go forward in history |
+| `browser_refresh` | Refresh current page |
 
-### Extraction (6 tools)
+### Extraction (5 tools)
 
-| Tool | Description | Arguments |
-|------|-------------|-----------|
-| `browser_extract_text` | Extract visible text | `selector?: string` |
-| `browser_extract_html` | Get HTML source | `selector?: string` |
-| `browser_extract_links` | Extract all links | none |
-| `browser_extract_images` | Extract image sources | none |
-| `browser_extract_tables` | Extract tables as JSON | `selector?: string` |
-| `browser_extract_metadata` | Get page metadata | none |
+| Tool | Description |
+|------|-------------|
+| `browser_extract_text` | Extract visible text from element |
+| `browser_extract_attribute` | Get attribute value from element |
+| `browser_extract_links` | Extract all links on page |
+| `browser_page_info` | Get current URL and title |
+| `browser_page_source` | Get HTML source |
 
-### Interaction (6 tools)
+### Interaction (5 tools)
 
-| Tool | Description | Arguments |
-|------|-------------|-----------|
-| `browser_click` | Click on an element | `selector: string` |
-| `browser_type` | Type text into element | `selector: string, text: string` |
-| `browser_clear` | Clear an input field | `selector: string` |
-| `browser_select` | Select dropdown option | `selector: string, value: string` |
-| `browser_submit` | Submit a form | `selector: string` |
-| `browser_hover` | Hover over element | `selector: string` |
-
-### Forms (5 tools)
-
-| Tool | Description | Arguments |
-|------|-------------|-----------|
-| `browser_fill_form` | Fill multiple fields | `fields: object` |
-| `browser_get_form_fields` | List form fields | `selector?: string` |
-| `browser_get_field_value` | Get field value | `selector: string` |
-| `browser_set_checkbox` | Set checkbox state | `selector: string, checked: bool` |
-| `browser_upload_file` | Upload file to input | `selector: string, path: string` |
-
-### Screenshots (3 tools)
-
-| Tool | Description | Arguments |
-|------|-------------|-----------|
-| `browser_screenshot` | Full page screenshot | `path?: string` |
-| `browser_screenshot_element` | Element screenshot | `selector: string, path?: string` |
-| `browser_print_pdf` | Generate PDF | `path?: string, landscape?: bool` |
-
-### JavaScript (3 tools)
-
-| Tool | Description | Arguments |
-|------|-------------|-----------|
-| `browser_evaluate` | Execute JS sync | `script: string` |
-| `browser_evaluate_async` | Execute async JS | `script: string` |
-| `browser_scroll` | Scroll page/element | `x?: int, y?: int, selector?: string` |
+| Tool | Description |
+|------|-------------|
+| `browser_click` | Click on an element |
+| `browser_double_click` | Double-click an element |
+| `browser_type` | Type text into element |
+| `browser_clear` | Clear an input field |
+| `browser_select` | Select dropdown option |
 
 ### Wait (4 tools)
 
-| Tool | Description | Arguments |
-|------|-------------|-----------|
-| `browser_wait_element` | Wait for element | `selector: string, timeout?: int` |
-| `browser_wait_text` | Wait for text | `text: string, timeout?: int` |
-| `browser_wait_url` | Wait for URL match | `pattern: string, timeout?: int` |
-| `browser_wait_load` | Wait for page load | `timeout?: int` |
+| Tool | Description |
+|------|-------------|
+| `browser_wait_for_element` | Wait for element to appear |
+| `browser_wait` | Wait for a duration |
+| `browser_wait_for_page_load` | Wait for page to load |
+| `browser_wait_for_text` | Wait for text to appear |
 
-### Cookies (4 tools)
+### Screenshots (1 tool)
 
-| Tool | Description | Arguments |
-|------|-------------|-----------|
-| `browser_get_cookies` | Get all cookies | none |
-| `browser_get_cookie` | Get specific cookie | `name: string` |
-| `browser_set_cookie` | Set a cookie | `name: string, value: string, ...` |
-| `browser_delete_cookies` | Delete cookies | `name?: string` |
+| Tool | Description |
+|------|-------------|
+| `browser_screenshot` | Capture page or element screenshot |
+
+### JavaScript (4 tools)
+
+| Tool | Description |
+|------|-------------|
+| `browser_evaluate_js` | Execute JavaScript code |
+| `browser_scroll` | Scroll the page |
+| `browser_hover` | Hover over an element |
+| `browser_handle_alert` | Handle JavaScript alerts |
+
+### Cookies (5 tools)
+
+| Tool | Description |
+|------|-------------|
+| `browser_get_cookies` | Get all cookies |
+| `browser_get_cookie` | Get specific cookie |
+| `browser_add_cookie` | Add a cookie |
+| `browser_delete_cookie` | Delete a cookie |
+| `browser_delete_all_cookies` | Delete all cookies |
+
+### Windows/Tabs (8 tools)
+
+| Tool | Description |
+|------|-------------|
+| `browser_list_windows` | List all windows/tabs |
+| `browser_new_tab` | Open new tab |
+| `browser_new_window` | Open new window |
+| `browser_switch_window` | Switch to window |
+| `browser_close_window` | Close current window |
+| `browser_maximize_window` | Maximize window |
+| `browser_minimize_window` | Minimize window |
+| `browser_set_window_size` | Set window size |
 
 ### Frames (3 tools)
 
-| Tool | Description | Arguments |
-|------|-------------|-----------|
-| `browser_switch_frame` | Switch to iframe | `selector: string` |
-| `browser_switch_parent` | Switch to parent | none |
-| `browser_switch_default` | Switch to main doc | none |
+| Tool | Description |
+|------|-------------|
+| `browser_switch_to_frame` | Switch to iframe |
+| `browser_switch_to_parent_frame` | Switch to parent frame |
+| `browser_switch_to_default_content` | Switch to main document |
 
-### Windows (4 tools)
+### Actions (7 tools)
 
-| Tool | Description | Arguments |
-|------|-------------|-----------|
-| `browser_get_windows` | List windows/tabs | none |
-| `browser_switch_window` | Switch to window | `handle: string` |
-| `browser_new_tab` | Open new tab | `url?: string` |
-| `browser_close_window` | Close current window | none |
-
-### Actions (2 tools)
-
-| Tool | Description | Arguments |
-|------|-------------|-----------|
-| `browser_drag_drop` | Drag and drop | `source: string, target: string` |
-| `browser_double_click` | Double-click | `selector: string` |
+| Tool | Description |
+|------|-------------|
+| `browser_drag_and_drop` | Drag and drop elements |
+| `browser_right_click` | Right-click on element |
+| `browser_focus` | Focus on element |
+| `browser_element_state` | Get element state (visible, enabled, selected) |
+| `browser_press_key` | Press keyboard key |
+| `browser_file_upload` | Upload file to input |
+| `browser_print_to_pdf` | Generate PDF from page |
 
 ## Element Selectors
 
@@ -220,18 +225,21 @@ Tools that target elements accept CSS selectors:
 
 ## Example: Web Research Agent
 
-```rust,ignore
+```rust
 use adk_browser::{BrowserSession, BrowserToolset, BrowserConfig};
 use adk_agent::LlmAgentBuilder;
+use std::sync::Arc;
 
-let session = BrowserSession::new(BrowserConfig::new("http://localhost:4444")).await?;
+let config = BrowserConfig::new().webdriver_url("http://localhost:4444");
+let browser = Arc::new(BrowserSession::new(config));
+browser.start().await?;
 
-let toolset = BrowserToolset::new(session)
+let toolset = BrowserToolset::new(browser.clone())
     .with_navigation(true)
     .with_extraction(true)
-    .with_screenshots(true);
+    .with_screenshot(true);
 
-let agent = LlmAgentBuilder::new("researcher")
+let mut builder = LlmAgentBuilder::new("researcher")
     .model(model)
     .instruction(r#"
         You are a web research assistant. When asked about a topic:
@@ -239,36 +247,43 @@ let agent = LlmAgentBuilder::new("researcher")
         2. Extract key information using browser_extract_text
         3. Take screenshots of important content using browser_screenshot
         4. Summarize your findings
-    "#)
-    .tools(toolset.selected_tools())
-    .build()?;
+    "#);
+
+for tool in toolset.all_tools() {
+    builder = builder.tool(tool);
+}
+
+let agent = builder.build()?;
 ```
 
 ## Example: Form Automation
 
-```rust,ignore
+```rust
 let agent = LlmAgentBuilder::new("form_filler")
     .model(model)
     .instruction(r#"
         You are a form automation assistant. To fill forms:
         1. Use browser_navigate to go to the form page
-        2. Use browser_get_form_fields to discover fields
-        3. Use browser_fill_form to fill multiple fields at once
-        4. Use browser_submit to submit the form
+        2. Use browser_extract_text to see form labels
+        3. Use browser_type to fill text fields
+        4. Use browser_select for dropdowns
+        5. Use browser_click to submit
     "#)
-    .tools(toolset.all_tools())
     .build()?;
 ```
 
 ## Configuration
 
-```rust,ignore
-let config = BrowserConfig::new("http://localhost:4444")
-    .with_headless(true)          // Run headless if supported
-    .with_timeout(Duration::from_secs(30))
-    .with_implicit_wait(Duration::from_secs(10));
+```rust
+let config = BrowserConfig::new()
+    .webdriver_url("http://localhost:4444")
+    .headless(true)
+    .viewport(1920, 1080)
+    .page_load_timeout(30)
+    .user_agent("Custom User Agent");
 
-let session = BrowserSession::new(config).await?;
+let browser = Arc::new(BrowserSession::new(config));
+browser.start().await?;
 ```
 
 ## WebDriver Options
@@ -286,7 +301,7 @@ Works with any WebDriver-compatible server:
 
 Browser tools return structured errors:
 
-```rust,ignore
+```rust
 match result {
     Ok(value) => println!("Success: {:?}", value),
     Err(e) => {
@@ -332,4 +347,4 @@ cargo run --example browser_openai --features openai
 
 ---
 
-**Next**: [MCP Tools →](mcp-tools.md)
+**Previous**: [← Built-in Tools](built-in-tools.md) | **Next**: [UI Tools →](ui-tools.md)
