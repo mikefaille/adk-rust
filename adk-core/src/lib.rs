@@ -89,4 +89,4 @@ pub use model::{
     UsageMetadata,
 };
 pub use tool::{Tool, ToolContext, ToolPredicate, Toolset};
-pub use types::{Content, Part};
+pub use types::{Content, FunctionResponseData, Part};

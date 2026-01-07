@@ -1,5 +1,5 @@
 use adk_gemini::{Gemini, GenerationConfig};
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use display_error_chain::DisplayErrorChain;
 use std::env;
 use std::fs;
@@ -90,7 +90,9 @@ async fn do_main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if images_saved == 0 {
-        warn!("no images were generated - possible reasons: content policy restrictions, API limitations, or model configuration issues");
+        warn!(
+            "no images were generated - possible reasons: content policy restrictions, API limitations, or model configuration issues"
+        );
     } else {
         info!(images_count = images_saved, "image generation completed successfully");
     }

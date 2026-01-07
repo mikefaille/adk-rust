@@ -8,7 +8,11 @@ use axum::{
 use futures::stream::{self, Stream};
 use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
-use tracing::{error, info};
+use tracing::{Instrument, info};
+
+fn default_streaming_true() -> bool {
+    true
+}
 
 #[derive(Clone)]
 pub struct RuntimeController {
@@ -34,7 +38,7 @@ pub struct RunSseRequest {
     pub user_id: String,
     pub session_id: String,
     pub new_message: NewMessage,
-    #[serde(default)]
+    #[serde(default = "default_streaming_true")]
     pub streaming: bool,
     #[serde(default)]
     pub state_delta: Option<serde_json::Value>,
@@ -67,57 +71,64 @@ pub async fn run_sse(
     Path((app_name, user_id, session_id)): Path<(String, String, String)>,
     Json(req): Json<RunRequest>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, StatusCode> {
-    // Validate session exists
-    controller
-        .config
-        .session_service
-        .get(adk_session::GetRequest {
+    let span = tracing::info_span!("run_sse", session_id = %session_id, app_name = %app_name, user_id = %user_id);
+
+    async move {
+        // Validate session exists
+        controller
+            .config
+            .session_service
+            .get(adk_session::GetRequest {
+                app_name: app_name.clone(),
+                user_id: user_id.clone(),
+                session_id: session_id.clone(),
+                num_recent_events: None,
+                after: None,
+            })
+            .await
+            .map_err(|_| StatusCode::NOT_FOUND)?;
+
+        // Load agent
+        let agent = controller
+            .config
+            .agent_loader
+            .load_agent(&app_name)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        // Create runner
+        let runner = adk_runner::Runner::new(adk_runner::RunnerConfig {
             app_name: app_name.clone(),
-            user_id: user_id.clone(),
-            session_id: session_id.clone(),
-            num_recent_events: None,
-            after: None,
+            agent,
+            session_service: controller.config.session_service.clone(),
+            artifact_service: controller.config.artifact_service.clone(),
+            memory_service: None,
+            run_config: None,
         })
-        .await
-        .map_err(|_| StatusCode::NOT_FOUND)?;
-
-    // Load agent
-    let agent = controller
-        .config
-        .agent_loader
-        .load_agent(&app_name)
-        .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    // Create runner
-    let runner = adk_runner::Runner::new(adk_runner::RunnerConfig {
-        app_name,
-        agent,
-        session_service: controller.config.session_service.clone(),
-        artifact_service: controller.config.artifact_service.clone(),
-        memory_service: None,
-    })
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        // Run agent
+        let event_stream = runner
+            .run(user_id, session_id, adk_core::Content::new("user").with_text(&req.new_message))
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    // Run agent
-    let event_stream = runner
-        .run(user_id, session_id, adk_core::Content::new("user").with_text(&req.new_message))
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    // Convert to SSE stream
-    let sse_stream = stream::unfold(event_stream, |mut stream| async move {
-        use futures::StreamExt;
-        match stream.next().await {
-            Some(Ok(event)) => {
-                let json = serde_json::to_string(&event).ok()?;
-                Some((Ok(Event::default().data(json)), stream))
+        // Convert to SSE stream
+        let sse_stream = stream::unfold(event_stream, move |mut stream| async move {
+            use futures::StreamExt;
+            match stream.next().await {
+                Some(Ok(event)) => {
+                    let json = serde_json::to_string(&event).ok()?;
+                    Some((Ok(Event::default().data(json)), stream))
+                }
+                _ => None,
             }
-            _ => None,
-        }
-    });
+        });
 
-    Ok(Sse::new(sse_stream).keep_alive(KeepAlive::default()))
+        Ok(Sse::new(sse_stream).keep_alive(KeepAlive::default()))
+    }
+    .instrument(span)
+    .await
 }
 
 /// POST /run_sse - adk-go compatible endpoint
@@ -147,8 +158,8 @@ pub async fn run_sse_compat(
         .collect::<Vec<_>>()
         .join(" ");
 
-    // Validate session exists
-    controller
+    // Validate session exists or create it
+    let session_result = controller
         .config
         .session_service
         .get(adk_session::GetRequest {
@@ -158,11 +169,22 @@ pub async fn run_sse_compat(
             num_recent_events: None,
             after: None,
         })
-        .await
-        .map_err(|e| {
-            error!(error = ?e, "Session not found");
-            StatusCode::NOT_FOUND
-        })?;
+        .await;
+
+    // If session doesn't exist, create it
+    if session_result.is_err() {
+        controller
+            .config
+            .session_service
+            .create(adk_session::CreateRequest {
+                app_name: app_name.clone(),
+                user_id: user_id.clone(),
+                session_id: Some(session_id.clone()),
+                state: std::collections::HashMap::new(),
+            })
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    }
 
     // Load agent
     let agent = controller
@@ -172,13 +194,17 @@ pub async fn run_sse_compat(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    // Create runner
+    // Create runner with streaming config from request
+    let streaming_mode =
+        if req.streaming { adk_core::StreamingMode::SSE } else { adk_core::StreamingMode::None };
+
     let runner = adk_runner::Runner::new(adk_runner::RunnerConfig {
         app_name,
         agent,
         session_service: controller.config.session_service.clone(),
         artifact_service: controller.config.artifact_service.clone(),
         memory_service: None,
+        run_config: Some(adk_core::RunConfig { streaming_mode }),
     })
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -189,7 +215,7 @@ pub async fn run_sse_compat(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     // Convert to SSE stream
-    let sse_stream = stream::unfold(event_stream, |mut stream| async move {
+    let sse_stream = stream::unfold(event_stream, move |mut stream| async move {
         use futures::StreamExt;
         match stream.next().await {
             Some(Ok(event)) => {

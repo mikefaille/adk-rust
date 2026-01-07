@@ -1,9 +1,10 @@
 use crate::InvocationContext;
 use adk_artifact::ArtifactService;
-use adk_core::{Agent, Content, EventStream, Memory, Result};
+use adk_core::{Agent, Content, EventStream, Memory, Result, RunConfig};
 use adk_session::SessionService;
 use async_stream::stream;
 use std::sync::Arc;
+use tracing::Instrument;
 
 pub struct RunnerConfig {
     pub app_name: String,
@@ -11,6 +12,10 @@ pub struct RunnerConfig {
     pub session_service: Arc<dyn SessionService>,
     pub artifact_service: Option<Arc<dyn ArtifactService>>,
     pub memory_service: Option<Arc<dyn Memory>>,
+    /// Optional run configuration (streaming mode, etc.)
+    /// If not provided, uses default (SSE streaming)
+    #[allow(dead_code)]
+    pub run_config: Option<RunConfig>,
 }
 
 pub struct Runner {
@@ -19,6 +24,7 @@ pub struct Runner {
     session_service: Arc<dyn SessionService>,
     artifact_service: Option<Arc<dyn ArtifactService>>,
     memory_service: Option<Arc<dyn Memory>>,
+    run_config: RunConfig,
 }
 
 impl Runner {
@@ -29,6 +35,7 @@ impl Runner {
             session_service: config.session_service,
             artifact_service: config.artifact_service,
             memory_service: config.memory_service,
+            run_config: config.run_config.unwrap_or_default(),
         })
     }
 
@@ -43,6 +50,7 @@ impl Runner {
         let root_agent = self.root_agent.clone();
         let artifact_service = self.artifact_service.clone();
         let memory_service = self.memory_service.clone();
+        let run_config = self.run_config.clone();
 
         let s = stream! {
             // Get or create session
@@ -97,6 +105,9 @@ impl Runner {
                 ctx = ctx.with_memory(memory);
             }
 
+            // Apply run config (streaming mode, etc.)
+            ctx = ctx.with_run_config(run_config.clone());
+
             let ctx = Arc::new(ctx);
 
             // Append user message to session service (persistent storage)
@@ -113,8 +124,16 @@ impl Runner {
                 return;
             }
 
-            // Run the agent
-            let mut agent_stream = match agent_to_run.run(ctx.clone()).await {
+            // Run the agent with instrumentation (ADK-Go style attributes)
+            let agent_span = tracing::info_span!(
+                "agent.execute",
+                "gcp.vertex.agent.invocation_id" = %invocation_id,
+                "gcp.vertex.agent.session_id" = %session_id,
+                "gcp.vertex.agent.event_id" = %invocation_id, // Use invocation_id as event_id for agent spans
+                "agent.name" = %agent_to_run.name()
+            );
+
+            let mut agent_stream = match agent_to_run.run(ctx.clone()).instrument(agent_span).await {
                 Ok(s) => s,
                 Err(e) => {
                     yield Err(e);

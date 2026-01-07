@@ -24,8 +24,11 @@ pub fn content_to_chat_message(content: &Content) -> Option<ChatMessage> {
             // Handle function responses - combine all responses into one tool message
             let mut response_texts = Vec::new();
             for part in &content.parts {
-                if let Part::FunctionResponse { name, response, .. } = part {
-                    response_texts.push(format!("{}: {}", name, response));
+                if let Part::FunctionResponse { function_response, .. } = part {
+                    response_texts.push(format!(
+                        "{}: {}",
+                        function_response.name, function_response.response
+                    ));
                 }
             }
             if !response_texts.is_empty() {

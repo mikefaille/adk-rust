@@ -1,5 +1,5 @@
 use adk_gemini::{Gemini, GenerationConfig, Part, SpeakerVoiceConfig, SpeechConfig};
-use base64::{engine::general_purpose, Engine as _};
+use base64::{Engine as _, engine::general_purpose};
 use display_error_chain::DisplayErrorChain;
 use std::fs::File;
 use std::io::Write;
@@ -100,8 +100,13 @@ Alice: I couldn't agree more. It's remarkable how far AI-generated speech has co
                                                             "💾 Multi-speaker audio saved as: {}",
                                                             filename
                                                         );
-                                                        info!("🎧 Play with: aplay {} (Linux) or afplay {} (macOS)", filename, filename);
-                                                        info!("👥 Features Alice (Puck voice) and Bob (Charon voice)");
+                                                        info!(
+                                                            "🎧 Play with: aplay {} (Linux) or afplay {} (macOS)",
+                                                            filename, filename
+                                                        );
+                                                        info!(
+                                                            "👥 Features Alice (Puck voice) and Bob (Charon voice)"
+                                                        );
                                                     }
                                                 }
                                                 Err(e) => {
@@ -152,7 +157,9 @@ Alice: I couldn't agree more. It's remarkable how far AI-generated speech has co
             error!("   2. Verify you have access to the Gemini TTS model");
             error!("   3. Check your internet connection");
             error!("   4. Ensure speaker names in dialogue match configured speakers");
-            error!("   5. Make sure the model 'gemini-2.5-flash-preview-tts' supports multi-speaker TTS");
+            error!(
+                "   5. Make sure the model 'gemini-2.5-flash-preview-tts' supports multi-speaker TTS"
+            );
         }
     }
 

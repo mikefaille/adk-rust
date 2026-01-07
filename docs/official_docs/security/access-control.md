@@ -126,10 +126,10 @@ sso.check_token(token, &permission).await?;
 
 ```toml
 [dependencies]
-adk-auth = "0.1.9"
+adk-auth = "0.2.0"
 
 # For SSO/OAuth support
-adk-auth = { version = "0.1.9", features = ["sso"] }
+adk-auth = { version = "0.2.0", features = ["sso"] }
 ```
 
 ## Core Components
@@ -335,3 +335,8 @@ match provider.validate(token).await {
     Err(e) => { /* other error */ }
 }
 ```
+
+
+---
+
+**Previous**: [← Evaluation](../evaluation/evaluation.md) | **Next**: [Development Guidelines →](../development/development-guidelines.md)

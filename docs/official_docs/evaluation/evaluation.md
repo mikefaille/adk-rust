@@ -302,4 +302,4 @@ cargo run --example eval_report
 
 ---
 
-**Next**: [Callbacks →](../callbacks/callbacks.md)
+**Previous**: [← A2A Protocol](../deployment/a2a.md) | **Next**: [Access Control →](../security/access-control.md)

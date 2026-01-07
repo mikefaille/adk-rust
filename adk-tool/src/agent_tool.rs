@@ -402,10 +402,9 @@ impl InvocationContext for AgentToolInvocationContext {
     }
 
     fn run_config(&self) -> &RunConfig {
-        // Use default config for sub-agent
-        // This is a static reference issue - we return a reference to a static default
+        // Use default config for sub-agent (SSE mode)
         static DEFAULT_CONFIG: RunConfig =
-            RunConfig { streaming_mode: adk_core::StreamingMode::Auto };
+            RunConfig { streaming_mode: adk_core::StreamingMode::SSE };
         &DEFAULT_CONFIG
     }
 

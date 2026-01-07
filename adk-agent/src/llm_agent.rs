@@ -1,12 +1,14 @@
 use adk_core::{
     AfterAgentCallback, AfterModelCallback, AfterToolCallback, Agent, BeforeAgentCallback,
     BeforeModelCallback, BeforeModelResult, BeforeToolCallback, CallbackContext, Content, Event,
-    EventActions, GlobalInstructionProvider, InstructionProvider, InvocationContext, Llm,
-    LlmRequest, MemoryEntry, Part, ReadonlyContext, Result, Tool, ToolContext,
+    EventActions, FunctionResponseData, GlobalInstructionProvider, InstructionProvider,
+    InvocationContext, Llm, LlmRequest, LlmResponse, MemoryEntry, Part, ReadonlyContext, Result,
+    Tool, ToolContext,
 };
 use async_stream::stream;
 use async_trait::async_trait;
 use std::sync::{Arc, Mutex};
+use tracing::Instrument;
 
 use crate::guardrails::GuardrailSet;
 
@@ -488,11 +490,9 @@ impl Agent for LlmAgent {
 
             // ===== LOAD SESSION HISTORY =====
             // Load previous conversation turns from the session
+            // NOTE: Session history already includes the current user message (added by Runner before agent runs)
             let session_history = ctx.session().conversation_history();
             conversation_history.extend(session_history);
-
-            // Add user content (current turn)
-            conversation_history.push(ctx.user_content().clone());
 
             // ===== APPLY INCLUDE_CONTENTS FILTERING =====
             // Control what conversation history the agent sees
@@ -639,6 +639,9 @@ impl Agent for LlmAgent {
                     let mut cached_event = Event::new(&invocation_id);
                     cached_event.author = agent_name.clone();
                     cached_event.llm_response.content = cached_response.content.clone();
+                    cached_event.llm_request = Some(serde_json::to_string(&request).unwrap_or_default());
+                    cached_event.gcp_llm_request = Some(serde_json::to_string(&request).unwrap_or_default());
+                    cached_event.gcp_llm_response = Some(serde_json::to_string(&cached_response).unwrap_or_default());
 
                     // Populate long_running_tool_ids for function calls from long-running tools
                     if let Some(ref content) = cached_response.content {
@@ -661,10 +664,37 @@ impl Agent for LlmAgent {
 
                     accumulated_content = cached_response.content;
                 } else {
-                    // Call model with STREAMING ENABLED
+                    // Record LLM request for tracing
+                    let request_json = serde_json::to_string(&request).unwrap_or_default();
+
+                    // Create call_llm span with GCP attributes (works for all model types)
+                    let llm_ts = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_nanos();
+                    let llm_event_id = format!("{}_llm_{}", invocation_id, llm_ts);
+                    let llm_span = tracing::info_span!(
+                        "call_llm",
+                        "gcp.vertex.agent.event_id" = %llm_event_id,
+                        "gcp.vertex.agent.invocation_id" = %invocation_id,
+                        "gcp.vertex.agent.session_id" = %ctx.session_id(),
+                        "gcp.vertex.agent.llm_request" = %request_json,
+                        "gcp.vertex.agent.llm_response" = tracing::field::Empty  // Placeholder for later recording
+                    );
+                    let _llm_guard = llm_span.enter();
+
+                    // Check streaming mode from run config
+                    use adk_core::StreamingMode;
+                    let streaming_mode = ctx.run_config().streaming_mode;
+                    let should_stream_to_client = matches!(streaming_mode, StreamingMode::SSE | StreamingMode::Bidi);
+
+                    // Always use streaming internally for LLM calls
                     let mut response_stream = model.generate_content(request, true).await?;
 
                     use futures::StreamExt;
+
+                    // Track last chunk for final event metadata (used in None mode)
+                    let mut last_chunk: Option<LlmResponse> = None;
 
                     // Stream and process chunks with AfterModel callbacks
                     while let Some(chunk_result) = response_stream.next().await {
@@ -697,20 +727,81 @@ impl Agent for LlmAgent {
                             }
                         }
 
-                        // Yield the (possibly modified) partial event
-                        let mut partial_event = Event::new(&invocation_id);
-                        partial_event.author = agent_name.clone();
-                        partial_event.llm_response.content = chunk.content.clone();
+                        // Accumulate content for conversation history (always needed)
+                        if let Some(chunk_content) = chunk.content.clone() {
+                            if let Some(ref mut acc) = accumulated_content {
+                                acc.parts.extend(chunk_content.parts);
+                            } else {
+                                accumulated_content = Some(chunk_content);
+                            }
+                        }
 
-                        // Populate long_running_tool_ids for function calls from long-running tools
-                        if let Some(ref content) = chunk.content {
+                        // For SSE/Bidi mode: yield each chunk immediately with stable event ID
+                        if should_stream_to_client {
+                            let mut partial_event = Event::with_id(&llm_event_id, &invocation_id);
+                            partial_event.author = agent_name.clone();
+                            partial_event.llm_request = Some(request_json.clone());
+                            partial_event.gcp_llm_request = Some(request_json.clone());
+                            partial_event.gcp_llm_response = Some(serde_json::to_string(&chunk).unwrap_or_default());
+                            partial_event.llm_response.partial = chunk.partial;
+                            partial_event.llm_response.turn_complete = chunk.turn_complete;
+                            partial_event.llm_response.finish_reason = chunk.finish_reason;
+                            partial_event.llm_response.usage_metadata = chunk.usage_metadata.clone();
+                            partial_event.llm_response.content = chunk.content.clone();
+
+                            // Populate long_running_tool_ids
+                            if let Some(ref content) = chunk.content {
+                                let long_running_ids: Vec<String> = content.parts.iter()
+                                    .filter_map(|p| {
+                                        if let Part::FunctionCall { name, .. } = p {
+                                            if let Some(tool) = tools.iter().find(|t| t.name() == name) {
+                                                if tool.is_long_running() {
+                                                    return Some(name.clone());
+                                                }
+                                            }
+                                        }
+                                        None
+                                    })
+                                    .collect();
+                                partial_event.long_running_tool_ids = long_running_ids;
+                            }
+
+                            yield Ok(partial_event);
+                        }
+
+                        // Store last chunk for final event metadata
+                        last_chunk = Some(chunk.clone());
+
+                        // Check if turn is complete
+                        if chunk.turn_complete {
+                            break;
+                        }
+                    }
+
+                    // For None mode: yield single final event with accumulated content
+                    if !should_stream_to_client {
+                        let mut final_event = Event::with_id(&llm_event_id, &invocation_id);
+                        final_event.author = agent_name.clone();
+                        final_event.llm_request = Some(request_json.clone());
+                        final_event.gcp_llm_request = Some(request_json.clone());
+                        final_event.llm_response.content = accumulated_content.clone();
+                        final_event.llm_response.partial = false;
+                        final_event.llm_response.turn_complete = true;
+
+                        // Copy metadata from last chunk
+                        if let Some(ref last) = last_chunk {
+                            final_event.llm_response.finish_reason = last.finish_reason;
+                            final_event.llm_response.usage_metadata = last.usage_metadata.clone();
+                            final_event.gcp_llm_response = Some(serde_json::to_string(last).unwrap_or_default());
+                        }
+
+                        // Populate long_running_tool_ids
+                        if let Some(ref content) = accumulated_content {
                             let long_running_ids: Vec<String> = content.parts.iter()
                                 .filter_map(|p| {
                                     if let Part::FunctionCall { name, .. } = p {
-                                        // Check if this tool is long-running
                                         if let Some(tool) = tools.iter().find(|t| t.name() == name) {
                                             if tool.is_long_running() {
-                                                // Use tool name as ID (we don't have explicit call IDs)
                                                 return Some(name.clone());
                                             }
                                         }
@@ -718,26 +809,16 @@ impl Agent for LlmAgent {
                                     None
                                 })
                                 .collect();
-                            partial_event.long_running_tool_ids = long_running_ids;
+                            final_event.long_running_tool_ids = long_running_ids;
                         }
 
-                        yield Ok(partial_event);
+                        yield Ok(final_event);
+                    }
 
-                        // Accumulate content for history
-                        if let Some(chunk_content) = chunk.content {
-                            if let Some(ref mut acc) = accumulated_content {
-                                // Merge parts from this chunk into accumulated content
-                                acc.parts.extend(chunk_content.parts);
-                            } else {
-                                // First chunk - initialize accumulator
-                                accumulated_content = Some(chunk_content);
-                            }
-                        }
-
-                        // Check if turn is complete
-                        if chunk.turn_complete {
-                            break;
-                        }
+                    // Record LLM response to span before guard drops
+                    if let Some(ref content) = accumulated_content {
+                        let response_json = serde_json::to_string(content).unwrap_or_default();
+                        llm_span.record("gcp.vertex.agent.llm_response", &response_json);
                     }
                 }
 
@@ -795,6 +876,12 @@ impl Agent for LlmAgent {
 
                 if !has_function_calls {
                     // No function calls, we're done
+                    // Record LLM response for tracing
+                    if let Some(ref content) = accumulated_content {
+                        let response_json = serde_json::to_string(content).unwrap_or_default();
+                        tracing::Span::current().record("gcp.vertex.agent.llm_response", &response_json);
+                    }
+
                     tracing::info!(agent.name = %agent_name, "Agent execution complete");
                     break;
                 }
@@ -821,24 +908,37 @@ impl Agent for LlmAgent {
 
                             // Find and execute tool
                             let (tool_result, tool_actions) = if let Some(tool) = tools.iter().find(|t| t.name() == name) {
-                                tracing::info!(tool.name = %name, tool.args = %args, "tool_call");
-
                                 // ✅ Use AgentToolContext that preserves parent context
                                 let tool_ctx: Arc<dyn ToolContext> = Arc::new(AgentToolContext::new(
                                     ctx.clone(),
                                     format!("{}_{}", invocation_id, name),
                                 ));
 
-                                let result = match tool.execute(tool_ctx.clone(), args.clone()).await {
-                                    Ok(result) => {
-                                        tracing::info!(tool.name = %name, tool.result = %result, "tool_result");
-                                        result
+                                // Create span name following adk-go pattern: "execute_tool {name}"
+                                let span_name = format!("execute_tool {}", name);
+                                let tool_span = tracing::info_span!(
+                                    "",
+                                    otel.name = %span_name,
+                                    tool.name = %name,
+                                    "gcp.vertex.agent.event_id" = %format!("{}_{}", invocation_id, name),
+                                    "gcp.vertex.agent.invocation_id" = %invocation_id,
+                                    "gcp.vertex.agent.session_id" = %ctx.session_id()
+                                );
+
+                                // Use instrument() for proper async span handling
+                                let result = async {
+                                    tracing::info!(tool.name = %name, tool.args = %args, "tool_call");
+                                    match tool.execute(tool_ctx.clone(), args.clone()).await {
+                                        Ok(result) => {
+                                            tracing::info!(tool.name = %name, tool.result = %result, "tool_result");
+                                            result
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!(tool.name = %name, error = %e, "tool_error");
+                                            serde_json::json!({ "error": e.to_string() })
+                                        }
                                     }
-                                    Err(e) => {
-                                        tracing::warn!(tool.name = %name, error = %e, "tool_error");
-                                        serde_json::json!({ "error": e.to_string() })
-                                    }
-                                };
+                                }.instrument(tool_span).await;
 
                                 (result, tool_ctx.actions())
                             } else {
@@ -852,8 +952,10 @@ impl Agent for LlmAgent {
                             tool_event.llm_response.content = Some(Content {
                                 role: "function".to_string(),
                                 parts: vec![Part::FunctionResponse {
-                                    name: name.clone(),
-                                    response: tool_result.clone(),
+                                    function_response: FunctionResponseData {
+                                        name: name.clone(),
+                                        response: tool_result.clone(),
+                                    },
                                     id: id.clone(),
                                 }],
                             });
@@ -869,8 +971,10 @@ impl Agent for LlmAgent {
                             conversation_history.push(Content {
                                 role: "function".to_string(),
                                 parts: vec![Part::FunctionResponse {
-                                    name: name.clone(),
-                                    response: tool_result,
+                                    function_response: FunctionResponseData {
+                                        name: name.clone(),
+                                        response: tool_result,
+                                    },
                                     id: id.clone(),
                                 }],
                             });
@@ -878,10 +982,13 @@ impl Agent for LlmAgent {
                     }
                 }
 
-                // If all function calls were from long-running tools, treat as final response
-                // The tools have been executed and returned pending status - don't continue the loop
+                // If all function calls were from long-running tools, we need ONE more model call
+                // to let the model generate a user-friendly response about the pending task
+                // But we mark this as the final iteration to prevent infinite loops
                 if all_calls_are_long_running {
-                    break;
+                    // Continue to next iteration for model to respond, but this will be the last
+                    // The model will see the tool response and generate text like "Started task X..."
+                    // On next iteration, there won't be function calls, so we'll break naturally
                 }
             }
 

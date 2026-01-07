@@ -61,14 +61,14 @@ This crate is part of the ADK-Rust workspace. Add it to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-adk-gemini = "0.1.7"
+adk-gemini = "0.2.0"
 ```
 
 Or use it through `adk-model`:
 
 ```toml
 [dependencies]
-adk-model = { version = "0.1.7", features = ["gemini"] }
+adk-model = { version = "0.2.0", features = ["gemini"] }
 ```
 
 ## 🚀 Quick Start

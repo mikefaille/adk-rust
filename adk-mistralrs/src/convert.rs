@@ -68,11 +68,11 @@ pub fn content_to_message(content: &Content) -> IndexMap<String, Value> {
 
     // Handle function responses
     for part in &content.parts {
-        if let Part::FunctionResponse { id, name, response } = part {
+        if let Part::FunctionResponse { id, function_response } = part {
             message
                 .insert("tool_call_id".to_string(), Value::String(id.clone().unwrap_or_default()));
-            message.insert("name".to_string(), Value::String(name.clone()));
-            message.insert("content".to_string(), response.clone());
+            message.insert("name".to_string(), Value::String(function_response.name.clone()));
+            message.insert("content".to_string(), function_response.response.clone());
         }
     }
 

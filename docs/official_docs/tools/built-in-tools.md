@@ -367,3 +367,7 @@ impl Default for LoadArtifactsTool {
 - [MCP Tools](mcp-tools.md) - Using MCP servers as tool providers
 - [Workflow Agents](../agents/workflow-agents.md) - Using ExitLoopTool with LoopAgent
 - [Artifacts](../artifacts/artifacts.md) - Managing binary data with artifacts
+
+---
+
+**Previous**: [← Function Tools](function-tools.md) | **Next**: [Browser Tools →](browser-tools.md)

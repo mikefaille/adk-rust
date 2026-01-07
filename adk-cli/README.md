@@ -19,14 +19,14 @@ Command-line launcher for Rust Agent Development Kit (ADK-Rust) agents.
 
 ```toml
 [dependencies]
-adk-cli = "0.1.9"
+adk-cli = "0.2.0"
 ```
 
 Or use the meta-crate:
 
 ```toml
 [dependencies]
-adk-rust = { version = "0.1.9", features = ["cli"] }
+adk-rust = { version = "0.2.0", features = ["cli"] }
 ```
 
 ## Quick Start
@@ -52,22 +52,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### Server Mode
 
-```rust
-Launcher::new(Arc::new(agent))
-    .with_server_mode(8080)
-    .run()
-    .await?;
+```bash
+# Run with serve subcommand
+cargo run -- serve --port 8080
 
-// Open http://localhost:8080 for web UI
+# Open http://localhost:8080 for web UI
 ```
 
 ### Custom Configuration
 
 ```rust
+use adk_cli::Launcher;
+use adk_artifact::InMemoryArtifactService;
+use adk_core::StreamingMode;
+use std::sync::Arc;
+
 Launcher::new(Arc::new(agent))
-    .with_user_id("user_123")
-    .with_session_id("session_456")
-    .with_artifact_service(Arc::new(artifacts))
+    .app_name("my_app")
+    .with_artifact_service(Arc::new(InMemoryArtifactService::new()))
+    .with_streaming_mode(StreamingMode::SSE)
     .run()
     .await?;
 ```

@@ -44,11 +44,11 @@ pub fn adk_parts_to_a2a(
 
                 Ok(crate::a2a::Part::Data { data, metadata: Some(metadata) })
             }
-            Part::FunctionResponse { name, response, id } => {
+            Part::FunctionResponse { function_response, id } => {
                 let mut data = Map::new();
                 let mut resp_data = Map::new();
-                resp_data.insert("name".to_string(), Value::String(name.clone()));
-                resp_data.insert("response".to_string(), response.clone());
+                resp_data.insert("name".to_string(), Value::String(function_response.name.clone()));
+                resp_data.insert("response".to_string(), function_response.response.clone());
                 if let Some(resp_id) = id {
                     resp_data.insert("id".to_string(), Value::String(resp_id.clone()));
                 }
@@ -101,7 +101,10 @@ pub fn a2a_parts_to_adk(parts: &[crate::a2a::Part]) -> Result<Vec<Part>> {
                     let response =
                         resp.get("response").cloned().unwrap_or(Value::Object(Map::new()));
                     let id = resp.get("id").and_then(|v| v.as_str()).map(String::from);
-                    Ok(Part::FunctionResponse { name, response, id })
+                    Ok(Part::FunctionResponse {
+                        function_response: adk_core::FunctionResponseData { name, response },
+                        id,
+                    })
                 } else {
                     Err(adk_core::AdkError::Agent("Unknown data part format".to_string()))
                 }

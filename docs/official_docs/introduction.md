@@ -2,7 +2,7 @@
 
 Agent Development Kit (ADK) is a flexible and modular framework for developing and deploying AI agents. While optimized for Gemini and the Google ecosystem, ADK is model-agnostic, deployment-agnostic, and built for compatibility with other frameworks. ADK was designed to make agent development feel more like software development, making it easier for developers to create, deploy, and orchestrate agentic architectures that range from simple tasks to complex workflows.
 
-> **Note:** ADK-Rust v0.1.4 requires Rust 1.75 or higher
+> **Note:** ADK-Rust v0.2.0 requires Rust 1.85.0 or higher
 
 ## Installation
 
@@ -16,7 +16,7 @@ Or add it to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-adk-rust = "0.1"
+adk-rust = "0.2.0"
 tokio = { version = "1.40", features = ["full"] }
 ```
 
@@ -129,10 +129,13 @@ Events form the conversation history and enable replay and debugging.
 
 The underlying LLM that powers LlmAgents. ADK-Rust is optimized for Gemini but supports multiple providers through the `Llm` trait:
 
-- **Gemini**: Google's Gemini models (2.0 Flash, Pro, etc.)
-- **OpenAI**: GPT-4o, GPT-4o-mini, Azure OpenAI
-- **Anthropic**: Claude Opus 4.5, Claude Sonnet 4, Claude 3.5
-- **DeepSeek**: DeepSeek-Chat, DeepSeek-Reasoner with thinking mode
+- **Gemini**: Google's Gemini models (`gemini-3-pro-preview`, `gemini-2.5-flash`, `gemini-2.5-pro`)
+- **OpenAI**: `gpt-5.2`, `gpt-4o`, `gpt-4o-mini`, Azure OpenAI
+- **Anthropic**: `claude-sonnet-4-5`, `claude-opus-4-5`, `claude-sonnet-4`
+- **DeepSeek**: `deepseek-chat`, `deepseek-reasoner` with thinking mode
+- **Groq**: Ultra-fast inference with `llama-3.3-70b-versatile`, `mixtral-8x7b-32768`
+- **Ollama**: Local inference with `llama3.2`, `qwen2.5`, `mistral`, `phi4`
+- **mistral.rs**: High-performance local inference with hardware acceleration
 
 All providers implement the same trait for interchangeable use:
 
@@ -158,18 +161,23 @@ ADK-Rust uses Cargo features for modularity:
 
 ```toml
 # Full installation (default)
-adk-rust = "0.1"
+adk-rust = "0.2.0"
 
 # Minimal: Only agents + Gemini
-adk-rust = { version = "0.1", default-features = false, features = ["minimal"] }
+adk-rust = { version = "0.2.0", default-features = false, features = ["minimal"] }
 
 # Custom: Pick what you need
-adk-rust = { version = "0.1", default-features = false, features = ["agents", "gemini", "tools"] }
+adk-rust = { version = "0.2.0", default-features = false, features = ["agents", "gemini", "tools"] }
 ```
 
 Available features:
 - `agents`: Agent implementations (LlmAgent, CustomAgent, workflow agents)
 - `models`: Model integrations (Gemini)
+- `openai`: OpenAI models (GPT-5, GPT-4o)
+- `anthropic`: Anthropic models (Claude 4.5, Claude 4)
+- `deepseek`: DeepSeek models (chat, reasoner)
+- `groq`: Groq ultra-fast inference
+- `ollama`: Local Ollama models
 - `tools`: Tool system and built-in tools
 - `sessions`: Session management
 - `artifacts`: Artifact storage

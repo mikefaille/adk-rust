@@ -487,3 +487,8 @@ let agent = LlmAgentBuilder::new("error_handling_agent")
 - [LlmAgent](../agents/llm-agent.md) - Agent configuration
 - [Tools](../tools/function-tools.md) - Tool system
 - [Events](../events/events.md) - Event structure
+
+
+---
+
+**Previous**: [← State Management](../sessions/state.md) | **Next**: [Artifacts →](../artifacts/artifacts.md)

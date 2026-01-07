@@ -2,9 +2,9 @@ use serde::{Deserialize, Serialize};
 use snafu::Snafu;
 use time::OffsetDateTime;
 
+use crate::Model;
 use crate::common::serde::*;
 use crate::generation::{GenerateContentRequest, GenerationResponse};
-use crate::Model;
 
 /// Batch file request line JSON representation.
 #[derive(Debug, Clone, Serialize, Deserialize)]

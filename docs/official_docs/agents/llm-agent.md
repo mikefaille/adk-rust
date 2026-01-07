@@ -1,266 +1,597 @@
 # LlmAgent
 
-The `LlmAgent` is the core agent type in ADK-Rust that uses a Large Language Model for reasoning and decision-making. It provides a flexible builder pattern for configuration and supports tools, sub-agents, callbacks, and instruction templating.
+The `LlmAgent` is the core agent type in ADK-Rust that uses a Large Language Model for reasoning and decision-making.
 
-## Overview
+## Quick Start
 
-An LlmAgent wraps an LLM (like Gemini) and provides:
+Create a new project:
 
-- **Instruction templating** with session state variable injection
-- **Tool integration** for extending agent capabilities
-- **Sub-agent support** for building agent hierarchies
-- **Callback hooks** for observing and modifying behavior
-- **Output management** with schema validation and state storage
+```bash
+cargo new llm_agent
+cd llm_agent
+```
 
-## Basic Usage
+Add dependencies to `Cargo.toml`:
 
-Create a minimal agent with just a name and model:
+```toml
+[dependencies]
+adk-rust = "0.2.0"
+tokio = { version = "1.40", features = ["full"] }
+dotenvy = "0.15"
+serde_json = "1.0"
+```
+
+Create `.env` with your API key:
+
+```bash
+echo 'GOOGLE_API_KEY=your-api-key' > .env
+```
+
+Replace `src/main.rs`:
 
 ```rust
 use adk_rust::prelude::*;
+use adk_rust::Launcher;
 use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
+    dotenvy::dotenv().ok();
+    
     let api_key = std::env::var("GOOGLE_API_KEY")?;
     let model = GeminiModel::new(&api_key, "gemini-2.5-flash")?;
 
     let agent = LlmAgentBuilder::new("my_agent")
+        .instruction("You are a helpful assistant.")
         .model(Arc::new(model))
         .build()?;
 
-    println!("Created agent: {}", agent.name());
+    Launcher::new(Arc::new(agent)).run().await?;
     Ok(())
 }
 ```
 
-## Builder Methods
+Run it:
 
-The `LlmAgentBuilder` provides a fluent API for configuring agents:
+```bash
+cargo run
+```
 
-### Required Methods
+### Interacting with Your Agent
 
-| Method | Description |
-|--------|-------------|
-| `new(name)` | Creates a new builder with the agent's name |
-| `model(model)` | Sets the LLM model (required) |
-| `build()` | Builds the agent, returns `Result<LlmAgent>` |
+You'll see an interactive prompt:
 
-### Configuration Methods
+```
+🤖 Agent ready! Type your questions (or 'exit' to quit).
 
-| Method | Description |
-|--------|-------------|
-| `description(desc)` | Human-readable description of the agent's purpose |
-| `instruction(text)` | System instruction for the agent (supports templating) |
-| `instruction_provider(fn)` | Dynamic instruction provider function |
-| `global_instruction(text)` | Tree-wide instruction for agent hierarchies |
-| `global_instruction_provider(fn)` | Dynamic global instruction provider |
-| `include_contents(mode)` | Controls conversation history visibility |
-| `output_key(key)` | Saves agent output to session state |
-| `output_schema(schema)` | JSON schema for structured output |
-| `input_schema(schema)` | JSON schema for input validation |
+You: Hello! What can you help me with?
+Assistant: Hello! I'm a helpful assistant. I can help you with:
+- Answering questions on various topics
+- Explaining concepts clearly
+- Having a conversation
 
-### Tool and Agent Methods
+What would you like to know?
 
-| Method | Description |
-|--------|-------------|
-| `tool(tool)` | Adds a tool to the agent |
-| `sub_agent(agent)` | Adds a sub-agent for delegation |
-| `disallow_transfer_to_parent(bool)` | Prevents transfer back to parent agent |
-| `disallow_transfer_to_peers(bool)` | Prevents transfer to sibling agents |
+You: exit
+👋 Goodbye!
+```
 
-### Callback Methods
+---
 
-| Method | Description |
-|--------|-------------|
-| `before_callback(fn)` | Called before agent execution |
-| `after_callback(fn)` | Called after agent execution |
-| `before_model_callback(fn)` | Called before LLM request |
-| `after_model_callback(fn)` | Called after LLM response |
-| `before_tool_callback(fn)` | Called before tool execution |
-| `after_tool_callback(fn)` | Called after tool execution |
+## Shaping Agent Behavior with Instructions
 
-## Instruction Templating
+The `instruction()` method defines your agent's personality and behavior. This is the **system prompt** that guides every response:
+
+```rust
+// A formal business assistant
+let formal_agent = LlmAgentBuilder::new("formal_assistant")
+    .instruction("You are a professional business consultant. \
+                 Use formal language. Be concise and data-driven.")
+    .model(Arc::new(model))
+    .build()?;
+
+// A friendly coding tutor
+let tutor_agent = LlmAgentBuilder::new("code_tutor")
+    .instruction("You are a friendly coding tutor for beginners. \
+                 Explain concepts simply. Use examples. \
+                 Encourage questions. Never make the user feel bad for not knowing.")
+    .model(Arc::new(model))
+    .build()?;
+
+// A creative storyteller
+let story_agent = LlmAgentBuilder::new("storyteller")
+    .instruction("You are a creative storyteller. \
+                 Craft engaging narratives with vivid descriptions. \
+                 Use plot twists and memorable characters.")
+    .model(Arc::new(model))
+    .build()?;
+```
+
+### Example Outputs
+
+**User prompt:** "What is Rust?"
+
+**Formal Business Assistant:**
+```
+Rust is a systems programming language focused on performance, memory safety, 
+and concurrency. Key metrics: 0 runtime overhead, 0 garbage collection. 
+Adoption growing 30% YoY in enterprise. Recommended for performance-critical 
+applications where reliability is paramount.
+```
+
+**Friendly Coding Tutor:**
+```
+Great question! 🎉 Rust is a programming language that helps you write fast 
+and safe code. Think of it like a helpful friend who stops you from making 
+mistakes before they happen!
+
+Here's a simple example:
+  let name = "Alice";  // This creates a variable
+
+What makes Rust special is that it catches bugs at compile time, not when 
+your program is running. Pretty cool, right? Want me to explain more?
+```
+
+**Creative Storyteller:**
+```
+In the twilight of 2010, in a secret Mozilla laboratory, a lone developer 
+named Graydon Hoare breathed life into something extraordinary—a language 
+that would challenge the old gods of C and C++.
+
+They called it Rust, named for a fungus that survives against all odds. 
+Like a phoenix rising from the ashes of segmentation faults and memory 
+leaks, Rust promised a new era: speed without sacrifice, power without peril.
+
+And so, the revolution began...
+```
+
+### Instruction Templating
 
 Instructions support variable injection using `{var}` syntax. Variables are resolved from session state at runtime:
 
 ```rust
-let agent = LlmAgentBuilder::new("greeter")
+let agent = LlmAgentBuilder::new("personalized")
+    .instruction("You are helping {user_name}. Their role is {user_role}. \
+                 Tailor your responses to their expertise level.")
     .model(Arc::new(model))
-    .instruction("You are helping {user_name}. Their preference is {preference}.")
     .build()?;
 ```
 
-When the agent runs, `{user_name}` and `{preference}` are replaced with values from the session state. If a variable is not found, it remains as-is in the instruction.
+**Step-by-step guide to use templating:**
 
-### Setting State Variables
+1. **Create the agent** with template variables in the instruction
+2. **Set up Runner and SessionService** to manage state
+3. **Create session with state variables** that match your template
+4. **Run the agent** - templates get replaced automatically
 
-State variables can be set through:
-
-1. **Session state** - Pre-populated when creating a session
-2. **Tool responses** - Tools can update state via `EventActions`
-3. **Output keys** - Agent output saved to state with `output_key()`
-
-```rust
-// Using output_key to save agent response to state
-let summarizer = LlmAgentBuilder::new("summarizer")
-    .model(Arc::new(model))
-    .instruction("Summarize the following text concisely.")
-    .output_key("summary")  // Response saved to state["summary"]
-    .build()?;
-```
-
-## IncludeContents
-
-The `IncludeContents` enum controls what conversation history the agent receives:
+Here's a complete working example:
 
 ```rust
 use adk_rust::prelude::*;
-
-// Default - agent sees full conversation history
-let agent = LlmAgentBuilder::new("agent")
-    .model(Arc::new(model))
-    .include_contents(IncludeContents::Default)
-    .build()?;
-
-// None - agent only sees current turn (stateless)
-let stateless_agent = LlmAgentBuilder::new("stateless")
-    .model(Arc::new(model))
-    .include_contents(IncludeContents::None)
-    .build()?;
-```
-
-### Options
-
-| Value | Behavior |
-|-------|----------|
-| `IncludeContents::Default` | Agent receives full conversation history (default) |
-| `IncludeContents::None` | Agent only sees current user input and instructions |
-
-Use `None` for agents that should operate independently on each turn without context from previous interactions.
-
-## Output Schema
-
-For structured output, provide a JSON schema:
-
-```rust
+use adk_rust::runner::{Runner, RunnerConfig};
+use adk_rust::session::{CreateRequest, InMemorySessionService, SessionService};
+use adk_rust::futures::StreamExt;
 use serde_json::json;
-
-let agent = LlmAgentBuilder::new("structured_agent")
-    .model(Arc::new(model))
-    .instruction("Extract the person's name and age from the text.")
-    .output_schema(json!({
-        "type": "object",
-        "properties": {
-            "name": { "type": "string" },
-            "age": { "type": "integer" }
-        },
-        "required": ["name", "age"]
-    }))
-    .build()?;
-```
-
-The LLM will format its response according to the schema.
-
-## Adding Tools
-
-Tools extend agent capabilities with custom functions:
-
-```rust
-use adk_rust::prelude::*;
-use serde_json::json;
+use std::collections::HashMap;
 use std::sync::Arc;
-
-// Create a simple tool with FunctionTool::new(name, description, handler)
-let weather_tool = FunctionTool::new(
-    "get_weather",
-    "Get the current weather for a location",
-    |_ctx, args| async move {
-        let location = args.get("location")
-            .and_then(|v| v.as_str())
-            .unwrap_or("unknown");
-        Ok(json!({ "weather": "sunny", "location": location }))
-    },
-);
-
-let agent = LlmAgentBuilder::new("weather_agent")
-    .model(Arc::new(model))
-    .instruction("You help users check the weather.")
-    .tool(Arc::new(weather_tool))
-    .build()?;
-```
-
-## Dynamic Instructions
-
-For instructions that need runtime computation, use an instruction provider:
-
-```rust
-use adk_rust::prelude::*;
-use std::sync::Arc;
-
-let agent = LlmAgentBuilder::new("dynamic_agent")
-    .model(Arc::new(model))
-    .instruction_provider(|ctx| {
-        Box::pin(async move {
-            let user_id = ctx.user_id();
-            Ok(format!("You are assisting user {}. Be helpful and concise.", user_id))
-        })
-    })
-    .build()?;
-```
-
-The provider receives a `ReadonlyContext` with access to session information.
-
-## Complete Example
-
-Here's a fully configured agent demonstrating multiple features:
-
-```rust
-use adk_rust::prelude::*;
-use adk_rust::IncludeContents;
-use std::sync::Arc;
-use serde_json::json;
 
 #[tokio::main]
 async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
+    dotenvy::dotenv().ok();
     let api_key = std::env::var("GOOGLE_API_KEY")?;
     let model = GeminiModel::new(&api_key, "gemini-2.5-flash")?;
 
-    // Create a tool with FunctionTool::new(name, description, handler)
-    let calculator = FunctionTool::new(
-        "calculate",
-        "Perform basic arithmetic",
-        |_ctx, args| async move {
-            let expr = args.get("expression")
-                .and_then(|v| v.as_str())
-                .unwrap_or("0");
-            // Simple evaluation (in production, use a proper parser)
-            Ok(json!({ "result": expr, "note": "Expression received" }))
-        },
-    );
-
-    // Build the agent with full configuration
-    let agent = LlmAgentBuilder::new("math_assistant")
-        .description("A helpful math assistant that can perform calculations")
-        .instruction("You are a math tutor helping {user_name}. \
-                     Use the calculator tool for arithmetic operations. \
-                     Explain your reasoning step by step.")
+    // 1. Agent with templated instruction
+    let agent = LlmAgentBuilder::new("personalized")
+        .instruction("You are helping {user_name}. Their role is {user_role}. \
+                     Tailor your responses to their expertise level.")
         .model(Arc::new(model))
-        .tool(Arc::new(calculator))
-        .include_contents(IncludeContents::Default)
-        .output_key("last_response")
         .build()?;
 
-    println!("Created agent: {}", agent.name());
-    println!("Description: {}", agent.description());
-    
+    // 2. Create session service and runner
+    let session_service = Arc::new(InMemorySessionService::new());
+    let runner = Runner::new(RunnerConfig {
+        app_name: "templating_demo".to_string(),
+        agent: Arc::new(agent),
+        session_service: session_service.clone(),
+        artifact_service: None,
+        memory_service: None,
+        run_config: None,
+    })?;
+
+    // 3. Create session with state variables
+    let mut state = HashMap::new();
+    state.insert("user_name".to_string(), json!("Alice"));
+    state.insert("user_role".to_string(), json!("Senior Developer"));
+
+    let session = session_service.create(CreateRequest {
+        app_name: "templating_demo".to_string(),
+        user_id: "user123".to_string(),
+        session_id: None,
+        state,
+    }).await?;
+
+    // 4. Run the agent - instruction becomes:
+    // "You are helping Alice. Their role is Senior Developer..."
+    let mut response_stream = runner.run(
+        "user123".to_string(),
+        session.id().to_string(),
+        Content::new("user").with_text("Explain async/await in Rust"),
+    ).await?;
+
+    // Print the response
+    while let Some(event) = response_stream.next().await {
+        let event = event?;
+        if let Some(content) = event.content() {
+            for part in &content.parts {
+                if let Part::Text { text } = part {
+                    print!("{}", text);
+                }
+            }
+        }
+    }
+
     Ok(())
 }
 ```
 
-## API Reference
+**Template Variable Types:**
 
-See the rustdoc for `LlmAgentBuilder` for complete API documentation.
+| Pattern | Example | Source |
+|---------|---------|--------|
+| `{var}` | `{user_name}` | Session state |
+| `{prefix:var}` | `{user:name}`, `{app:config}` | Prefixed state |
+| `{var?}` | `{user_name?}` | Optional (empty if missing) |
+| `{artifact.file}` | `{artifact.resume.pdf}` | Artifact content |
+
+**Output Example:**
+
+Template: `"You are helping {user_name}. Their role is {user_role}."`  
+Becomes: `"You are helping Alice. Their role is Senior Developer."`
+
+The agent will then respond with personalized content based on the user's name and expertise level!
+
+---
+
+## Adding Tools
+
+Tools give your agent abilities beyond conversation—they can fetch data, perform calculations, search the web, or call external APIs. The LLM decides when to use a tool based on the user's request.
+
+### How Tools Work
+
+1. **Agent receives user message** → "What's the weather in Tokyo?"
+2. **LLM decides to call tool** → Selects `get_weather` with `{"city": "Tokyo"}`
+3. **Tool executes** → Returns `{"temperature": "22°C", "condition": "sunny"}`
+4. **LLM formats response** → "The weather in Tokyo is sunny at 22°C."
+
+### Creating a Tool with FunctionTool
+
+`FunctionTool` is the simplest way to create a tool—wrap any async Rust function and the LLM can call it. You provide a name, description, and handler function that receives JSON arguments and returns a JSON result.
+
+```rust
+let weather_tool = FunctionTool::new(
+    "get_weather",                              // Tool name (used by LLM)
+    "Get the current weather for a city",       // Description (helps LLM decide when to use it)
+    |_ctx, args| async move {                   // Handler function
+        let city = args.get("city")             // Extract arguments from JSON
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+        Ok(json!({ "city": city, "temperature": "22°C" }))  // Return JSON result
+    },
+);
+```
+> **⚠️ Note: Current Limitation**: Built-in tools like `GoogleSearchTool` are currently incompatible with `FunctionTool` in the same agent. Use either built-in tools OR custom `FunctionTool`s, but not both together. 
+**💡 Workaround**: Create separate subagents, each with their own tool type, and coordinate them using a master LLMAgent, workflow agents or multi-agent patterns.
+
+### Build a Multi-Tool Agent
+
+Create a new project:
+
+```bash
+cargo new tool_agent
+cd tool_agent
+```
+
+Add dependencies to `Cargo.toml`:
+
+```toml
+[dependencies]
+adk-rust = { version = "0.2.0", features = ["tools"] }
+tokio = { version = "1.40", features = ["full"] }
+dotenvy = "0.15"
+serde_json = "1.0"
+```
+
+Create `.env`:
+
+```bash
+echo 'GOOGLE_API_KEY=your-api-key' > .env
+```
+
+Replace `src/main.rs` with an agent that has three tools:
+
+```rust
+use adk_rust::prelude::*;
+use adk_rust::Launcher;
+use serde_json::json;
+use std::sync::Arc;
+
+#[tokio::main]
+async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
+    dotenvy::dotenv().ok();
+    let api_key = std::env::var("GOOGLE_API_KEY")?;
+    let model = GeminiModel::new(&api_key, "gemini-2.5-flash")?;
+
+    // Tool 1: Weather lookup
+    let weather_tool = FunctionTool::new(
+        "get_weather",
+        "Get the current weather for a city. Parameters: city (string)",
+        |_ctx, args| async move {
+            let city = args.get("city").and_then(|v| v.as_str()).unwrap_or("unknown");
+            Ok(json!({ "city": city, "temperature": "22°C", "condition": "sunny" }))
+        },
+    );
+
+    // Tool 2: Calculator
+    let calculator = FunctionTool::new(
+        "calculate",
+        "Perform arithmetic. Parameters: a (number), b (number), operation (add/subtract/multiply/divide)",
+        |_ctx, args| async move {
+            let a = args.get("a").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let b = args.get("b").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let op = args.get("operation").and_then(|v| v.as_str()).unwrap_or("add");
+            let result = match op {
+                "add" => a + b,
+                "subtract" => a - b,
+                "multiply" => a * b,
+                "divide" => if b != 0.0 { a / b } else { 0.0 },
+                _ => 0.0,
+            };
+            Ok(json!({ "result": result }))
+        },
+    );
+
+    // Tool 3: Built-in Google Search (Note: Currently unsupported in ADK-Rust)
+    // let search_tool = GoogleSearchTool::new();
+
+    // Build agent with weather and calculator tools
+    let agent = LlmAgentBuilder::new("multi_tool_agent")
+        .instruction("You are a helpful assistant. Use tools when needed: \
+                     - get_weather for weather questions \
+                     - calculate for math")
+        .model(Arc::new(model))
+        .tool(Arc::new(weather_tool))
+        .tool(Arc::new(calculator))
+        // .tool(Arc::new(search_tool))  // Currently unsupported
+        .build()?;
+
+    Launcher::new(Arc::new(agent)).run().await?;
+    Ok(())
+}
+```
+
+Run your agent:
+
+```bash
+cargo run
+```
+
+### Example Interaction
+
+```
+You: What's 15% of 250?
+Assistant: [Using calculate tool with a=250, b=0.15, operation=multiply]
+15% of 250 is 37.5.
+
+You: What's the weather in Tokyo?
+Assistant: [Using get_weather tool with city=Tokyo]
+The weather in Tokyo is sunny with a temperature of 22°C.
+
+You: Search for latest Rust features
+Assistant: I don't have access to search functionality at the moment, but I can help with other questions about Rust or perform calculations!
+```
+
+---
+
+## Structured Output with JSON Schema
+
+For applications that need structured data, use `output_schema()`:
+
+```rust
+use adk_rust::prelude::*;
+use serde_json::json;
+use std::sync::Arc;
+
+#[tokio::main]
+async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
+    dotenvy::dotenv().ok();
+    let api_key = std::env::var("GOOGLE_API_KEY")?;
+    let model = GeminiModel::new(&api_key, "gemini-2.5-flash")?;
+
+    let extractor = LlmAgentBuilder::new("entity_extractor")
+        .instruction("Extract entities from the given text.")
+        .model(Arc::new(model))
+        .output_schema(json!({
+            "type": "object",
+            "properties": {
+                "people": {
+                    "type": "array",
+                    "items": { "type": "string" }
+                },
+                "locations": {
+                    "type": "array",
+                    "items": { "type": "string" }
+                },
+                "dates": {
+                    "type": "array",
+                    "items": { "type": "string" }
+                }
+            },
+            "required": ["people", "locations", "dates"]
+        }))
+        .build()?;
+
+    println!("Entity extractor ready!");
+    Ok(())
+}
+```
+
+### JSON Output Example
+
+Input: "John met Sarah in Paris on December 25th"
+
+Output:
+```json
+{
+  "people": ["John", "Sarah"],
+  "locations": ["Paris"],
+  "dates": ["December 25th"]
+}
+```
+
+---
+
+## Advanced Features
+
+### Include Contents
+
+Control conversation history visibility:
+
+```rust
+// Full history (default)
+.include_contents(IncludeContents::Default)
+
+// Stateless - only sees current input
+.include_contents(IncludeContents::None)
+```
+
+### Output Key
+
+Save agent responses to session state:
+
+```rust
+.output_key("summary")  // Response saved to state["summary"]
+```
+
+### Dynamic Instructions
+
+Compute instructions at runtime:
+
+```rust
+.instruction_provider(|ctx| {
+    Box::pin(async move {
+        let user_id = ctx.user_id();
+        Ok(format!("You are assisting user {}.", user_id))
+    })
+})
+```
+
+### Callbacks
+
+Intercept agent behavior:
+
+```rust
+.before_model_callback(|ctx, request| {
+    Box::pin(async move {
+        println!("About to call LLM with {} messages", request.contents.len());
+        Ok(BeforeModelResult::Continue)
+    })
+})
+```
+
+---
+
+## Builder Reference
+
+| Method | Description |
+|--------|-------------|
+| `new(name)` | Creates builder with agent name |
+| `model(Arc<dyn Llm>)` | Sets the LLM (required) |
+| `description(text)` | Agent description |
+| `instruction(text)` | System prompt |
+| `tool(Arc<dyn Tool>)` | Adds a tool |
+| `output_schema(json)` | JSON schema for structured output |
+| `output_key(key)` | Saves response to state |
+| `include_contents(mode)` | History visibility |
+| `build()` | Creates the agent |
+
+---
+
+## Complete Example
+
+A production-ready agent with multiple tools (weather, calculator, search) and output saved to session state:
+
+```rust
+use adk_rust::prelude::*;
+use adk_rust::Launcher;
+use serde_json::json;
+use std::sync::Arc;
+
+#[tokio::main]
+async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
+    dotenvy::dotenv().ok();
+    let api_key = std::env::var("GOOGLE_API_KEY")?;
+    let model = GeminiModel::new(&api_key, "gemini-2.5-flash")?;
+
+    // Weather tool
+    let weather = FunctionTool::new(
+        "get_weather",
+        "Get weather for a city. Parameters: city (string)",
+        |_ctx, args| async move {
+            let city = args.get("city").and_then(|v| v.as_str()).unwrap_or("unknown");
+            Ok(json!({
+                "city": city,
+                "temperature": "22°C",
+                "humidity": "65%",
+                "condition": "partly cloudy"
+            }))
+        },
+    );
+
+    // Calculator tool
+    let calc = FunctionTool::new(
+        "calculate",
+        "Math operations. Parameters: expression (string like '2 + 2')",
+        |_ctx, args| async move {
+            let expr = args.get("expression").and_then(|v| v.as_str()).unwrap_or("0");
+            Ok(json!({ "expression": expr, "result": "computed" }))
+        },
+    );
+
+    // Build the full agent
+    let agent = LlmAgentBuilder::new("assistant")
+        .description("A helpful assistant with weather and calculation abilities")
+        .instruction("You are a helpful assistant. \
+                     Use the weather tool for weather questions. \
+                     Use the calculator for math. \
+                     Be concise and friendly.")
+        .model(Arc::new(model))
+        .tool(Arc::new(weather))
+        .tool(Arc::new(calc))
+        // .tool(Arc::new(GoogleSearchTool::new()))  // Currently unsupported with FunctionTool
+        .output_key("last_response")
+        .build()?;
+
+    println!("✅ Agent '{}' ready!", agent.name());
+    Launcher::new(Arc::new(agent)).run().await?;
+    Ok(())
+}
+```
+
+Try these prompts:
+
+```
+You: What's 25 times 4?
+Assistant: It's 100.
+
+You: How's the weather in New York?
+Assistant: The weather in New York is partly cloudy with a temperature of 22°C and 65% humidity.
+
+You: Calculate 15% tip on $85
+Assistant: A 15% tip on $85 is $12.75, making the total $97.75.
+```
+
+---
 
 ## Related
 
@@ -268,3 +599,7 @@ See the rustdoc for `LlmAgentBuilder` for complete API documentation.
 - [Multi-Agent Systems](multi-agent.md) - Building agent hierarchies
 - [Function Tools](../tools/function-tools.md) - Creating custom tools
 - [Callbacks](../callbacks/callbacks.md) - Intercepting agent behavior
+
+---
+
+**Previous**: [Quickstart](../quickstart.md) | **Next**: [Workflow Agents →](workflow-agents.md)

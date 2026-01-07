@@ -44,7 +44,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-adk-realtime = { version = "0.1", features = ["openai"] }
+adk-realtime = { version = "0.2.0", features = ["openai"] }
 ```
 
 ### Basic Usage
@@ -364,3 +364,7 @@ ADK-Rust's realtime implementation follows the OpenAI Agents SDK pattern:
 | Tools | Function definitions | `Tool` trait + `ToolDefinition` |
 | Handoffs | `transfer_to_agent` | `sub_agents` + auto-generated tool |
 | Callbacks | Hooks | `before_*` / `after_*` callbacks |
+
+---
+
+**Previous**: [← Graph Agents](./graph-agents.md) | **Next**: [Model Providers →](../models/providers.md)

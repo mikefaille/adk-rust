@@ -65,6 +65,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         session_service,
         artifact_service: None,
         memory_service: None,
+        run_config: None,
     })?;
 
     println!("🤖 Agent ready! Type your questions (or 'exit' to quit).\n");

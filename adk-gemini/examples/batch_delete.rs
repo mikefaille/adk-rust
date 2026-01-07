@@ -74,7 +74,9 @@ async fn do_main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
                 _ => {
-                    info!("batch is still running or pending - use cancel() to stop it or wait for completion before deleting");
+                    info!(
+                        "batch is still running or pending - use cancel() to stop it or wait for completion before deleting"
+                    );
                 }
             }
         }

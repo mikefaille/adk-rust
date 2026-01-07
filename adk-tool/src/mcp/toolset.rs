@@ -21,6 +21,26 @@ use tokio::sync::Mutex;
 /// Type alias for tool filter predicate
 pub type ToolFilter = Arc<dyn Fn(&str) -> bool + Send + Sync>;
 
+/// Sanitize JSON schema for LLM compatibility.
+/// Removes fields like `$schema`, `additionalProperties`, `definitions`, `$ref`
+/// that some LLM APIs (like Gemini) don't accept.
+fn sanitize_schema(value: &mut Value) {
+    if let Value::Object(map) = value {
+        map.remove("$schema");
+        map.remove("definitions");
+        map.remove("$ref");
+        map.remove("additionalProperties");
+
+        for (_, v) in map.iter_mut() {
+            sanitize_schema(v);
+        }
+    } else if let Value::Array(arr) = value {
+        for v in arr.iter_mut() {
+            sanitize_schema(v);
+        }
+    }
+}
+
 /// MCP Toolset - connects to an MCP server and exposes its tools as ADK tools.
 ///
 /// This toolset implements the ADK `Toolset` trait and bridges the gap between
@@ -189,8 +209,16 @@ where
             let adk_tool = McpTool {
                 name: tool_name,
                 description: mcp_tool.description.map(|d| d.to_string()).unwrap_or_default(),
-                input_schema: Some(Value::Object(mcp_tool.input_schema.as_ref().clone())),
-                output_schema: mcp_tool.output_schema.map(|s| Value::Object(s.as_ref().clone())),
+                input_schema: {
+                    let mut schema = Value::Object(mcp_tool.input_schema.as_ref().clone());
+                    sanitize_schema(&mut schema);
+                    Some(schema)
+                },
+                output_schema: mcp_tool.output_schema.map(|s| {
+                    let mut schema = Value::Object(s.as_ref().clone());
+                    sanitize_schema(&mut schema);
+                    schema
+                }),
                 client: self.client.clone(),
             };
 

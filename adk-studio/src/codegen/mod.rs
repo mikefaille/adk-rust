@@ -799,11 +799,11 @@ adk-graph = {{ path = "{}/adk-graph" }}"#,
             adk_root, adk_root, adk_root, adk_root, adk_root
         )
     } else {
-        r#"adk-agent = "0.1.7"
-adk-core = "0.1.7"
-adk-model = "0.1.7"
-adk-tool = "0.1.7"
-adk-graph = "0.1.7""#
+        r#"adk-agent = "0.2.0"
+adk-core = "0.2.0"
+adk-model = "0.2.0"
+adk-tool = "0.2.0"
+adk-graph = "0.2.0""#
             .to_string()
     };
 

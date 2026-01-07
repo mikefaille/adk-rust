@@ -37,8 +37,8 @@ async fn do_main() -> Result<(), Box<dyn std::error::Error>> {
         .connect_timeout(Duration::from_secs(10)) // Connection timeout
         .pool_idle_timeout(Duration::from_secs(30)) // Connection pool timeout
         .pool_max_idle_per_host(10); // Max idle connections per host
-                                     // Uncomment the line below to use a proxy
-                                     // .proxy(reqwest::Proxy::http("http://proxy.example.com:8080")?);
+    // Uncomment the line below to use a proxy
+    // .proxy(reqwest::Proxy::http("http://proxy.example.com:8080")?);
 
     info!("custom HTTP client configured with timeouts and connection pooling");
 

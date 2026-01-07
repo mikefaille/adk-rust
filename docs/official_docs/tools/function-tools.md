@@ -1,295 +1,122 @@
 # Function Tools
 
-Function tools allow you to extend agent capabilities with custom Rust functions. They provide a way to give agents access to external APIs, databases, calculations, or any other functionality your application needs.
+Extend agent capabilities with custom Rust functions.
 
-## Overview
+---
 
-A `FunctionTool` wraps an async Rust function and exposes it to the LLM as a callable tool. The LLM can decide when to call the tool based on its description and the conversation context.
+## What are Function Tools?
 
-Key features:
-- **Async execution** - Tools run asynchronously and can perform I/O operations
-- **JSON parameters** - Parameters are passed as `serde_json::Value` for flexibility
-- **Type-safe schemas** - Optional JSON Schema for parameter validation
-- **Context access** - Tools receive a `ToolContext` for accessing session state and artifacts
+Function tools let you give agents abilities beyond conversation - calling APIs, performing calculations, accessing databases, or any custom logic. The LLM decides when to use a tool based on the user's request.
 
-## Basic Usage
+> **Key highlights**:
+> - 🔧 **Wrap any async function** as a callable tool
+> - 📝 **JSON parameters** - flexible input/output
+> - 🎯 **Type-safe schemas** - optional JSON Schema validation
+> - 🔗 **Context access** - session state, artifacts, memory
 
-Create a function tool with `FunctionTool::new()`:
+---
+
+## Step 1: Basic Tool
+
+Create a tool with `FunctionTool::new()` and **always add a schema** so the LLM knows what parameters to pass:
 
 ```rust
 use adk_rust::prelude::*;
-use serde_json::{json, Value};
+use adk_rust::Launcher;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+use serde_json::json;
 use std::sync::Arc;
 
-// Define the tool handler function
-async fn get_weather(
-    _ctx: Arc<dyn ToolContext>,
-    args: Value,
-) -> Result<Value> {
-    let location = args.get("location")
-        .and_then(|v| v.as_str())
-        .unwrap_or("unknown");
-    
-    // In a real app, call a weather API here
-    Ok(json!({
-        "location": location,
-        "temperature": 72,
-        "conditions": "sunny"
-    }))
+#[derive(JsonSchema, Serialize, Deserialize)]
+struct WeatherParams {
+    /// The city or location to get weather for
+    location: String,
 }
 
 #[tokio::main]
-async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
+async fn main() -> anyhow::Result<()> {
+    dotenvy::dotenv().ok();
     let api_key = std::env::var("GOOGLE_API_KEY")?;
     let model = GeminiModel::new(&api_key, "gemini-2.5-flash")?;
 
-    // Create the function tool
+    // Weather tool with proper schema
     let weather_tool = FunctionTool::new(
-        "get_weather",                           // Tool name
-        "Get current weather for a location",    // Description for the LLM
-        get_weather,                             // Handler function
-    );
+        "get_weather",
+        "Get current weather for a location",
+        |_ctx, args| async move {
+            let location = args.get("location")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            Ok(json!({
+                "location": location,
+                "temperature": "22°C",
+                "conditions": "sunny"
+            }))
+        },
+    )
+    .with_parameters_schema::<WeatherParams>(); // Required for LLM to call correctly!
 
-    // Add tool to agent
     let agent = LlmAgentBuilder::new("weather_agent")
+        .instruction("You help users check the weather. Always use the get_weather tool.")
         .model(Arc::new(model))
-        .instruction("You help users check the weather. Use the get_weather tool.")
         .tool(Arc::new(weather_tool))
         .build()?;
 
+    Launcher::new(Arc::new(agent)).run().await?;
     Ok(())
 }
 ```
 
-## Handler Function Signature
+> ⚠️ **Important**: Always use `.with_parameters_schema<T>()` - without it, the LLM won't know what parameters to pass and may not call the tool.
 
-Tool handlers must follow this signature:
+**How it works**:
+1. User asks: "What's the weather in Tokyo?"
+2. LLM decides to call `get_weather` with `{"location": "Tokyo"}`
+3. Tool returns `{"location": "Tokyo", "temperature": "22°C", "conditions": "sunny"}`
+4. LLM formats response: "The weather in Tokyo is sunny at 22°C."
 
-```rust
-async fn handler(
-    ctx: Arc<dyn ToolContext>,
-    args: Value,
-) -> Result<Value>
-```
+---
 
-Where:
-- `ctx` - The tool context providing access to session information and artifacts
-- `args` - JSON object containing the parameters passed by the LLM
-- Returns `Result<Value>` - Success with JSON response or `AdkError`
+## Step 2: Parameter Handling
 
-### Using Closures
-
-You can also use closures for simple tools:
+Extract parameters from the JSON `args`:
 
 ```rust
-let add_tool = FunctionTool::new(
-    "add_numbers",
-    "Add two numbers together",
-    |_ctx: Arc<dyn ToolContext>, args: Value| async move {
-        let a = args.get("a").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        let b = args.get("b").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        Ok(json!({ "result": a + b }))
+let order_tool = FunctionTool::new(
+    "process_order",
+    "Process an order. Parameters: product_id (required), quantity (required), priority (optional)",
+    |_ctx, args| async move {
+        // Required parameters - return error if missing
+        let product_id = args.get("product_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| adk_core::AdkError::Tool("product_id is required".into()))?;
+        
+        let quantity = args.get("quantity")
+            .and_then(|v| v.as_i64())
+            .ok_or_else(|| adk_core::AdkError::Tool("quantity is required".into()))?;
+        
+        // Optional parameter with default
+        let priority = args.get("priority")
+            .and_then(|v| v.as_str())
+            .unwrap_or("normal");
+        
+        Ok(json!({
+            "order_id": "ORD-12345",
+            "product_id": product_id,
+            "quantity": quantity,
+            "priority": priority,
+            "status": "confirmed"
+        }))
     },
 );
 ```
 
-## Parameter Handling
+---
 
-Parameters are passed as a `serde_json::Value` object. Extract values using the `serde_json` API:
+## Step 3: Typed Parameters with Schema
 
-```rust
-async fn process_order(
-    _ctx: Arc<dyn ToolContext>,
-    args: Value,
-) -> Result<Value> {
-    // Required string parameter
-    let product_id = args.get("product_id")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| AdkError::Tool("product_id is required".into()))?;
-    
-    // Required integer parameter
-    let quantity = args.get("quantity")
-        .and_then(|v| v.as_i64())
-        .ok_or_else(|| AdkError::Tool("quantity is required".into()))?;
-    
-    // Optional parameter with default
-    let priority = args.get("priority")
-        .and_then(|v| v.as_str())
-        .unwrap_or("normal");
-    
-    // Optional boolean
-    let express = args.get("express")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    
-    // Process the order...
-    Ok(json!({
-        "order_id": "ORD-12345",
-        "product_id": product_id,
-        "quantity": quantity,
-        "priority": priority,
-        "express": express,
-        "status": "confirmed"
-    }))
-}
-```
-
-### Using Serde for Typed Parameters
-
-For complex parameters, deserialize into a struct:
-
-```rust
-use serde::Deserialize;
-
-#[derive(Deserialize)]
-struct SearchParams {
-    query: String,
-    #[serde(default = "default_limit")]
-    limit: usize,
-    #[serde(default)]
-    filters: Vec<String>,
-}
-
-fn default_limit() -> usize { 10 }
-
-async fn search_documents(
-    _ctx: Arc<dyn ToolContext>,
-    args: Value,
-) -> Result<Value> {
-    let params: SearchParams = serde_json::from_value(args)
-        .map_err(|e| AdkError::Tool(format!("Invalid parameters: {}", e)))?;
-    
-    // Use typed params
-    println!("Searching for: {} (limit: {})", params.query, params.limit);
-    
-    Ok(json!({ "results": [], "total": 0 }))
-}
-```
-
-## Return Values
-
-Tools return `Result<Value>` where:
-- `Ok(Value)` - Success response as JSON
-- `Err(AdkError)` - Error that will be reported to the LLM
-
-### Success Responses
-
-Return any JSON-serializable data:
-
-```rust
-// Simple value
-Ok(json!("Success"))
-
-// Object
-Ok(json!({
-    "status": "completed",
-    "data": { "id": 123 }
-}))
-
-// Array
-Ok(json!(["item1", "item2", "item3"]))
-
-// Using serde_json::to_value for structs
-#[derive(Serialize)]
-struct Response {
-    id: String,
-    created_at: String,
-}
-
-let response = Response {
-    id: "abc123".into(),
-    created_at: "2024-01-15".into(),
-};
-Ok(serde_json::to_value(response)?)
-```
-
-### Error Handling
-
-Return `AdkError::Tool` for tool-specific errors:
-
-```rust
-async fn divide(
-    _ctx: Arc<dyn ToolContext>,
-    args: Value,
-) -> Result<Value> {
-    let a = args.get("a").and_then(|v| v.as_f64())
-        .ok_or_else(|| AdkError::Tool("Parameter 'a' is required".into()))?;
-    let b = args.get("b").and_then(|v| v.as_f64())
-        .ok_or_else(|| AdkError::Tool("Parameter 'b' is required".into()))?;
-    
-    if b == 0.0 {
-        return Err(AdkError::Tool("Cannot divide by zero".into()));
-    }
-    
-    Ok(json!({ "result": a / b }))
-}
-```
-
-The error message is passed back to the LLM, which can then decide how to handle it (retry, ask for different input, etc.).
-
-## ToolContext Interface
-
-The `ToolContext` provides access to execution context:
-
-```rust
-#[async_trait]
-pub trait ToolContext: CallbackContext {
-    /// Unique ID for this function call
-    fn function_call_id(&self) -> &str;
-    
-    /// Actions that can modify session state
-    fn actions(&self) -> &EventActions;
-    
-    /// Search the memory service
-    async fn search_memory(&self, query: &str) -> Result<Vec<MemoryEntry>>;
-}
-```
-
-### Inherited from CallbackContext
-
-Through `CallbackContext`, you also have access to:
-
-```rust
-pub trait CallbackContext: ReadonlyContext {
-    /// Access to artifact storage (if configured)
-    fn artifacts(&self) -> Option<Arc<dyn Artifacts>>;
-}
-```
-
-### Inherited from ReadonlyContext
-
-```rust
-pub trait ReadonlyContext {
-    fn invocation_id(&self) -> &str;
-    fn agent_name(&self) -> &str;
-    fn user_id(&self) -> &str;
-    fn app_name(&self) -> &str;
-    fn session_id(&self) -> &str;
-    fn branch(&self) -> &str;
-    fn user_content(&self) -> &Content;
-}
-```
-
-### Using Context in Tools
-
-```rust
-async fn personalized_greeting(
-    ctx: Arc<dyn ToolContext>,
-    _args: Value,
-) -> Result<Value> {
-    let user_id = ctx.user_id();
-    let session_id = ctx.session_id();
-    
-    Ok(json!({
-        "greeting": format!("Hello, user {}!", user_id),
-        "session": session_id
-    }))
-}
-```
-
-## Parameter Schema
-
-Define a JSON Schema for better LLM understanding of parameters:
+For complex tools, use typed structs with JSON Schema:
 
 ```rust
 use schemars::JsonSchema;
@@ -314,162 +141,243 @@ enum Operation {
     Divide,
 }
 
-// Create tool with typed schema
 let calculator = FunctionTool::new(
     "calculator",
     "Perform arithmetic operations",
-    calculator_handler,
+    |_ctx, args| async move {
+        let params: CalculatorParams = serde_json::from_value(args)?;
+        let result = match params.operation {
+            Operation::Add => params.a + params.b,
+            Operation::Subtract => params.a - params.b,
+            Operation::Multiply => params.a * params.b,
+            Operation::Divide if params.b != 0.0 => params.a / params.b,
+            Operation::Divide => return Err(adk_core::AdkError::Tool("Cannot divide by zero".into())),
+        };
+        Ok(json!({ "result": result }))
+    },
 )
 .with_parameters_schema::<CalculatorParams>();
 ```
 
-The schema is automatically generated from the Rust types using `schemars`.
+The schema is auto-generated from Rust types using `schemars`.
 
-## Response Schema
+---
 
-Similarly, define a response schema:
+## Step 4: Multi-Tool Agent
+
+Add multiple tools to one agent:
 
 ```rust
-#[derive(JsonSchema, Serialize)]
-struct CalculatorResult {
-    /// The computed result
-    result: f64,
-    /// Human-readable expression
-    expression: String,
+let agent = LlmAgentBuilder::new("assistant")
+    .instruction("Help with calculations, conversions, and weather.")
+    .model(Arc::new(model))
+    .tool(Arc::new(calc_tool))
+    .tool(Arc::new(convert_tool))
+    .tool(Arc::new(weather_tool))
+    .build()?;
+```
+
+The LLM automatically chooses the right tool based on the user's request.
+
+---
+
+## Error Handling
+
+Return `AdkError::Tool` for tool-specific errors:
+
+```rust
+let divide_tool = FunctionTool::new(
+    "divide",
+    "Divide two numbers",
+    |_ctx, args| async move {
+        let a = args.get("a").and_then(|v| v.as_f64())
+            .ok_or_else(|| adk_core::AdkError::Tool("Parameter 'a' is required".into()))?;
+        let b = args.get("b").and_then(|v| v.as_f64())
+            .ok_or_else(|| adk_core::AdkError::Tool("Parameter 'b' is required".into()))?;
+        
+        if b == 0.0 {
+            return Err(adk_core::AdkError::Tool("Cannot divide by zero".into()));
+        }
+        
+        Ok(json!({ "result": a / b }))
+    },
+);
+```
+
+Error messages are passed to the LLM, which can retry or ask for different input.
+
+---
+
+## Tool Context
+
+Access session info via `ToolContext`:
+
+```rust
+#[derive(JsonSchema, Serialize, Deserialize)]
+struct GreetParams {
+    #[serde(default)]
+    message: Option<String>,
 }
 
-let calculator = FunctionTool::new(
-    "calculator",
-    "Perform arithmetic operations",
-    calculator_handler,
+let greet_tool = FunctionTool::new(
+    "greet",
+    "Greet the user with session info",
+    |ctx, _args| async move {
+        let user_id = ctx.user_id();
+        let session_id = ctx.session_id();
+        let agent_name = ctx.agent_name();
+        Ok(json!({
+            "greeting": format!("Hello, user {}!", user_id),
+            "session": session_id,
+            "served_by": agent_name
+        }))
+    },
 )
-.with_parameters_schema::<CalculatorParams>()
-.with_response_schema::<CalculatorResult>();
+.with_parameters_schema::<GreetParams>();
 ```
+
+**Available context**:
+- `ctx.user_id()` - Current user ID
+- `ctx.session_id()` - Current session ID
+- `ctx.agent_name()` - Name of the agent
+- `ctx.artifacts()` - Access to artifact storage
+- `ctx.search_memory(query)` - Search memory service
+
+---
 
 ## Long-Running Tools
 
-For tools that may take a long time to execute, mark them as long-running:
+For operations that take significant time (data processing, external APIs), use the non-blocking pattern:
+
+1. **Start tool** returns immediately with a task_id
+2. **Background work** runs asynchronously  
+3. **Status tool** lets users check progress
 
 ```rust
-let slow_tool = FunctionTool::new(
-    "generate_report",
-    "Generate a comprehensive report (may take several minutes)",
-    generate_report_handler,
-)
-.with_long_running(true);
-```
-
-> **Note**: Long-running tool support is currently limited. See the [roadmap](../../roadmap/long-running-tools.md) for planned enhancements.
-
-## Complete Example
-
-Here's a complete example with multiple tools:
-
-```rust
-use adk_rust::prelude::*;
-use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::sync::RwLock;
 
-// Calculator tool
-async fn calculate(
-    _ctx: Arc<dyn ToolContext>,
-    args: Value,
-) -> Result<Value> {
-    let operation = args.get("operation")
-        .and_then(|v| v.as_str())
-        .unwrap_or("add");
-    let a = args.get("a").and_then(|v| v.as_f64()).unwrap_or(0.0);
-    let b = args.get("b").and_then(|v| v.as_f64()).unwrap_or(0.0);
-    
-    let result = match operation {
-        "add" => a + b,
-        "subtract" => a - b,
-        "multiply" => a * b,
-        "divide" if b != 0.0 => a / b,
-        "divide" => return Err(AdkError::Tool("Cannot divide by zero".into())),
-        _ => return Err(AdkError::Tool(format!("Unknown operation: {}", operation))),
-    };
-    
-    Ok(json!({
-        "result": result,
-        "expression": format!("{} {} {} = {}", a, operation, b, result)
-    }))
+#[derive(JsonSchema, Serialize, Deserialize)]
+struct ReportParams {
+    topic: String,
 }
 
-// Unit converter tool
-async fn convert_units(
-    _ctx: Arc<dyn ToolContext>,
-    args: Value,
-) -> Result<Value> {
-    let value = args.get("value").and_then(|v| v.as_f64())
-        .ok_or_else(|| AdkError::Tool("value is required".into()))?;
-    let from = args.get("from").and_then(|v| v.as_str())
-        .ok_or_else(|| AdkError::Tool("from unit is required".into()))?;
-    let to = args.get("to").and_then(|v| v.as_str())
-        .ok_or_else(|| AdkError::Tool("to unit is required".into()))?;
-    
-    let result = match (from, to) {
-        ("celsius", "fahrenheit") => value * 9.0 / 5.0 + 32.0,
-        ("fahrenheit", "celsius") => (value - 32.0) * 5.0 / 9.0,
-        ("km", "miles") => value * 0.621371,
-        ("miles", "km") => value / 0.621371,
-        _ => return Err(AdkError::Tool(format!("Cannot convert {} to {}", from, to))),
-    };
-    
-    Ok(json!({
-        "original": { "value": value, "unit": from },
-        "converted": { "value": result, "unit": to }
-    }))
+#[derive(JsonSchema, Serialize, Deserialize)]
+struct StatusParams {
+    task_id: String,
 }
 
-#[tokio::main]
-async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
-    let api_key = std::env::var("GOOGLE_API_KEY")?;
-    let model = GeminiModel::new(&api_key, "gemini-2.5-flash")?;
+// Shared task store
+let tasks: Arc<RwLock<HashMap<String, TaskState>>> = Arc::new(RwLock::new(HashMap::new()));
+let tasks1 = tasks.clone();
+let tasks2 = tasks.clone();
 
-    let calc_tool = FunctionTool::new(
-        "calculator",
-        "Perform arithmetic: add, subtract, multiply, divide",
-        calculate,
-    );
+// Tool 1: Start (returns immediately)
+let start_tool = FunctionTool::new(
+    "generate_report",
+    "Start generating a report. Returns task_id immediately.",
+    move |_ctx, args| {
+        let tasks = tasks1.clone();
+        async move {
+            let topic = args.get("topic").and_then(|v| v.as_str()).unwrap_or("general").to_string();
+            let task_id = format!("task_{}", rand::random::<u32>());
+            
+            // Store initial state
+            tasks.write().await.insert(task_id.clone(), TaskState {
+                status: "processing".to_string(),
+                progress: 0,
+                result: None,
+            });
 
-    let convert_tool = FunctionTool::new(
-        "convert_units",
-        "Convert between units (temperature, distance)",
-        convert_units,
-    );
+            // Spawn background work (non-blocking!)
+            let tasks_bg = tasks.clone();
+            let tid = task_id.clone();
+            tokio::spawn(async move {
+                // Simulate work...
+                tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+                if let Some(t) = tasks_bg.write().await.get_mut(&tid) {
+                    t.status = "completed".to_string();
+                    t.result = Some("Report complete".to_string());
+                }
+            });
 
-    let agent = LlmAgentBuilder::new("math_helper")
-        .description("A helpful math and conversion assistant")
-        .instruction("Help users with calculations and unit conversions. \
-                     Use the calculator for arithmetic and convert_units for conversions.")
-        .model(Arc::new(model))
-        .tool(Arc::new(calc_tool))
-        .tool(Arc::new(convert_tool))
-        .build()?;
+            // Return immediately with task_id
+            Ok(json!({"task_id": task_id, "status": "processing"}))
+        }
+    },
+)
+.with_parameters_schema::<ReportParams>()
+.with_long_running(true);  // Mark as long-running
 
-    println!("Created agent: {}", agent.name());
-    Ok(())
-}
+// Tool 2: Check status
+let status_tool = FunctionTool::new(
+    "check_report_status",
+    "Check report generation status",
+    move |_ctx, args| {
+        let tasks = tasks2.clone();
+        async move {
+            let task_id = args.get("task_id").and_then(|v| v.as_str()).unwrap_or("");
+            if let Some(t) = tasks.read().await.get(task_id) {
+                Ok(json!({"status": t.status, "result": t.result}))
+            } else {
+                Ok(json!({"error": "Task not found"}))
+            }
+        }
+    },
+)
+.with_parameters_schema::<StatusParams>();
 ```
+
+**Key points**:
+- `.with_long_running(true)` tells the agent this tool returns a pending status
+- The tool spawns work with `tokio::spawn()` and returns immediately
+- Provide a status check tool so users can poll progress
+```
+
+This adds a note to prevent the LLM from calling the tool repeatedly.
+
+---
+
+## Run Examples
+
+```bash
+cd doc-test/tools/function_tools_test
+
+# Basic tool with closure
+cargo run --bin basic
+
+# Tool with typed JSON schema
+cargo run --bin with_schema
+
+# Multi-tool agent (3 tools)
+cargo run --bin multi_tool
+
+# Tool context (session info)
+cargo run --bin context
+
+# Long-running tool
+cargo run --bin long_running
+```
+
+---
 
 ## Best Practices
 
-1. **Clear descriptions** - Write tool descriptions that help the LLM understand when to use the tool
-2. **Validate inputs** - Always validate required parameters and return helpful error messages
-3. **Return structured data** - Use JSON objects with clear field names
-4. **Handle errors gracefully** - Return `AdkError::Tool` with descriptive messages
-5. **Keep tools focused** - Each tool should do one thing well
-6. **Use schemas** - Define parameter schemas for complex tools to improve LLM accuracy
+1. **Clear descriptions** - Help the LLM understand when to use the tool
+2. **Validate inputs** - Return helpful error messages for missing parameters
+3. **Return structured JSON** - Use clear field names
+4. **Keep tools focused** - Each tool should do one thing well
+5. **Use schemas** - For complex tools, define parameter schemas
 
-## API Reference
-
-See the rustdoc for `FunctionTool` for complete API documentation.
+---
 
 ## Related
 
-- [Built-in Tools](built-in-tools.md) - Pre-built tools like GoogleSearchTool
-- [MCP Tools](mcp-tools.md) - Using MCP servers as tool providers
+- [Built-in Tools](built-in-tools.md) - Pre-built tools (GoogleSearch, ExitLoop)
+- [MCP Tools](mcp-tools.md) - Model Context Protocol integration
 - [LlmAgent](../agents/llm-agent.md) - Adding tools to agents
-- [Callbacks](../callbacks/callbacks.md) - Intercepting tool execution
+
+---
+
+**Previous**: [← mistral.rs](../models/mistralrs.md) | **Next**: [Built-in Tools →](built-in-tools.md)

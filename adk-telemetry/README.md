@@ -19,26 +19,27 @@ OpenTelemetry integration for Rust Agent Development Kit (ADK-Rust) agent observ
 
 ```toml
 [dependencies]
-adk-telemetry = "0.1.9"
+adk-telemetry = "0.2.0"
 ```
 
 Or use the meta-crate:
 
 ```toml
 [dependencies]
-adk-rust = { version = "0.1.9", features = ["telemetry"] }
+adk-rust = { version = "0.2.0", features = ["telemetry"] }
 ```
 
 ## Quick Start
 
 ```rust
-use adk_telemetry::init_tracing;
+use adk_telemetry::init_telemetry;
 
-fn main() {
-    // Initialize with environment filter
-    init_tracing();
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Initialize with service name
+    init_telemetry("my-agent")?;
 
     // Your agent code here...
+    Ok(())
 }
 ```
 
@@ -59,14 +60,31 @@ RUST_LOG=adk_agent=trace,adk_model=debug cargo run
 Configure OTLP export for distributed tracing:
 
 ```rust
-use adk_telemetry::TelemetryConfig;
+use adk_telemetry::init_with_otlp;
 
-let config = TelemetryConfig::builder()
-    .service_name("my-agent")
-    .otlp_endpoint("http://localhost:4317")
-    .build();
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    init_with_otlp("my-agent", "http://localhost:4317")?;
+    
+    // Your agent code here...
+    Ok(())
+}
+```
 
-init_with_config(config);
+## Available Functions
+
+| Function | Description |
+|----------|-------------|
+| `init_telemetry(service_name)` | Basic console logging |
+| `init_with_otlp(service_name, endpoint)` | OTLP export to collectors |
+| `init_with_adk_exporter(service_name)` | ADK-style span exporter |
+| `shutdown_telemetry()` | Flush and shutdown |
+
+## Re-exports
+
+Convenience re-exports from `tracing`:
+
+```rust
+use adk_telemetry::{info, debug, warn, error, trace, instrument, Span};
 ```
 
 ## Features

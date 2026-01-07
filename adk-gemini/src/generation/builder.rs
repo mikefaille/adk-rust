@@ -3,12 +3,12 @@ use std::sync::Arc;
 use tracing::instrument;
 
 use crate::{
+    Content, FunctionCallingMode, FunctionDeclaration, GenerationConfig, GenerationResponse,
+    Message, Role, Tool,
     cache::CachedContentHandle,
     client::{Error as ClientError, GeminiClient},
     generation::{GenerateContentRequest, SpeakerVoiceConfig, SpeechConfig, ThinkingConfig},
     tools::{FunctionCallingConfig, ToolConfig},
-    Content, FunctionCallingMode, FunctionDeclaration, GenerationConfig, GenerationResponse,
-    Message, Role, Tool,
 };
 
 /// Builder for content generation requests

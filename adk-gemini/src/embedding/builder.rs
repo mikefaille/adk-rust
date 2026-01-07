@@ -6,8 +6,8 @@ use super::model::{
     EmbedContentRequest, TaskType,
 };
 use crate::{
-    client::{Error as ClientError, GeminiClient},
     Content, Message,
+    client::{Error as ClientError, GeminiClient},
 };
 
 /// Builder for embed generation requests

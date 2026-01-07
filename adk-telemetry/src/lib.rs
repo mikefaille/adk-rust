@@ -27,6 +27,7 @@
 //! ```
 
 pub mod init;
+pub mod span_exporter;
 pub mod spans;
 
 // Re-export tracing macros for convenience
@@ -35,8 +36,11 @@ pub use tracing::{Span, debug, error, info, instrument, trace, warn};
 // Re-export span helpers
 pub use spans::*;
 
+// Re-export span exporter (ADK-Go style)
+pub use span_exporter::*;
+
 // Re-export init functions
-pub use init::{init_telemetry, init_with_otlp, shutdown_telemetry};
+pub use init::{init_telemetry, init_with_adk_exporter, init_with_otlp, shutdown_telemetry};
 
 // Re-export metrics
 pub use opentelemetry::global;

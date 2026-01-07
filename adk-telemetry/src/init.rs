@@ -1,7 +1,9 @@
 //! Telemetry initialization and configuration
 
-use std::sync::Once;
+use std::sync::{Arc, Once};
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
+
+use crate::span_exporter::{AdkSpanExporter, AdkSpanLayer};
 
 static INIT: Once = Once::new();
 
@@ -117,4 +119,37 @@ pub fn init_with_otlp(
 /// Should be called before application exit to ensure all telemetry data is sent.
 pub fn shutdown_telemetry() {
     opentelemetry::global::shutdown_tracer_provider();
+}
+
+/// Initialize telemetry with ADK-Go style span exporter
+/// This creates a shared span exporter that can be used by both telemetry and debug API
+/// Returns the exporter so it can be passed to the debug controller
+pub fn init_with_adk_exporter(
+    service_name: &str,
+) -> Result<Arc<AdkSpanExporter>, Box<dyn std::error::Error>> {
+    let exporter = Arc::new(AdkSpanExporter::new());
+    let exporter_clone = exporter.clone();
+
+    INIT.call_once(|| {
+        let filter = EnvFilter::try_from_default_env()
+            .or_else(|_| EnvFilter::try_new("info"))
+            .expect("Failed to create env filter");
+
+        let adk_layer = AdkSpanLayer::new(exporter_clone);
+
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_target(true)
+                    .with_thread_ids(true)
+                    .with_line_number(true),
+            )
+            .with(adk_layer)
+            .init();
+
+        tracing::info!(service.name = service_name, "Telemetry initialized with ADK span exporter");
+    });
+
+    Ok(exporter)
 }

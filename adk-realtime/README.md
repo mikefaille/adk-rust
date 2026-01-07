@@ -51,14 +51,13 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-adk-realtime = { version = "0.1.9", features = ["openai"] }
+adk-realtime = { version = "0.2.0", features = ["openai"] }
 ```
 
 ### Using RealtimeAgent (Recommended)
 
 ```rust
 use adk_realtime::{RealtimeAgent, openai::OpenAIRealtimeModel};
-use adk_runner::Runner;
 use std::sync::Arc;
 
 #[tokio::main]
@@ -71,13 +70,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .instruction("You are a helpful voice assistant.")
         .voice("alloy")
         .server_vad()  // Enable server-side voice activity detection
-        .tool(Arc::new(weather_tool))
         .build()?;
 
-    // Use with standard ADK runner
-    let runner = Runner::new(Arc::new(agent));
-    runner.run(session, content).await?;
-
+    // RealtimeAgent implements the Agent trait
+    // Use with ADK runner or directly via agent.run(ctx)
     Ok(())
 }
 ```

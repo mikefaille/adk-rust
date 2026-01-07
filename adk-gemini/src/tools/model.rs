@@ -1,4 +1,4 @@
-use schemars::{generate::SchemaSettings, JsonSchema, SchemaGenerator};
+use schemars::{JsonSchema, SchemaGenerator, generate::SchemaSettings};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use snafu::{ResultExt, Snafu};

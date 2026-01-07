@@ -25,14 +25,14 @@ The crate implements the `Llm` trait from `adk-core`, allowing models to be used
 
 ```toml
 [dependencies]
-adk-model = "0.1.9"
+adk-model = "0.2.0"
 ```
 
 Or use the meta-crate:
 
 ```toml
 [dependencies]
-adk-rust = { version = "0.1.9", features = ["models"] }
+adk-rust = { version = "0.2.0", features = ["models"] }
 ```
 
 ## Quick Start
@@ -109,10 +109,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let api_key = std::env::var("DEEPSEEK_API_KEY")?;
 
     // Standard chat model
-    let model = DeepSeekClient::new(DeepSeekConfig::chat(api_key))?;
+    let model = DeepSeekClient::chat(api_key)?;
 
     // Or use the reasoner model with chain-of-thought
-    // let model = DeepSeekClient::new(DeepSeekConfig::reasoner(api_key))?;
+    // let model = DeepSeekClient::reasoner(api_key)?;
 
     let agent = LlmAgentBuilder::new("assistant")
         .model(Arc::new(model))
@@ -283,15 +283,15 @@ Enable specific providers with feature flags:
 ```toml
 [dependencies]
 # All providers (default)
-adk-model = { version = "0.1.9", features = ["all-providers"] }
+adk-model = { version = "0.2.0", features = ["all-providers"] }
 
 # Individual providers
-adk-model = { version = "0.1.9", features = ["gemini"] }
-adk-model = { version = "0.1.9", features = ["openai"] }
-adk-model = { version = "0.1.9", features = ["anthropic"] }
-adk-model = { version = "0.1.9", features = ["deepseek"] }
-adk-model = { version = "0.1.9", features = ["groq"] }
-adk-model = { version = "0.1.9", features = ["ollama"] }
+adk-model = { version = "0.2.0", features = ["gemini"] }
+adk-model = { version = "0.2.0", features = ["openai"] }
+adk-model = { version = "0.2.0", features = ["anthropic"] }
+adk-model = { version = "0.2.0", features = ["deepseek"] }
+adk-model = { version = "0.2.0", features = ["groq"] }
+adk-model = { version = "0.2.0", features = ["ollama"] }
 ```
 
 ## Related Crates

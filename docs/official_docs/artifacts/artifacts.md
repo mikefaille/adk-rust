@@ -548,3 +548,8 @@ For complete API documentation, see:
 - [Sessions](../sessions/sessions.md) - Session management and lifecycle
 - [Callbacks](../callbacks/callbacks.md) - Accessing artifacts in callbacks
 - [Tools](../tools/function-tools.md) - Using artifacts in custom tools
+
+
+---
+
+**Previous**: [← Callbacks](../callbacks/callbacks.md) | **Next**: [Events →](../events/events.md)

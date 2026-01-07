@@ -75,12 +75,20 @@ pub struct MemoryEntry {
     pub author: String,
 }
 
+/// Streaming mode for agent responses.
+/// Matches ADK Python/Go specification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum StreamingMode {
+    /// No streaming; responses delivered as complete units.
+    /// Agent collects all chunks internally and yields a single final event.
+    None,
+    /// Server-Sent Events streaming; one-way streaming from server to client.
+    /// Agent yields each chunk as it arrives with stable event ID.
     #[default]
-    Auto,
-    Enabled,
-    Disabled,
+    SSE,
+    /// Bidirectional streaming; simultaneous communication in both directions.
+    /// Used for realtime audio/video agents.
+    Bidi,
 }
 
 /// Controls what parts of prior conversation history is received by llmagent
@@ -100,7 +108,7 @@ pub struct RunConfig {
 
 impl Default for RunConfig {
     fn default() -> Self {
-        Self { streaming_mode: StreamingMode::Auto }
+        Self { streaming_mode: StreamingMode::SSE }
     }
 }
 
@@ -111,12 +119,13 @@ mod tests {
     #[test]
     fn test_run_config_default() {
         let config = RunConfig::default();
-        assert_eq!(config.streaming_mode, StreamingMode::Auto);
+        assert_eq!(config.streaming_mode, StreamingMode::SSE);
     }
 
     #[test]
     fn test_streaming_mode() {
-        assert_eq!(StreamingMode::Auto, StreamingMode::Auto);
-        assert_ne!(StreamingMode::Auto, StreamingMode::Enabled);
+        assert_eq!(StreamingMode::SSE, StreamingMode::SSE);
+        assert_ne!(StreamingMode::SSE, StreamingMode::None);
+        assert_ne!(StreamingMode::None, StreamingMode::Bidi);
     }
 }

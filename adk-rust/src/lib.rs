@@ -626,6 +626,22 @@ pub mod ui {
     pub use adk_ui::*;
 }
 
+/// Documentation audit system.
+///
+/// Validates ADK-Rust documentation against actual crate implementations:
+/// - [`AuditOrchestrator`](doc_audit::AuditOrchestrator) - Main audit coordinator
+/// - [`DocumentationParser`](doc_audit::DocumentationParser) - Parse markdown files
+/// - [`CodeAnalyzer`](doc_audit::CodeAnalyzer) - Analyze Rust source code
+/// - [`ExampleValidator`](doc_audit::ExampleValidator) - Validate code examples
+/// - [`ReportGenerator`](doc_audit::ReportGenerator) - Generate audit reports
+///
+/// Available with feature: `doc-audit`
+#[cfg(feature = "doc-audit")]
+#[cfg_attr(docsrs, doc(cfg(feature = "doc-audit")))]
+pub mod doc_audit {
+    pub use adk_doc_audit::*;
+}
+
 /// CLI launcher for running agents.
 ///
 /// Quick way to run agents in console or server mode:
@@ -669,13 +685,29 @@ pub mod prelude {
     // Agents
     #[cfg(feature = "agents")]
     pub use crate::agent::{
-        ConditionalAgent, CustomAgent, CustomAgentBuilder, LlmAgent, LlmAgentBuilder, LoopAgent,
-        ParallelAgent, SequentialAgent,
+        ConditionalAgent, CustomAgent, CustomAgentBuilder, LlmAgent, LlmAgentBuilder,
+        LlmConditionalAgent, LlmConditionalAgentBuilder, LoopAgent, ParallelAgent, SequentialAgent,
     };
 
     // Models
     #[cfg(feature = "models")]
     pub use crate::model::GeminiModel;
+
+    // Model providers (when specific features are enabled)
+    #[cfg(feature = "openai")]
+    pub use crate::model::openai::{OpenAIClient, OpenAIConfig};
+
+    #[cfg(feature = "anthropic")]
+    pub use crate::model::anthropic::{AnthropicClient, AnthropicConfig};
+
+    #[cfg(feature = "deepseek")]
+    pub use crate::model::deepseek::{DeepSeekClient, DeepSeekConfig};
+
+    #[cfg(feature = "groq")]
+    pub use crate::model::groq::{GroqClient, GroqConfig};
+
+    #[cfg(feature = "ollama")]
+    pub use crate::model::ollama::{OllamaConfig, OllamaModel};
 
     // Tools
     #[cfg(feature = "tools")]

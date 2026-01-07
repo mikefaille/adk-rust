@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-01-06
+
+### ⭐ Highlights
+- **Documentation Overhaul**: All crate READMEs validated against actual implementations
+- **API Consistency**: Fixed incorrect API examples across documentation
+
+### Fixed
+- Fixed `LlmAgentBuilder` API: use `.tool()` in loop instead of non-existent `.tools(vec![...])`
+- Fixed `Runner::new()` examples: use `Launcher` for simple cases, `RunnerConfig` for advanced
+- Fixed `SessionService::create()` API: use `CreateRequest` struct
+- Fixed `BrowserConfig` API: use builder pattern instead of `::new(url)`
+- Fixed `LoopAgent` API: use `vec![]` and `with_max_iterations()`
+- Fixed dotenv → dotenvy in examples
+- Removed non-existent `Launcher` methods from docs (`with_server_mode`, `with_user_id`, `with_session_id`)
+
+### Changed
+- All ADK crates bumped to version 0.2.0
+- Rust edition updated to 2024, requires Rust 1.85+
+
 ## [0.1.9] - 2026-01-03
 
 ### ⭐ Highlights
@@ -390,8 +409,8 @@ Initial release - Published to crates.io.
 - Tokio async runtime
 - Google API key for Gemini
 
-[Unreleased]: https://github.com/zavora-ai/adk-rust/compare/v0.1.9...HEAD
-[0.1.9]: https://github.com/zavora-ai/adk-rust/compare/v0.1.9...v0.1.9
+[Unreleased]: https://github.com/zavora-ai/adk-rust/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/zavora-ai/adk-rust/compare/v0.1.9...v0.2.0
 [0.1.9]: https://github.com/zavora-ai/adk-rust/compare/v0.1.7...v0.1.9
 [0.1.7]: https://github.com/zavora-ai/adk-rust/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/zavora-ai/adk-rust/compare/v0.1.5...v0.1.6

@@ -1,5 +1,5 @@
 use adk_gemini::Gemini;
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use display_error_chain::DisplayErrorChain;
 use std::env;
 use std::fs;
@@ -123,7 +123,9 @@ async fn do_main() -> Result<(), Box<dyn std::error::Error>> {
 
     save_generated_images(&edit_response3, "watercolor_landscape")?;
 
-    info!("image editing examples completed - check generated files: base_landscape.png, landscape_with_barn_*.png, sunset_landscape_*.png, watercolor_landscape_*.png");
+    info!(
+        "image editing examples completed - check generated files: base_landscape.png, landscape_with_barn_*.png, sunset_landscape_*.png, watercolor_landscape_*.png"
+    );
 
     Ok(())
 }

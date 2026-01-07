@@ -254,11 +254,15 @@ impl SessionService for DatabaseSessionService {
                     id: row.get("id"),
                     timestamp: DateTime::parse_from_rfc3339(&timestamp).unwrap().with_timezone(&Utc),
                     invocation_id: row.get("invocation_id"),
+                    invocation_id_camel: row.get("invocation_id"),
                     branch: row.get("branch"),
                     author: row.get("author"),
+                    llm_request: None,
                     llm_response,
                     actions,
                     long_running_tool_ids,
+                    gcp_llm_request: None,
+                    gcp_llm_response: None,
                 }
             })
             .collect();

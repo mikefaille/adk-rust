@@ -37,11 +37,13 @@ impl GeminiModel {
                     }
                     adk_gemini::Part::FunctionResponse { function_response } => {
                         converted_parts.push(Part::FunctionResponse {
-                            name: function_response.name.clone(),
-                            response: function_response
-                                .response
-                                .clone()
-                                .unwrap_or(serde_json::Value::Null),
+                            function_response: adk_core::FunctionResponseData {
+                                name: function_response.name.clone(),
+                                response: function_response
+                                    .response
+                                    .clone()
+                                    .unwrap_or(serde_json::Value::Null),
+                            },
                             id: None,
                         });
                     }
@@ -62,7 +64,14 @@ impl GeminiModel {
             if let Some(chunks) = &grounding.grounding_chunks {
                 let sources: Vec<String> = chunks
                     .iter()
-                    .filter_map(|c| c.web.as_ref().map(|w| format!("[{}]({})", w.title, w.uri)))
+                    .filter_map(|c| {
+                        c.web.as_ref().and_then(|w| match (&w.title, &w.uri) {
+                            (Some(title), Some(uri)) => Some(format!("[{}]({})", title, uri)),
+                            (Some(title), None) => Some(title.clone()),
+                            (None, Some(uri)) => Some(uri.to_string()),
+                            (None, None) => None,
+                        })
+                    })
                     .collect();
                 if !sources.is_empty() {
                     let sources_info = format!("\n📚 **Sources:** {}", sources.join(" | "));
@@ -112,6 +121,7 @@ impl Llm for GeminiModel {
     }
 
     #[adk_telemetry::instrument(
+        name = "call_llm",
         skip(self, req),
         fields(
             model.name = %self.model_name,
@@ -203,9 +213,12 @@ impl Llm for GeminiModel {
                 "function" => {
                     // For function responses
                     for part in &content.parts {
-                        if let Part::FunctionResponse { name, response, .. } = part {
+                        if let Part::FunctionResponse { function_response, .. } = part {
                             builder = builder
-                                .with_function_response(name, response.clone())
+                                .with_function_response(
+                                    &function_response.name,
+                                    function_response.response.clone(),
+                                )
                                 .map_err(|e| adk_core::AdkError::Model(e.to_string()))?;
                         }
                     }
@@ -272,8 +285,10 @@ impl Llm for GeminiModel {
                         Ok(resp) => {
                             match Self::convert_response(&resp) {
                                 Ok(mut llm_resp) => {
-                                    llm_resp.partial = true;
-                                    llm_resp.turn_complete = false;
+                                    // Check if this is the final chunk (has finish_reason)
+                                    let is_final = llm_resp.finish_reason.is_some();
+                                    llm_resp.partial = !is_final;
+                                    llm_resp.turn_complete = is_final;
                                     yield Ok(llm_resp);
                                 }
                                 Err(e) => {

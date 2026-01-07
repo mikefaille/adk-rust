@@ -130,20 +130,20 @@ fn do_main() -> Result<(), Box<dyn std::error::Error>> {
     info!("with their thought signatures to maintain context:");
 
     // Extract the original parts for context preservation
-    if let Some(candidate) = response.candidates.first() {
-        if let Some(parts) = &candidate.content.parts {
-            for (i, part) in parts.iter().enumerate() {
-                if let Part::Text { text: _, thought, thought_signature } = part {
-                    info!(
-                        part_number = i + 1,
-                        text_type = if *thought == Some(true) { "Thought" } else { "Regular" },
-                        has_signature = thought_signature.is_some(),
-                        "part analysis"
-                    );
+    if let Some(candidate) = response.candidates.first()
+        && let Some(parts) = &candidate.content.parts
+    {
+        for (i, part) in parts.iter().enumerate() {
+            if let Part::Text { text: _, thought, thought_signature } = part {
+                info!(
+                    part_number = i + 1,
+                    text_type = if *thought == Some(true) { "Thought" } else { "Regular" },
+                    has_signature = thought_signature.is_some(),
+                    "part analysis"
+                );
 
-                    if let Some(sig) = thought_signature {
-                        info!(signature_preview = &sig[..10.min(sig.len())], "preserve signature");
-                    }
+                if let Some(sig) = thought_signature {
+                    info!(signature_preview = &sig[..10.min(sig.len())], "preserve signature");
                 }
             }
         }

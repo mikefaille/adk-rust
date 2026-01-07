@@ -28,6 +28,7 @@ pub async fn run_console(agent: Arc<dyn Agent>, app_name: String, user_id: Strin
         session_service: session_service.clone(),
         artifact_service: None,
         memory_service: None,
+        run_config: None,
     })?;
 
     let mut rl = DefaultEditor::new()?;
@@ -106,8 +107,8 @@ impl StreamPrinter {
         match part {
             Part::Text { text } => self.handle_text_chunk(text),
             Part::FunctionCall { name, args, .. } => self.print_tool_call(name, args),
-            Part::FunctionResponse { name, response, .. } => {
-                self.print_tool_response(name, response)
+            Part::FunctionResponse { function_response, .. } => {
+                self.print_tool_response(&function_response.name, &function_response.response)
             }
             Part::InlineData { mime_type, data } => self.print_inline_data(mime_type, data.len()),
             Part::FileData { mime_type, file_uri } => self.print_file_data(mime_type, file_uri),

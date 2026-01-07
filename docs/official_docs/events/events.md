@@ -430,9 +430,9 @@ After a tool executes, the result is returned in a function response:
 ```rust
 if let Some(content) = &event.llm_response.content {
     for part in &content.parts {
-        if let Part::FunctionResponse { name, response } = part {
-            println!("Tool result from: {}", name);
-            println!("Response: {}", response);
+        if let Part::FunctionResponse { function_response, .. } = part {
+            println!("Tool result from: {}", function_response.name);
+            println!("Response: {}", function_response.response);
 
             // Process the tool result
             // The LLM will use this to continue the conversation
@@ -535,3 +535,8 @@ println!("Event occurred at: {}", event.timestamp.format("%Y-%m-%d %H:%M:%S"));
 - [Artifacts](../artifacts/artifacts.md) - Managing binary data
 - [Multi-Agent Systems](../agents/multi-agent.md) - Agent transfers and coordination
 - [Callbacks](../callbacks/callbacks.md) - Intercepting and modifying events
+
+
+---
+
+**Previous**: [← Artifacts](../artifacts/artifacts.md) | **Next**: [Telemetry →](../observability/telemetry.md)

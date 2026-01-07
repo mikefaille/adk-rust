@@ -1,6 +1,6 @@
 use snafu::ResultExt;
 use std::sync::Arc;
-use tracing::{instrument, Span};
+use tracing::{Span, instrument};
 
 use super::handle::BatchHandle;
 use super::model::*;

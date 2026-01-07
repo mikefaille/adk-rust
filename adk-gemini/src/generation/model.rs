@@ -3,8 +3,8 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
 use crate::{
-    safety::{SafetyRating, SafetySetting},
     Content, Modality, Part,
+    safety::{SafetyRating, SafetySetting},
 };
 
 /// Reason why generation finished
@@ -164,9 +164,11 @@ pub struct GroundingChunk {
 #[serde(rename_all = "camelCase")]
 pub struct MapsGroundingChunk {
     /// The URI of the Maps source
-    pub uri: Url,
+    #[serde(default)]
+    pub uri: Option<Url>,
     /// The title of the Maps source
-    pub title: String,
+    #[serde(default)]
+    pub title: Option<String>,
     /// The place ID from Google Maps
     #[serde(skip_serializing_if = "Option::is_none")]
     pub place_id: Option<String>,
@@ -177,9 +179,11 @@ pub struct MapsGroundingChunk {
 #[serde(rename_all = "camelCase")]
 pub struct WebGroundingChunk {
     /// The URI of the web source
-    pub uri: Url,
+    #[serde(default)]
+    pub uri: Option<Url>,
     /// The title of the web source
-    pub title: String,
+    #[serde(default)]
+    pub title: Option<String>,
 }
 
 /// Support information connecting response text to grounding sources
@@ -193,15 +197,18 @@ pub struct GroundingSupport {
 }
 
 /// A segment of response text
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct GroundingSegment {
     /// Start index of the segment in the response text
-    pub start_index: u32,
+    #[serde(default)]
+    pub start_index: Option<u32>,
     /// End index of the segment in the response text
-    pub end_index: u32,
+    #[serde(default)]
+    pub end_index: Option<u32>,
     /// The text content of the segment
-    pub text: String,
+    #[serde(default)]
+    pub text: Option<String>,
 }
 
 /// Response from the Gemini API for content generation

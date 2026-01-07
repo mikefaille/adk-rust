@@ -6,7 +6,7 @@ This guide shows you how to get up and running with ADK-Rust. You'll create your
 
 Before you start, make sure you have:
 
-- Rust 1.75 or later (`rustup update stable`)
+- Rust 1.85.0 or later (`rustup update stable`)
 - A Google API key for Gemini
 
 ## Step 1: Create a New Project
@@ -36,12 +36,12 @@ Update your `Cargo.toml` with the required dependencies:
 [package]
 name = "my_agent"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 
 [dependencies]
-adk-rust = "0.1"
+adk-rust = "0.2.0"
 tokio = { version = "1.40", features = ["full"] }
-dotenv = "0.15"
+dotenvy = "0.15"
 ```
 
 Install the dependencies:
@@ -82,7 +82,7 @@ use std::sync::Arc;
 #[tokio::main]
 async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     // Load environment variables from .env file
-    dotenv::dotenv().ok();
+    dotenvy::dotenv().ok();
     
     // Get API key from environment
     let api_key = std::env::var("GOOGLE_API_KEY")
@@ -131,7 +131,7 @@ You: exit
 👋 Goodbye!
 ```
 
-## Step 6: Add a Tool (Optional)
+## Step 6: Add a Tool
 
 Let's enhance your agent with the Google Search tool to give it access to real-time information:
 
@@ -142,7 +142,7 @@ use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
-    dotenv::dotenv().ok();
+    dotenvy::dotenv().ok();
     
     let api_key = std::env::var("GOOGLE_API_KEY")
         .expect("GOOGLE_API_KEY environment variable not set");
@@ -163,7 +163,13 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-Now your agent can search the web:
+Start your agent again in interactive console mode:
+
+```bash
+cargo run
+```
+
+Now you can prompt your agent to search the web:
 
 ```
 You: What's the weather like in Tokyo today?
@@ -180,17 +186,31 @@ For a web-based interface, run with the `serve` command:
 cargo run -- serve
 ```
 
-Or specify a custom port:
+This starts the server on the **default port 8080**. Access it at [http://localhost:8080](http://localhost:8080).
+
+To specify a custom port:
 
 ```bash
 cargo run -- serve --port 3000
 ```
 
-Access the web interface at [http://localhost:8080](http://localhost:8080).
+This starts the server on **port 3000**. Access it at [http://localhost:3000](http://localhost:3000).
 
 ## Understanding the Code
 
 Let's break down what each part does:
+
+### Imports
+
+```rust
+use adk_rust::prelude::*;  // GeminiModel, LlmAgentBuilder, Arc, etc.
+use adk_rust::Launcher;    // CLI launcher for console/server modes
+use std::sync::Arc;        // Thread-safe reference counting pointer
+```
+
+- **`prelude::*`** imports all commonly used types: `GeminiModel`, `LlmAgentBuilder`, `Arc`, error types, and more
+- **`Launcher`** provides the CLI interface for running agents
+- **`Arc`** (Atomic Reference Counted) enables safe sharing of the model and agent across async tasks
 
 ### Model Creation
 
@@ -198,7 +218,10 @@ Let's break down what each part does:
 let model = GeminiModel::new(&api_key, "gemini-2.5-flash")?;
 ```
 
-Creates a Gemini model instance. The model handles all LLM interactions.
+Creates a Gemini model instance that implements the `Llm` trait. The model:
+- Handles authentication with your API key
+- Manages streaming responses from the LLM
+- Supports function calling for tools
 
 ### Agent Building
 
@@ -210,11 +233,16 @@ let agent = LlmAgentBuilder::new("my_assistant")
     .build()?;
 ```
 
-- `new("name")`: Sets the agent's identifier
-- `description()`: Brief description of what the agent does
-- `instruction()`: System prompt that guides the agent's behavior
-- `model()`: The LLM to use for reasoning
-- `build()`: Creates the agent instance
+The builder pattern configures your agent:
+
+| Method | Purpose |
+|--------|--------|
+| `new("name")` | Sets the agent's unique identifier (used in logs and multi-agent systems) |
+| `description()` | Brief description shown in agent cards and A2A protocol |
+| `instruction()` | **System prompt** - defines the agent's personality and behavior |
+| `model(Arc::new(...))` | Wraps the model in `Arc` for thread-safe sharing |
+| `tool(Arc::new(...))` | *(Optional)* Adds tools/functions the agent can call |
+| `build()` | Validates configuration and creates the agent instance |
 
 ### Launcher
 
@@ -222,30 +250,178 @@ let agent = LlmAgentBuilder::new("my_assistant")
 Launcher::new(Arc::new(agent)).run().await?;
 ```
 
-The Launcher provides CLI support for running agents in console or server mode.
+The Launcher handles the runtime:
+- **Console mode** (default): Interactive chat in your terminal
+- **Server mode** (`-- serve`): REST API with web interface
+- Manages session state, streaming responses, and graceful shutdown
 
 ## Using Other Models
 
-ADK-Rust is model-agnostic. You can implement the `Llm` trait to use other providers:
+ADK-Rust supports multiple LLM providers out of the box. Enable them via feature flags in your `Cargo.toml`:
+
+```toml
+[dependencies]
+adk-rust = { version = "0.2.0", features = ["openai", "anthropic", "deepseek", "groq", "ollama"] }
+```
+
+Set the appropriate API key for your provider:
+
+```bash
+# OpenAI
+export OPENAI_API_KEY="your-api-key"
+
+# Anthropic
+export ANTHROPIC_API_KEY="your-api-key"
+
+# DeepSeek
+export DEEPSEEK_API_KEY="your-api-key"
+
+# Groq
+export GROQ_API_KEY="your-api-key"
+
+# Ollama (no key needed, just run: ollama serve)
+```
+
+### OpenAI
 
 ```rust
 use adk_rust::prelude::*;
+use adk_rust::Launcher;
+use std::sync::Arc;
 
-pub struct MyCustomModel {
-    // Your model configuration
-}
+#[tokio::main]
+async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
+    dotenvy::dotenv().ok();
 
-#[async_trait]
-impl Llm for MyCustomModel {
-    async fn generate(&self, request: LlmRequest) -> Result<LlmResponse> {
-        // Your implementation
-    }
-    
-    async fn generate_stream(&self, request: LlmRequest) -> Result<LlmResponseStream> {
-        // Your streaming implementation
-    }
+    let api_key = std::env::var("OPENAI_API_KEY")?;
+    let model = OpenAIClient::new(OpenAIConfig::new(api_key, "gpt-4o"))?;
+
+    let agent = LlmAgentBuilder::new("assistant")
+        .instruction("You are a helpful assistant.")
+        .model(Arc::new(model))
+        .build()?;
+
+    Launcher::new(Arc::new(agent)).run().await?;
+
+    Ok(())
 }
 ```
+
+### Anthropic
+
+```rust
+use adk_rust::prelude::*;
+use adk_rust::Launcher;
+use std::sync::Arc;
+
+#[tokio::main]
+async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
+    dotenvy::dotenv().ok();
+
+    let api_key = std::env::var("ANTHROPIC_API_KEY")?;
+    let model = AnthropicClient::new(AnthropicConfig::new(api_key, "claude-sonnet-4-20250514"))?;
+
+    let agent = LlmAgentBuilder::new("assistant")
+        .instruction("You are a helpful assistant.")
+        .model(Arc::new(model))
+        .build()?;
+
+    Launcher::new(Arc::new(agent)).run().await?;
+
+    Ok(())
+}
+```
+
+### DeepSeek
+
+```rust
+use adk_rust::prelude::*;
+use adk_rust::Launcher;
+use std::sync::Arc;
+
+#[tokio::main]
+async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
+    dotenvy::dotenv().ok();
+
+    let api_key = std::env::var("DEEPSEEK_API_KEY")?;
+
+    // Standard chat model
+    let model = DeepSeekClient::chat(api_key)?;
+
+    // Or use reasoner for chain-of-thought reasoning
+    // let model = DeepSeekClient::reasoner(api_key)?;
+
+    let agent = LlmAgentBuilder::new("assistant")
+        .instruction("You are a helpful assistant.")
+        .model(Arc::new(model))
+        .build()?;
+
+    Launcher::new(Arc::new(agent)).run().await?;
+
+    Ok(())
+}
+```
+
+### Groq (Ultra-Fast Inference)
+
+```rust
+use adk_rust::prelude::*;
+use adk_rust::Launcher;
+use std::sync::Arc;
+
+#[tokio::main]
+async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
+    dotenvy::dotenv().ok();
+
+    let api_key = std::env::var("GROQ_API_KEY")?;
+    let model = GroqClient::new(GroqConfig::llama70b(api_key))?;
+
+    let agent = LlmAgentBuilder::new("assistant")
+        .instruction("You are a helpful assistant.")
+        .model(Arc::new(model))
+        .build()?;
+
+    Launcher::new(Arc::new(agent)).run().await?;
+
+    Ok(())
+}
+```
+
+### Ollama (Local Models)
+
+```rust
+use adk_rust::prelude::*;
+use adk_rust::Launcher;
+use std::sync::Arc;
+
+#[tokio::main]
+async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
+    dotenvy::dotenv().ok();
+
+    // Requires: ollama serve && ollama pull llama3.2
+    let model = OllamaModel::new(OllamaConfig::new("llama3.2"))?;
+
+    let agent = LlmAgentBuilder::new("assistant")
+        .instruction("You are a helpful assistant.")
+        .model(Arc::new(model))
+        .build()?;
+
+    Launcher::new(Arc::new(agent)).run().await?;
+
+    Ok(())
+}
+```
+
+### Supported Models
+
+| Provider | Model Examples | Feature Flag |
+|----------|---------------|--------------|
+| Gemini | `gemini-3-pro-preview`, `gemini-3-flash-preview`, `gemini-2.5-flash`, `gemini-2.5-pro`, `gemini-2.0-flash` | (default) |
+| OpenAI | `gpt-5.2`, `gpt-5.2-mini`, `gpt-5-mini`, `gpt-5-nano`, `gpt-4.1`, `gpt-4.1-mini`, `o3-mini`, `gpt-4o`, `gpt-4o-mini` | `openai` |
+| Anthropic | `claude-sonnet-4-5`, `claude-haiku-4-5`, `claude-opus-4-5`, `claude-sonnet-4`, `claude-opus-4`, `claude-haiku-4` | `anthropic` |
+| DeepSeek | `deepseek-chat`, `deepseek-reasoner` | `deepseek` |
+| Groq | `gpt-oss-120b`, `qwen3-32b`, `llama-3.3-70b-versatile`, `mixtral-8x7b-32768` | `groq` |
+| Ollama | `gemma3`, `qwen2.5`, `llama3.2`, `mistral`, `phi4`, `codellama` | `ollama` |
 
 ## Next Steps
 

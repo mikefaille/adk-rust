@@ -17,6 +17,9 @@ pub struct Event {
     pub id: String,
     pub timestamp: DateTime<Utc>,
     pub invocation_id: String,
+    /// Camel case version for UI compatibility
+    #[serde(rename = "invocationId")]
+    pub invocation_id_camel: String,
     pub branch: String,
     pub author: String,
     /// The LLM response containing content and metadata.
@@ -27,6 +30,15 @@ pub struct Event {
     /// IDs of long-running tools associated with this event.
     #[serde(default)]
     pub long_running_tool_ids: Vec<String>,
+    /// LLM request data for UI display (JSON string)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub llm_request: Option<String>,
+    /// GCP Vertex Agent LLM request (for UI compatibility)
+    #[serde(rename = "gcp.vertex.agent.llm_request", skip_serializing_if = "Option::is_none")]
+    pub gcp_llm_request: Option<String>,
+    /// GCP Vertex Agent LLM response (for UI compatibility)
+    #[serde(rename = "gcp.vertex.agent.llm_response", skip_serializing_if = "Option::is_none")]
+    pub gcp_llm_response: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -40,15 +52,40 @@ pub struct EventActions {
 
 impl Event {
     pub fn new(invocation_id: impl Into<String>) -> Self {
+        let invocation_id = invocation_id.into();
         Self {
             id: Uuid::new_v4().to_string(),
             timestamp: Utc::now(),
-            invocation_id: invocation_id.into(),
+            invocation_id: invocation_id.clone(),
+            invocation_id_camel: invocation_id,
             branch: String::new(),
             author: String::new(),
             llm_response: LlmResponse::default(),
             actions: EventActions::default(),
             long_running_tool_ids: Vec::new(),
+            llm_request: None,
+            gcp_llm_request: None,
+            gcp_llm_response: None,
+        }
+    }
+
+    /// Create an event with a specific ID.
+    /// Use this for streaming events where all chunks should share the same event ID.
+    pub fn with_id(id: impl Into<String>, invocation_id: impl Into<String>) -> Self {
+        let invocation_id = invocation_id.into();
+        Self {
+            id: id.into(),
+            timestamp: Utc::now(),
+            invocation_id: invocation_id.clone(),
+            invocation_id_camel: invocation_id,
+            branch: String::new(),
+            author: String::new(),
+            llm_response: LlmResponse::default(),
+            actions: EventActions::default(),
+            long_running_tool_ids: Vec::new(),
+            llm_request: None,
+            gcp_llm_request: None,
+            gcp_llm_response: None,
         }
     }
 
@@ -206,8 +243,10 @@ mod tests {
         event.llm_response.content = Some(Content {
             role: "function".to_string(),
             parts: vec![Part::FunctionResponse {
-                name: "get_weather".to_string(),
-                response: serde_json::json!({"temp": 72}),
+                function_response: crate::FunctionResponseData {
+                    name: "get_weather".to_string(),
+                    response: serde_json::json!({"temp": 72}),
+                },
                 id: Some("call_123".to_string()),
             }],
         });
@@ -234,8 +273,10 @@ mod tests {
         event.llm_response.content = Some(Content {
             role: "function".to_string(),
             parts: vec![Part::FunctionResponse {
-                name: "tool".to_string(),
-                response: serde_json::json!({"result": "done"}),
+                function_response: crate::FunctionResponseData {
+                    name: "tool".to_string(),
+                    response: serde_json::json!({"result": "done"}),
+                },
                 id: Some("call_tool".to_string()),
             }],
         });

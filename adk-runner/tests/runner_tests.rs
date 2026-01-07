@@ -152,6 +152,7 @@ fn test_runner_creation() {
         session_service,
         artifact_service: None,
         memory_service: None,
+        run_config: None,
     });
 
     assert!(runner.is_ok());
@@ -169,6 +170,7 @@ async fn test_runner_run() {
         session_service,
         artifact_service: None,
         memory_service: None,
+        run_config: None,
     })
     .unwrap();
 

@@ -15,8 +15,8 @@ use eventsource_stream::{EventStreamError, Eventsource};
 use futures::{Stream, StreamExt, TryStreamExt};
 use mime::Mime;
 use reqwest::{
-    header::{HeaderMap, HeaderName, HeaderValue, InvalidHeaderValue},
     Client, ClientBuilder, RequestBuilder, Response,
+    header::{HeaderMap, HeaderName, HeaderValue, InvalidHeaderValue},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -25,7 +25,7 @@ use std::{
     fmt::{self, Formatter},
     sync::{Arc, LazyLock},
 };
-use tracing::{instrument, Level, Span};
+use tracing::{Level, Span, instrument};
 use url::Url;
 
 use crate::batch::model::*;

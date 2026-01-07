@@ -178,7 +178,9 @@ async fn do_main() -> Result<(), Box<dyn std::error::Error>> {
 
             // --- Step 3: Multi-turn conversation with thought context ---
             info!("step 3: multi-turn conversation maintaining thought context");
-            info!("IMPORTANT: To maintain thought context, we must include the complete previous response with thought signatures in the next turn");
+            info!(
+                "IMPORTANT: To maintain thought context, we must include the complete previous response with thought signatures in the next turn"
+            );
 
             // Create a multi-turn conversation that includes the previous context
             // We need to include ALL parts from the previous responses to maintain thought context
@@ -252,7 +254,9 @@ async fn do_main() -> Result<(), Box<dyn std::error::Error>> {
 
             let followup_response = conversation_builder.execute().await?;
 
-            info!("follow-up question: Is this weather suitable for outdoor sports? Please recommend some appropriate activities.");
+            info!(
+                "follow-up question: Is this weather suitable for outdoor sports? Please recommend some appropriate activities."
+            );
             info!(followup_response = followup_response.text(), "follow-up response");
 
             // Check if there are any new function calls with thought signatures in the follow-up

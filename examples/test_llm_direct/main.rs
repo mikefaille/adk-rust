@@ -70,10 +70,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 println!("        args: {}", args);
                                 println!("        id: {:?}", id);
                             }
-                            Part::FunctionResponse { name, response, id } => {
+                            Part::FunctionResponse { function_response, id } => {
                                 println!("    [{}] FunctionResponse:", i);
-                                println!("        name: {}", name);
-                                println!("        response: {}", response);
+                                println!("        name: {}", function_response.name);
+                                println!("        response: {}", function_response.response);
                                 println!("        id: {:?}", id);
                             }
                             _ => {

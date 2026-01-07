@@ -16,6 +16,26 @@ impl SessionController {
     pub fn new(session_service: Arc<dyn adk_session::SessionService>) -> Self {
         Self { session_service }
     }
+
+    /// Helper function to convert a session to SessionResponse with actual events and state
+    fn session_to_response(session: &dyn adk_session::Session) -> SessionResponse {
+        // Convert events to JSON values
+        let events: Vec<serde_json::Value> = session
+            .events()
+            .all()
+            .into_iter()
+            .map(|event| serde_json::to_value(event).unwrap_or(serde_json::Value::Null))
+            .collect();
+
+        SessionResponse {
+            id: session.id().to_string(),
+            app_name: session.app_name().to_string(),
+            user_id: session.user_id().to_string(),
+            last_update_time: session.last_update_time().timestamp(),
+            events,
+            state: session.state().all(),
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -64,14 +84,7 @@ pub async fn create_session(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let response = SessionResponse {
-        id: session.id().to_string(),
-        app_name: session.app_name().to_string(),
-        user_id: session.user_id().to_string(),
-        last_update_time: session.last_update_time().timestamp(),
-        events: vec![],
-        state: std::collections::HashMap::new(),
-    };
+    let response = SessionController::session_to_response(session.as_ref());
 
     info!(session_id = %response.id, "Session created successfully");
 
@@ -94,14 +107,7 @@ pub async fn get_session(
         .await
         .map_err(|_| StatusCode::NOT_FOUND)?;
 
-    Ok(Json(SessionResponse {
-        id: session.id().to_string(),
-        app_name: session.app_name().to_string(),
-        user_id: session.user_id().to_string(),
-        last_update_time: session.last_update_time().timestamp(),
-        events: vec![],
-        state: std::collections::HashMap::new(),
-    }))
+    Ok(Json(SessionController::session_to_response(session.as_ref())))
 }
 
 pub async fn delete_session(
@@ -156,14 +162,7 @@ pub async fn create_session_from_path(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    Ok(Json(SessionResponse {
-        id: session.id().to_string(),
-        app_name: session.app_name().to_string(),
-        user_id: session.user_id().to_string(),
-        last_update_time: session.last_update_time().timestamp(),
-        events: vec![],
-        state: std::collections::HashMap::new(),
-    }))
+    Ok(Json(SessionController::session_to_response(session.as_ref())))
 }
 
 /// Get session from URL path parameters (adk-go compatible)
@@ -185,14 +184,7 @@ pub async fn get_session_from_path(
         .await
         .map_err(|_| StatusCode::NOT_FOUND)?;
 
-    Ok(Json(SessionResponse {
-        id: session.id().to_string(),
-        app_name: session.app_name().to_string(),
-        user_id: session.user_id().to_string(),
-        last_update_time: session.last_update_time().timestamp(),
-        events: vec![],
-        state: std::collections::HashMap::new(),
-    }))
+    Ok(Json(SessionController::session_to_response(session.as_ref())))
 }
 
 /// Delete session from URL path parameters (adk-go compatible)
@@ -220,23 +212,28 @@ pub async fn list_sessions(
     State(controller): State<SessionController>,
     Path(params): Path<SessionPathParams>,
 ) -> Result<Json<Vec<SessionResponse>>, StatusCode> {
+    tracing::info!(
+        "list_sessions called with app_name: {}, user_id: {}",
+        params.app_name,
+        params.user_id
+    );
+
     let sessions = controller
         .session_service
-        .list(adk_session::ListRequest { app_name: params.app_name, user_id: params.user_id })
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let responses: Vec<SessionResponse> = sessions
-        .into_iter()
-        .map(|s| SessionResponse {
-            id: s.id().to_string(),
-            app_name: s.app_name().to_string(),
-            user_id: s.user_id().to_string(),
-            last_update_time: s.last_update_time().timestamp(),
-            events: vec![],
-            state: std::collections::HashMap::new(),
+        .list(adk_session::ListRequest {
+            app_name: params.app_name.clone(),
+            user_id: params.user_id.clone(),
         })
-        .collect();
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to list sessions: {:?}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    tracing::info!("Found {} sessions", sessions.len());
+
+    let responses: Vec<SessionResponse> =
+        sessions.into_iter().map(|s| SessionController::session_to_response(s.as_ref())).collect();
 
     Ok(Json(responses))
 }

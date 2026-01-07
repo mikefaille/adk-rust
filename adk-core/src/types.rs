@@ -1,5 +1,11 @@
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FunctionResponseData {
+    pub name: String,
+    pub response: serde_json::Value,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Content {
     pub role: String,
@@ -44,9 +50,9 @@ pub enum Part {
         #[serde(skip_serializing_if = "Option::is_none")]
         id: Option<String>,
     },
+    #[serde(rename_all = "camelCase")]
     FunctionResponse {
-        name: String,
-        response: serde_json::Value,
+        function_response: FunctionResponseData,
         /// Tool call ID for OpenAI-style providers. None for Gemini.
         #[serde(skip_serializing_if = "Option::is_none")]
         id: Option<String>,

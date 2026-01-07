@@ -23,9 +23,31 @@ members = [
     "adk-studio",
     "adk-rust",
     "adk-gemini",
+    "adk-doc-audit",
 
     # Development packages (not published)
-    "examples",
+    "examples", "docs/official_docs_examples/quickstart_test", "docs/official_docs_examples/agents/llm_agent_test",
+    "docs/official_docs_examples/tools/mcp_test",
+    "docs/official_docs_examples/sessions/sessions_test",
+    "docs/official_docs_examples/callbacks/callbacks_test",
+    "docs/official_docs_examples/artifacts/artifacts_test",
+    "docs/official_docs_examples/events/events_test",
+    "docs/official_docs_examples/observability/telemetry_test",
+    "docs/official_docs_examples/deployment/launcher_test",
+    "docs/official_docs_examples/deployment/a2a_test",
+    "docs/official_docs_examples/evaluation/eval_test",
+    "docs/official_docs_examples/security/auth_test",
+    "docs/official_docs_examples/security/guardrails_test",
+    "docs/official_docs_examples/security/memory_test",
+    "docs/official_docs_examples/studio/studio_test",
+    "docs/official_docs_examples/core/core_test",
+    "docs/official_docs_examples/core/runner_test",
+    "docs/official_docs_examples/cli/cli_test",
+    "docs/official_docs_examples/eval/eval_readme_test",
+    "docs/official_docs_examples/graph/graph_readme_test",
+    "docs/official_docs_examples/guardrail/guardrail_readme_test",
+    "docs/official_docs_examples/realtime/realtime_readme_test",
+    "docs/official_docs_examples/readme_validation",
 ]
 exclude = [
     # Git-only packages with GPU dependencies (build explicitly with: cargo build -p adk-mistralrs)
@@ -50,7 +72,7 @@ opt-level = 3
 lto = true
 
 [workspace.package]
-version = "0.1.9"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.85.0"
 license = "Apache-2.0"
@@ -78,23 +100,24 @@ opentelemetry = "0.21"
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
 
 # ADK internal crates (use { workspace = true } in member crates)
-adk-core = { path = "adk-core", version = "0.1.9" }
-adk-agent = { path = "adk-agent", version = "0.1.9" }
-adk-model = { path = "adk-model", version = "0.1.9" }
-adk-tool = { path = "adk-tool", version = "0.1.9" }
-adk-runner = { path = "adk-runner", version = "0.1.9" }
-adk-server = { path = "adk-server", version = "0.1.9" }
-adk-session = { path = "adk-session", version = "0.1.9" }
-adk-artifact = { path = "adk-artifact", version = "0.1.9" }
-adk-memory = { path = "adk-memory", version = "0.1.9" }
-adk-cli = { path = "adk-cli", version = "0.1.9" }
-adk-realtime = { path = "adk-realtime", version = "0.1.9" }
-adk-graph = { path = "adk-graph", version = "0.1.9" }
-adk-browser = { path = "adk-browser", version = "0.1.9" }
-adk-eval = { path = "adk-eval", version = "0.1.9" }
-adk-ui = { path = "adk-ui", version = "0.1.9" }
-adk-telemetry = { path = "adk-telemetry", version = "0.1.9" }
-adk-guardrail = { path = "adk-guardrail", version = "0.1.9" }
-adk-auth = { path = "adk-auth", version = "0.1.9" }
-adk-studio = { path = "adk-studio", version = "0.1.9" }
-adk-gemini = { path = "adk-gemini", version = "0.1.9" }
+adk-core = { path = "adk-core", version = "0.2.0" }
+adk-agent = { path = "adk-agent", version = "0.2.0" }
+adk-model = { path = "adk-model", version = "0.2.0" }
+adk-tool = { path = "adk-tool", version = "0.2.0" }
+adk-runner = { path = "adk-runner", version = "0.2.0" }
+adk-server = { path = "adk-server", version = "0.2.0" }
+adk-session = { path = "adk-session", version = "0.2.0" }
+adk-artifact = { path = "adk-artifact", version = "0.2.0" }
+adk-memory = { path = "adk-memory", version = "0.2.0" }
+adk-cli = { path = "adk-cli", version = "0.2.0" }
+adk-realtime = { path = "adk-realtime", version = "0.2.0" }
+adk-graph = { path = "adk-graph", version = "0.2.0" }
+adk-browser = { path = "adk-browser", version = "0.2.0" }
+adk-eval = { path = "adk-eval", version = "0.2.0" }
+adk-ui = { path = "adk-ui", version = "0.2.0" }
+adk-telemetry = { path = "adk-telemetry", version = "0.2.0" }
+adk-guardrail = { path = "adk-guardrail", version = "0.2.0" }
+adk-auth = { path = "adk-auth", version = "0.2.0" }
+adk-studio = { path = "adk-studio", version = "0.2.0" }
+adk-gemini = { path = "adk-gemini", version = "0.2.0" }
+adk-doc-audit = { path = "adk-doc-audit", version = "0.2.0" }

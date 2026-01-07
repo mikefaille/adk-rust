@@ -30,7 +30,7 @@
 //! ```
 
 use adk_artifact::ArtifactService;
-use adk_core::{Agent, AgentLoader, Result};
+use adk_core::{Agent, AgentLoader, Result, RunConfig, StreamingMode};
 use adk_server::{ServerConfig, create_app};
 use adk_session::InMemorySessionService;
 use clap::{Parser, Subcommand};
@@ -91,12 +91,13 @@ pub struct Launcher {
     agent: Arc<dyn Agent>,
     app_name: Option<String>,
     artifact_service: Option<Arc<dyn ArtifactService>>,
+    run_config: Option<RunConfig>,
 }
 
 impl Launcher {
     /// Create a new launcher with the given agent.
     pub fn new(agent: Arc<dyn Agent>) -> Self {
-        Self { agent, app_name: None, artifact_service: None }
+        Self { agent, app_name: None, artifact_service: None, run_config: None }
     }
 
     /// Set a custom application name (defaults to agent name).
@@ -108,6 +109,12 @@ impl Launcher {
     /// Set a custom artifact service.
     pub fn with_artifact_service(mut self, service: Arc<dyn ArtifactService>) -> Self {
         self.artifact_service = Some(service);
+        self
+    }
+
+    /// Set streaming mode (defaults to SSE if not specified).
+    pub fn with_streaming_mode(mut self, mode: StreamingMode) -> Self {
+        self.run_config = Some(RunConfig { streaming_mode: mode });
         self
     }
 
@@ -156,6 +163,7 @@ impl Launcher {
             session_service,
             artifact_service: self.artifact_service,
             memory_service: None,
+            run_config: self.run_config,
         })?;
 
         println!("🤖 Agent ready! Type your questions (or 'exit' to quit).\n");
@@ -237,16 +245,24 @@ impl Launcher {
 
     /// Run web server with UI.
     async fn run_serve(self, port: u16) -> Result<()> {
-        // Initialize telemetry
-        if let Err(e) = adk_telemetry::init_telemetry("adk-server") {
-            eprintln!("Warning: Failed to initialize telemetry: {}", e);
-        }
+        // Initialize telemetry with ADK-Go style exporter
+        let span_exporter = match adk_telemetry::init_with_adk_exporter("adk-server") {
+            Ok(exporter) => Some(exporter),
+            Err(e) => {
+                eprintln!("Warning: Failed to initialize telemetry: {}", e);
+                None
+            }
+        };
 
         let session_service = Arc::new(InMemorySessionService::new());
         let agent_loader = Arc::new(SingleAgentLoader::new(self.agent));
 
-        let config = ServerConfig::new(agent_loader, session_service)
+        let mut config = ServerConfig::new(agent_loader, session_service)
             .with_artifact_service_opt(self.artifact_service);
+
+        if let Some(exporter) = span_exporter {
+            config = config.with_span_exporter(exporter);
+        }
 
         let app = create_app(config);
 
