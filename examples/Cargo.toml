@@ -482,6 +482,10 @@ name = "mistralrs_diffusion"
 path = "mistralrs_diffusion/main.rs"
 required-features = ["mistralrs"]
 
+[[example]]
+name = "ralph_autonomous_agent"
+path = "ralph_autonomous_agent/main.rs"
+
 [features]
 default = []
 openai = ["adk-model/openai"]
@@ -534,3 +538,7 @@ rmcp = { version = "0.9", features = ["client", "transport-child-process"] }
 rustyline = "15"
 image = "0.25"
 clap = { version = "4.0", features = ["derive"] }
+
+[dev-dependencies]
+proptest = "1.0"
+tokio-test = "0.4"

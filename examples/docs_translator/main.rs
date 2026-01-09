@@ -99,7 +99,7 @@ async fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     
     // Parse arguments
-    let (lang_filter, source_dir, output_base) = parse_args(&args);
+    let (lang_filter, source_dir, output_base, explicit_output) = parse_args(&args);
     
     if lang_filter.as_deref() == Some("--help") || lang_filter.as_deref() == Some("-h") {
         print_help();
@@ -147,7 +147,12 @@ async fn main() -> anyhow::Result<()> {
     
     // Process each language
     for (lang_code, lang_name) in languages {
-        let output_dir = format!("{}/{}", output_base, lang_code);
+        // If explicit output provided, use it directly; otherwise append lang_code
+        let output_dir = if explicit_output {
+            output_base.clone()
+        } else {
+            format!("{}/{}", output_base, lang_code)
+        };
         
         println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
         println!("🔄 Translating to {} ({})", lang_name, lang_code);
@@ -184,35 +189,19 @@ async fn translate_language(
     output_path: &PathBuf,
     files: &[PathBuf],
 ) -> anyhow::Result<TranslationStats> {
-    let model = Arc::new(GeminiModel::new(api_key, "gemini-2.0-flash")?);
+    let model = Arc::new(GeminiModel::new(api_key, "gemini-2.5-flash")?);
     
-    // Build translator agent with language-specific instruction
+    // Simple translator agent (no loop - we'll chunk instead)
     let translator = LlmAgentBuilder::new("translator")
         .description(&format!("Translates documentation to {}", lang_name))
         .instruction(&format!(
             "{}\n\n## TARGET LANGUAGE\nTranslate to: {} ({})",
             TRANSLATOR_INSTRUCTION, lang_name, lang_code
         ))
-        .output_key("translation")
         .model(model.clone())
         .build()?;
     
-    // Build reviewer agent
-    let reviewer = LlmAgentBuilder::new("reviewer")
-        .description("Reviews translation quality")
-        .instruction(REVIEWER_INSTRUCTION)
-        .model(model.clone())
-        .tool(Arc::new(ExitLoopTool::new()))
-        .build()?;
-    
-    // Create translation loop (max 3 iterations for quality)
-    let translation_loop = LoopAgent::new(
-        "translation_loop",
-        vec![Arc::new(translator), Arc::new(reviewer)],
-    )
-    .with_max_iterations(3);
-    
-    let agent: Arc<dyn Agent> = Arc::new(translation_loop);
+    let agent: Arc<dyn Agent> = Arc::new(translator);
     let session_service = Arc::new(InMemorySessionService::new());
     
     let runner = Arc::new(Runner::new(RunnerConfig {
@@ -231,95 +220,152 @@ async fn translate_language(
         failed: 0,
     };
     
-    // Semaphore for rate limiting (2 concurrent translations)
-    let semaphore = Arc::new(Semaphore::new(2));
-    
     for (idx, file) in files.iter().enumerate() {
         let rel_path = file.strip_prefix(source_path).unwrap_or(file);
         let out_file = output_path.join(rel_path);
         
-        // Progress indicator
         let progress = format!("[{}/{}]", idx + 1, files.len());
         
-        // Skip if already translated
         if out_file.exists() {
             println!("   {} ⏭️  {} (exists)", progress, rel_path.display());
             stats.skipped += 1;
             continue;
         }
         
-        print!("   {} 📝 {}...", progress, rel_path.display());
+        println!("   {} 📝 {}", progress, rel_path.display());
         
-        // Acquire semaphore permit
-        let _permit = semaphore.acquire().await?;
-        
-        // Read source content
         let content = fs::read_to_string(file).await?;
         
-        // Create fresh session
-        let session = session_service.create(adk_rust::session::CreateRequest {
-            app_name: "docs_translator".to_string(),
-            user_id: "translator".to_string(),
-            session_id: None,
-            state: HashMap::new(),
-        }).await?;
+        // Split into chunks by sections (## headers)
+        let chunks = split_into_chunks(&content, 4000);
+        println!("      📦 {} chunk(s) to translate", chunks.len());
         
-        // Run translation
-        let user_content = Content::new("user").with_text(&content);
-        let result = runner.run(
-            "translator".to_string(),
-            session.id().to_string(),
-            user_content,
-        ).await;
+        let mut translated_chunks = Vec::new();
         
-        match result {
-            Ok(mut events) => {
-                let mut translated = String::new();
-                
-                while let Some(Ok(event)) = events.next().await {
-                    // Capture translator output (last one wins)
-                    if event.author == "translator" {
+        for (chunk_idx, chunk) in chunks.iter().enumerate() {
+            print!("      🔄 Chunk {}/{}...", chunk_idx + 1, chunks.len());
+            std::io::Write::flush(&mut std::io::stdout()).ok();
+            
+            let session = session_service.create(adk_rust::session::CreateRequest {
+                app_name: "docs_translator".to_string(),
+                user_id: "translator".to_string(),
+                session_id: None,
+                state: HashMap::new(),
+            }).await?;
+            
+            let user_content = Content::new("user").with_text(chunk);
+            let result = runner.run(
+                "translator".to_string(),
+                session.id().to_string(),
+                user_content,
+            ).await;
+            
+            match result {
+                Ok(mut events) => {
+                    let mut chunk_translated = String::new();
+                    
+                    while let Some(Ok(event)) = events.next().await {
                         if let Some(content) = &event.llm_response.content {
                             for part in &content.parts {
                                 if let Part::Text { text } = part {
-                                    if !text.trim().is_empty() {
-                                        translated = text.clone();
-                                    }
+                                    chunk_translated.push_str(text);
                                 }
                             }
                         }
                     }
-                }
-                
-                if translated.is_empty() {
-                    println!(" ❌ (empty output)");
-                    stats.failed += 1;
-                } else {
-                    // Clean up any markdown code fences that might wrap the output
-                    let cleaned = clean_translation(&translated);
                     
-                    // Create output directory
-                    if let Some(parent) = out_file.parent() {
-                        fs::create_dir_all(parent).await?;
+                    if chunk_translated.is_empty() {
+                        println!(" ❌");
+                    } else {
+                        let preview: String = chunk_translated.chars().take(50).collect();
+                        println!(" ✅ \"{}...\"", preview.replace('\n', " "));
+                        translated_chunks.push(clean_translation(&chunk_translated));
                     }
-                    
-                    // Write translated file
-                    fs::write(&out_file, &cleaned).await?;
-                    println!(" ✅");
-                    stats.completed += 1;
+                }
+                Err(e) => {
+                    println!(" ❌ ({})", e);
                 }
             }
-            Err(e) => {
-                println!(" ❌ ({})", e);
-                stats.failed += 1;
-            }
+            
+            // Rate limit between chunks
+            tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
         }
         
-        // Rate limiting delay
-        tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+        if translated_chunks.len() == chunks.len() {
+            // All chunks translated - combine and save
+            let full_translation = translated_chunks.join("\n\n");
+            
+            if let Some(parent) = out_file.parent() {
+                fs::create_dir_all(parent).await?;
+            }
+            
+            fs::write(&out_file, &full_translation).await?;
+            println!("      💾 Saved: {}", out_file.display());
+            stats.completed += 1;
+        } else {
+            println!("      ❌ Failed: only {}/{} chunks translated", translated_chunks.len(), chunks.len());
+            stats.failed += 1;
+        }
+        
+        println!();
     }
     
     Ok(stats)
+}
+
+/// Split content into chunks by markdown sections, preserving code blocks
+fn split_into_chunks(content: &str, max_chars: usize) -> Vec<String> {
+    // First, identify safe split points (## headers not inside code blocks)
+    let mut in_code_block = false;
+    let mut sections: Vec<String> = Vec::new();
+    let mut current_section = String::new();
+    
+    for line in content.lines() {
+        // Track code block state
+        if line.trim().starts_with("```") {
+            in_code_block = !in_code_block;
+        }
+        
+        // Only split at ## headers when NOT in a code block
+        if !in_code_block && line.starts_with("## ") && !current_section.is_empty() {
+            sections.push(current_section.trim().to_string());
+            current_section = String::new();
+        }
+        
+        current_section.push_str(line);
+        current_section.push('\n');
+    }
+    
+    if !current_section.trim().is_empty() {
+        sections.push(current_section.trim().to_string());
+    }
+    
+    // Now combine small sections into chunks up to max_chars
+    let mut chunks: Vec<String> = Vec::new();
+    let mut current_chunk = String::new();
+    
+    for section in sections {
+        if current_chunk.len() + section.len() > max_chars && !current_chunk.is_empty() {
+            chunks.push(current_chunk.trim().to_string());
+            current_chunk = String::new();
+        }
+        
+        if !current_chunk.is_empty() {
+            current_chunk.push_str("\n\n");
+        }
+        current_chunk.push_str(&section);
+    }
+    
+    if !current_chunk.trim().is_empty() {
+        chunks.push(current_chunk.trim().to_string());
+    }
+    
+    // If content is small enough, return as single chunk
+    if chunks.is_empty() {
+        return vec![content.to_string()];
+    }
+    
+    chunks
 }
 
 /// Clean up translation output (remove wrapper code fences if present)
@@ -339,11 +385,13 @@ fn clean_translation(text: &str) -> String {
     trimmed.to_string()
 }
 
-fn parse_args(args: &[String]) -> (Option<String>, String, String) {
+fn parse_args(args: &[String]) -> (Option<String>, String, String, bool) {
     let lang = args.get(1).cloned();
     let source = args.get(2).cloned().unwrap_or_else(|| "docs/official_docs".to_string());
-    let output = args.get(3).cloned().unwrap_or_else(|| "docs".to_string());
-    (lang, source, output)
+    let output = args.get(3).cloned();
+    let explicit_output = output.is_some();
+    let output = output.unwrap_or_else(|| "docs".to_string());
+    (lang, source, output, explicit_output)
 }
 
 fn print_help() {

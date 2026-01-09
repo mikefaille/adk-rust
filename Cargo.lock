@@ -219,6 +219,7 @@ dependencies = [
  "dotenvy",
  "futures",
  "image",
+ "proptest",
  "reqwest 0.12.25",
  "rmcp",
  "rustyline 15.0.0",
@@ -226,6 +227,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tokio-test",
  "tracing-subscriber",
 ]
 
