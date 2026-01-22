@@ -40,9 +40,9 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-adk-graph = { version = "0.2.0", features = ["sqlite"] }
-adk-agent = "0.2.0"
-adk-model = "0.2.0"
+adk-graph = { version = "0.2.1", features = ["sqlite"] }
+adk-agent = "0.2.1"
+adk-model = "0.2.1"
 adk-core = "0.2.0"
 ```
 

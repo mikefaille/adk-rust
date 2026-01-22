@@ -68,7 +68,7 @@ Or use it through `adk-model`:
 
 ```toml
 [dependencies]
-adk-model = { version = "0.2.0", features = ["gemini"] }
+adk-model = { version = "0.2.1", features = ["gemini"] }
 ```
 
 ## 🚀 Quick Start

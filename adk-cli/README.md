@@ -26,7 +26,7 @@ Or use the meta-crate:
 
 ```toml
 [dependencies]
-adk-rust = { version = "0.2.0", features = ["cli"] }
+adk-rust = { version = "0.2.1", features = ["cli"] }
 ```
 
 ## Quick Start
