@@ -343,11 +343,12 @@ export function Canvas() {
               disabled={building} 
               className={`w-full px-2 py-1.5 rounded text-xs text-white font-medium ${
                 building 
-                  ? 'bg-gray-500' 
+                  ? 'opacity-50 cursor-not-allowed' 
                   : builtBinaryPath 
                     ? 'bg-green-600 hover:bg-green-700' 
                     : 'bg-orange-500 hover:bg-orange-600 animate-pulse'
               }`}
+              style={building ? { backgroundColor: 'var(--text-muted)' } : undefined}
             >
               {building ? '⏳ Building...' : builtBinaryPath ? '🔨 Build' : '🔨 Build Required'}
             </button>

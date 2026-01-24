@@ -27,11 +27,12 @@ export function ThemeToggle({ className = '', size = 18 }: ThemeToggleProps) {
   return (
     <button
       onClick={toggle}
-      className={`p-2 rounded-md transition-colors hover:bg-opacity-80 ${
-        isLight 
-          ? 'hover:bg-gray-200 text-gray-700' 
-          : 'hover:bg-gray-700 text-gray-300'
-      } ${className}`}
+      className={`p-2 rounded-md transition-colors ${className}`}
+      style={{
+        color: 'var(--text-secondary)',
+      }}
+      onMouseEnter={(e) => e.currentTarget.style.backgroundColor = 'var(--bg-secondary)'}
+      onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'transparent'}
       title={isLight ? 'Switch to dark mode' : 'Switch to light mode'}
       aria-label={isLight ? 'Switch to dark mode' : 'Switch to light mode'}
     >

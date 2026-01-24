@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from 'react';
 import { useStore } from '../../store';
 import { TEMPLATES, Template } from './templates';
+import { useTheme } from '../../hooks/useTheme';
 
 interface MenuBarProps {
   onExportCode: () => void;
@@ -12,6 +13,8 @@ export function MenuBar({ onExportCode, onNewProject, onTemplateApplied }: MenuB
   const [openMenu, setOpenMenu] = useState<string | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const { currentProject, addAgent, removeAgent, addEdge, removeEdge } = useStore();
+  const { mode } = useTheme();
+  const isLight = mode === 'light';
 
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
@@ -47,16 +50,28 @@ export function MenuBar({ onExportCode, onNewProject, onTemplateApplied }: MenuB
     setOpenMenu(null);
   };
 
+  const menuButtonClass = isLight
+    ? 'hover:bg-gray-200'
+    : 'hover:bg-gray-700';
+  
+  const menuActiveClass = isLight
+    ? 'bg-gray-200'
+    : 'bg-gray-700';
+
   const Menu = ({ name, children }: { name: string; children: React.ReactNode }) => (
     <div className="relative">
       <button
-        className={`px-3 py-1 text-sm hover:bg-gray-700 rounded ${openMenu === name ? 'bg-gray-700' : ''}`}
+        className={`px-3 py-1 text-sm rounded ${menuButtonClass} ${openMenu === name ? menuActiveClass : ''}`}
+        style={{ color: 'var(--text-primary)' }}
         onClick={() => setOpenMenu(openMenu === name ? null : name)}
       >
         {name}
       </button>
       {openMenu === name && (
-        <div className="absolute top-full left-0 mt-1 bg-gray-800 border border-gray-600 rounded shadow-lg min-w-[200px] z-50">
+        <div 
+          className="absolute top-full left-0 mt-1 rounded shadow-lg min-w-[200px] z-50"
+          style={{ backgroundColor: 'var(--surface-panel)', border: '1px solid var(--border-default)' }}
+        >
           {children}
         </div>
       )}
@@ -65,7 +80,8 @@ export function MenuBar({ onExportCode, onNewProject, onTemplateApplied }: MenuB
 
   const MenuItem = ({ onClick, children, disabled }: { onClick: () => void; children: React.ReactNode; disabled?: boolean }) => (
     <button
-      className={`w-full text-left px-3 py-2 text-sm hover:bg-gray-700 ${disabled ? 'opacity-50 cursor-not-allowed' : ''}`}
+      className={`w-full text-left px-3 py-2 text-sm ${menuButtonClass} ${disabled ? 'opacity-50 cursor-not-allowed' : ''}`}
+      style={{ color: 'var(--text-primary)' }}
       onClick={() => { if (!disabled) { onClick(); setOpenMenu(null); } }}
       disabled={disabled}
     >
@@ -73,11 +89,15 @@ export function MenuBar({ onExportCode, onNewProject, onTemplateApplied }: MenuB
     </button>
   );
 
-  const Divider = () => <div className="border-t border-gray-600 my-1" />;
+  const Divider = () => <div className="my-1" style={{ borderTop: '1px solid var(--border-default)' }} />;
 
   return (
-    <div ref={menuRef} className="flex items-center gap-1 px-2 py-1 bg-gray-900 border-b border-gray-700">
-      <span className="text-sm font-semibold text-blue-400 mr-4">🔧 ADK Studio</span>
+    <div 
+      ref={menuRef} 
+      className="flex items-center gap-1 px-2 py-1"
+      style={{ backgroundColor: 'var(--surface-panel)', borderBottom: '1px solid var(--border-default)' }}
+    >
+      <span className="text-sm font-semibold mr-4" style={{ color: 'var(--accent-primary)' }}>🔧 ADK Studio</span>
 
       <Menu name="File">
         <MenuItem onClick={onNewProject}>📄 New Project</MenuItem>
@@ -86,7 +106,7 @@ export function MenuBar({ onExportCode, onNewProject, onTemplateApplied }: MenuB
       </Menu>
 
       <Menu name="Templates">
-        <div className="px-3 py-1 text-xs text-gray-400 border-b border-gray-600">Add to current project</div>
+        <div className="px-3 py-1 text-xs" style={{ color: 'var(--text-muted)', borderBottom: '1px solid var(--border-default)' }}>Add to current project</div>
         {TEMPLATES.map(t => (
           <MenuItem key={t.id} onClick={() => applyTemplate(t)} disabled={!currentProject}>
             {t.icon} {t.name}
@@ -97,21 +117,21 @@ export function MenuBar({ onExportCode, onNewProject, onTemplateApplied }: MenuB
       <Menu name="Help">
         <MenuItem onClick={() => window.open('https://github.com/zavora-ai/adk-rust', '_blank')}>📚 Documentation</MenuItem>
         <Divider />
-        <div className="px-3 py-2 text-xs text-gray-400">
+        <div className="px-3 py-2 text-xs" style={{ color: 'var(--text-secondary)' }}>
           <div className="font-semibold mb-1">Keyboard Shortcuts</div>
           <div>Drag agents from left panel</div>
           <div>Click agent to edit properties</div>
           <div>Drag tools onto agents</div>
         </div>
         <Divider />
-        <div className="px-3 py-2 text-xs text-gray-500">ADK Studio v0.1.0</div>
+        <div className="px-3 py-2 text-xs" style={{ color: 'var(--text-muted)' }}>ADK Studio v0.1.0</div>
       </Menu>
 
       <div className="flex-1" />
 
       {currentProject && (
-        <span className="text-sm text-gray-400">
-          Project: <span className="text-white">{currentProject.name}</span>
+        <span className="text-sm" style={{ color: 'var(--text-secondary)' }}>
+          Project: <span style={{ color: 'var(--text-primary)' }}>{currentProject.name}</span>
         </span>
       )}
     </div>

@@ -24,10 +24,19 @@ export function ToolConfigPanel({ toolId, config, onUpdate, onClose, onOpenCodeE
   if (!current && !isSimple) return null;
 
   return (
-    <div className="w-80 bg-studio-panel border-l border-gray-700 p-4 overflow-y-auto">
+    <div 
+      className="w-80 border-l p-4 overflow-y-auto"
+      style={{ backgroundColor: 'var(--surface-panel)', borderColor: 'var(--border-default)', color: 'var(--text-primary)' }}
+    >
       <div className="flex justify-between items-center mb-4">
-        <h3 className="font-semibold">Configure Tool</h3>
-        <button onClick={onClose} className="px-2 py-1 bg-gray-600 rounded text-xs">Close</button>
+        <h3 className="font-semibold" style={{ color: 'var(--text-primary)' }}>Configure Tool</h3>
+        <button 
+          onClick={onClose} 
+          className="px-2 py-1 rounded text-xs"
+          style={{ backgroundColor: 'var(--bg-secondary)', color: 'var(--text-primary)', border: '1px solid var(--border-default)' }}
+        >
+          Close
+        </button>
       </div>
 
       {toolType === 'mcp' && <McpConfig config={current as McpToolConfig} onUpdate={onUpdate} />}
@@ -42,22 +51,39 @@ function McpConfig({ config, onUpdate }: { config: McpToolConfig; onUpdate: (c: 
   return (
     <div className="space-y-3">
       <div>
-        <label className="block text-sm text-gray-400 mb-2">Quick Templates</label>
+        <label className="block text-sm mb-2" style={{ color: 'var(--text-secondary)' }}>Quick Templates</label>
         <div className="grid grid-cols-2 gap-1 mb-3">
           {MCP_TEMPLATES.map(t => (
-            <button key={t.name} className="flex items-center gap-1 px-2 py-1 bg-gray-700 hover:bg-gray-600 rounded text-xs" title={t.desc} onClick={() => onUpdate({ ...config, name: t.name, server_command: t.command, server_args: t.args })}>
+            <button 
+              key={t.name} 
+              className="flex items-center gap-1 px-2 py-1 rounded text-xs"
+              style={{ backgroundColor: 'var(--bg-secondary)', color: 'var(--text-primary)', border: '1px solid var(--border-default)' }}
+              title={t.desc} 
+              onClick={() => onUpdate({ ...config, name: t.name, server_command: t.command, server_args: t.args })}
+            >
               <span>{t.icon}</span><span className="truncate">{t.name}</span>
             </button>
           ))}
         </div>
       </div>
       <div>
-        <label className="block text-sm text-gray-400 mb-1">Server Command</label>
-        <input className="w-full px-2 py-1 bg-studio-bg border border-gray-600 rounded text-sm" placeholder="npx, uvx..." value={config.server_command} onChange={e => onUpdate({ ...config, server_command: e.target.value })} />
+        <label className="block text-sm mb-1" style={{ color: 'var(--text-secondary)' }}>Server Command</label>
+        <input 
+          className="w-full px-2 py-1 border rounded text-sm" 
+          style={{ backgroundColor: 'var(--bg-secondary)', borderColor: 'var(--border-default)', color: 'var(--text-primary)' }}
+          placeholder="npx, uvx..." 
+          value={config.server_command} 
+          onChange={e => onUpdate({ ...config, server_command: e.target.value })} 
+        />
       </div>
       <div>
-        <label className="block text-sm text-gray-400 mb-1">Server Args (one per line)</label>
-        <textarea className="w-full px-2 py-1 bg-studio-bg border border-gray-600 rounded text-sm h-20" value={config.server_args.join('\n')} onChange={e => onUpdate({ ...config, server_args: e.target.value.split('\n').filter(Boolean) })} />
+        <label className="block text-sm mb-1" style={{ color: 'var(--text-secondary)' }}>Server Args (one per line)</label>
+        <textarea 
+          className="w-full px-2 py-1 border rounded text-sm h-20" 
+          style={{ backgroundColor: 'var(--bg-secondary)', borderColor: 'var(--border-default)', color: 'var(--text-primary)' }}
+          value={config.server_args.join('\n')} 
+          onChange={e => onUpdate({ ...config, server_args: e.target.value.split('\n').filter(Boolean) })} 
+        />
       </div>
     </div>
   );
@@ -75,41 +101,82 @@ function FunctionConfig({ config, onUpdate, onOpenCodeEditor }: { config: Functi
   return (
     <div className="space-y-3">
       <div>
-        <label className="block text-sm text-gray-400 mb-1">Function Name</label>
-        <input className="w-full px-2 py-1 bg-studio-bg border border-gray-600 rounded text-sm" placeholder="get_weather" value={config.name} onChange={e => onUpdate({ ...config, name: e.target.value })} />
+        <label className="block text-sm mb-1" style={{ color: 'var(--text-secondary)' }}>Function Name</label>
+        <input 
+          className="w-full px-2 py-1 border rounded text-sm" 
+          style={{ backgroundColor: 'var(--bg-secondary)', borderColor: 'var(--border-default)', color: 'var(--text-primary)' }}
+          placeholder="get_weather" 
+          value={config.name} 
+          onChange={e => onUpdate({ ...config, name: e.target.value })} 
+        />
       </div>
       <div>
-        <label className="block text-sm text-gray-400 mb-1">Description</label>
-        <textarea className="w-full px-2 py-1 bg-studio-bg border border-gray-600 rounded text-sm h-16" value={config.description} onChange={e => onUpdate({ ...config, description: e.target.value })} />
+        <label className="block text-sm mb-1" style={{ color: 'var(--text-secondary)' }}>Description</label>
+        <textarea 
+          className="w-full px-2 py-1 border rounded text-sm h-16" 
+          style={{ backgroundColor: 'var(--bg-secondary)', borderColor: 'var(--border-default)', color: 'var(--text-primary)' }}
+          value={config.description} 
+          onChange={e => onUpdate({ ...config, description: e.target.value })} 
+        />
       </div>
       <div>
-        <label className="block text-sm text-gray-400 mb-1">Parameters</label>
+        <label className="block text-sm mb-1" style={{ color: 'var(--text-secondary)' }}>Parameters</label>
         {config.parameters.map((p, idx) => (
           <div key={idx} className="flex gap-1 mb-1 items-center">
-            <input className="flex-1 px-1 py-0.5 bg-studio-bg border border-gray-600 rounded text-xs" placeholder="name" value={p.name} onChange={e => updateParam(idx, { name: e.target.value })} />
-            <select className="px-1 py-0.5 bg-studio-bg border border-gray-600 rounded text-xs" value={p.param_type} onChange={e => updateParam(idx, { param_type: e.target.value as 'string' | 'number' | 'boolean' })}>
+            <input 
+              className="flex-1 px-1 py-0.5 border rounded text-xs" 
+              style={{ backgroundColor: 'var(--bg-secondary)', borderColor: 'var(--border-default)', color: 'var(--text-primary)' }}
+              placeholder="name" 
+              value={p.name} 
+              onChange={e => updateParam(idx, { name: e.target.value })} 
+            />
+            <select 
+              className="px-1 py-0.5 border rounded text-xs" 
+              style={{ backgroundColor: 'var(--bg-secondary)', borderColor: 'var(--border-default)', color: 'var(--text-primary)' }}
+              value={p.param_type} 
+              onChange={e => updateParam(idx, { param_type: e.target.value as 'string' | 'number' | 'boolean' })}
+            >
               <option value="string">string</option>
               <option value="number">number</option>
               <option value="boolean">boolean</option>
             </select>
-            <label className="text-xs flex items-center gap-1"><input type="checkbox" checked={p.required} onChange={e => updateParam(idx, { required: e.target.checked })} />req</label>
-            <button className="text-red-400 text-xs" onClick={() => removeParam(idx)}>×</button>
+            <label className="text-xs flex items-center gap-1" style={{ color: 'var(--text-secondary)' }}>
+              <input type="checkbox" checked={p.required} onChange={e => updateParam(idx, { required: e.target.checked })} />req
+            </label>
+            <button style={{ color: 'var(--accent-error)' }} className="text-xs" onClick={() => removeParam(idx)}>×</button>
           </div>
         ))}
-        <button className="w-full py-1 bg-gray-700 hover:bg-gray-600 rounded text-xs mt-1" onClick={addParam}>+ Add Parameter</button>
+        <button 
+          className="w-full py-1 rounded text-xs mt-1" 
+          style={{ backgroundColor: 'var(--bg-secondary)', color: 'var(--text-primary)', border: '1px solid var(--border-default)' }}
+          onClick={addParam}
+        >
+          + Add Parameter
+        </button>
       </div>
       <div>
         <div className="flex justify-between items-center mb-1">
-          <label className="text-sm text-gray-400">Code (Rust)</label>
-          <button className="text-xs text-blue-400 hover:text-blue-300" onClick={onOpenCodeEditor}>✏️ Edit</button>
+          <label className="text-sm" style={{ color: 'var(--text-secondary)' }}>Code (Rust)</label>
+          <button className="text-xs" style={{ color: 'var(--accent-primary)' }} onClick={onOpenCodeEditor}>✏️ Edit</button>
         </div>
-        <textarea className="w-full px-2 py-2 bg-gray-900 border border-gray-600 rounded text-xs font-mono h-32 text-gray-400 cursor-pointer" value={generateFunctionTemplate(config)} readOnly onClick={onOpenCodeEditor} />
+        <textarea 
+          className="w-full px-2 py-2 border rounded text-xs font-mono h-32 cursor-pointer" 
+          style={{ backgroundColor: 'var(--bg-primary)', borderColor: 'var(--border-default)', color: 'var(--text-muted)' }}
+          value={generateFunctionTemplate(config)} 
+          readOnly 
+          onClick={onOpenCodeEditor} 
+        />
       </div>
       <div>
-        <label className="block text-sm text-gray-400 mb-2">Templates</label>
+        <label className="block text-sm mb-2" style={{ color: 'var(--text-secondary)' }}>Templates</label>
         <div className="grid grid-cols-2 gap-1">
           {FUNCTION_TEMPLATES.map(t => (
-            <button key={t.name} className="px-2 py-1 bg-gray-700 hover:bg-gray-600 rounded text-xs flex items-center gap-1" onClick={() => onUpdate({ ...config, ...t.template })}>
+            <button 
+              key={t.name} 
+              className="px-2 py-1 rounded text-xs flex items-center gap-1" 
+              style={{ backgroundColor: 'var(--bg-secondary)', color: 'var(--text-primary)', border: '1px solid var(--border-default)' }}
+              onClick={() => onUpdate({ ...config, ...t.template })}
+            >
               <span>{t.icon}</span><span className="truncate">{t.name}</span>
             </button>
           ))}
@@ -122,17 +189,26 @@ function FunctionConfig({ config, onUpdate, onOpenCodeEditor }: { config: Functi
 function BrowserConfig({ config, onUpdate }: { config: BrowserToolConfig; onUpdate: (c: ToolConfig) => void }) {
   return (
     <div className="space-y-3">
-      <div className="p-2 bg-yellow-900/50 border border-yellow-600 rounded text-xs">
-        <div className="font-semibold text-yellow-400 mb-1">⚠️ Requirements</div>
-        <p className="text-yellow-200">Chrome + ChromeDriver required</p>
+      <div 
+        className="p-2 rounded text-xs"
+        style={{ backgroundColor: 'rgba(234, 179, 8, 0.15)', border: '1px solid var(--accent-warning)', color: 'var(--text-primary)' }}
+      >
+        <div className="font-semibold mb-1" style={{ color: 'var(--accent-warning)' }}>⚠️ Requirements</div>
+        <p style={{ color: 'var(--text-secondary)' }}>Chrome + ChromeDriver required</p>
       </div>
       <div className="flex items-center gap-2">
         <input type="checkbox" id="headless" checked={config.headless} onChange={e => onUpdate({ ...config, headless: e.target.checked })} />
-        <label htmlFor="headless" className="text-sm">Headless Mode</label>
+        <label htmlFor="headless" className="text-sm" style={{ color: 'var(--text-primary)' }}>Headless Mode</label>
       </div>
       <div>
-        <label className="block text-sm text-gray-400 mb-1">Timeout (ms)</label>
-        <input type="number" className="w-full px-2 py-1 bg-studio-bg border border-gray-600 rounded text-sm" value={config.timeout_ms} onChange={e => onUpdate({ ...config, timeout_ms: parseInt(e.target.value) || 30000 })} />
+        <label className="block text-sm mb-1" style={{ color: 'var(--text-secondary)' }}>Timeout (ms)</label>
+        <input 
+          type="number" 
+          className="w-full px-2 py-1 border rounded text-sm" 
+          style={{ backgroundColor: 'var(--bg-secondary)', borderColor: 'var(--border-default)', color: 'var(--text-primary)' }}
+          value={config.timeout_ms} 
+          onChange={e => onUpdate({ ...config, timeout_ms: parseInt(e.target.value) || 30000 })} 
+        />
       </div>
     </div>
   );
@@ -146,9 +222,12 @@ function SimpleToolInfo({ type }: { type: string }) {
   };
   const { title, desc } = info[type] || { title: 'Tool', desc: 'No configuration needed.' };
   return (
-    <div className="p-2 bg-blue-900/50 border border-blue-600 rounded text-xs">
-      <div className="font-semibold text-blue-400 mb-1">ℹ️ {title}</div>
-      <p className="text-blue-200">{desc}</p>
+    <div 
+      className="p-2 rounded text-xs"
+      style={{ backgroundColor: 'rgba(59, 130, 246, 0.15)', border: '1px solid var(--node-agent)', color: 'var(--text-primary)' }}
+    >
+      <div className="font-semibold mb-1" style={{ color: 'var(--node-agent)' }}>ℹ️ {title}</div>
+      <p style={{ color: 'var(--text-secondary)' }}>{desc}</p>
     </div>
   );
 }
