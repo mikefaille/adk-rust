@@ -54,7 +54,7 @@ export const DEFAULT_GLOBAL_SETTINGS: GlobalSettings = {
     onEdgeDelete: true,
   },
   layoutMode: 'free',
-  layoutDirection: 'TB',
+  layoutDirection: 'LR',  // Default to Left-to-Right
 };
 
 const GLOBAL_SETTINGS_KEY = 'adk-studio-global-settings';
