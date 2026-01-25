@@ -1,19 +1,20 @@
 use adk_agent::LlmAgentBuilder;
+use adk_core::SingleAgentLoader;
 use adk_model::gemini::GeminiModel;
-use adk_ui::UiToolset;
+use adk_ui::{a2ui::A2UI_AGENT_PROMPT, UiToolset};
 use anyhow::Result;
 use std::sync::Arc;
 
 const INSTRUCTION: &str = r#"
-You are a support intake assistant that renders working UIs.
+You are a support intake assistant.
 
-Use render_screen for the initial intake UI. Build A2UI components with:
-- a root component id "root"
-- layout via Column/Row
-- Button actions using action.event.name
+When the user starts, immediately render a support ticket form with:
+- Title input
+- Description textarea  
+- Priority select (Low, Medium, High)
+- Submit button
 
-When a user submits, follow up with a confirmation screen or a card/alert.
-If a short form is needed, you may use render_form.
+Use render_screen with a root Column layout.
 "#;
 
 #[tokio::main]
@@ -28,7 +29,7 @@ async fn main() -> Result<()> {
 
     let mut builder = LlmAgentBuilder::new("ui_working_support")
         .description("Support intake agent with working UI flows")
-        .instruction(INSTRUCTION)
+        .instruction(&format!("{}\n\n{}", A2UI_AGENT_PROMPT, INSTRUCTION))
         .model(Arc::new(GeminiModel::new(&api_key, "gemini-2.5-flash")?));
 
     for tool in ui_tools {
@@ -36,17 +37,15 @@ async fn main() -> Result<()> {
     }
 
     let agent = builder.build()?;
+    let agent_loader = Arc::new(SingleAgentLoader::new(Arc::new(agent)));
 
-    let app_name = "ui_working_support".to_string();
-    let user_id = "user1".to_string();
+    let port = std::env::var("PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(8081);
 
     println!("=== Working UI: Support Intake ===");
-    println!("Try prompts:");
-    println!("  - \"Open a support ticket\"");
-    println!("  - \"Report a bug in the billing portal\"");
-    println!("  - \"My app keeps crashing on launch\"");
+    println!("Server running on http://localhost:{}", port);
+    println!("Open http://localhost:5173 and select 'Support Intake' from the dropdown");
 
-    adk_cli::console::run_console(Arc::new(agent), app_name, user_id).await?;
+    adk_cli::serve::run_serve(agent_loader, port).await?;
 
     Ok(())
 }

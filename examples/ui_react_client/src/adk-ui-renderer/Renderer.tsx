@@ -701,3 +701,5 @@ const ComponentRenderer: React.FC<{ component: Component }> = ({ component }) =>
             return <div className="text-red-500 text-sm p-2 border border-red-200 rounded">Unknown component: {(component as any).type}</div>;
     }
 };
+
+export { ComponentRenderer };

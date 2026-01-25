@@ -1,6 +1,7 @@
 use adk_agent::LlmAgentBuilder;
+use adk_core::SingleAgentLoader;
 use adk_model::gemini::GeminiModel;
-use adk_ui::UiToolset;
+use adk_ui::{a2ui::A2UI_AGENT_PROMPT, UiToolset};
 use anyhow::Result;
 use std::sync::Arc;
 
@@ -28,7 +29,9 @@ async fn main() -> Result<()> {
 
     let mut builder = LlmAgentBuilder::new("ui_working_appointment")
         .description("Appointment scheduling agent with working UI flows")
-        .instruction(INSTRUCTION)
+        .instruction(&format!("{}
+
+{}", A2UI_AGENT_PROMPT, INSTRUCTION))
         .model(Arc::new(GeminiModel::new(&api_key, "gemini-2.5-flash")?));
 
     for tool in ui_tools {
@@ -36,17 +39,15 @@ async fn main() -> Result<()> {
     }
 
     let agent = builder.build()?;
+    let agent_loader = Arc::new(SingleAgentLoader::new(Arc::new(agent)));
 
-    let app_name = "ui_working_appointment".to_string();
-    let user_id = "user1".to_string();
+    let port = std::env::var("PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(8082);
 
     println!("=== Working UI: Appointment Scheduling ===");
-    println!("Try prompts:");
-    println!("  - \"Book a dentist appointment\"");
-    println!("  - \"Show me available services and book a slot\"");
-    println!("  - \"Schedule a follow-up for next week\"");
+    println!("Server running on http://localhost:{}", port);
+    println!("Open http://localhost:5173 and select 'Appointments' from the dropdown");
 
-    adk_cli::console::run_console(Arc::new(agent), app_name, user_id).await?;
+    adk_cli::serve::run_serve(agent_loader, port).await?;
 
     Ok(())
 }

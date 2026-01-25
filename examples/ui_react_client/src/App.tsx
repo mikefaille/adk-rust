@@ -1,11 +1,8 @@
-import { useState, useCallback, useEffect } from 'react';
-import { Renderer } from './adk-ui-renderer/Renderer';
+import { useState, useEffect } from 'react';
+import { ComponentRenderer } from './adk-ui-renderer/Renderer';
+import { convertA2UIComponent } from './adk-ui-renderer/a2ui-converter';
 import type { Component } from './adk-ui-renderer/types';
-import { convertA2UIMessage, convertA2UIComponent } from './adk-ui-renderer/a2ui-converter';
-
-const API_BASE = `http://${window.location.hostname}:8080`;
-const APP_NAME = 'ui_demo';
-const USER_ID = 'user1';
+import './App.css';
 
 interface Surface {
   surfaceId: string;
@@ -13,194 +10,214 @@ interface Surface {
   dataModel: Record<string, unknown>;
 }
 
+interface Example {
+  id: string;
+  name: string;
+  description: string;
+  port: number;
+}
+
+const EXAMPLES: Example[] = [
+  { id: 'ui_demo', name: 'UI Demo', description: 'Basic A2UI demo', port: 8080 },
+  { id: 'ui_working_support', name: 'Support Intake', description: 'Support ticket system', port: 8081 },
+  { id: 'ui_working_appointment', name: 'Appointments', description: 'Appointment booking', port: 8082 },
+  { id: 'ui_working_events', name: 'Events', description: 'Event RSVP system', port: 8083 },
+  { id: 'ui_working_facilities', name: 'Facilities', description: 'Work order system', port: 8084 },
+  { id: 'ui_working_inventory', name: 'Inventory', description: 'Restock requests', port: 8085 },
+];
+
 function App() {
   const [surface, setSurface] = useState<Surface | null>(null);
-  const [sessionId, setSessionId] = useState<string | null>(null);
-  const [isLoading, setIsLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [selectedExample, setSelectedExample] = useState<Example>(EXAMPLES[0]);
+  const [isConnected, setIsConnected] = useState(false);
 
-  const ensureSession = async (): Promise<string> => {
-    if (sessionId) return sessionId;
+  useEffect(() => {
+    let abortController = new AbortController();
 
-    const response = await fetch(`${API_BASE}/api/apps/${APP_NAME}/users/${USER_ID}/sessions`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ state: {} }),
-    });
+    const startSession = async () => {
+      try {
+        console.log('Starting session for:', selectedExample.id, 'port:', selectedExample.port);
+        setIsConnected(false);
+        setSurface(null);
 
-    if (!response.ok) throw new Error('Failed to create session');
+        const baseUrl = `http://localhost:${selectedExample.port}`;
+        
+        // Create session
+        console.log('Creating session...');
+        const sessionRes = await fetch(`${baseUrl}/api/apps/${selectedExample.id}/users/user1/sessions`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ state: {} }),
+        });
 
-    const data = await response.json();
-    const newSessionId = data.id || data.session_id || `session-${Date.now()}`;
-    setSessionId(newSessionId);
-    return newSessionId;
-  };
+        console.log('Session response:', sessionRes.status);
+        if (!sessionRes.ok) {
+          console.error('Failed to create session');
+          return;
+        }
 
-  const sendMessage = useCallback(async (message: string) => {
-    if (!message.trim() || isLoading) return;
+        const session = await sessionRes.json();
+        console.log('Session ID:', session.id);
 
-    setIsLoading(true);
-    setError(null);
+        // Connect to SSE via POST
+        const sseUrl = `${baseUrl}/api/run/${selectedExample.id}/user1/${session.id}`;
+        console.log('Connecting to SSE:', sseUrl);
+        
+        const response = await fetch(sseUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ new_message: 'start' }),
+        });
 
-    try {
-      const sid = await ensureSession();
+        if (!response.ok || !response.body) {
+          console.error('Failed to connect to SSE');
+          return;
+        }
 
-      const response = await fetch(`${API_BASE}/api/run/${APP_NAME}/${USER_ID}/${sid}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ new_message: message }),
-      });
+        setIsConnected(true);
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
 
-      if (!response.ok) throw new Error(`Server error: ${response.status}`);
+        const processStream = async () => {
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
 
-      const reader = response.body?.getReader();
-      if (!reader) throw new Error('No response body');
+            const text = decoder.decode(value);
+            const lines = text.split('\n');
 
-      const decoder = new TextDecoder();
-      let buffer = '';
+            for (const line of lines) {
+              if (!line.startsWith('data: ')) continue;
+              const eventData = line.slice(6).trim();
+              if (!eventData || eventData === ':keep-alive') continue;
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
+              try {
+                const evt = JSON.parse(eventData);
 
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop() || '';
-
-        for (const line of lines) {
-          if (!line.startsWith('data: ')) continue;
-          
-          const eventData = line.slice(6);
-          if (eventData === '[DONE]') continue;
-
-          try {
-            const evt = JSON.parse(eventData);
-
-            // Extract components from function response
-            if (evt.content?.parts) {
-              for (const part of evt.content.parts) {
-                if (part.functionResponse?.name === 'render_screen') {
-                  const response = part.functionResponse.response;
-                  if (response.components) {
-                    // Parse components if they're a JSON string
-                    const componentsArray = typeof response.components === 'string' 
-                      ? JSON.parse(response.components)
-                      : response.components;
-                    
-                    // Build component map
-                    const componentMap = new Map<string, any>();
-                    componentsArray.forEach((comp: any) => {
-                      const converted = convertA2UIComponent(comp);
-                      if (converted) {
-                        componentMap.set(converted.id, converted);
-                      }
-                    });
-                    
-                    // Resolve children IDs to actual components
-                    const resolveChildren = (comp: any): any => {
-                      if (comp.children && Array.isArray(comp.children)) {
-                        return {
-                          ...comp,
-                          children: comp.children.map((childId: string) => {
-                            const child = componentMap.get(childId);
-                            return child ? resolveChildren(child) : null;
-                          }).filter(Boolean)
+                // Extract components from function response
+                if (evt.content?.parts) {
+                  for (const part of evt.content.parts) {
+                    if (part.functionResponse?.name === 'render_screen') {
+                      const response = part.functionResponse.response;
+                      if (response.components) {
+                        const componentsArray = typeof response.components === 'string' 
+                          ? JSON.parse(response.components)
+                          : response.components;
+                        
+                        const componentMap = new Map<string, any>();
+                        componentsArray.forEach((comp: any) => {
+                          const converted = convertA2UIComponent(comp);
+                          if (converted) {
+                            componentMap.set(converted.id, converted);
+                          }
+                        });
+                        
+                        const resolveChildren = (comp: any): any => {
+                          if (comp.children && Array.isArray(comp.children)) {
+                            return {
+                              ...comp,
+                              children: comp.children.map((childId: string) => {
+                                const child = componentMap.get(childId);
+                                return child ? resolveChildren(child) : null;
+                              }).filter(Boolean)
+                            };
+                          }
+                          return comp;
                         };
+                        
+                        const root = componentMap.get('root');
+                        if (root) {
+                          const resolvedRoot = resolveChildren(root);
+                          setSurface({
+                            surfaceId: response.surface_id || 'main',
+                            components: [resolvedRoot],
+                            dataModel: response.data_model || {},
+                          });
+                        }
                       }
-                      return comp;
-                    };
-                    
-                    // Find root component and resolve its tree
-                    const root = componentMap.get('root');
-                    if (root) {
-                      const resolvedRoot = resolveChildren(root);
-                      setSurface({
-                        surfaceId: response.surface_id || 'main',
-                        components: [resolvedRoot],
-                        dataModel: response.data_model || {},
-                      });
                     }
                   }
                 }
+              } catch (e) {
+                console.error('Failed to parse SSE event:', e);
               }
             }
-          } catch (e) {
-            console.error('Failed to parse SSE event:', e);
           }
-        }
+        };
+
+        processStream().catch(console.error);
+      } catch (error) {
+        console.error('Failed to start session:', error);
       }
-    } catch (err) {
-      setError((err as Error).message);
-    } finally {
-      setIsLoading(false);
-    }
-  }, [isLoading, sessionId]);
+    };
 
-  const handleAction = useCallback(async (actionId: string, data?: Record<string, unknown>) => {
-    const message = data 
-      ? `Action: ${actionId} with data: ${JSON.stringify(data)}`
-      : `Action: ${actionId}`;
-    
-    await sendMessage(message);
-  }, [sendMessage]);
+    startSession();
 
-  // Auto-start on mount
-  useEffect(() => {
-    sendMessage('start');
-  }, []);
-
-  if (error) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-gray-50 dark:bg-gray-900">
-        <div className="max-w-md w-full bg-white dark:bg-gray-800 rounded-lg shadow-lg p-6">
-          <h2 className="text-xl font-bold text-red-600 dark:text-red-400 mb-2">Error</h2>
-          <p className="text-gray-700 dark:text-gray-300">{error}</p>
-          <button
-            onClick={() => {
-              setError(null);
-              sendMessage('start');
-            }}
-            className="mt-4 px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700"
-          >
-            Retry
-          </button>
-        </div>
-      </div>
-    );
-  }
-
-  if (isLoading && !surface) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-gray-50 dark:bg-gray-900">
-        <div className="text-center">
-          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto mb-4"></div>
-          <p className="text-gray-600 dark:text-gray-400">Loading...</p>
-        </div>
-      </div>
-    );
-  }
-
-  if (!surface) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-gray-50 dark:bg-gray-900">
-        <p className="text-gray-600 dark:text-gray-400">No UI to display</p>
-      </div>
-    );
-  }
+    return () => {
+      abortController.abort();
+    };
+  }, [selectedExample]);
 
   return (
     <div className="min-h-screen bg-gray-50 dark:bg-gray-900">
-      <div className="max-w-4xl mx-auto p-4">
-        <Renderer
-          component={surface.components.find(c => c.id === 'root') || surface.components[0]}
-          onAction={(event) => {
-            if (event.action === 'button_click') {
-              handleAction(event.action_id);
-            } else if (event.action === 'form_submit') {
-              handleAction(event.action_id, event.data);
-            }
-          }}
-        />
+      {/* Header */}
+      <div className="bg-white dark:bg-gray-800 border-b dark:border-gray-700 px-6 py-4">
+        <div className="max-w-7xl mx-auto flex items-center justify-between">
+          <div>
+            <h1 className="text-2xl font-bold text-gray-900 dark:text-white">
+              A2UI Examples
+            </h1>
+            <p className="text-sm text-gray-600 dark:text-gray-400 mt-1">
+              {selectedExample.description}
+            </p>
+          </div>
+          
+          <div className="flex items-center gap-4">
+            <select
+              value={selectedExample.id}
+              onChange={(e) => {
+                const example = EXAMPLES.find(ex => ex.id === e.target.value);
+                if (example) setSelectedExample(example);
+              }}
+              className="px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
+            >
+              {EXAMPLES.map(ex => (
+                <option key={ex.id} value={ex.id}>{ex.name}</option>
+              ))}
+            </select>
+            
+            <div className="flex items-center gap-2">
+              <div className={`w-2 h-2 rounded-full ${isConnected ? 'bg-green-500' : 'bg-red-500'}`} />
+              <span className="text-sm text-gray-600 dark:text-gray-400">
+                {isConnected ? 'Connected' : 'Disconnected'}
+              </span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Content */}
+      <div className="max-w-7xl mx-auto px-6 py-8">
+        {surface && surface.components.length > 0 ? (
+          <div className="bg-white dark:bg-gray-800 rounded-lg shadow-sm p-6">
+            {surface.components.map((component, index) => (
+              <ComponentRenderer key={index} component={component} />
+            ))}
+          </div>
+        ) : (
+          <div className="text-center py-12">
+            <div className="text-gray-400 dark:text-gray-600 mb-4">
+              {isConnected ? (
+                <>
+                  <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500 mx-auto mb-4" />
+                  <p>Waiting for UI...</p>
+                </>
+              ) : (
+                <p>Connecting to {selectedExample.name}...</p>
+              )}
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

@@ -1,6 +1,7 @@
 use adk_agent::LlmAgentBuilder;
+use adk_core::SingleAgentLoader;
 use adk_model::gemini::GeminiModel;
-use adk_ui::UiToolset;
+use adk_ui::{a2ui::A2UI_AGENT_PROMPT, UiToolset};
 use anyhow::Result;
 use std::sync::Arc;
 
@@ -26,7 +27,9 @@ async fn main() -> Result<()> {
 
     let mut builder = LlmAgentBuilder::new("ui_working_facilities")
         .description("Facilities maintenance agent with working UI flows")
-        .instruction(INSTRUCTION)
+        .instruction(&format!("{}
+
+{}", A2UI_AGENT_PROMPT, INSTRUCTION))
         .model(Arc::new(GeminiModel::new(&api_key, "gemini-2.5-flash")?));
 
     for tool in ui_tools {
@@ -34,17 +37,15 @@ async fn main() -> Result<()> {
     }
 
     let agent = builder.build()?;
+    let agent_loader = Arc::new(SingleAgentLoader::new(Arc::new(agent)));
 
-    let app_name = "ui_working_facilities".to_string();
-    let user_id = "user1".to_string();
+    let port = std::env::var("PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(8084);
 
     println!("=== Working UI: Facilities Maintenance ===");
-    println!("Try prompts:");
-    println!("  - \"Report a leaking pipe on floor 3\"");
-    println!("  - \"Create a maintenance work order\"");
-    println!("  - \"Show safety instructions for a power outage\"");
+    println!("Server running on http://localhost:{}", port);
+    println!("Open http://localhost:5173 and select 'Facilities' from the dropdown");
 
-    adk_cli::console::run_console(Arc::new(agent), app_name, user_id).await?;
+    adk_cli::serve::run_serve(agent_loader, port).await?;
 
     Ok(())
 }
