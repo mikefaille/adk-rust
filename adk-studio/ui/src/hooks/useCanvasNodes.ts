@@ -41,8 +41,8 @@ export function useCanvasNodes(project: Project | null, execution: ExecutionStat
   const isHorizontal = layoutDirection === 'LR' || layoutDirection === 'RL';
   
   // Track project structure for detecting actual changes
-  const prevAgentKeys = useRef<string>('');
-  const prevToolsHash = useRef<string>('');
+  const prevAgentKeys = useRef<string | null>(null);
+  const prevToolsHash = useRef<string | null>(null);
 
   // Build nodes only when project STRUCTURE changes (agents added/removed)
   useEffect(() => {
@@ -55,6 +55,14 @@ export function useCanvasNodes(project: Project | null, execution: ExecutionStat
     prevToolsHash.current = toolsHash;
 
     const agentIds = Object.keys(project.agents);
+    
+    // v2.0: If no agents, show empty canvas (no START/END nodes)
+    // This allows undo to restore to a truly blank state
+    if (agentIds.length === 0) {
+      setNodes([]);
+      return;
+    }
+    
     const allSubAgents = new Set(agentIds.flatMap(id => project.agents[id].sub_agents || []));
     const topLevelAgents = agentIds.filter(id => !allSubAgents.has(id));
 
