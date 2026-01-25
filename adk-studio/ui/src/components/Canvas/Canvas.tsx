@@ -77,6 +77,7 @@ export function Canvas() {
     clearCompiledCode,
     invalidateBuild,
     toggleAutobuild,
+    showBuildProgress,
   } = useBuild(
     currentProject?.id, 
     currentProject?.settings?.autobuildTriggers,
@@ -495,7 +496,15 @@ export function Canvas() {
             </button>
             <div className="flex gap-1">
               <button 
-                onClick={handleBuild} 
+                onClick={() => {
+                  if (building && isAutobuild) {
+                    // During autobuild, clicking shows the progress modal
+                    showBuildProgress();
+                  } else {
+                    // Normal build
+                    handleBuild();
+                  }
+                }} 
                 disabled={building && !isAutobuild} 
                 className={`flex-1 px-2 py-1.5 rounded text-xs text-white font-medium ${
                   building 
@@ -508,7 +517,7 @@ export function Canvas() {
                 title={building && isAutobuild ? 'Click to view build progress' : undefined}
               >
                 {building 
-                  ? (isAutobuild ? '⚡ Auto Building...' : '⏳ Building...') 
+                  ? '⏳ Building...'
                   : builtBinaryPath 
                     ? '🔨 Build' 
                     : '🔨 Build Required'}

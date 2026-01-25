@@ -98,12 +98,18 @@ export function useBuild(
   }, [projectId]);
 
   // Core build function (used by both manual and auto build)
+  // For autobuild, we don't set buildOutput to avoid showing modal
   const executeBuild = useCallback(async (isAuto: boolean) => {
     if (!projectId || building) return;
     
     setBuilding(true);
     setIsAutobuild(isAuto);
-    setBuildOutput({ success: false, output: '', path: null });
+    
+    // Only set buildOutput for manual builds (to show modal)
+    // For autobuild, we track progress internally but don't show modal
+    if (!isAuto) {
+      setBuildOutput({ success: false, output: '', path: null });
+    }
     
     // Close any existing event source
     if (eventSourceRef.current) {
@@ -116,16 +122,22 @@ export function useBuild(
     
     es.addEventListener('status', (e) => {
       output += e.data + '\n';
-      setBuildOutput({ success: false, output, path: null });
+      if (!isAuto || buildOutputRef.current) {
+        setBuildOutput({ success: false, output, path: null });
+      }
     });
     
     es.addEventListener('output', (e) => {
       output += e.data + '\n';
-      setBuildOutput({ success: false, output, path: null });
+      if (!isAuto || buildOutputRef.current) {
+        setBuildOutput({ success: false, output, path: null });
+      }
     });
     
     es.addEventListener('done', (e) => {
-      setBuildOutput({ success: true, output, path: e.data });
+      if (!isAuto || buildOutputRef.current) {
+        setBuildOutput({ success: true, output, path: e.data });
+      }
       setBuiltBinaryPath(e.data);
       setBuilding(false);
       setIsAutobuild(false);
@@ -135,6 +147,7 @@ export function useBuild(
     
     es.addEventListener('error', (e) => {
       output += '\nError: ' + ((e as MessageEvent).data || 'Build failed');
+      // Always show errors, even for autobuild
       setBuildOutput({ success: false, output, path: null });
       setBuilding(false);
       setIsAutobuild(false);
@@ -149,6 +162,14 @@ export function useBuild(
       eventSourceRef.current = null;
     };
   }, [projectId, building]);
+  
+  // Track if user has requested to see build output
+  const buildOutputRef = useRef<boolean>(false);
+  
+  // Update ref when buildOutput changes
+  useEffect(() => {
+    buildOutputRef.current = buildOutput !== null;
+  }, [buildOutput]);
 
   // Manual build - shows modal
   const build = useCallback(async () => {
@@ -211,10 +232,11 @@ export function useBuild(
 
   // Show build modal (for when user clicks during autobuild)
   const showBuildProgress = useCallback(() => {
-    // If building, the modal will show current progress
-    // If not building but has output, show the last build output
-    // This is handled by the buildOutput state
-  }, []);
+    if (building && isAutobuild) {
+      // User clicked during autobuild - show the modal with current progress
+      setBuildOutput({ success: false, output: 'Build in progress...', path: null });
+    }
+  }, [building, isAutobuild]);
 
   // Cleanup on unmount
   useEffect(() => {
