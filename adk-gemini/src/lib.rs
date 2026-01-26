@@ -31,6 +31,9 @@
 pub mod client;
 mod models;
 
+/// Data mapper for Vertex AI types
+pub mod mapper;
+
 /// Convenient re-exports of commonly used types
 pub mod prelude;
 

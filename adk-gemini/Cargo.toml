@@ -217,9 +217,6 @@ version = "^0.1"
 [dependencies.base64]
 version = "0.22"
 
-[dependencies.eventsource-stream]
-version = "0.2"
-
 [dependencies.futures]
 version = "^0.3.1"
 
@@ -231,19 +228,6 @@ version = "0.3"
 
 [dependencies.mime_guess]
 version = "2.0"
-
-[dependencies.reqwest]
-version = "^0.12.15"
-features = [
-    "charset",
-    "h2",
-    "http2",
-    "json",
-    "stream",
-    "macos-system-configuration",
-    "rustls-tls",
-]
-default-features = false
 
 [dependencies.schemars]
 version = "1.0"
@@ -284,6 +268,24 @@ version = "0.1.41"
 [dependencies.url]
 version = "^2.4"
 features = ["serde"]
+
+[dependencies.google-cloud-aiplatform-v1]
+version = "1.5"
+
+[dependencies.google-cloud-auth]
+version = "0.13"
+
+[dependencies.google-cloud-gax]
+version = "0.18"
+
+[dependencies.google-cloud-googleapis]
+version = "0.15"
+
+[dependencies.google-cloud-wkt]
+version = "1.2"
+
+[dependencies.bytes]
+version = "1"
 
 [dev-dependencies.display-error-chain]
 version = "0.2"
