@@ -66,7 +66,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "dashmap",
- "jsonwebtoken 10.3.0",
+ "jsonwebtoken",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
@@ -239,7 +239,6 @@ dependencies = [
  "google-cloud-aiplatform-v1",
  "google-cloud-auth",
  "google-cloud-gax",
- "jsonwebtoken 9.3.1",
  "mime",
  "mime_guess",
  "reqwest 0.12.28",
@@ -2572,7 +2571,7 @@ dependencies = [
  "bytes",
  "google-cloud-gax",
  "http 1.4.0",
- "jsonwebtoken 10.3.0",
+ "jsonwebtoken",
  "reqwest 0.13.2",
  "rustc_version",
  "rustls",
@@ -3584,21 +3583,6 @@ dependencies = [
  "serde",
  "serde_json",
  "uuid-simd",
-]
-
-[[package]]
-name = "jsonwebtoken"
-version = "9.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5a87cc7a48537badeae96744432de36f4be2b4a34a05a5ef32e9dd8a1c169dde"
-dependencies = [
- "base64 0.22.1",
- "js-sys",
- "pem",
- "ring",
- "serde",
- "serde_json",
- "simple_asn1",
 ]
 
 [[package]]
