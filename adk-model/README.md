@@ -46,8 +46,9 @@ use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let api_key = std::env::var("GOOGLE_API_KEY")?;
-    let model = GeminiModel::new(&api_key, "gemini-2.5-flash")?;
+    let project_id = std::env::var("GOOGLE_PROJECT_ID")?;
+    let location = std::env::var("GOOGLE_LOCATION").unwrap_or_else(|_| "us-central1".to_string());
+    let model = GeminiModel::new(&project_id, &location, "gemini-2.5-flash").await?;
 
     let agent = LlmAgentBuilder::new("assistant")
         .model(Arc::new(model))
@@ -258,7 +259,8 @@ See [Ollama library](https://ollama.com/library) for all available models.
 
 ```bash
 # Google Gemini
-GOOGLE_API_KEY=your-google-api-key
+GOOGLE_PROJECT_ID=your-google-project-id
+GOOGLE_LOCATION=us-central1 # Optional, defaults to us-central1
 
 # OpenAI
 OPENAI_API_KEY=your-openai-api-key

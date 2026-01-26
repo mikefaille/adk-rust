@@ -118,8 +118,9 @@ impl InvocationContext for TestContext {
 async fn main() -> Result<()> {
     println!("=== State Management Demo ===\n");
 
-    let api_key = std::env::var("GEMINI_API_KEY").expect("GEMINI_API_KEY not set");
-    let model1 = GeminiModel::new(&api_key, "gemini-2.5-flash")?;
+    let project_id = std::env::var("GOOGLE_PROJECT_ID").expect("GOOGLE_PROJECT_ID not set");
+    let location = std::env::var("GOOGLE_LOCATION").unwrap_or_else(|_| "us-central1".to_string());
+    let model1 = GeminiModel::new(&project_id, &location, "gemini-2.5-flash").await?;
 
     // Demo 1: Single agent with output_key
     println!("Demo 1: Single Agent with OutputKey");
@@ -160,8 +161,8 @@ async fn main() -> Result<()> {
     println!("\n\nDemo 2: Sequential Agents with State Coordination");
     println!("--------------------------------------------------");
 
-    let model2 = GeminiModel::new(&api_key, "gemini-2.5-flash")?;
-    let model3 = GeminiModel::new(&api_key, "gemini-2.5-flash")?;
+    let model2 = GeminiModel::new(&project_id, &location, "gemini-2.5-flash").await?;
+    let model3 = GeminiModel::new(&project_id, &location, "gemini-2.5-flash").await?;
 
     let analyzer = LlmAgentBuilder::new("analyzer")
         .description("Analyzes sentiment")

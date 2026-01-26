@@ -23,8 +23,12 @@
 //! use adk_model::GeminiModel;
 //! use std::sync::Arc;
 //!
-//! let api_key = std::env::var("GOOGLE_API_KEY").unwrap();
-//! let model = GeminiModel::new(&api_key, "gemini-2.5-flash").unwrap();
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! let project_id = std::env::var("GOOGLE_PROJECT_ID").unwrap();
+//! let location = std::env::var("GOOGLE_LOCATION").unwrap();
+//! let model = GeminiModel::new(&project_id, &location, "gemini-2.5-flash").await?;
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! ### OpenAI

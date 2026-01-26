@@ -2,22 +2,24 @@ use adk_core::{Content, Llm, LlmRequest};
 use adk_model::gemini::GeminiModel;
 use futures::StreamExt;
 
-fn get_api_key() -> Option<String> {
-    std::env::var("GEMINI_API_KEY").ok()
+fn get_config() -> Option<(String, String)> {
+    let project_id = std::env::var("GOOGLE_PROJECT_ID").ok()?;
+    let location = std::env::var("GOOGLE_LOCATION").unwrap_or_else(|_| "us-central1".to_string());
+    Some((project_id, location))
 }
 
 #[tokio::test]
 #[ignore] // Run with: cargo test -- --ignored --test-threads=1
 async fn test_gemini_generate_content() {
-    let api_key = match get_api_key() {
-        Some(key) => key,
+    let (project_id, location) = match get_config() {
+        Some(c) => c,
         None => {
-            println!("Skipping test: GEMINI_API_KEY not set");
+            println!("Skipping test: GOOGLE_PROJECT_ID not set");
             return;
         }
     };
 
-    let model = GeminiModel::new(api_key, "gemini-2.5-flash").unwrap();
+    let model = GeminiModel::new(project_id, location, "gemini-2.5-flash").await.unwrap();
 
     let content = Content::new("user").with_text("Say 'Hello' in one word");
     let request = LlmRequest::new("gemini-2.5-flash", vec![content]);
@@ -40,15 +42,15 @@ async fn test_gemini_generate_content() {
 #[tokio::test]
 #[ignore]
 async fn test_gemini_streaming() {
-    let api_key = match get_api_key() {
-        Some(key) => key,
+    let (project_id, location) = match get_config() {
+        Some(c) => c,
         None => {
-            println!("Skipping test: GEMINI_API_KEY not set");
+            println!("Skipping test: GOOGLE_PROJECT_ID not set");
             return;
         }
     };
 
-    let model = GeminiModel::new(api_key, "gemini-2.5-flash").unwrap();
+    let model = GeminiModel::new(project_id, location, "gemini-2.5-flash").await.unwrap();
 
     let content = Content::new("user").with_text("Count from 1 to 3");
     let request = LlmRequest::new("gemini-2.5-flash", vec![content]);
@@ -70,15 +72,15 @@ async fn test_gemini_streaming() {
 #[tokio::test]
 #[ignore]
 async fn test_gemini_with_config() {
-    let api_key = match get_api_key() {
-        Some(key) => key,
+    let (project_id, location) = match get_config() {
+        Some(c) => c,
         None => {
-            println!("Skipping test: GEMINI_API_KEY not set");
+            println!("Skipping test: GOOGLE_PROJECT_ID not set");
             return;
         }
     };
 
-    let model = GeminiModel::new(api_key, "gemini-2.5-flash").unwrap();
+    let model = GeminiModel::new(project_id, location, "gemini-2.5-flash").await.unwrap();
 
     let content = Content::new("user").with_text("Say hello");
     let mut request = LlmRequest::new("gemini-2.5-flash", vec![content]);
@@ -104,15 +106,15 @@ async fn test_gemini_with_config() {
 #[tokio::test]
 #[ignore]
 async fn test_gemini_conversation() {
-    let api_key = match get_api_key() {
-        Some(key) => key,
+    let (project_id, location) = match get_config() {
+        Some(c) => c,
         None => {
-            println!("Skipping test: GEMINI_API_KEY not set");
+            println!("Skipping test: GOOGLE_PROJECT_ID not set");
             return;
         }
     };
 
-    let model = GeminiModel::new(api_key, "gemini-2.5-flash").unwrap();
+    let model = GeminiModel::new(project_id, location, "gemini-2.5-flash").await.unwrap();
 
     let contents = vec![
         Content::new("user").with_text("My name is Alice"),

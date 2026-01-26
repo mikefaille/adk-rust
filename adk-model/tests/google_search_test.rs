@@ -3,22 +3,24 @@ use adk_model::gemini::GeminiModel;
 use futures::StreamExt;
 use serde_json::json;
 
-fn get_api_key() -> Option<String> {
-    std::env::var("GEMINI_API_KEY").ok()
+fn get_config() -> Option<(String, String)> {
+    let project_id = std::env::var("GOOGLE_PROJECT_ID").ok()?;
+    let location = std::env::var("GOOGLE_LOCATION").unwrap_or_else(|_| "us-central1".to_string());
+    Some((project_id, location))
 }
 
 #[tokio::test]
 #[ignore]
 async fn test_google_search_zavora() {
-    let api_key = match get_api_key() {
-        Some(key) => key,
+    let (project_id, location) = match get_config() {
+        Some(c) => c,
         None => {
-            println!("Skipping test: GEMINI_API_KEY not set");
+            println!("Skipping test: GOOGLE_PROJECT_ID not set");
             return;
         }
     };
 
-    let model = GeminiModel::new(api_key, "gemini-2.5-flash").unwrap();
+    let model = GeminiModel::new(project_id, location, "gemini-2.5-flash").await.unwrap();
 
     let content =
         Content::new("user").with_text("Search for information about Zavora Technologies");
