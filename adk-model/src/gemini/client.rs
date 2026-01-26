@@ -2,80 +2,55 @@ use adk_core::{
     Content, FinishReason, Llm, LlmRequest, LlmResponse, LlmResponseStream, Part, Result,
     UsageMetadata,
 };
-use adk_gemini::Gemini;
+use adk_gemini::{GeminiProvider, GenerateContentRequest, GenerationConfig, part};
 use async_trait::async_trait;
+use std::collections::HashMap;
 
 pub struct GeminiModel {
-    client: Gemini,
+    client: GeminiProvider,
     model_name: String,
 }
 
 impl GeminiModel {
-    pub fn new(api_key: impl Into<String>, model: impl Into<String>) -> Result<Self> {
-        let client =
-            Gemini::new(api_key.into()).map_err(|e| adk_core::AdkError::Model(e.to_string()))?;
+    pub async fn new(project_id: impl Into<String>, location: impl Into<String>, model: impl Into<String>) -> Result<Self> {
+        let client = GeminiProvider::new(project_id, location)
+            .await
+            .map_err(|e| adk_core::AdkError::Model(e.to_string()))?;
 
         Ok(Self { client, model_name: model.into() })
     }
 
-    fn convert_response(resp: &adk_gemini::GenerationResponse) -> Result<LlmResponse> {
+    fn convert_response(resp: &adk_gemini::GenerateContentResponse) -> Result<LlmResponse> {
         let mut converted_parts: Vec<Part> = Vec::new();
 
         // Convert content parts
-        if let Some(parts) = resp.candidates.first().and_then(|c| c.content.parts.as_ref()) {
-            for p in parts {
-                match p {
-                    adk_gemini::Part::Text { text, .. } => {
-                        converted_parts.push(Part::Text { text: text.clone() });
-                    }
-                    adk_gemini::Part::FunctionCall { function_call, .. } => {
-                        converted_parts.push(Part::FunctionCall {
-                            name: function_call.name.clone(),
-                            args: function_call.args.clone(),
-                            id: None,
-                        });
-                    }
-                    adk_gemini::Part::FunctionResponse { function_response } => {
-                        converted_parts.push(Part::FunctionResponse {
-                            function_response: adk_core::FunctionResponseData {
-                                name: function_response.name.clone(),
-                                response: function_response
-                                    .response
-                                    .clone()
-                                    .unwrap_or(serde_json::Value::Null),
-                            },
-                            id: None,
-                        });
-                    }
-                    _ => {}
-                }
-            }
-        }
+        if let Some(candidate) = resp.candidates.first() {
+            if let Some(content) = &candidate.content {
+                for p in &content.parts {
+                    if let Some(data) = &p.data {
+                        match data {
+                            part::Data::Text(text) => {
+                                converted_parts.push(Part::Text { text: text.clone() });
+                            }
+                            part::Data::FunctionCall(func_call) => {
+                                // Convert prost Struct to serde Value
+                                let args = if let Some(_s) = &func_call.args {
+                                    // TODO: Implement proper conversion from prost_types::Struct to serde_json::Value
+                                    serde_json::Value::Object(serde_json::Map::new())
+                                } else {
+                                    serde_json::Value::Null
+                                };
 
-        // Add grounding metadata as text if present (required for Google Search grounding compliance)
-        if let Some(grounding) = resp.candidates.first().and_then(|c| c.grounding_metadata.as_ref())
-        {
-            if let Some(queries) = &grounding.web_search_queries {
-                if !queries.is_empty() {
-                    let search_info = format!("\n\n🔍 **Searched:** {}", queries.join(", "));
-                    converted_parts.push(Part::Text { text: search_info });
-                }
-            }
-            if let Some(chunks) = &grounding.grounding_chunks {
-                let sources: Vec<String> = chunks
-                    .iter()
-                    .filter_map(|c| {
-                        c.web.as_ref().and_then(|w| match (&w.title, &w.uri) {
-                            (Some(title), Some(uri)) => Some(format!("[{}]({})", title, uri)),
-                            (Some(title), None) => Some(title.clone()),
-                            (None, Some(uri)) => Some(uri.to_string()),
-                            (None, None) => None,
-                        })
-                    })
-                    .collect();
-                if !sources.is_empty() {
-                    let sources_info = format!("\n📚 **Sources:** {}", sources.join(" | "));
-                    converted_parts.push(Part::Text { text: sources_info });
+                                converted_parts.push(Part::FunctionCall {
+                                    name: func_call.name.clone(),
+                                    args,
+                                    id: None,
+                                });
+                            }
+                            // part::Data::FunctionResponse? usually in request, not response from model
+                            _ => {}
+                        }
+                    }
                 }
             }
         }
@@ -87,19 +62,18 @@ impl GeminiModel {
         };
 
         let usage_metadata = resp.usage_metadata.as_ref().map(|u| UsageMetadata {
-            prompt_token_count: u.prompt_token_count.unwrap_or(0),
-            candidates_token_count: u.candidates_token_count.unwrap_or(0),
-            total_token_count: u.total_token_count.unwrap_or(0),
+            prompt_token_count: u.prompt_token_count,
+            candidates_token_count: u.candidates_token_count,
+            total_token_count: u.total_token_count,
         });
 
-        let finish_reason =
-            resp.candidates.first().and_then(|c| c.finish_reason.as_ref()).map(|fr| match fr {
-                adk_gemini::FinishReason::Stop => FinishReason::Stop,
-                adk_gemini::FinishReason::MaxTokens => FinishReason::MaxTokens,
-                adk_gemini::FinishReason::Safety => FinishReason::Safety,
-                adk_gemini::FinishReason::Recitation => FinishReason::Recitation,
-                _ => FinishReason::Other,
-            });
+        // Finish reason mapping
+        let finish_reason = resp.candidates.first().map(|c| match c.finish_reason {
+            1 => FinishReason::Stop, // STOP
+            2 => FinishReason::MaxTokens, // MAX_TOKENS
+            3 => FinishReason::Safety, // SAFETY
+            _ => FinishReason::Other,
+        });
 
         Ok(LlmResponse {
             content,
@@ -133,193 +107,103 @@ impl Llm for GeminiModel {
     async fn generate_content(&self, req: LlmRequest, stream: bool) -> Result<LlmResponseStream> {
         adk_telemetry::info!("Generating content");
 
-        let mut builder = self.client.generate_content();
+        let mut contents = Vec::new();
 
-        // Add contents using proper builder methods
-        for content in &req.contents {
-            match content.role.as_str() {
-                "user" => {
-                    // For user messages, build gemini Content with potentially multiple parts
-                    let mut gemini_parts = Vec::new();
-                    for part in &content.parts {
-                        match part {
-                            Part::Text { text } => {
-                                gemini_parts.push(adk_gemini::Part::Text {
-                                    text: text.clone(),
-                                    thought: None,
-                                    thought_signature: None,
-                                });
-                            }
-                            Part::InlineData { data, mime_type } => {
-                                use base64::{Engine as _, engine::general_purpose::STANDARD};
-                                let encoded = STANDARD.encode(data);
-                                gemini_parts.push(adk_gemini::Part::InlineData {
-                                    inline_data: adk_gemini::Blob {
-                                        mime_type: mime_type.clone(),
-                                        data: encoded,
-                                    },
-                                });
-                            }
-                            _ => {}
-                        }
-                    }
-                    if !gemini_parts.is_empty() {
-                        let user_content = adk_gemini::Content {
-                            role: Some(adk_gemini::Role::User),
-                            parts: Some(gemini_parts),
-                        };
-                        builder = builder.with_message(adk_gemini::Message {
-                            content: user_content,
-                            role: adk_gemini::Role::User,
-                        });
-                    }
+        for content in req.contents {
+            let mut parts = Vec::new();
+            for part in content.parts {
+                let data = match part {
+                    Part::Text { text } => Some(part::Data::Text(text)),
+                    Part::InlineData { data, mime_type } => {
+                        Some(part::Data::InlineData(adk_gemini::Blob {
+                            mime_type,
+                            data: base64::Engine::encode(&base64::engine::general_purpose::STANDARD, data).into(),
+                        }))
+                    },
+                    Part::FunctionCall { name, args: _, .. } => {
+                        Some(part::Data::FunctionCall(adk_gemini::FunctionCall {
+                            name,
+                            args: None, // TODO: Convert serde Value to prost Struct
+                            ..Default::default()
+                        }))
+                    },
+                    Part::FunctionResponse { function_response, .. } => {
+                         Some(part::Data::FunctionResponse(adk_gemini::FunctionResponse {
+                            name: function_response.name,
+                            response: None, // TODO: Convert serde Value to prost Struct
+                            ..Default::default()
+                        }))
+                    },
+                    _ => None,
+                };
+
+                if let Some(d) = data {
+                    parts.push(adk_gemini::Part {
+                        data: Some(d),
+                        ..Default::default()
+                    });
                 }
-                "model" => {
-                    // For model messages, build gemini Content
-                    let mut gemini_parts = Vec::new();
-                    for part in &content.parts {
-                        match part {
-                            Part::Text { text } => {
-                                gemini_parts.push(adk_gemini::Part::Text {
-                                    text: text.clone(),
-                                    thought: None,
-                                    thought_signature: None,
-                                });
-                            }
-                            Part::FunctionCall { name, args, .. } => {
-                                gemini_parts.push(adk_gemini::Part::FunctionCall {
-                                    function_call: adk_gemini::FunctionCall {
-                                        name: name.clone(),
-                                        args: args.clone(),
-                                        thought_signature: None,
-                                    },
-                                    thought_signature: None,
-                                });
-                            }
-                            _ => {}
-                        }
-                    }
-                    if !gemini_parts.is_empty() {
-                        let model_content = adk_gemini::Content {
-                            role: Some(adk_gemini::Role::Model),
-                            parts: Some(gemini_parts),
-                        };
-                        builder = builder.with_message(adk_gemini::Message {
-                            content: model_content,
-                            role: adk_gemini::Role::Model,
-                        });
-                    }
-                }
-                "function" => {
-                    // For function responses
-                    for part in &content.parts {
-                        if let Part::FunctionResponse { function_response, .. } = part {
-                            builder = builder
-                                .with_function_response(
-                                    &function_response.name,
-                                    function_response.response.clone(),
-                                )
-                                .map_err(|e| adk_core::AdkError::Model(e.to_string()))?;
-                        }
-                    }
-                }
-                _ => {}
             }
+
+            contents.push(adk_gemini::Content {
+                role: content.role,
+                parts,
+            });
         }
 
-        // Add generation config
-        if let Some(config) = req.config {
-            let has_schema = config.response_schema.is_some();
-            let gen_config = adk_gemini::GenerationConfig {
-                temperature: config.temperature,
-                top_p: config.top_p,
-                top_k: config.top_k,
-                max_output_tokens: config.max_output_tokens,
-                response_schema: config.response_schema,
-                response_mime_type: if has_schema {
-                    Some("application/json".to_string())
-                } else {
-                    None
-                },
+        // Config mapping
+        let generation_config = if let Some(config) = req.config {
+            Some(GenerationConfig {
+                temperature: Some(config.temperature.unwrap_or(0.0)),
+                top_p: Some(config.top_p.unwrap_or(0.0)),
+                top_k: Some(config.top_k.unwrap_or(0) as f32),
+                candidate_count: Some(1),
+                max_output_tokens: Some(config.max_output_tokens.unwrap_or(0)),
+                stop_sequences: vec![],
+                response_mime_type: "".to_string(),
+                presence_penalty: Some(0.0),
+                frequency_penalty: Some(0.0),
                 ..Default::default()
-            };
-            builder = builder.with_generation_config(gen_config);
-        }
+            })
+        } else {
+            None
+        };
 
-        // Add tools
-        if !req.tools.is_empty() {
-            let mut function_declarations = Vec::new();
-            let mut has_google_search = false;
-
-            for (name, tool_decl) in &req.tools {
-                if name == "google_search" {
-                    has_google_search = true;
-                    continue;
-                }
-
-                // Deserialize our tool declaration into adk_gemini::FunctionDeclaration
-                if let Ok(func_decl) =
-                    serde_json::from_value::<adk_gemini::FunctionDeclaration>(tool_decl.clone())
-                {
-                    function_declarations.push(func_decl);
-                }
-            }
-
-            if !function_declarations.is_empty() {
-                let tool = adk_gemini::Tool::with_functions(function_declarations);
-                builder = builder.with_tool(tool);
-            }
-
-            if has_google_search {
-                // Enable built-in Google Search
-                let tool = adk_gemini::Tool::google_search();
-                builder = builder.with_tool(tool);
-            }
-        }
+        let request = GenerateContentRequest {
+            model: self.model_name.clone(),
+            contents,
+            tools: vec![], // TODO: Map tools
+            tool_config: None,
+            safety_settings: vec![],
+            generation_config,
+            system_instruction: None,
+            cached_content: "".to_string(),
+            labels: HashMap::new(),
+            ..Default::default()
+        };
 
         if stream {
-            adk_telemetry::debug!("Executing streaming request");
-            let response_stream = builder.execute_stream().await.map_err(|e| {
-                adk_telemetry::error!(error = %e, "Model request failed");
-                adk_core::AdkError::Model(e.to_string())
-            })?;
+            let stream = self.client.stream_generate_content(request).await.map_err(|e| adk_core::AdkError::Model(e.to_string()))?;
 
             let mapped_stream = async_stream::stream! {
-                use futures::TryStreamExt;
-                let mut stream = response_stream;
-                while let Some(result) = stream.try_next().await.transpose() {
+                use futures::StreamExt;
+                let mut stream = stream; // tonic stream implements Stream
+                while let Some(result) = stream.next().await {
                     match result {
                         Ok(resp) => {
                             match Self::convert_response(&resp) {
-                                Ok(mut llm_resp) => {
-                                    // Check if this is the final chunk (has finish_reason)
-                                    let is_final = llm_resp.finish_reason.is_some();
-                                    llm_resp.partial = !is_final;
-                                    llm_resp.turn_complete = is_final;
-                                    yield Ok(llm_resp);
-                                }
-                                Err(e) => {
-                                    adk_telemetry::error!(error = %e, "Failed to convert response");
-                                    yield Err(e);
-                                }
+                                Ok(llm_resp) => yield Ok(llm_resp),
+                                Err(e) => yield Err(e),
                             }
                         }
-                        Err(e) => {
-                            adk_telemetry::error!(error = %e, "Stream error");
-                            yield Err(adk_core::AdkError::Model(e.to_string()));
-                        }
+                        Err(e) => yield Err(adk_core::AdkError::Model(e.to_string())),
                     }
                 }
             };
 
             Ok(Box::pin(mapped_stream))
         } else {
-            adk_telemetry::debug!("Executing blocking request");
-            let response = builder.execute().await.map_err(|e| {
-                adk_telemetry::error!(error = %e, "Model request failed");
-                adk_core::AdkError::Model(e.to_string())
-            })?;
-
+            let response = self.client.generate_content(request).await.map_err(|e| adk_core::AdkError::Model(e.to_string()))?;
             let llm_response = Self::convert_response(&response)?;
 
             let stream = async_stream::stream! {

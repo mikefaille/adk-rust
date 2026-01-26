@@ -113,15 +113,14 @@ impl InvocationContext for MockContext {
 // --- Tests ---
 
 #[tokio::test]
-#[ignore] // Requires GEMINI_API_KEY - run with: cargo test --ignored
+#[ignore] // Requires GOOGLE_PROJECT_ID - run with: cargo test --ignored
 async fn test_real_gemini_interaction() {
-    // Load API key from env
+    // Load config from env
     dotenvy::dotenv().ok();
-    let api_key = env::var("GEMINI_API_KEY").expect("GEMINI_API_KEY must be set");
+    let project_id = env::var("GOOGLE_PROJECT_ID").expect("GOOGLE_PROJECT_ID must be set");
+    let location = env::var("GOOGLE_LOCATION").unwrap_or_else(|_| "us-central1".to_string());
 
-    println!("Using Gemini API Key: {}...", &api_key[..10]);
-
-    let model = Arc::new(GeminiModel::new(api_key, "gemini-1.5-flash").unwrap());
+    let model = Arc::new(GeminiModel::new(project_id, location, "gemini-1.5-flash").await.unwrap());
 
     let agent = LlmAgentBuilder::new("gemini-agent")
         .model(model)

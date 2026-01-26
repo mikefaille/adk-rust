@@ -105,10 +105,11 @@ async fn test_callback_execution() {
     assert!(*after_called.lock().unwrap());
 }
 
-#[test]
-fn test_llm_agent_stores_callbacks() {
-    let api_key = std::env::var("GEMINI_API_KEY").unwrap_or_else(|_| "test".to_string());
-    let model = GeminiModel::new(&api_key, "gemini-2.5-flash").expect("Failed to create model");
+#[tokio::test]
+async fn test_llm_agent_stores_callbacks() {
+    let project_id = std::env::var("GOOGLE_PROJECT_ID").unwrap_or_else(|_| "test-project".to_string());
+    let location = std::env::var("GOOGLE_LOCATION").unwrap_or_else(|_| "us-central1".to_string());
+    let model = GeminiModel::new(&project_id, &location, "gemini-2.5-flash").await.expect("Failed to create model");
 
     let agent = LlmAgentBuilder::new("test_agent")
         .model(Arc::new(model))
