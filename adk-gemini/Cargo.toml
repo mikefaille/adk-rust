@@ -265,9 +265,6 @@ features = ["derive"]
 [dependencies.serde_json]
 version = "^1.0"
 
-[dependencies.jsonwebtoken]
-version = "9.3"
-
 [dependencies.snafu]
 version = "0.8"
 features = ["backtrace"]
