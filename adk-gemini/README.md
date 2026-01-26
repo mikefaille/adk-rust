@@ -92,6 +92,82 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+## ✅ Using the stable v1 API
+
+By default the SDK uses the **v1beta** endpoint. Use `with_v1` to target the stable v1 API.
+
+```rust
+use adk_gemini::Gemini;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let api_key = std::env::var("GOOGLE_API_KEY")?;
+    let client = Gemini::with_v1(api_key)?;
+
+    let response = client
+        .generate_content()
+        .with_user_message("Hello, Gemini!")
+        .execute()
+        .await?;
+
+    println!("{}", response.text());
+    Ok(())
+}
+```
+
+## ☁️ Vertex AI (Google Cloud) API Keys
+
+For Vertex AI endpoints, you can configure the client with your project and location.
+API key auth is still supported for model inference.
+
+```rust
+use adk_gemini::Gemini;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let api_key = std::env::var("GOOGLE_API_KEY")?;
+    let client = Gemini::with_google_cloud(api_key, "my-project", "us-central1")?;
+
+    let response = client
+        .generate_content()
+        .with_user_message("Hello from Vertex AI!")
+        .execute()
+        .await?;
+
+    println!("{}", response.text());
+    Ok(())
+}
+```
+
+## 🔐 Vertex AI (Google Cloud) Service Accounts
+
+Service accounts are also supported for Vertex AI. Provide the service account JSON key
+and choose the project/location.
+
+```rust
+use adk_gemini::Gemini;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let service_account_json = std::fs::read_to_string("service-account.json")?;
+    let client = Gemini::with_google_cloud_service_account_json(
+        &service_account_json,
+        "my-project",
+        "us-central1",
+        "gemini-2.5-flash",
+    )?;
+
+    let response = client
+        .generate_content()
+        .with_user_message("Hello from Vertex AI!")
+        .execute()
+        .await?;
+
+    println!("{}", response.text());
+    Ok(())
+}
+```
+
 ## 🔧 ADK-Specific Extensions
 
 ### Grounding Metadata

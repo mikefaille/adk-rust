@@ -13,6 +13,7 @@ use crate::{
 };
 use eventsource_stream::{EventStreamError, Eventsource};
 use futures::{Stream, StreamExt, TryStreamExt};
+use jsonwebtoken::{EncodingKey, Header};
 use mime::Mime;
 use reqwest::{
     Client, ClientBuilder, RequestBuilder, Response,
@@ -25,6 +26,7 @@ use std::{
     fmt::{self, Formatter},
     sync::{Arc, LazyLock},
 };
+use tokio::sync::Mutex;
 use tracing::{Level, Span, instrument};
 use url::Url;
 
@@ -34,6 +36,10 @@ use crate::cache::model::*;
 static DEFAULT_BASE_URL: LazyLock<Url> = LazyLock::new(|| {
     Url::parse("https://generativelanguage.googleapis.com/v1beta/")
         .expect("unreachable error: failed to parse default base URL")
+});
+static V1_BASE_URL: LazyLock<Url> = LazyLock::new(|| {
+    Url::parse("https://generativelanguage.googleapis.com/v1/")
+        .expect("unreachable error: failed to parse v1 base URL")
 });
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Hash, Deserialize, Serialize)]
@@ -60,6 +66,26 @@ impl Model {
             Model::TextEmbedding004 => "models/text-embedding-004",
             Model::Custom(model) => model,
         }
+    }
+
+    pub fn vertex_model_path(&self, project_id: &str, location: &str) -> String {
+        let model_id = match self {
+            Model::Gemini25Flash => "gemini-2.5-flash",
+            Model::Gemini25FlashLite => "gemini-2.5-flash-lite",
+            Model::Gemini25Pro => "gemini-2.5-pro",
+            Model::TextEmbedding004 => "text-embedding-004",
+            Model::Custom(model) => {
+                if model.starts_with("projects/") {
+                    return model.clone();
+                }
+                if model.starts_with("publishers/") {
+                    return format!("projects/{project_id}/locations/{location}/{model}");
+                }
+                model.strip_prefix("models/").unwrap_or(model)
+            }
+        };
+
+        format!("projects/{project_id}/locations/{location}/publishers/google/models/{model_id}")
     }
 }
 
@@ -140,10 +166,136 @@ pub enum Error {
         source: url::ParseError,
     },
 
+    #[snafu(display("failed to parse service account JSON"))]
+    ServiceAccountKeyParse {
+        source: serde_json::Error,
+    },
+
+    #[snafu(display("failed to sign service account JWT"))]
+    ServiceAccountJwt {
+        source: jsonwebtoken::errors::Error,
+    },
+
+    #[snafu(display("failed to request service account token from '{url}'"))]
+    ServiceAccountToken {
+        source: reqwest::Error,
+        url: String,
+    },
+
+    #[snafu(display("failed to deserialize service account token response"))]
+    ServiceAccountTokenDeserialize {
+        source: serde_json::Error,
+    },
+
     #[snafu(display("I/O error during file operations"))]
     Io {
         source: std::io::Error,
     },
+}
+
+#[derive(Debug, Clone)]
+enum AuthConfig {
+    ApiKey(String),
+    ServiceAccount(ServiceAccountTokenSource),
+}
+
+#[derive(Debug, Deserialize, Clone)]
+struct ServiceAccountKey {
+    client_email: String,
+    private_key: String,
+    token_uri: String,
+}
+
+#[derive(Debug, Clone)]
+struct CachedToken {
+    access_token: String,
+    expires_at: i64,
+}
+
+#[derive(Debug, Clone)]
+struct ServiceAccountTokenSource {
+    key: ServiceAccountKey,
+    scopes: Vec<String>,
+    cached: Arc<Mutex<Option<CachedToken>>>,
+}
+
+impl ServiceAccountTokenSource {
+    fn new(key: ServiceAccountKey) -> Self {
+        Self {
+            key,
+            scopes: vec!["https://www.googleapis.com/auth/cloud-platform".to_string()],
+            cached: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    async fn access_token(&self, http_client: &Client) -> Result<String, Error> {
+        let now = time::OffsetDateTime::now_utc().unix_timestamp();
+        {
+            let cache = self.cached.lock().await;
+            if let Some(token) = cache.as_ref() {
+                if token.expires_at.saturating_sub(60) > now {
+                    return Ok(token.access_token.clone());
+                }
+            }
+        }
+
+        let jwt = self.build_jwt(now)?;
+        let token = self.fetch_token(http_client, jwt).await?;
+
+        let mut cache = self.cached.lock().await;
+        *cache = Some(token.clone());
+        Ok(token.access_token)
+    }
+
+    fn build_jwt(&self, now: i64) -> Result<String, Error> {
+        #[derive(Serialize)]
+        struct Claims<'a> {
+            iss: &'a str,
+            scope: &'a str,
+            aud: &'a str,
+            iat: i64,
+            exp: i64,
+        }
+
+        let exp = now + 3600;
+        let scope = self.scopes.join(" ");
+        let claims = Claims {
+            iss: &self.key.client_email,
+            scope: &scope,
+            aud: &self.key.token_uri,
+            iat: now,
+            exp,
+        };
+        let encoding_key =
+            EncodingKey::from_rsa_pem(self.key.private_key.as_bytes()).context(ServiceAccountJwtSnafu)?;
+        jsonwebtoken::encode(&Header::new(jsonwebtoken::Algorithm::RS256), &claims, &encoding_key)
+            .context(ServiceAccountJwtSnafu)
+    }
+
+    async fn fetch_token(&self, http_client: &Client, jwt: String) -> Result<CachedToken, Error> {
+        #[derive(Deserialize)]
+        struct TokenResponse {
+            access_token: String,
+            expires_in: i64,
+        }
+
+        let url = &self.key.token_uri;
+        let response = http_client
+            .post(url)
+            .form(&[
+                ("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer"),
+                ("assertion", &jwt),
+            ])
+            .send()
+            .await
+            .map_err(|e| Error::ServiceAccountToken { source: e, url: url.clone() })?;
+
+        let response = GeminiClient::check_response(response).await?;
+        let token: TokenResponse =
+            response.json().await.context(ServiceAccountTokenDeserializeSnafu)?;
+        let expires_at = time::OffsetDateTime::now_utc().unix_timestamp() + token.expires_in;
+        Ok(CachedToken { access_token: token.access_token, expires_at })
+    }
 }
 
 /// Internal client for making requests to the Gemini API
@@ -151,25 +303,29 @@ pub struct GeminiClient {
     http_client: Client,
     pub model: Model,
     base_url: Url,
+    auth: AuthConfig,
 }
 
 impl GeminiClient {
     /// Create a new client with custom base URL
-    fn with_base_url<K: AsRef<str>, M: Into<Model>>(
+    fn with_base_url<M: Into<Model>>(
         client_builder: ClientBuilder,
-        api_key: K,
         model: M,
         base_url: Url,
+        auth: AuthConfig,
     ) -> Result<Self, Error> {
-        let headers = HeaderMap::from_iter([(
-            HeaderName::from_static("x-goog-api-key"),
-            HeaderValue::from_str(api_key.as_ref()).context(InvalidApiKeySnafu)?,
-        )]);
+        let headers = match &auth {
+            AuthConfig::ApiKey(api_key) => HeaderMap::from_iter([(
+                HeaderName::from_static("x-goog-api-key"),
+                HeaderValue::from_str(api_key.as_str()).context(InvalidApiKeySnafu)?,
+            )]),
+            AuthConfig::ServiceAccount(_) => HeaderMap::new(),
+        };
 
         let http_client =
             client_builder.default_headers(headers).build().expect("all parameters must be valid");
 
-        Ok(Self { http_client, model: model.into(), base_url })
+        Ok(Self { http_client, model: model.into(), base_url, auth })
     }
 
     /// Check the response status code and return an error if it is not successful
@@ -273,12 +429,23 @@ impl GeminiClient {
         deserializer: D,
     ) -> Result<T, Error> {
         let request = builder(&self.http_client);
+        let request = self.apply_auth(request).await?;
         tracing::debug!("request built successfully");
         let response = request.send().await.context(PerformRequestNewSnafu)?;
         tracing::debug!("response received successfully");
         let response = Self::check_response(response).await?;
         tracing::debug!("response ok");
         deserializer(response).await
+    }
+
+    async fn apply_auth(&self, request: RequestBuilder) -> Result<RequestBuilder, Error> {
+        match &self.auth {
+            AuthConfig::ApiKey(_) => Ok(request),
+            AuthConfig::ServiceAccount(source) => {
+                let token = source.access_token(&self.http_client).await?;
+                Ok(request.bearer_auth(token))
+            }
+        }
     }
 
     /// Perform a GET request and deserialize the JSON response.
@@ -697,6 +864,19 @@ impl GeminiClient {
     }
 }
 
+#[derive(Debug, Clone)]
+struct GoogleCloudConfig {
+    project_id: String,
+    location: String,
+}
+
+impl GoogleCloudConfig {
+    fn base_url(&self) -> Result<Url, Error> {
+        Url::parse(&format!("https://{}-aiplatform.googleapis.com/v1/", self.location))
+            .context(UrlParseSnafu)
+    }
+}
+
 /// A builder for the `Gemini` client.
 ///
 /// # Examples
@@ -731,20 +911,22 @@ impl GeminiClient {
 /// # }
 /// ```
 pub struct GeminiBuilder {
-    key: String,
+    auth: AuthConfig,
     model: Model,
     client_builder: ClientBuilder,
     base_url: Url,
+    google_cloud: Option<GoogleCloudConfig>,
 }
 
 impl GeminiBuilder {
     /// Creates a new `GeminiBuilder` with the given API key.
     pub fn new<K: Into<String>>(key: K) -> Self {
         Self {
-            key: key.into(),
+            auth: AuthConfig::ApiKey(key.into()),
             model: Model::default(),
             client_builder: ClientBuilder::default(),
             base_url: DEFAULT_BASE_URL.clone(),
+            google_cloud: None,
         }
     }
 
@@ -763,17 +945,50 @@ impl GeminiBuilder {
     /// Sets a custom base URL for the API.
     pub fn with_base_url(mut self, base_url: Url) -> Self {
         self.base_url = base_url;
+        self.google_cloud = None;
+        self
+    }
+
+    /// Configures the client to use a service account JSON key for authentication.
+    pub fn with_service_account_json(mut self, service_account_json: &str) -> Result<Self, Error> {
+        let key: ServiceAccountKey =
+            serde_json::from_str(service_account_json).context(ServiceAccountKeyParseSnafu)?;
+        self.auth = AuthConfig::ServiceAccount(ServiceAccountTokenSource::new(key));
+        Ok(self)
+    }
+
+    /// Configures the client to use Vertex AI (Google Cloud) endpoints.
+    ///
+    /// Note: Authentication uses API keys or service accounts.
+    pub fn with_google_cloud<P: Into<String>, L: Into<String>>(
+        mut self,
+        project_id: P,
+        location: L,
+    ) -> Self {
+        self.google_cloud = Some(GoogleCloudConfig {
+            project_id: project_id.into(),
+            location: location.into(),
+        });
         self
     }
 
     /// Builds the `Gemini` client.
     pub fn build(self) -> Result<Gemini, Error> {
+        let (model, base_url) = if let Some(config) = &self.google_cloud {
+            (
+                Model::Custom(self.model.vertex_model_path(&config.project_id, &config.location)),
+                config.base_url()?,
+            )
+        } else {
+            (self.model, self.base_url)
+        };
+
         Ok(Gemini {
             client: Arc::new(GeminiClient::with_base_url(
                 self.client_builder,
-                self.key,
-                self.model,
-                self.base_url,
+                model,
+                base_url,
+                self.auth,
             )?),
         })
     }
@@ -801,9 +1016,75 @@ impl Gemini {
         Self::with_model_and_base_url(api_key, model, DEFAULT_BASE_URL.clone())
     }
 
+    /// Create a new client with the specified API key using the v1 (stable) API.
+    pub fn with_v1<K: AsRef<str>>(api_key: K) -> Result<Self, Error> {
+        Self::with_model_and_base_url(api_key, Model::default(), V1_BASE_URL.clone())
+    }
+
+    /// Create a new client with the specified API key and model using the v1 (stable) API.
+    pub fn with_model_v1<K: AsRef<str>, M: Into<Model>>(api_key: K, model: M) -> Result<Self, Error> {
+        Self::with_model_and_base_url(api_key, model, V1_BASE_URL.clone())
+    }
+
     /// Create a new client with custom base URL
     pub fn with_base_url<K: AsRef<str>>(api_key: K, base_url: Url) -> Result<Self, Error> {
         Self::with_model_and_base_url(api_key, Model::default(), base_url)
+    }
+
+    /// Create a new client using Vertex AI (Google Cloud) endpoints.
+    ///
+    /// Note: Authentication uses API keys or service accounts.
+    pub fn with_google_cloud<K: AsRef<str>, P: AsRef<str>, L: AsRef<str>>(
+        api_key: K,
+        project_id: P,
+        location: L,
+    ) -> Result<Self, Error> {
+        Self::with_google_cloud_model(api_key, project_id, location, Model::default())
+    }
+
+    /// Create a new client using Vertex AI (Google Cloud) endpoints and a specific model.
+    ///
+    /// Note: Authentication uses API keys or service accounts.
+    pub fn with_google_cloud_model<K: AsRef<str>, P: AsRef<str>, L: AsRef<str>, M: Into<Model>>(
+        api_key: K,
+        project_id: P,
+        location: L,
+        model: M,
+    ) -> Result<Self, Error> {
+        GeminiBuilder::new(api_key.as_ref())
+            .with_model(model)
+            .with_google_cloud(project_id.as_ref(), location.as_ref())
+            .build()
+    }
+
+    /// Create a new client using a service account JSON key.
+    pub fn with_service_account_json(service_account_json: &str) -> Result<Self, Error> {
+        Self::with_service_account_json_model(service_account_json, Model::default())
+    }
+
+    /// Create a new client using a service account JSON key and a specific model.
+    pub fn with_service_account_json_model<M: Into<Model>>(
+        service_account_json: &str,
+        model: M,
+    ) -> Result<Self, Error> {
+        GeminiBuilder::new("")
+            .with_model(model)
+            .with_service_account_json(service_account_json)?
+            .build()
+    }
+
+    /// Create a new client using Vertex AI (Google Cloud) endpoints and a service account JSON key.
+    pub fn with_google_cloud_service_account_json<M: Into<Model>>(
+        service_account_json: &str,
+        project_id: &str,
+        location: &str,
+        model: M,
+    ) -> Result<Self, Error> {
+        GeminiBuilder::new("")
+            .with_model(model)
+            .with_service_account_json(service_account_json)?
+            .with_google_cloud(project_id, location)
+            .build()
     }
 
     /// Create a new client with the specified API key, model, and base URL
@@ -812,8 +1093,12 @@ impl Gemini {
         model: M,
         base_url: Url,
     ) -> Result<Self, Error> {
-        let client =
-            GeminiClient::with_base_url(Default::default(), api_key, model.into(), base_url)?;
+        let client = GeminiClient::with_base_url(
+            Default::default(),
+            model.into(),
+            base_url,
+            AuthConfig::ApiKey(api_key.as_ref().to_string()),
+        )?;
         Ok(Self { client: Arc::new(client) })
     }
 

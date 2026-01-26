@@ -255,6 +255,9 @@ features = ["derive"]
 [dependencies.serde_json]
 version = "^1.0"
 
+[dependencies.jsonwebtoken]
+version = "9.3"
+
 [dependencies.snafu]
 version = "0.8"
 features = ["backtrace"]
@@ -276,7 +279,7 @@ features = [
 
 [dependencies.tokio]
 version = "1"
-features = ["io-util"]
+features = ["io-util", "sync"]
 
 [dependencies.tracing]
 version = "0.1.41"
