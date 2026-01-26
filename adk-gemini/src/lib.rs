@@ -31,6 +31,12 @@
 pub mod client;
 mod models;
 
+/// Data mapper for Vertex AI types
+pub mod mapper;
+
+/// Official Vertex AI types
+pub use google_cloud_aiplatform_v1::model as vertex_model;
+
 /// Convenient re-exports of commonly used types
 pub mod prelude;
 

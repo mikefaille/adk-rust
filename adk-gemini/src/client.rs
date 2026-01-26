@@ -11,30 +11,22 @@ use crate::{
     },
     generation::{ContentBuilder, GenerateContentRequest, GenerationResponse},
 };
-use eventsource_stream::{EventStreamError, Eventsource};
-use futures::{Stream, StreamExt, TryStreamExt};
+use futures::{Stream, TryStreamExt};
 use mime::Mime;
-use reqwest::{
-    Client, ClientBuilder, RequestBuilder, Response,
-    header::{HeaderMap, HeaderName, HeaderValue, InvalidHeaderValue},
-};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
-use snafu::{OptionExt, ResultExt, Snafu};
+use snafu::Snafu;
 use std::{
     fmt::{self, Formatter},
-    sync::{Arc, LazyLock},
+    sync::Arc,
 };
-use tracing::{Level, Span, instrument};
-use url::Url;
+use tracing::{Level, instrument};
+
+use google_cloud_aiplatform_v1::client::LlmUtilityService;
+use google_cloud_aiplatform_v1::client::PredictionService;
+use google_cloud_aiplatform_v1::model as vertex;
 
 use crate::batch::model::*;
 use crate::cache::model::*;
-
-static DEFAULT_BASE_URL: LazyLock<Url> = LazyLock::new(|| {
-    Url::parse("https://generativelanguage.googleapis.com/v1beta/")
-        .expect("unreachable error: failed to parse default base URL")
-});
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Hash, Deserialize, Serialize)]
 pub enum Model {
@@ -54,10 +46,10 @@ pub enum Model {
 impl Model {
     pub fn as_str(&self) -> &str {
         match self {
-            Model::Gemini25Flash => "models/gemini-2.5-flash",
-            Model::Gemini25FlashLite => "models/gemini-2.5-flash-lite",
-            Model::Gemini25Pro => "models/gemini-2.5-pro",
-            Model::TextEmbedding004 => "models/text-embedding-004",
+            Model::Gemini25Flash => "gemini-2.5-flash-001",
+            Model::Gemini25FlashLite => "gemini-2.5-flash-lite-001",
+            Model::Gemini25Pro => "gemini-2.5-pro-001",
+            Model::TextEmbedding004 => "text-embedding-004",
             Model::Custom(model) => model,
         }
     }
@@ -71,681 +63,305 @@ impl From<String> for Model {
 
 impl fmt::Display for Model {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        match self {
-            Model::Gemini25Flash => write!(f, "models/gemini-2.5-flash"),
-            Model::Gemini25FlashLite => write!(f, "models/gemini-2.5-flash-lite"),
-            Model::Gemini25Pro => write!(f, "models/gemini-2.5-pro"),
-            Model::TextEmbedding004 => write!(f, "models/text-embedding-004"),
-            Model::Custom(model) => write!(f, "{}", model),
-        }
+        write!(f, "{}", self.as_str())
     }
 }
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
-    #[snafu(display("failed to parse API key"))]
-    InvalidApiKey {
-        source: InvalidHeaderValue,
+    #[snafu(display("Google Cloud GAX error: {}", source))]
+    Gax {
+        source: Box<dyn std::error::Error + Send + Sync>,
     },
 
-    #[snafu(display("failed to construct URL (probably incorrect model name): {suffix}"))]
-    ConstructUrl {
-        source: url::ParseError,
-        suffix: String,
+    #[snafu(display("Google Cloud Builder error: {}", source))]
+    Builder {
+        source: Box<dyn std::error::Error + Send + Sync>,
     },
 
-    PerformRequestNew {
-        source: reqwest::Error,
-    },
-
-    #[snafu(display("failed to perform request to '{url}'"))]
-    PerformRequest {
-        source: reqwest::Error,
-        url: Url,
-    },
-
-    #[snafu(display(
-        "bad response from server; code {code}; description: {}",
-        description.as_deref().unwrap_or("none")
-    ))]
-    BadResponse {
-        /// HTTP status code
-        code: u16,
-        /// HTTP error description
-        description: Option<String>,
-    },
-
-    MissingResponseHeader {
-        header: String,
-    },
-
-    #[snafu(display("failed to obtain stream SSE part"))]
-    BadPart {
-        source: EventStreamError<reqwest::Error>,
-    },
+    #[snafu(display("feature not implemented in Vertex AI client yet"))]
+    NotImplemented,
 
     #[snafu(display("failed to deserialize JSON response"))]
     Deserialize {
         source: serde_json::Error,
     },
 
-    #[snafu(display("failed to generate content"))]
-    DecodeResponse {
-        source: reqwest::Error,
-    },
-
-    #[snafu(display("failed to parse URL"))]
-    UrlParse {
-        source: url::ParseError,
-    },
-
+    // Legacy errors kept to minimize breakage in other files temporarily
     #[snafu(display("I/O error during file operations"))]
     Io {
         source: std::io::Error,
     },
 }
 
-/// Internal client for making requests to the Gemini API
+/// Internal client for making requests to the Gemini API via Vertex AI
 pub struct GeminiClient {
-    http_client: Client,
+    pub prediction_client: PredictionService,
+    pub llm_utility_client: LlmUtilityService,
+    pub project_id: String,
+    pub location: String,
     pub model: Model,
-    base_url: Url,
 }
 
 impl GeminiClient {
-    /// Create a new client with custom base URL
-    fn with_base_url<K: AsRef<str>, M: Into<Model>>(
-        client_builder: ClientBuilder,
-        api_key: K,
-        model: M,
-        base_url: Url,
+    /// Create a new client
+    pub async fn new(
+        project_id: String,
+        location: String,
+        model: Model,
     ) -> Result<Self, Error> {
-        let headers = HeaderMap::from_iter([(
-            HeaderName::from_static("x-goog-api-key"),
-            HeaderValue::from_str(api_key.as_ref()).context(InvalidApiKeySnafu)?,
-        )]);
+        let endpoint = format!("https://{}-aiplatform.googleapis.com", location);
 
-        let http_client =
-            client_builder.default_headers(headers).build().expect("all parameters must be valid");
-
-        Ok(Self { http_client, model: model.into(), base_url })
-    }
-
-    /// Check the response status code and return an error if it is not successful
-    #[tracing::instrument(skip_all, err)]
-    async fn check_response(response: Response) -> Result<Response, Error> {
-        let status = response.status();
-        if !status.is_success() {
-            let description = response.text().await.ok();
-            BadResponseSnafu { code: status.as_u16(), description }.fail()
-        } else {
-            Ok(response)
-        }
-    }
-
-    /// Performs an HTTP request to the Gemini API with standardized error handling.
-    ///
-    /// This method provides a generic way to make HTTP requests to the Gemini API with
-    /// consistent error handling, response checking, and deserialization. It handles:
-    /// - Building the HTTP request using a provided builder function
-    /// - Sending the request and handling network errors
-    /// - Checking the response status code for errors
-    /// - Deserializing the response using a provided deserializer function
-    ///
-    /// # Type Parameters
-    /// * `B` - A function that takes a `&Client` and returns a `RequestBuilder`
-    /// * `D` - An async function that takes ownership of a `Response` and returns a `Result<T, Error>`
-    /// * `T` - The type of the deserialized response
-    ///
-    /// # Note
-    /// The `AsyncFn` trait is a standard Rust feature (stabilized in v1.85) and does not
-    /// require any additional imports or feature flags.
-    ///
-    /// # Parameters
-    /// * `builder` - A function that constructs the HTTP request using the client
-    /// * `deserializer` - An async function that processes the response into the desired type
-    ///
-    /// # Examples
-    ///
-    /// Basic HTTP operations:
-    /// ```no_run
-    /// # use adk_gemini::client::*;
-    /// # use reqwest::Response;
-    /// # use url::Url;
-    /// # use serde_json::Value;
-    /// # use snafu::ResultExt;
-    /// # async fn examples(client: &GeminiClient) -> Result<(), Box<dyn std::error::Error>> {
-    /// # let url: Url = "https://example.com".parse()?;
-    /// # let request = Value::Null;
-    ///
-    /// // POST request with JSON payload
-    /// let _response: Value = client
-    ///     .perform_request(
-    ///         |c| c.post(url.clone()).json(&request),
-    ///         async |r| r.json().await.context(DecodeResponseSnafu),
-    ///     )
-    ///     .await?;
-    ///
-    /// // GET request with JSON response
-    /// let _response: Value = client
-    ///     .perform_request(
-    ///         |c| c.get(url.clone()),
-    ///         async |r| r.json().await.context(DecodeResponseSnafu),
-    ///     )
-    ///     .await?;
-    ///
-    /// // DELETE request with no response body
-    /// let _response: () = client
-    ///     .perform_request(|c| c.delete(url), async |_r| Ok(()))
-    ///     .await?;
-    /// # Ok(())
-    /// # }
-    /// ```
-    ///
-    /// Request returning a stream:
-    /// ```no_run
-    /// # use adk_gemini::client::*;
-    /// # use reqwest::Response;
-    /// # use url::Url;
-    /// # use serde_json::Value;
-    /// # async fn example(client: &GeminiClient) -> Result<(), Box<dyn std::error::Error>> {
-    /// # let url: Url = "https://example.com".parse()?;
-    /// # let request = Value::Null;
-    /// let _stream = client
-    ///     .perform_request(
-    ///         |c| c.post(url).json(&request),
-    ///         async |r| Ok(r.bytes_stream()),
-    ///     )
-    ///     .await?;
-    /// # Ok(())
-    /// # }
-    /// ```
-    #[tracing::instrument(skip_all)]
-    #[doc(hidden)]
-    pub async fn perform_request<
-        B: FnOnce(&Client) -> RequestBuilder,
-        D: AsyncFn(Response) -> Result<T, Error>,
-        T,
-    >(
-        &self,
-        builder: B,
-        deserializer: D,
-    ) -> Result<T, Error> {
-        let request = builder(&self.http_client);
-        tracing::debug!("request built successfully");
-        let response = request.send().await.context(PerformRequestNewSnafu)?;
-        tracing::debug!("response received successfully");
-        let response = Self::check_response(response).await?;
-        tracing::debug!("response ok");
-        deserializer(response).await
-    }
-
-    /// Perform a GET request and deserialize the JSON response.
-    ///
-    /// This is a convenience wrapper around [`perform_request`](Self::perform_request).
-    #[tracing::instrument(skip(self), fields(request.type = "get", request.url = %url))]
-    async fn get_json<T: serde::de::DeserializeOwned>(&self, url: Url) -> Result<T, Error> {
-        self.perform_request(|c| c.get(url), async |r| r.json().await.context(DecodeResponseSnafu))
+        let prediction_client = PredictionService::builder()
+            .with_endpoint(endpoint.clone())
+            .build()
             .await
+            .map_err(|e| Error::Builder { source: Box::new(e) })?;
+
+        let llm_utility_client = LlmUtilityService::builder()
+            .with_endpoint(endpoint)
+            .build()
+            .await
+            .map_err(|e| Error::Builder { source: Box::new(e) })?;
+
+        Ok(Self {
+            prediction_client,
+            llm_utility_client,
+            project_id,
+            location,
+            model,
+        })
     }
 
-    /// Perform a POST request with JSON body and deserialize the JSON response.
-    ///
-    /// This is a convenience wrapper around [`perform_request`](Self::perform_request).
-    #[tracing::instrument(skip(self, body), fields(request.type = "post", request.url = %url))]
-    async fn post_json<Req: serde::Serialize, Res: serde::de::DeserializeOwned>(
-        &self,
-        url: Url,
-        body: &Req,
-    ) -> Result<Res, Error> {
-        self.perform_request(
-            |c| c.post(url).json(body),
-            async |r| r.json().await.context(DecodeResponseSnafu),
-        )
-        .await
+    // Helper to get the resource path for a model
+    pub fn model_path(&self) -> String {
+        format!("projects/{}/locations/{}/publishers/google/models/{}", self.project_id, self.location, self.model.as_str())
+    }
+
+    pub fn endpoint_path(&self) -> String {
+        format!("projects/{}/locations/{}/publishers/google", self.project_id, self.location)
     }
 
     /// Generate content
-    #[instrument(skip_all, fields(
-        model,
-        messages.parts.count = request.contents.len(),
-        tools.present = request.tools.is_some(),
-        system.instruction.present = request.system_instruction.is_some(),
-        cached.content.present = request.cached_content.is_some(),
-        usage.prompt_tokens,
-        usage.candidates_tokens,
-        usage.thoughts_tokens,
-        usage.cached_content_tokens,
-        usage.total_tokens,
-    ), ret(level = Level::TRACE), err)]
+    #[instrument(skip_all, ret(level = Level::TRACE), err)]
     pub(crate) async fn generate_content_raw(
         &self,
         request: GenerateContentRequest,
     ) -> Result<GenerationResponse, Error> {
-        let url = self.build_url("generateContent")?;
-        let response: GenerationResponse = self.post_json(url, &request).await?;
+        let vertex_req: vertex::GenerateContentRequest = request.into();
 
-        // Record usage metadata
-        if let Some(usage) = &response.usage_metadata {
-            #[rustfmt::skip]
-            Span::current()
-                .record("usage.prompt_tokens", usage.prompt_token_count)
-                .record("usage.candidates_tokens", usage.candidates_token_count)
-                .record("usage.thoughts_tokens", usage.thoughts_token_count)
-                .record("usage.cached_content_tokens", usage.cached_content_token_count)
-                .record("usage.total_tokens", usage.total_token_count);
+        let response = self.prediction_client.generate_content()
+            .set_model(self.model_path())
+            .with_request(vertex_req)
+            .send()
+            .await
+            .map_err(|e| Error::Gax { source: Box::new(e) })?;
 
-            tracing::debug!("generation usage evaluated");
-        }
-
-        Ok(response)
+        Ok(response.into())
     }
 
     /// Generate content with streaming
-    #[instrument(skip_all, fields(
-        model,
-        messages.parts.count = request.contents.len(),
-        tools.present = request.tools.is_some(),
-        system.instruction.present = request.system_instruction.is_some(),
-        cached.content.present = request.cached_content.is_some(),
-    ), err)]
+    #[instrument(skip_all, err)]
     pub(crate) async fn generate_content_stream(
         &self,
-        request: GenerateContentRequest,
+        _request: GenerateContentRequest,
     ) -> Result<impl TryStreamExt<Ok = GenerationResponse, Error = Error> + Send + use<>, Error>
     {
-        let mut url = self.build_url("streamGenerateContent")?;
-        url.query_pairs_mut().append_pair("alt", "sse");
-
-        let stream = self
-            .perform_request(|c| c.post(url).json(&request), async |r| Ok(r.bytes_stream()))
-            .await?;
-
-        Ok(stream
-            .eventsource()
-            .map(|event| event.context(BadPartSnafu))
-            .map_ok(|event| {
-                serde_json::from_str::<GenerationResponse>(&event.data).context(DeserializeSnafu)
-            })
-            .map(|r| r.flatten()))
+        // Streaming is not yet supported in the generated client for GenerateContent
+        let stream = futures::stream::iter(vec![Err(Error::NotImplemented)]);
+        Ok(stream)
     }
 
     /// Embed content
-    #[instrument(skip_all, fields(
-        model,
-        task.type = request.task_type.as_ref().map(|t| format!("{:?}", t)),
-        task.title = request.title,
-        task.output.dimensionality = request.output_dimensionality,
-    ))]
+    #[instrument(skip_all)]
     pub(crate) async fn embed_content(
         &self,
         request: EmbedContentRequest,
     ) -> Result<ContentEmbeddingResponse, Error> {
-        let url = self.build_url("embedContent")?;
-        self.post_json(url, &request).await
+        let vertex_req: vertex::EmbedContentRequest = request.into();
+
+        let response = self.prediction_client.embed_content()
+            .set_model(self.model_path())
+            .with_request(vertex_req)
+            .send()
+            .await
+            .map_err(|e| Error::Gax { source: Box::new(e) })?;
+
+        Ok(response.into())
+    }
+
+    /// Count tokens
+    #[instrument(skip_all)]
+    pub(crate) async fn count_tokens(
+        &self,
+        request: GenerateContentRequest,
+    ) -> Result<i32, Error> {
+        let vertex_req: vertex::GenerateContentRequest = request.into();
+
+        let response = self.llm_utility_client.count_tokens()
+            .set_endpoint(self.endpoint_path())
+            .set_model(self.model_path())
+            .set_contents(vertex_req.contents)
+            .send()
+            .await
+            .map_err(|e| Error::Gax { source: Box::new(e) })?;
+
+        Ok(response.total_tokens)
     }
 
     /// Batch Embed content
-    #[instrument(skip_all, fields(batch.size = request.requests.len()))]
+    #[instrument(skip_all)]
     pub(crate) async fn embed_content_batch(
         &self,
-        request: BatchEmbedContentsRequest,
+        _request: BatchEmbedContentsRequest,
     ) -> Result<BatchContentEmbeddingResponse, Error> {
-        let url = self.build_url("batchEmbedContents")?;
-        self.post_json(url, &request).await
+        Err(Error::NotImplemented)
     }
 
-    /// Batch generate content (synchronous API that returns results immediately)
-    #[instrument(skip_all, fields(
-        batch.display_name = request.batch.display_name,
-        batch.size = request.batch.input_config.batch_size(),
-    ))]
+    /// Batch generate content
+    #[instrument(skip_all)]
     pub(crate) async fn batch_generate_content(
         &self,
-        request: BatchGenerateContentRequest,
+        _request: BatchGenerateContentRequest,
     ) -> Result<BatchGenerateContentResponse, Error> {
-        let url = self.build_url("batchGenerateContent")?;
-        self.post_json(url, &request).await
+        Err(Error::NotImplemented)
     }
 
     /// Get a batch operation
-    #[instrument(skip_all, fields(
-        operation.name = name,
-    ))]
+    #[instrument(skip_all)]
     pub(crate) async fn get_batch_operation<T: serde::de::DeserializeOwned>(
         &self,
-        name: &str,
+        _name: &str,
     ) -> Result<T, Error> {
-        let url = self.build_batch_url(name, None)?;
-        self.get_json(url).await
+        Err(Error::NotImplemented)
     }
 
     /// List batch operations
-    #[instrument(skip_all, fields(
-        page.size = page_size,
-        page.token.present = page_token.is_some(),
-    ))]
+    #[instrument(skip_all)]
     pub(crate) async fn list_batch_operations(
         &self,
-        page_size: Option<u32>,
-        page_token: Option<String>,
+        _page_size: Option<u32>,
+        _page_token: Option<String>,
     ) -> Result<ListBatchesResponse, Error> {
-        let mut url = self.build_batch_url("batches", None)?;
-
-        if let Some(size) = page_size {
-            url.query_pairs_mut().append_pair("pageSize", &size.to_string());
-        }
-        if let Some(token) = page_token {
-            url.query_pairs_mut().append_pair("pageToken", &token);
-        }
-
-        self.get_json(url).await
+        Err(Error::NotImplemented)
     }
 
     /// List files
-    #[instrument(skip_all, fields(
-        page.size = page_size,
-        page.token.present = page_token.is_some(),
-    ))]
+    #[instrument(skip_all)]
     pub(crate) async fn list_files(
         &self,
-        page_size: Option<u32>,
-        page_token: Option<String>,
+        _page_size: Option<u32>,
+        _page_token: Option<String>,
     ) -> Result<ListFilesResponse, Error> {
-        let mut url = self.build_files_url(None)?;
-
-        if let Some(size) = page_size {
-            url.query_pairs_mut().append_pair("pageSize", &size.to_string());
-        }
-        if let Some(token) = page_token {
-            url.query_pairs_mut().append_pair("pageToken", &token);
-        }
-
-        self.get_json(url).await
+        Err(Error::NotImplemented)
     }
 
     /// Cancel a batch operation
-    #[instrument(skip_all, fields(
-        operation.name = name,
-    ))]
-    pub(crate) async fn cancel_batch_operation(&self, name: &str) -> Result<(), Error> {
-        let url = self.build_batch_url(name, Some("cancel"))?;
-        self.perform_request(|c| c.post(url).json(&json!({})), async |_r| Ok(())).await
+    #[instrument(skip_all)]
+    pub(crate) async fn cancel_batch_operation(&self, _name: &str) -> Result<(), Error> {
+        Err(Error::NotImplemented)
     }
 
     /// Delete a batch operation
-    #[instrument(skip_all, fields(
-        operation.name = name,
-    ))]
-    pub(crate) async fn delete_batch_operation(&self, name: &str) -> Result<(), Error> {
-        let url = self.build_batch_url(name, None)?;
-        self.perform_request(|c| c.delete(url), async |_r| Ok(())).await
+    #[instrument(skip_all)]
+    pub(crate) async fn delete_batch_operation(&self, _name: &str) -> Result<(), Error> {
+        Err(Error::NotImplemented)
     }
 
-    async fn create_upload(
-        &self,
-        bytes: usize,
-        display_name: Option<String>,
-        mime_type: Mime,
-    ) -> Result<Url, Error> {
-        let url = self
-            .base_url
-            .join("/upload/v1beta/files")
-            .context(ConstructUrlSnafu { suffix: "/upload/v1beta/files".to_string() })?;
-
-        self.perform_request(
-            |c| {
-                c.post(url)
-                    .header("X-Goog-Upload-Protocol", "resumable")
-                    .header("X-Goog-Upload-Command", "start")
-                    .header("X-Goog-Upload-Content-Length", bytes.to_string())
-                    .header("X-Goog-Upload-Header-Content-Type", mime_type.to_string())
-                    .json(&json!({"file": {"displayName": display_name}}))
-            },
-            async |r| {
-                r.headers()
-                    .get("X-Goog-Upload-URL")
-                    .context(MissingResponseHeaderSnafu { header: "X-Goog-Upload-URL" })
-                    .and_then(|upload_url| {
-                        upload_url.to_str().map(str::to_string).map_err(|_| Error::BadResponse {
-                            code: 500,
-                            description: Some("Missing upload URL in response".to_string()),
-                        })
-                    })
-                    .and_then(|url| Url::parse(&url).context(UrlParseSnafu))
-            },
-        )
-        .await
-    }
-
-    /// Upload a file using the resumable upload protocol.
-    #[instrument(skip_all, fields(
-        file.size = file_bytes.len(),
-        mime.type = mime_type.to_string(),
-        file.display_name = display_name.as_deref(),
-    ))]
+    /// Upload a file
+    #[instrument(skip_all)]
     pub(crate) async fn upload_file(
         &self,
-        display_name: Option<String>,
-        file_bytes: Vec<u8>,
-        mime_type: Mime,
+        _display_name: Option<String>,
+        _file_bytes: Vec<u8>,
+        _mime_type: Mime,
     ) -> Result<File, Error> {
-        // Step 1: Create resumable upload session
-        let upload_url = self.create_upload(file_bytes.len(), display_name, mime_type).await?;
-
-        // Step 2: Upload file content
-        let upload_response = self
-            .http_client
-            .post(upload_url.clone())
-            .header("X-Goog-Upload-Command", "upload, finalize")
-            .header("X-Goog-Upload-Offset", "0")
-            .body(file_bytes)
-            .send()
-            .await
-            .map_err(|e| Error::PerformRequest { source: e, url: upload_url })?;
-
-        let final_response = Self::check_response(upload_response).await?;
-
-        #[derive(serde::Deserialize)]
-        struct UploadResponse {
-            file: File,
-        }
-
-        let upload_response: UploadResponse =
-            final_response.json().await.context(DecodeResponseSnafu)?;
-        Ok(upload_response.file)
+        Err(Error::NotImplemented)
     }
 
     /// Get a file resource
-    #[instrument(skip_all, fields(
-        file.name = name,
-    ))]
-    pub(crate) async fn get_file(&self, name: &str) -> Result<File, Error> {
-        let url = self.build_files_url(Some(name))?;
-        self.get_json(url).await
+    #[instrument(skip_all)]
+    pub(crate) async fn get_file(&self, _name: &str) -> Result<File, Error> {
+        Err(Error::NotImplemented)
     }
 
     /// Delete a file resource
-    #[instrument(skip_all, fields(
-        file.name = name,
-    ))]
-    pub(crate) async fn delete_file(&self, name: &str) -> Result<(), Error> {
-        let url = self.build_files_url(Some(name))?;
-        self.perform_request(|c| c.delete(url), async |_r| Ok(())).await
+    #[instrument(skip_all)]
+    pub(crate) async fn delete_file(&self, _name: &str) -> Result<(), Error> {
+        Err(Error::NotImplemented)
     }
 
     /// Download a file resource
-    #[instrument(skip_all, fields(
-        file.name = name,
-    ))]
-    pub(crate) async fn download_file(&self, name: &str) -> Result<Vec<u8>, Error> {
-        let mut url = self
-            .base_url
-            .join(&format!("/download/v1beta/{name}:download"))
-            .context(ConstructUrlSnafu { suffix: format!("/download/v1beta/{name}:download") })?;
-        url.query_pairs_mut().append_pair("alt", "media");
-
-        self.perform_request(
-            |c| c.get(url),
-            async |r| r.bytes().await.context(DecodeResponseSnafu).map(|bytes| bytes.to_vec()),
-        )
-        .await
+    #[instrument(skip_all)]
+    pub(crate) async fn download_file(&self, _name: &str) -> Result<Vec<u8>, Error> {
+        Err(Error::NotImplemented)
     }
 
     /// Create cached content
     pub(crate) async fn create_cached_content(
         &self,
-        cached_content: CreateCachedContentRequest,
+        _cached_content: CreateCachedContentRequest,
     ) -> Result<CachedContent, Error> {
-        let url = self.build_cache_url(None)?;
-        self.post_json(url, &cached_content).await
+        Err(Error::NotImplemented)
     }
 
     /// Get cached content
-    pub(crate) async fn get_cached_content(&self, name: &str) -> Result<CachedContent, Error> {
-        let url = self.build_cache_url(Some(name))?;
-        self.get_json(url).await
+    pub(crate) async fn get_cached_content(&self, _name: &str) -> Result<CachedContent, Error> {
+        Err(Error::NotImplemented)
     }
 
-    /// Update cached content (typically to update TTL)
+    /// Update cached content
     pub(crate) async fn update_cached_content(
         &self,
-        name: &str,
-        expiration: CacheExpirationRequest,
+        _name: &str,
+        _expiration: CacheExpirationRequest,
     ) -> Result<CachedContent, Error> {
-        let url = self.build_cache_url(Some(name))?;
-
-        // Create a minimal update payload with just the expiration
-        let update_payload = match expiration {
-            CacheExpirationRequest::Ttl { ttl } => json!({ "ttl": ttl }),
-            CacheExpirationRequest::ExpireTime { expire_time } => {
-                json!({ "expireTime": expire_time.format(&time::format_description::well_known::Rfc3339).unwrap() })
-            }
-        };
-
-        self.perform_request(
-            |c| c.patch(url.clone()).json(&update_payload),
-            async |r| r.json().await.context(DecodeResponseSnafu),
-        )
-        .await
+        Err(Error::NotImplemented)
     }
 
     /// Delete cached content
-    pub(crate) async fn delete_cached_content(&self, name: &str) -> Result<(), Error> {
-        let url = self.build_cache_url(Some(name))?;
-        self.perform_request(|c| c.delete(url.clone()), async |_r| Ok(())).await
+    pub(crate) async fn delete_cached_content(&self, _name: &str) -> Result<(), Error> {
+        Err(Error::NotImplemented)
     }
 
     /// List cached contents
     pub(crate) async fn list_cached_contents(
         &self,
-        page_size: Option<i32>,
-        page_token: Option<String>,
+        _page_size: Option<i32>,
+        _page_token: Option<String>,
     ) -> Result<ListCachedContentsResponse, Error> {
-        let mut url = self.build_cache_url(None)?;
-
-        if let Some(size) = page_size {
-            url.query_pairs_mut().append_pair("pageSize", &size.to_string());
-        }
-        if let Some(token) = page_token {
-            url.query_pairs_mut().append_pair("pageToken", &token);
-        }
-
-        self.get_json(url).await
-    }
-
-    /// Build a URL with the given suffix
-    #[tracing::instrument(skip(self), ret(level = Level::DEBUG))]
-    fn build_url_with_suffix(&self, suffix: &str) -> Result<Url, Error> {
-        self.base_url.join(suffix).context(ConstructUrlSnafu { suffix: suffix.to_string() })
-    }
-
-    /// Build a URL for the API
-    #[tracing::instrument(skip(self), ret(level = Level::DEBUG))]
-    fn build_url(&self, endpoint: &str) -> Result<Url, Error> {
-        let suffix = format!("{}:{endpoint}", self.model);
-        self.build_url_with_suffix(&suffix)
-    }
-
-    /// Build a URL for a batch operation
-    fn build_batch_url(&self, name: &str, action: Option<&str>) -> Result<Url, Error> {
-        let suffix = action.map(|a| format!("{name}:{a}")).unwrap_or_else(|| name.to_string());
-        self.build_url_with_suffix(&suffix)
-    }
-
-    /// Build a URL for file operations
-    fn build_files_url(&self, name: Option<&str>) -> Result<Url, Error> {
-        let suffix = name
-            .map(|n| format!("files/{}", n.strip_prefix("files/").unwrap_or(n)))
-            .unwrap_or_else(|| "files".to_string());
-        self.build_url_with_suffix(&suffix)
-    }
-
-    /// Build a URL for cache operations
-    fn build_cache_url(&self, name: Option<&str>) -> Result<Url, Error> {
-        let suffix = name
-            .map(|n| {
-                if n.starts_with("cachedContents/") {
-                    n.to_string()
-                } else {
-                    format!("cachedContents/{}", n)
-                }
-            })
-            .unwrap_or_else(|| "cachedContents".to_string());
-        self.build_url_with_suffix(&suffix)
+        Err(Error::NotImplemented)
     }
 }
 
 /// A builder for the `Gemini` client.
-///
-/// # Examples
-///
-/// ## Basic usage
-///
-/// ```no_run
-/// use adk_gemini::{GeminiBuilder, Model};
-///
-/// # async fn run() -> Result<(), Box<dyn std::error::Error>> {
-/// let gemini = GeminiBuilder::new("YOUR_API_KEY")
-///     .with_model(Model::Gemini25Pro)
-///     .build()?;
-/// # Ok(())
-/// # }
-/// ```
-///
-/// ## With proxy configuration
-///
-/// ```no_run
-/// use adk_gemini::{GeminiBuilder, Model};
-/// use reqwest::{ClientBuilder, Proxy};
-///
-/// # async fn run() -> Result<(), Box<dyn std::error::Error>> {
-/// let proxy = Proxy::https("https://my.proxy")?;
-/// let http_client = ClientBuilder::new().proxy(proxy);
-///
-/// let gemini = GeminiBuilder::new("YOUR_API_KEY")
-///     .with_http_client(http_client)
-///     .build()?;
-/// # Ok(())
-/// # }
-/// ```
 pub struct GeminiBuilder {
-    key: String,
+    project_id: Option<String>,
+    location: Option<String>,
     model: Model,
-    client_builder: ClientBuilder,
-    base_url: Url,
 }
 
 impl GeminiBuilder {
-    /// Creates a new `GeminiBuilder` with the given API key.
-    pub fn new<K: Into<String>>(key: K) -> Self {
+    /// Creates a new `GeminiBuilder`.
+    pub fn new() -> Self {
         Self {
-            key: key.into(),
+            project_id: None,
+            location: None, // Default to us-central1 maybe?
             model: Model::default(),
-            client_builder: ClientBuilder::default(),
-            base_url: DEFAULT_BASE_URL.clone(),
         }
+    }
+
+    /// Sets the project ID.
+    pub fn with_project_id<S: Into<String>>(mut self, project_id: S) -> Self {
+        self.project_id = Some(project_id.into());
+        self
+    }
+
+    /// Sets the location (region).
+    pub fn with_location<S: Into<String>>(mut self, location: S) -> Self {
+        self.location = Some(location.into());
+        self
     }
 
     /// Sets the model for the client.
@@ -754,27 +370,14 @@ impl GeminiBuilder {
         self
     }
 
-    /// Sets a custom `reqwest::ClientBuilder`.
-    pub fn with_http_client(mut self, client_builder: ClientBuilder) -> Self {
-        self.client_builder = client_builder;
-        self
-    }
-
-    /// Sets a custom base URL for the API.
-    pub fn with_base_url(mut self, base_url: Url) -> Self {
-        self.base_url = base_url;
-        self
-    }
-
     /// Builds the `Gemini` client.
-    pub fn build(self) -> Result<Gemini, Error> {
+    pub async fn build(self) -> Result<Gemini, Error> {
+        let project_id = self.project_id.ok_or_else(|| Error::NotImplemented /* Using NotImplemented as placeholder for MissingProjectID */)?;
+        let location = self.location.unwrap_or_else(|| "us-central1".to_string());
+
+        let client = GeminiClient::new(project_id, location, self.model).await?;
         Ok(Gemini {
-            client: Arc::new(GeminiClient::with_base_url(
-                self.client_builder,
-                self.key,
-                self.model,
-                self.base_url,
-            )?),
+            client: Arc::new(client),
         })
     }
 }
@@ -786,35 +389,17 @@ pub struct Gemini {
 }
 
 impl Gemini {
-    /// Create a new client with the specified API key
-    pub fn new<K: AsRef<str>>(api_key: K) -> Result<Self, Error> {
-        Self::with_model(api_key, Model::default())
-    }
-
-    /// Create a new client for the Gemini Pro model
-    pub fn pro<K: AsRef<str>>(api_key: K) -> Result<Self, Error> {
-        Self::with_model(api_key, Model::Gemini25Pro)
-    }
-
-    /// Create a new client with the specified API key and model
-    pub fn with_model<K: AsRef<str>, M: Into<Model>>(api_key: K, model: M) -> Result<Self, Error> {
-        Self::with_model_and_base_url(api_key, model, DEFAULT_BASE_URL.clone())
-    }
-
-    /// Create a new client with custom base URL
-    pub fn with_base_url<K: AsRef<str>>(api_key: K, base_url: Url) -> Result<Self, Error> {
-        Self::with_model_and_base_url(api_key, Model::default(), base_url)
-    }
-
-    /// Create a new client with the specified API key, model, and base URL
-    pub fn with_model_and_base_url<K: AsRef<str>, M: Into<Model>>(
-        api_key: K,
-        model: M,
-        base_url: Url,
-    ) -> Result<Self, Error> {
-        let client =
-            GeminiClient::with_base_url(Default::default(), api_key, model.into(), base_url)?;
-        Ok(Self { client: Arc::new(client) })
+    /// Create a new client
+    ///
+    /// Note: This is a breaking change from previous versions.
+    /// It now requires Project ID and Location, or assumes defaults/environment.
+    /// For migration, we might need a way to support the old API or fail gracefully.
+    pub async fn new(project_id: impl Into<String>, location: impl Into<String>) -> Result<Self, Error> {
+        GeminiBuilder::new()
+            .with_project_id(project_id)
+            .with_location(location)
+            .build()
+            .await
     }
 
     /// Start building a content generation request
@@ -825,6 +410,11 @@ impl Gemini {
     /// Start building a content embedding request
     pub fn embed_content(&self) -> EmbedBuilder {
         EmbedBuilder::new(self.client.clone())
+    }
+
+    /// Count tokens for a request
+    pub async fn count_tokens(&self, request: GenerateContentRequest) -> Result<i32, Error> {
+        self.client.count_tokens(request).await
     }
 
     /// Start building a batch content generation request
@@ -838,8 +428,6 @@ impl Gemini {
     }
 
     /// Lists batch operations.
-    ///
-    /// This method returns a stream that handles pagination automatically.
     pub fn list_batches(
         &self,
         page_size: impl Into<Option<u32>>,
@@ -849,6 +437,7 @@ impl Gemini {
         async_stream::try_stream! {
             let mut page_token: Option<String> = None;
             loop {
+                // TODO: Implement using client.list_batch_operations
                 let response = client
                     .list_batch_operations(page_size, page_token.clone())
                     .await?;
@@ -877,8 +466,6 @@ impl Gemini {
     }
 
     /// Lists cached contents.
-    ///
-    /// This method returns a stream that handles pagination automatically.
     pub fn list_cached_contents(
         &self,
         page_size: impl Into<Option<i32>>,
@@ -917,8 +504,6 @@ impl Gemini {
     }
 
     /// Lists files.
-    ///
-    /// This method returns a stream that handles pagination automatically.
     pub fn list_files(
         &self,
         page_size: impl Into<Option<u32>>,
