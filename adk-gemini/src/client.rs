@@ -21,6 +21,7 @@ use std::{
 };
 use tracing::{Level, instrument};
 
+use google_cloud_aiplatform_v1::client::LlmUtilityService;
 use google_cloud_aiplatform_v1::client::PredictionService;
 use google_cloud_aiplatform_v1::model as vertex;
 
@@ -97,6 +98,7 @@ pub enum Error {
 /// Internal client for making requests to the Gemini API via Vertex AI
 pub struct GeminiClient {
     pub prediction_client: PredictionService,
+    pub llm_utility_client: LlmUtilityService,
     pub project_id: String,
     pub location: String,
     pub model: Model,
@@ -111,14 +113,21 @@ impl GeminiClient {
     ) -> Result<Self, Error> {
         let endpoint = format!("https://{}-aiplatform.googleapis.com", location);
 
-        let client = PredictionService::builder()
+        let prediction_client = PredictionService::builder()
+            .with_endpoint(endpoint.clone())
+            .build()
+            .await
+            .map_err(|e| Error::Builder { source: Box::new(e) })?;
+
+        let llm_utility_client = LlmUtilityService::builder()
             .with_endpoint(endpoint)
             .build()
             .await
             .map_err(|e| Error::Builder { source: Box::new(e) })?;
 
         Ok(Self {
-            prediction_client: client,
+            prediction_client,
+            llm_utility_client,
             project_id,
             location,
             model,
@@ -128,6 +137,10 @@ impl GeminiClient {
     // Helper to get the resource path for a model
     pub fn model_path(&self) -> String {
         format!("projects/{}/locations/{}/publishers/google/models/{}", self.project_id, self.location, self.model.as_str())
+    }
+
+    pub fn endpoint_path(&self) -> String {
+        format!("projects/{}/locations/{}/publishers/google", self.project_id, self.location)
     }
 
     /// Generate content
@@ -164,9 +177,37 @@ impl GeminiClient {
     #[instrument(skip_all)]
     pub(crate) async fn embed_content(
         &self,
-        _request: EmbedContentRequest,
+        request: EmbedContentRequest,
     ) -> Result<ContentEmbeddingResponse, Error> {
-        Err(Error::NotImplemented)
+        let vertex_req: vertex::EmbedContentRequest = request.into();
+
+        let response = self.prediction_client.embed_content()
+            .set_model(self.model_path())
+            .with_request(vertex_req)
+            .send()
+            .await
+            .map_err(|e| Error::Gax { source: Box::new(e) })?;
+
+        Ok(response.into())
+    }
+
+    /// Count tokens
+    #[instrument(skip_all)]
+    pub(crate) async fn count_tokens(
+        &self,
+        request: GenerateContentRequest,
+    ) -> Result<i32, Error> {
+        let vertex_req: vertex::GenerateContentRequest = request.into();
+
+        let response = self.llm_utility_client.count_tokens()
+            .set_endpoint(self.endpoint_path())
+            .set_model(self.model_path())
+            .set_contents(vertex_req.contents)
+            .send()
+            .await
+            .map_err(|e| Error::Gax { source: Box::new(e) })?;
+
+        Ok(response.total_tokens)
     }
 
     /// Batch Embed content
@@ -369,6 +410,11 @@ impl Gemini {
     /// Start building a content embedding request
     pub fn embed_content(&self) -> EmbedBuilder {
         EmbedBuilder::new(self.client.clone())
+    }
+
+    /// Count tokens for a request
+    pub async fn count_tokens(&self, request: GenerateContentRequest) -> Result<i32, Error> {
+        self.client.count_tokens(request).await
     }
 
     /// Start building a batch content generation request

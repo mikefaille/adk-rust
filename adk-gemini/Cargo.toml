@@ -273,10 +273,10 @@ features = ["serde"]
 version = "1.5"
 
 [dependencies.google-cloud-auth]
-version = "0.13"
+version = "1.4"
 
 [dependencies.google-cloud-gax]
-version = "0.18"
+version = "1.5"
 
 [dependencies.google-cloud-googleapis]
 version = "0.15"

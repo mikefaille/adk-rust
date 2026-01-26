@@ -1,5 +1,6 @@
 use google_cloud_aiplatform_v1::model as vertex;
 use crate::{
+    embedding::model::{EmbedContentRequest, ContentEmbeddingResponse, ContentEmbedding},
     generation::model::{GenerateContentRequest, GenerationResponse},
     models::{Content, Part, Role, Blob},
 };
@@ -17,6 +18,36 @@ impl From<GenerateContentRequest> for vertex::GenerateContentRequest {
 
         if let Some(config) = req.tool_config {
             builder = builder.set_tool_config(Into::<vertex::ToolConfig>::into(config));
+        }
+
+        builder
+    }
+}
+
+impl From<EmbedContentRequest> for vertex::EmbedContentRequest {
+    fn from(req: EmbedContentRequest) -> Self {
+        let mut builder = vertex::EmbedContentRequest::new()
+            .set_content(Into::<vertex::Content>::into(req.content));
+
+        if let Some(title) = req.title {
+            builder = builder.set_title(title);
+        }
+
+        if let Some(task_type) = req.task_type {
+            builder = builder.set_task_type(match task_type {
+                crate::embedding::model::TaskType::RetrievalQuery => vertex::embed_content_request::EmbeddingTaskType::RetrievalQuery,
+                crate::embedding::model::TaskType::RetrievalDocument => vertex::embed_content_request::EmbeddingTaskType::RetrievalDocument,
+                crate::embedding::model::TaskType::SemanticSimilarity => vertex::embed_content_request::EmbeddingTaskType::SemanticSimilarity,
+                crate::embedding::model::TaskType::Classification => vertex::embed_content_request::EmbeddingTaskType::Classification,
+                crate::embedding::model::TaskType::Clustering => vertex::embed_content_request::EmbeddingTaskType::Clustering,
+                crate::embedding::model::TaskType::QuestionAnswering => vertex::embed_content_request::EmbeddingTaskType::QuestionAnswering,
+                crate::embedding::model::TaskType::FactVerification => vertex::embed_content_request::EmbeddingTaskType::FactVerification,
+                crate::embedding::model::TaskType::CodeRetrievalQuery => vertex::embed_content_request::EmbeddingTaskType::RetrievalQuery, // Fallback as there is no direct CodeRetrievalQuery in vertex::model::embed_content_request::EmbeddingTaskType
+            });
+        }
+
+        if let Some(output_dimensionality) = req.output_dimensionality {
+            builder = builder.set_output_dimensionality(output_dimensionality);
         }
 
         builder
@@ -120,6 +151,16 @@ impl From<vertex::GenerateContentResponse> for GenerationResponse {
             }),
             model_version: None, // Not provided in Vertex response?
             response_id: None,
+        }
+    }
+}
+
+impl From<vertex::EmbedContentResponse> for ContentEmbeddingResponse {
+    fn from(resp: vertex::EmbedContentResponse) -> Self {
+        ContentEmbeddingResponse {
+            embedding: resp.embedding.map(|e| ContentEmbedding {
+                values: e.values,
+            }).unwrap_or_default(),
         }
     }
 }
