@@ -15,6 +15,7 @@ use eventsource_stream::{EventStreamError, Eventsource};
 use futures::{Stream, StreamExt, TryStreamExt};
 use google_cloud_aiplatform_v1::client::PredictionService;
 use google_cloud_auth::credentials::{self, Credentials};
+use jsonwebtoken::{EncodingKey, Header};
 use mime::Mime;
 use reqwest::{
     Client, ClientBuilder, RequestBuilder, Response,
@@ -27,6 +28,7 @@ use std::{
     fmt::{self, Formatter},
     sync::{Arc, LazyLock},
 };
+use tokio::sync::Mutex;
 use tracing::{Level, Span, instrument};
 use url::Url;
 
@@ -244,10 +246,135 @@ pub enum Error {
     #[snafu(display("google cloud client initialization thread panicked"))]
     GoogleCloudInitThreadPanicked,
 
+    #[snafu(display("failed to parse service account JSON"))]
+    ServiceAccountKeyParse {
+        source: serde_json::Error,
+    },
+
+    #[snafu(display("failed to sign service account JWT"))]
+    ServiceAccountJwt {
+        source: jsonwebtoken::errors::Error,
+    },
+
+    #[snafu(display("failed to request service account token from '{url}'"))]
+    ServiceAccountToken {
+        source: reqwest::Error,
+        url: String,
+    },
+
+    #[snafu(display("failed to deserialize service account token response"))]
+    ServiceAccountTokenDeserialize {
+        source: serde_json::Error,
+    },
     #[snafu(display("I/O error during file operations"))]
     Io {
         source: std::io::Error,
     },
+}
+
+#[derive(Debug, Clone)]
+enum AuthConfig {
+    ApiKey(String),
+    ServiceAccount(ServiceAccountTokenSource),
+}
+
+#[derive(Debug, Deserialize, Clone)]
+struct ServiceAccountKey {
+    client_email: String,
+    private_key: String,
+    token_uri: String,
+}
+
+#[derive(Debug, Clone)]
+struct CachedToken {
+    access_token: String,
+    expires_at: i64,
+}
+
+#[derive(Debug, Clone)]
+struct ServiceAccountTokenSource {
+    key: ServiceAccountKey,
+    scopes: Vec<String>,
+    cached: Arc<Mutex<Option<CachedToken>>>,
+}
+
+impl ServiceAccountTokenSource {
+    fn new(key: ServiceAccountKey) -> Self {
+        Self {
+            key,
+            scopes: vec!["https://www.googleapis.com/auth/cloud-platform".to_string()],
+            cached: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    async fn access_token(&self, http_client: &Client) -> Result<String, Error> {
+        let now = time::OffsetDateTime::now_utc().unix_timestamp();
+        {
+            let cache = self.cached.lock().await;
+            if let Some(token) = cache.as_ref() {
+                if token.expires_at.saturating_sub(60) > now {
+                    return Ok(token.access_token.clone());
+                }
+            }
+        }
+
+        let jwt = self.build_jwt(now)?;
+        let token = self.fetch_token(http_client, jwt).await?;
+
+        let mut cache = self.cached.lock().await;
+        *cache = Some(token.clone());
+        Ok(token.access_token)
+    }
+
+    fn build_jwt(&self, now: i64) -> Result<String, Error> {
+        #[derive(Serialize)]
+        struct Claims<'a> {
+            iss: &'a str,
+            scope: &'a str,
+            aud: &'a str,
+            iat: i64,
+            exp: i64,
+        }
+
+        let exp = now + 3600;
+        let scope = self.scopes.join(" ");
+        let claims = Claims {
+            iss: &self.key.client_email,
+            scope: &scope,
+            aud: &self.key.token_uri,
+            iat: now,
+            exp,
+        };
+        let encoding_key =
+            EncodingKey::from_rsa_pem(self.key.private_key.as_bytes()).context(ServiceAccountJwtSnafu)?;
+        jsonwebtoken::encode(&Header::new(jsonwebtoken::Algorithm::RS256), &claims, &encoding_key)
+            .context(ServiceAccountJwtSnafu)
+    }
+
+    async fn fetch_token(&self, http_client: &Client, jwt: String) -> Result<CachedToken, Error> {
+        #[derive(Deserialize)]
+        struct TokenResponse {
+            access_token: String,
+            expires_in: i64,
+        }
+
+        let url = &self.key.token_uri;
+        let response = http_client
+            .post(url)
+            .form(&[
+                ("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer"),
+                ("assertion", &jwt),
+            ])
+            .send()
+            .await
+            .map_err(|e| Error::ServiceAccountToken { source: e, url: url.clone() })?;
+
+        let response = GeminiClient::check_response(response).await?;
+        let token: TokenResponse =
+            response.json().await.context(ServiceAccountTokenDeserializeSnafu)?;
+        let expires_at = time::OffsetDateTime::now_utc().unix_timestamp() + token.expires_in;
+        Ok(CachedToken { access_token: token.access_token, expires_at })
+    }
 }
 
 /// Internal client for making requests to the Gemini API
@@ -272,6 +399,7 @@ impl GoogleCloudAuth {
 struct RestClient {
     http_client: Client,
     base_url: Url,
+    auth: AuthConfig,
 }
 
 #[derive(Debug)]
@@ -298,19 +426,22 @@ impl GeminiClient {
         client_builder: ClientBuilder,
         model: M,
         base_url: Url,
-        api_key: String,
+        auth: AuthConfig,
     ) -> Result<Self, Error> {
-        let headers = HeaderMap::from_iter([(
-            HeaderName::from_static("x-goog-api-key"),
-            HeaderValue::from_str(api_key.as_str()).context(InvalidApiKeySnafu)?,
-        )]);
+        let headers = match &auth {
+            AuthConfig::ApiKey(api_key) => HeaderMap::from_iter([(
+                HeaderName::from_static("x-goog-api-key"),
+                HeaderValue::from_str(api_key.as_str()).context(InvalidApiKeySnafu)?,
+            )]),
+            AuthConfig::ServiceAccount(_) => HeaderMap::new(),
+        };
 
         let http_client =
             client_builder.default_headers(headers).build().expect("all parameters must be valid");
 
         Ok(Self {
             model: model.into(),
-            backend: GeminiBackend::Rest(RestClient { http_client, base_url }),
+            backend: GeminiBackend::Rest(RestClient { http_client, base_url, auth }),
         })
     }
 
@@ -428,6 +559,7 @@ impl GeminiClient {
     ) -> Result<T, Error> {
         let rest = self.rest_client("perform_request")?;
         let request = builder(&rest.http_client);
+        let request = self.apply_auth(request).await?;
         tracing::debug!("request built successfully");
         let response = request.send().await.context(PerformRequestNewSnafu)?;
         tracing::debug!("response received successfully");
@@ -447,6 +579,24 @@ impl GeminiClient {
         match &self.backend {
             GeminiBackend::Vertex(vertex) => Ok(vertex),
             GeminiBackend::Rest(_) => GoogleCloudUnsupportedSnafu { operation }.fail(),
+        }
+    }
+
+    async fn apply_auth(&self, request: RequestBuilder) -> Result<RequestBuilder, Error> {
+        match self.backend_auth()? {
+            AuthConfig::ApiKey(_) => Ok(request),
+            AuthConfig::ServiceAccount(source) => {
+                let rest = self.rest_client("apply_auth")?;
+                let token = source.access_token(&rest.http_client).await?;
+                Ok(request.bearer_auth(token))
+            }
+        }
+    }
+
+    fn backend_auth(&self) -> Result<&AuthConfig, Error> {
+        match &self.backend {
+            GeminiBackend::Rest(rest) => Ok(&rest.auth),
+            GeminiBackend::Vertex(_) => GoogleCloudUnsupportedSnafu { operation: "auth" }.fail(),
         }
     }
 
@@ -1311,7 +1461,7 @@ impl GeminiBuilder {
                 self.client_builder,
                 self.model,
                 self.base_url,
-                api_key,
+                AuthConfig::ApiKey(api_key),
             )?),
         })
     }
@@ -1466,7 +1616,7 @@ impl Gemini {
             Default::default(),
             model.into(),
             base_url,
-            api_key.as_ref().to_string(),
+            AuthConfig::ApiKey(api_key.as_ref().to_string()),
         )?;
         Ok(Self { client: Arc::new(client) })
     }
