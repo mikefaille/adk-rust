@@ -50,6 +50,7 @@ async-openai = { version = "0.27", optional = true }
 [dev-dependencies]
 tokio.workspace = true
 dotenvy = "0.15"
+tokio-tungstenite = "0.26"
 
 [features]
 default = []
