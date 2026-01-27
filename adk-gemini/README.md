@@ -204,6 +204,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+### Google Cloud secrets via environment
+
+When deploying, you can keep credentials in secret managers or CI/CD systems and
+expose them as environment variables. The Google Cloud SDK credentials loader
+supports `GOOGLE_APPLICATION_CREDENTIALS` (service account or WIF JSON), while
+project/location can be provided as `GOOGLE_CLOUD_PROJECT` and
+`GOOGLE_CLOUD_LOCATION`.
+
+```rust
+use adk_gemini::Gemini;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let project = std::env::var("GOOGLE_CLOUD_PROJECT")?;
+    let location = std::env::var("GOOGLE_CLOUD_LOCATION")?;
+
+    // ADC will read GOOGLE_APPLICATION_CREDENTIALS when set.
+    let client = Gemini::with_google_cloud_adc(&project, &location)?;
+
+    let response = client
+        .generate_content()
+        .with_user_message("Hello from secrets-backed Vertex AI!")
+        .execute()
+        .await?;
+
+    println!("{}", response.text());
+    Ok(())
+}
+```
+
 ## 🔧 ADK-Specific Extensions
 
 ## Examples
