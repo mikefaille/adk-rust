@@ -271,6 +271,9 @@ export const useStore = create<StudioState>((set, get) => ({
         }
       });
       
+      // Get all action nodes
+      const actionNodes = s.currentProject.actionNodes || {};
+      
       // Reconnect edges: connect sources to targets to maintain flow
       const currentEdges = s.currentProject.workflow.edges;
       const newEdges: typeof currentEdges = [];
@@ -300,6 +303,59 @@ export const useStore = create<StudioState>((set, get) => ({
         !agentsToRemove.includes(e.from) && !agentsToRemove.includes(e.to)
       );
       
+      let finalEdges = [...remainingEdges, ...newEdges];
+      
+      // Validate and fix edge connections
+      // Get all remaining workflow nodes (agents + action nodes)
+      const remainingAgentIds = Object.keys(agents);
+      const actionNodeIds = Object.keys(actionNodes);
+      const allNodeIds = [...remainingAgentIds, ...actionNodeIds];
+      
+      // Check each node has incoming edge (except START)
+      for (const nodeId of allNodeIds) {
+        const hasIncoming = finalEdges.some(e => e.to === nodeId);
+        if (!hasIncoming) {
+          // Find what should connect to this node
+          // If there's an edge from START that doesn't go anywhere valid, connect START to this node
+          const startEdge = finalEdges.find(e => e.from === 'START');
+          if (!startEdge || !allNodeIds.includes(startEdge.to)) {
+            // Remove invalid START edge if exists
+            finalEdges = finalEdges.filter(e => !(e.from === 'START' && !allNodeIds.includes(e.to)));
+            // Connect START to this node
+            finalEdges.push({ from: 'START', to: nodeId });
+          }
+        }
+      }
+      
+      // Check each node has outgoing edge (except END)
+      for (const nodeId of allNodeIds) {
+        const hasOutgoing = finalEdges.some(e => e.from === nodeId);
+        if (!hasOutgoing) {
+          // Connect this node to END
+          finalEdges.push({ from: nodeId, to: 'END' });
+        }
+      }
+      
+      // Ensure START has an outgoing edge if there are nodes
+      if (allNodeIds.length > 0) {
+        const startHasOutgoing = finalEdges.some(e => e.from === 'START');
+        if (!startHasOutgoing) {
+          // Find the first node in the workflow
+          const firstNode = allNodeIds[0];
+          finalEdges.push({ from: 'START', to: firstNode });
+        }
+      }
+      
+      // Ensure END has an incoming edge if there are nodes
+      if (allNodeIds.length > 0) {
+        const endHasIncoming = finalEdges.some(e => e.to === 'END');
+        if (!endHasIncoming) {
+          // Find the last node in the workflow
+          const lastNode = allNodeIds[allNodeIds.length - 1];
+          finalEdges.push({ from: lastNode, to: 'END' });
+        }
+      }
+      
       return {
         currentProject: {
           ...s.currentProject,
@@ -307,7 +363,7 @@ export const useStore = create<StudioState>((set, get) => ({
           tool_configs: toolConfigs,
           workflow: {
             ...s.currentProject.workflow,
-            edges: [...remainingEdges, ...newEdges],
+            edges: finalEdges,
           },
         },
       };
@@ -500,7 +556,6 @@ export const useStore = create<StudioState>((set, get) => ({
       delete actionNodes[id];
       
       // Reconnect edges: connect sources to targets to maintain flow
-      // (Same logic as removeAgent)
       const currentEdges = s.currentProject.workflow.edges;
       const newEdges: typeof currentEdges = [];
       
@@ -527,13 +582,57 @@ export const useStore = create<StudioState>((set, get) => ({
         (e) => e.from !== id && e.to !== id
       );
       
+      let finalEdges = [...remainingEdges, ...newEdges];
+      
+      // Validate and fix edge connections
+      const agents = s.currentProject.agents;
+      const remainingAgentIds = Object.keys(agents);
+      const actionNodeIds = Object.keys(actionNodes);
+      const allNodeIds = [...remainingAgentIds, ...actionNodeIds];
+      
+      // Check each node has incoming edge (except START)
+      for (const nodeId of allNodeIds) {
+        const hasIncoming = finalEdges.some(e => e.to === nodeId);
+        if (!hasIncoming) {
+          const startEdge = finalEdges.find(e => e.from === 'START');
+          if (!startEdge || !allNodeIds.includes(startEdge.to)) {
+            finalEdges = finalEdges.filter(e => !(e.from === 'START' && !allNodeIds.includes(e.to)));
+            finalEdges.push({ from: 'START', to: nodeId });
+          }
+        }
+      }
+      
+      // Check each node has outgoing edge (except END)
+      for (const nodeId of allNodeIds) {
+        const hasOutgoing = finalEdges.some(e => e.from === nodeId);
+        if (!hasOutgoing) {
+          finalEdges.push({ from: nodeId, to: 'END' });
+        }
+      }
+      
+      // Ensure START has an outgoing edge if there are nodes
+      if (allNodeIds.length > 0) {
+        const startHasOutgoing = finalEdges.some(e => e.from === 'START');
+        if (!startHasOutgoing) {
+          finalEdges.push({ from: 'START', to: allNodeIds[0] });
+        }
+      }
+      
+      // Ensure END has an incoming edge if there are nodes
+      if (allNodeIds.length > 0) {
+        const endHasIncoming = finalEdges.some(e => e.to === 'END');
+        if (!endHasIncoming) {
+          finalEdges.push({ from: allNodeIds[allNodeIds.length - 1], to: 'END' });
+        }
+      }
+      
       return {
         currentProject: {
           ...s.currentProject,
           actionNodes,
           workflow: {
             ...s.currentProject.workflow,
-            edges: [...remainingEdges, ...newEdges],
+            edges: finalEdges,
           },
         },
         selectedActionNodeId: s.selectedActionNodeId === id ? null : s.selectedActionNodeId,

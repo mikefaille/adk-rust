@@ -300,7 +300,8 @@ export function Canvas() {
   // Wrapped createAgent that records for undo
   const createAgentWithUndo = useCallback((agentType?: string) => {
     // Capture the complete edge state BEFORE creating the agent
-    const edgesBefore = [...(currentProject?.workflow.edges || [])];
+    // Read from store directly to avoid stale closures
+    const edgesBefore = [...(useStore.getState().currentProject?.workflow.edges || [])];
     
     // Create the agent
     createAgent(agentType);
@@ -324,14 +325,15 @@ export function Canvas() {
         undoRedo.recordAddNode(newAgentId, project.agents[newAgentId], newEdges, edgesBefore);
       }
     }, 0);
-  }, [createAgent, currentProject, undoRedo]);
+  }, [createAgent, undoRedo]);
   
   // Wrapped removeAgent that records for undo and applies layout
   const removeAgentWithUndo = useCallback((nodeId: string) => {
     if (nodeId === 'START' || nodeId === 'END') return;
     
     // Capture the complete edge state BEFORE removing
-    const edgesBefore = [...(currentProject?.workflow.edges || [])];
+    // Read from store directly to avoid stale closures
+    const edgesBefore = [...(useStore.getState().currentProject?.workflow.edges || [])];
     
     // Record before removing (with complete edge state)
     undoRedo.recordDeleteNode(nodeId, edgesBefore);
@@ -342,7 +344,7 @@ export function Canvas() {
     // Apply layout after deletion to maintain current layout direction
     invalidateBuild('onAgentDelete');
     setTimeout(() => applyLayout(), 100);
-  }, [removeAgent, undoRedo, currentProject, invalidateBuild, applyLayout]);
+  }, [removeAgent, undoRedo, invalidateBuild, applyLayout]);
   
   // Wrapped removeActionNode that also applies layout after deletion
   // This ensures the layout direction is maintained after structure changes

@@ -88,9 +88,12 @@ export function useLayout() {
   }, [toggleDirection]);
 
   // Apply layout without toggling (uses current direction)
+  // Note: We read layoutDirection from the store directly to avoid stale closures
+  // when applyLayout is called from setTimeout callbacks
   const applyLayout = useCallback(() => {
-    doLayout(layoutDirection);
-  }, [doLayout, layoutDirection]);
+    const currentDirection = useStore.getState().layoutDirection;
+    doLayout(currentDirection);
+  }, [doLayout]);
 
   /**
    * Fit all nodes in view
