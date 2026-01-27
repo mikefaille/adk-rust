@@ -297,10 +297,7 @@ impl GeminiClient {
     }
 
     fn with_vertex<M: Into<Model>>(model: M, prediction: PredictionService) -> Self {
-        Self {
-            model: model.into(),
-            backend: GeminiBackend::Vertex(VertexClient { prediction }),
-        }
+        Self { model: model.into(), backend: GeminiBackend::Vertex(VertexClient { prediction }) }
     }
 
     /// Check the response status code and return an error if it is not successful
@@ -534,7 +531,8 @@ impl GeminiClient {
         let mut request_value =
             serde_json::to_value(&request).context(GoogleCloudRequestSerializeSnafu)?;
         let model = self.model.to_string();
-        let request_object = request_value.as_object_mut().context(GoogleCloudRequestNotObjectSnafu)?;
+        let request_object =
+            request_value.as_object_mut().context(GoogleCloudRequestNotObjectSnafu)?;
         request_object.insert("model".to_string(), serde_json::Value::String(model));
 
         let request: google_cloud_aiplatform_v1::model::GenerateContentRequest =
@@ -912,9 +910,7 @@ impl GeminiClient {
     #[tracing::instrument(skip(self), ret(level = Level::DEBUG))]
     fn build_url_with_suffix(&self, suffix: &str) -> Result<Url, Error> {
         let rest = self.rest_client("build_url")?;
-        rest.base_url
-            .join(suffix)
-            .context(ConstructUrlSnafu { suffix: suffix.to_string() })
+        rest.base_url.join(suffix).context(ConstructUrlSnafu { suffix: suffix.to_string() })
     }
 
     /// Build a URL for the API
@@ -1059,10 +1055,8 @@ impl GeminiBuilder {
         project_id: P,
         location: L,
     ) -> Self {
-        self.google_cloud = Some(GoogleCloudConfig {
-            project_id: project_id.into(),
-            location: location.into(),
-        });
+        self.google_cloud =
+            Some(GoogleCloudConfig { project_id: project_id.into(), location: location.into() });
         self
     }
 
@@ -1112,9 +1106,7 @@ impl GeminiBuilder {
                 )
                 .context(GoogleCloudClientBuildSnafu)?;
 
-            return Ok(Gemini {
-                client: Arc::new(GeminiClient::with_vertex(model, prediction)),
-            });
+            return Ok(Gemini { client: Arc::new(GeminiClient::with_vertex(model, prediction)) });
         }
 
         let api_key = self.api_key.ok_or(Error::MissingApiKey)?;
@@ -1160,7 +1152,10 @@ impl Gemini {
     }
 
     /// Create a new client with the specified API key and model using the v1 (stable) API.
-    pub fn with_model_v1<K: AsRef<str>, M: Into<Model>>(api_key: K, model: M) -> Result<Self, Error> {
+    pub fn with_model_v1<K: AsRef<str>, M: Into<Model>>(
+        api_key: K,
+        model: M,
+    ) -> Result<Self, Error> {
         Self::with_model_and_base_url(api_key, model, V1_BASE_URL.clone())
     }
 
