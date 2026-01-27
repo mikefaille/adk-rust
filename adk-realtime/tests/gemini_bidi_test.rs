@@ -75,7 +75,7 @@ async fn test_gemini_bidi_flow() {
     // Wait a bit for server to start
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
-    let model = GeminiRealtimeModel::new("dummy-key", "gemini-2.0-flash-live")
+    let model = GeminiRealtimeModel::new("dummy-key", "models/gemini-live-2.5-flash-native-audio")
         .with_base_url(&server_url);
 
     let config = RealtimeConfig::default();
