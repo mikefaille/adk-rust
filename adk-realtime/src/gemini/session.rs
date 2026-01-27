@@ -419,3 +419,64 @@ impl std::fmt::Debug for GeminiRealtimeSession {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // Use a dummy session for testing translation logic
+
+    #[test]
+    fn test_translate_setup_complete() {
+        let raw = r#"{"setup_complete": {}}"#;
+        let event = GeminiRealtimeSession::translate_gemini_event(raw).unwrap();
+        assert!(matches!(event, ServerEvent::SessionCreated { .. }));
+    }
+
+    #[test]
+    fn test_translate_audio_delta() {
+        let raw = r#"{
+            "server_content": {
+                "model_turn": {
+                    "parts": [
+                        {
+                            "inline_data": {
+                                "mime_type": "audio/pcm;rate=24000",
+                                "data": "YmFzZTY0"
+                            }
+                        }
+                    ]
+                }
+            }
+        }"#;
+        let event = GeminiRealtimeSession::translate_gemini_event(raw).unwrap();
+        match event {
+            ServerEvent::AudioDelta { delta, .. } => assert_eq!(delta, "YmFzZTY0"),
+            _ => panic!("Expected AudioDelta"),
+        }
+    }
+
+    #[test]
+    fn test_translate_tool_call() {
+        let raw = r#"{
+            "tool_call": {
+                "function_calls": [
+                    {
+                        "name": "get_weather",
+                        "id": "call_123",
+                        "args": {"location": "NYC"}
+                    }
+                ]
+            }
+        }"#;
+        let event = GeminiRealtimeSession::translate_gemini_event(raw).unwrap();
+        match event {
+            ServerEvent::FunctionCallDone { name, call_id, arguments, .. } => {
+                assert_eq!(name, "get_weather");
+                assert_eq!(call_id, "call_123");
+                assert!(arguments.contains("NYC"));
+            }
+            _ => panic!("Expected FunctionCallDone"),
+        }
+    }
+}
