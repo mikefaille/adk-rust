@@ -23,7 +23,6 @@ type WsSource = futures::stream::SplitStream<WsStream>;
 
 /// Gemini-specific client message format.
 #[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
 struct GeminiClientMessage {
     #[serde(skip_serializing_if = "Option::is_none")]
     setup: Option<GeminiSetup>,
@@ -34,7 +33,6 @@ struct GeminiClientMessage {
 }
 
 #[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
 struct GeminiSetup {
     model: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -59,14 +57,12 @@ struct GeminiPart {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 struct GeminiInlineData {
     mime_type: String,
     data: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
 struct GeminiRealtimeInput {
     #[serde(skip_serializing_if = "Option::is_none")]
     media_chunks: Option<Vec<GeminiMediaChunk>>,
@@ -75,20 +71,17 @@ struct GeminiRealtimeInput {
 }
 
 #[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
 struct GeminiMediaChunk {
     mime_type: String,
     data: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
 struct GeminiToolResponse {
     function_responses: Vec<GeminiFunctionResponse>,
 }
 
 #[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
 struct GeminiFunctionResponse {
     id: String,
     response: Value,
@@ -137,14 +130,14 @@ impl GeminiRealtimeSession {
         });
 
         let mut generation_config = json!({
-            "responseModalities": config.modalities.unwrap_or_else(|| vec!["AUDIO".to_string()]),
+            "response_modalities": config.modalities.unwrap_or_else(|| vec!["AUDIO".to_string()]),
         });
 
         if let Some(voice) = &config.voice {
-            generation_config["speechConfig"] = json!({
-                "voiceConfig": {
-                    "prebuiltVoiceConfig": {
-                        "voiceName": voice
+            generation_config["speech_config"] = json!({
+                "voice_config": {
+                    "prebuilt_voice_config": {
+                        "voice_name": voice
                     }
                 }
             });
@@ -156,7 +149,7 @@ impl GeminiRealtimeSession {
 
         let tools = config.tools.map(|tools| {
             vec![json!({
-                "functionDeclarations": tools.iter().map(|t| {
+                "function_declarations": tools.iter().map(|t| {
                     let mut decl = json!({
                         "name": t.name,
                     });
@@ -206,7 +199,7 @@ impl GeminiRealtimeSession {
         match receiver.next().await {
             Some(Ok(Message::Text(text))) => {
                 // Gemini has a different response format, translate to unified events
-                match self.translate_gemini_event(&text) {
+                match Self::translate_gemini_event(&text) {
                     Ok(event) => Some(Ok(event)),
                     Err(e) => Some(Err(e)),
                 }
@@ -228,12 +221,12 @@ impl GeminiRealtimeSession {
     }
 
     /// Translate Gemini-specific events to unified format.
-    fn translate_gemini_event(&self, raw: &str) -> Result<ServerEvent> {
+    fn translate_gemini_event(raw: &str) -> Result<ServerEvent> {
         let value: Value = serde_json::from_str(raw)
             .map_err(|e| RealtimeError::protocol(format!("Parse error: {}", e)))?;
 
         // Check for setup completion
-        if value.get("setupComplete").is_some() {
+        if value.get("setup_complete").is_some() {
             return Ok(ServerEvent::SessionCreated {
                 event_id: uuid::Uuid::new_v4().to_string(),
                 session: value,
@@ -241,8 +234,8 @@ impl GeminiRealtimeSession {
         }
 
         // Check for server content (audio/text)
-        if let Some(content) = value.get("serverContent") {
-            if let Some(turn_complete) = content.get("turnComplete") {
+        if let Some(content) = value.get("server_content") {
+            if let Some(turn_complete) = content.get("turn_complete") {
                 if turn_complete.as_bool().unwrap_or(false) {
                     return Ok(ServerEvent::ResponseDone {
                         event_id: uuid::Uuid::new_v4().to_string(),
@@ -251,11 +244,11 @@ impl GeminiRealtimeSession {
                 }
             }
 
-            if let Some(parts) = content.get("modelTurn").and_then(|t| t.get("parts")) {
+            if let Some(parts) = content.get("model_turn").and_then(|t| t.get("parts")) {
                 if let Some(parts_arr) = parts.as_array() {
                     for part in parts_arr {
                         // Audio output
-                        if let Some(inline_data) = part.get("inlineData") {
+                        if let Some(inline_data) = part.get("inline_data") {
                             if let Some(data) = inline_data.get("data").and_then(|d| d.as_str()) {
                                 return Ok(ServerEvent::AudioDelta {
                                     event_id: uuid::Uuid::new_v4().to_string(),
@@ -284,8 +277,8 @@ impl GeminiRealtimeSession {
         }
 
         // Check for tool calls
-        if let Some(tool_call) = value.get("toolCall") {
-            if let Some(calls) = tool_call.get("functionCalls").and_then(|c| c.as_array()) {
+        if let Some(tool_call) = value.get("tool_call") {
+            if let Some(calls) = tool_call.get("function_calls").and_then(|c| c.as_array()) {
                 if let Some(call) = calls.first() {
                     let name = call.get("name").and_then(|n| n.as_str()).unwrap_or("");
                     let id = call.get("id").and_then(|i| i.as_str()).unwrap_or("");
@@ -425,3 +418,4 @@ impl std::fmt::Debug for GeminiRealtimeSession {
             .finish()
     }
 }
+

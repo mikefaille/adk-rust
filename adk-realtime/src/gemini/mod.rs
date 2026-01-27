@@ -44,10 +44,10 @@ pub use model::GeminiRealtimeModel;
 pub use session::GeminiRealtimeSession;
 
 /// Gemini Live API WebSocket URL template.
-pub const GEMINI_LIVE_URL: &str = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent";
+pub const GEMINI_LIVE_URL: &str = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1.GenerativeService.BidiGenerateContent";
 
 /// Default model for Gemini Live.
-pub const DEFAULT_MODEL: &str = "models/gemini-2.0-flash-live-preview-04-09";
+pub const DEFAULT_MODEL: &str = "models/gemini-live-2.5-flash-native-audio";
 
 /// Available voices for Gemini Live (varies by model).
 pub const GEMINI_VOICES: &[&str] = &["Puck", "Charon", "Kore", "Fenrir", "Aoede"];
