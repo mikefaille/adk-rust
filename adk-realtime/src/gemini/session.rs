@@ -422,7 +422,6 @@ impl std::fmt::Debug for GeminiRealtimeSession {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
     // Use a dummy session for testing translation logic
 
