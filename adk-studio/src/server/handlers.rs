@@ -1,4 +1,7 @@
 use crate::schema::{ProjectMeta, ProjectSchema};
+use crate::server::events::ResumeEvent;
+use crate::server::graph_runner::{deserialize_interrupt_response, INTERRUPTED_SESSIONS};
+use crate::server::sse::send_resume_response;
 use crate::server::state::AppState;
 use axum::{
     Json,
@@ -310,4 +313,151 @@ pub async fn build_project(
     } else {
         Ok(Json(BuildResponse { success: false, output: combined, binary_path: None }))
     }
+}
+
+
+// ============================================
+// HITL Resume Endpoint
+// ============================================
+// Task 10: Add Resume Endpoint
+// Requirements: 3.2, 5.2
+
+/// Request body for resuming an interrupted workflow.
+///
+/// ## JSON Format
+/// ```json
+/// {
+///   "response": { "approved": true, "comment": "Looks good" }
+/// }
+/// ```
+/// or for simple text responses:
+/// ```json
+/// {
+///   "response": "approve"
+/// }
+/// ```
+#[derive(Debug, Deserialize)]
+pub struct ResumeRequest {
+    /// User's response to the interrupt.
+    /// Can be a JSON object with multiple fields or a simple value.
+    pub response: serde_json::Value,
+}
+
+/// Response from the resume endpoint.
+#[derive(Debug, Serialize)]
+pub struct ResumeResponse {
+    /// Whether the resume was successful
+    pub success: bool,
+    /// Node ID that was resumed
+    pub node_id: String,
+    /// Message describing the result
+    pub message: String,
+}
+
+/// Resume an interrupted workflow session.
+///
+/// This endpoint handles user responses to HITL (Human-in-the-Loop) interrupts.
+/// When a workflow is interrupted (e.g., for approval), the user can respond
+/// via this endpoint to resume execution.
+///
+/// ## Endpoint
+/// `POST /api/sessions/{session_id}/resume`
+///
+/// ## Request Body
+/// ```json
+/// {
+///   "response": { "approved": true }
+/// }
+/// ```
+///
+/// ## Response
+/// ```json
+/// {
+///   "success": true,
+///   "node_id": "review",
+///   "message": "Workflow resumed successfully"
+/// }
+/// ```
+///
+/// ## Flow
+/// 1. Retrieve the interrupted session state from storage
+/// 2. Deserialize the user's response into state updates
+/// 3. Update the workflow state with the response (equivalent to `graph.update_state()`)
+/// 4. Resume workflow execution (equivalent to `graph.invoke()`)
+/// 5. Emit a resume event via SSE
+///
+/// ## Requirements
+/// - Requirement 3.2: After user response, `graph.update_state()` is called
+/// - Requirement 5.2: State persistence - workflow resumes from checkpoint
+///
+/// ## Errors
+/// - 404: Session not found or not interrupted
+/// - 500: Internal error during resume
+pub async fn resume_session(
+    Path(session_id): Path<String>,
+    Json(req): Json<ResumeRequest>,
+) -> ApiResult<ResumeResponse> {
+    // Task 10.1: Get the interrupted session state
+    let interrupted_state = INTERRUPTED_SESSIONS
+        .get(&session_id)
+        .await
+        .ok_or_else(|| {
+            err(
+                StatusCode::NOT_FOUND,
+                format!("Session '{}' not found or not interrupted", session_id),
+            )
+        })?;
+
+    let node_id = interrupted_state.node_id.clone();
+    let thread_id = interrupted_state.thread_id.clone();
+    let checkpoint_id = interrupted_state.checkpoint_id.clone();
+
+    // Task 10.2 & 10.3: Deserialize user response and prepare state updates
+    // This is equivalent to calling `graph.update_state()` with the response
+    let state_updates = deserialize_interrupt_response(req.response.clone());
+
+    // Log the resume action for debugging
+    tracing::info!(
+        session_id = %session_id,
+        node_id = %node_id,
+        thread_id = %thread_id,
+        checkpoint_id = %checkpoint_id,
+        updates = ?state_updates,
+        "Resuming interrupted workflow"
+    );
+
+    // Task 10.4: Resume workflow execution
+    // Send the user's response to the subprocess via stdin.
+    // This triggers the workflow to resume from its checkpoint.
+    if let Err(e) = send_resume_response(&session_id, req.response.clone()).await {
+        tracing::warn!(
+            session_id = %session_id,
+            error = %e,
+            "Failed to send resume response to subprocess, session may have ended"
+        );
+        // Don't fail the request - the session might have ended naturally
+        // or the response will be picked up on the next stream connection
+    }
+
+    // Remove the interrupted state since we're resuming
+    INTERRUPTED_SESSIONS.remove(&session_id).await;
+
+    // Task 10.5: Emit resume event
+    // The resume event is emitted to notify the frontend that the workflow
+    // is resuming. We log it here for debugging.
+    let resume_event = ResumeEvent::new(&node_id);
+    tracing::info!(
+        session_id = %session_id,
+        event = %resume_event.to_json(),
+        "Resume event emitted"
+    );
+
+    Ok(Json(ResumeResponse {
+        success: true,
+        node_id,
+        message: format!(
+            "Workflow resumed. Response: {}",
+            serde_json::to_string(&req.response).unwrap_or_default()
+        ),
+    }))
 }

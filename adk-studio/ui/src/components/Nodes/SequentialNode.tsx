@@ -49,6 +49,8 @@ interface SequentialNodeData {
   activeSubAgent?: string;
   /** Whether the node is currently executing */
   isActive?: boolean;
+  /** Whether the node is interrupted (HITL waiting for input) */
+  isInterrupted?: boolean;
   /** Execution status */
   status?: NodeStatus;
 }
@@ -100,9 +102,11 @@ function SubAgentItem({
  * - Ordered list of sub-agents
  * - Active sub-agent highlighting
  * - Theme-aware styling
+ * - Interrupted state for HITL (trigger-input-flow Requirement 3.3)
  */
 export const SequentialNode = memo(function SequentialNode({ data, selected }: Props) {
   const isActive = data.isActive || false;
+  const isInterrupted = data.isInterrupted || false;
   const subAgents = data.subAgents || [];
   const subAgentTools = data.subAgentTools || {};
   const activeSubAgent = data.activeSubAgent;
@@ -114,6 +118,7 @@ export const SequentialNode = memo(function SequentialNode({ data, selected }: P
       nodeType="sequential"
       isActive={isActive}
       isSelected={selected}
+      isInterrupted={isInterrupted}
       status={status}
     >
       {subAgents.length > 0 && (

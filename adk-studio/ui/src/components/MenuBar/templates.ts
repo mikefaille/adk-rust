@@ -1,5 +1,6 @@
 import type { AgentSchema } from '../../types/project';
 import type { ActionNodeConfig, TriggerNodeConfig } from '../../types/actionNodes';
+import { DEFAULT_MANUAL_TRIGGER_CONFIG } from '../../types/actionNodes';
 import { createDefaultStandardProperties } from '../../types/standardProperties';
 
 export interface Template {
@@ -18,6 +19,7 @@ function createManualTrigger(): TriggerNodeConfig {
     ...createDefaultStandardProperties('manual_trigger', 'Manual Trigger', 'trigger_input'),
     type: 'trigger',
     triggerType: 'manual',
+    manual: { ...DEFAULT_MANUAL_TRIGGER_CONFIG },
   };
 }
 

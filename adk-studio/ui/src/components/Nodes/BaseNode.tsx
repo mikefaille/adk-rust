@@ -56,6 +56,8 @@ interface BaseNodeProps {
   isActive?: boolean;
   /** Whether the node is selected */
   isSelected?: boolean;
+  /** Whether the node is interrupted (HITL waiting for input) */
+  isInterrupted?: boolean;
   /** Current execution status */
   status?: NodeStatus;
   /** Optional children to render in the node body */
@@ -81,6 +83,7 @@ interface BaseNodeProps {
  * - Integrated StatusIndicator (Requirement 7.4)
  * - Selection highlighting with distinct border (Requirement 7.9)
  * - Theme-aware styling using CSS variables
+ * - Interrupted state for HITL (trigger-input-flow Requirement 3.3)
  */
 export const BaseNode = memo(function BaseNode({
   label,
@@ -88,6 +91,7 @@ export const BaseNode = memo(function BaseNode({
   nodeType,
   isActive = false,
   isSelected = false,
+  isInterrupted = false,
   status = 'idle',
   children,
   showTopHandle = true,
@@ -100,11 +104,15 @@ export const BaseNode = memo(function BaseNode({
   const displayIcon = icon || nodeIcons[nodeType];
   const typeBadgeLabel = nodeLabels[nodeType];
   
+  // Determine effective status: interrupted takes precedence over active
+  const effectiveStatus: NodeStatus = isInterrupted ? 'interrupted' : (isActive ? 'running' : status);
+  
   // Build class names for styling
   const containerClasses = [
     'node-base',
     isSelected && 'node-selected',
     isActive && 'node-active',
+    isInterrupted && 'node-interrupted',
   ].filter(Boolean).join(' ');
 
   const headerClasses = [
@@ -139,7 +147,7 @@ export const BaseNode = memo(function BaseNode({
         {showTypeBadge && nodeType !== 'start' && nodeType !== 'end' && (
           <span className="node-type-badge">{typeBadgeLabel}</span>
         )}
-        <StatusIndicator status={isActive ? 'running' : status} size="sm" />
+        <StatusIndicator status={effectiveStatus} size="sm" />
       </div>
 
       {/* Node body content */}

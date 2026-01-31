@@ -49,6 +49,8 @@ interface ParallelNodeData {
   activeSubAgent?: string;
   /** Whether the node is currently executing */
   isActive?: boolean;
+  /** Whether the node is interrupted (HITL waiting for input) */
+  isInterrupted?: boolean;
   /** Execution status */
   status?: NodeStatus;
 }
@@ -96,9 +98,11 @@ function ParallelSubAgentItem({
  * - List of concurrent sub-agents (marked with ∥)
  * - Active sub-agent highlighting
  * - Theme-aware styling
+ * - Interrupted state for HITL (trigger-input-flow Requirement 3.3)
  */
 export const ParallelNode = memo(function ParallelNode({ data, selected }: Props) {
   const isActive = data.isActive || false;
+  const isInterrupted = data.isInterrupted || false;
   const subAgents = data.subAgents || [];
   const subAgentTools = data.subAgentTools || {};
   const activeSubAgent = data.activeSubAgent;
@@ -110,6 +114,7 @@ export const ParallelNode = memo(function ParallelNode({ data, selected }: Props
       nodeType="parallel"
       isActive={isActive}
       isSelected={selected}
+      isInterrupted={isInterrupted}
       status={status}
     >
       {subAgents.length > 0 && (

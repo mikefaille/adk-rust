@@ -7,10 +7,27 @@ export interface ToolCall {
 }
 
 /**
+ * Data associated with a workflow interrupt (Human-in-the-Loop).
+ * When a workflow emits an interrupt event, this data is captured
+ * to display to the user and enable their response.
+ * 
+ * @see Requirements 3.1, 3.2: Interrupt detection and response
+ */
+export interface InterruptData {
+  /** The node ID that triggered the interrupt */
+  nodeId: string;
+  /** Human-readable message explaining what input is needed */
+  message: string;
+  /** Additional context data from the interrupt */
+  data: Record<string, unknown>;
+}
+
+/**
  * Node status for visual indicators.
  * @see Requirements 7.4, 7.5, 7.6, 7.7
+ * @see trigger-input-flow Requirement 3.3: Interrupt visual indicator
  */
-export type NodeStatus = 'idle' | 'running' | 'success' | 'error';
+export type NodeStatus = 'idle' | 'running' | 'success' | 'error' | 'interrupted';
 
 /**
  * State snapshot captured at each node during execution.

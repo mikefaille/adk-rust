@@ -26,7 +26,16 @@ import { createDefaultStandardProperties } from '../../types/standardProperties'
 import { TEMPLATES } from '../MenuBar/templates';
 import { validateConnection } from '../../utils/connectionValidation';
 
-type FlowPhase = 'idle' | 'input' | 'output';
+/**
+ * Flow phase for edge animations.
+ * - 'idle': No activity
+ * - 'trigger_input': User submitting input to trigger (animates trigger→START)
+ * - 'input': Data flowing from START to agents
+ * - 'output': Agent generating response
+ * - 'interrupted': Waiting for HITL response
+ * @see trigger-input-flow Requirements 2.2, 2.3, 3.1, 3.2
+ */
+type FlowPhase = 'idle' | 'trigger_input' | 'input' | 'output' | 'interrupted';
 
 export function Canvas() {
   // Store state
@@ -160,6 +169,10 @@ export function Canvas() {
   // State Inspector visibility (v2.0)
   const [showStateInspector, setShowStateInspector] = useState(true);
   
+  // HITL: Interrupted node ID for visual indicator (v2.0)
+  // @see trigger-input-flow Requirement 3.3: Interrupt visual indicator
+  const [interruptedNodeId, setInterruptedNodeId] = useState<string | null>(null);
+  
   // Data Flow Overlay state (v2.0)
   // @see Requirements 3.1-3.9: Data flow overlays
   // Note: showDataFlowOverlay is now managed by the store for persistence
@@ -177,6 +190,12 @@ export function Canvas() {
   const handleToggleDataFlowOverlay = useCallback(() => {
     setShowDataFlowOverlay(!showDataFlowOverlay);
   }, [showDataFlowOverlay, setShowDataFlowOverlay]);
+  
+  // HITL: Handler for interrupt state changes from TestConsole
+  // @see trigger-input-flow Requirement 3.3: Interrupt visual indicator
+  const handleInterruptChange = useCallback((interrupt: import('../../types/execution').InterruptData | null) => {
+    setInterruptedNodeId(interrupt?.nodeId || null);
+  }, []);
   
   // Handler for receiving snapshots and state keys from TestConsole
   const handleSnapshotsChange = useCallback((
@@ -249,6 +268,9 @@ export function Canvas() {
     // @see Requirements 10.3, 10.5
     executionPath: executionPath.path,
     isExecuting: executionPath.isExecuting,
+    // HITL: Interrupted node ID for visual indicator
+    // @see trigger-input-flow Requirement 3.3
+    interruptedNodeId,
   });
   const { applyLayout, fitToView, zoomIn, zoomOut } = useLayout();
   const { createAgent, duplicateAgent, removeAgent } = useAgentActions();
@@ -1004,6 +1026,7 @@ export function Canvas() {
             buildStatus={buildStatus}
             isCollapsed={consoleCollapsed}
             onCollapseChange={setConsoleCollapsed}
+            onInterruptChange={handleInterruptChange}
           />
         </div>
       )}

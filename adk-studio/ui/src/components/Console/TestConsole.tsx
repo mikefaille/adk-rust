@@ -1,18 +1,25 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import ReactMarkdown from 'react-markdown';
 import { useStore } from '../../store';
-import { useSSE, TraceEvent } from '../../hooks/useSSE';
-import type { StateSnapshot } from '../../types/execution';
+import { useSSE, TraceEvent, FlowPhase } from '../../hooks/useSSE';
+import type { StateSnapshot, InterruptData } from '../../types/execution';
 import type { Project } from '../../types/project';
 import { ConsoleFilters, EventFilter } from './ConsoleFilters';
+import { DEFAULT_MANUAL_TRIGGER_CONFIG, type ManualTriggerConfig } from '../../types/actionNodes';
 
 interface Message {
-  role: 'user' | 'assistant';
+  role: 'user' | 'assistant' | 'interrupt';
   content: string;
   agent?: string;
+  /** Interrupt data for HITL messages */
+  interruptData?: InterruptData;
 }
 
-type FlowPhase = 'idle' | 'input' | 'output';
+/**
+ * Flow phase for edge animations.
+ * @see trigger-input-flow Requirements 2.2, 2.3
+ * Note: The actual FlowPhase type is now imported from useSSE hook
+ */
 type Tab = 'chat' | 'events';
 
 /** Build status for summary line */
@@ -51,6 +58,73 @@ function getPlaceholderText(state: WorkflowState, buildStatus: BuildStatus): str
   }
 }
 
+/**
+ * Get trigger configuration from project.
+ * Finds the manual trigger node and returns its configuration.
+ * @see trigger-input-flow Requirements 1.1, 1.2, 2.1
+ */
+function getTriggerConfig(project: Project | null): ManualTriggerConfig | null {
+  if (!project) return null;
+  
+  const actionNodes = project.actionNodes || {};
+  const trigger = Object.values(actionNodes)
+    .find(node => node.type === 'trigger' && node.triggerType === 'manual');
+  
+  if (!trigger || trigger.type !== 'trigger') return null;
+  
+  return trigger.manual || DEFAULT_MANUAL_TRIGGER_CONFIG;
+}
+
+/**
+ * Input context for the chat input field.
+ * Determines label, placeholder, and disabled state based on workflow state.
+ */
+interface InputContext {
+  /** Label shown above the input field */
+  label: string;
+  /** Placeholder text inside the input field */
+  placeholder: string;
+  /** Whether the input is disabled */
+  disabled: boolean;
+}
+
+/**
+ * Get input context based on workflow state, trigger configuration, and interrupt state.
+ * @see trigger-input-flow Requirements 2.1, 3.1, 4.1
+ */
+function getInputContext(
+  workflowState: WorkflowState,
+  buildStatus: BuildStatus,
+  triggerConfig: ManualTriggerConfig | null,
+  interrupt: InterruptData | null
+): InputContext {
+  // If there's an active interrupt, show interrupt-specific context
+  // @see trigger-input-flow Requirements 3.1, 4.1
+  if (interrupt) {
+    return {
+      label: `⚠️ ${interrupt.nodeId} requires input`,
+      placeholder: interrupt.message,
+      disabled: false,
+    };
+  }
+  
+  // If workflow is not ready, show informative placeholder and disable input
+  if (workflowState !== 'ready') {
+    return {
+      label: '',
+      placeholder: getPlaceholderText(workflowState, buildStatus),
+      disabled: true,
+    };
+  }
+  
+  // Workflow is ready - use trigger configuration
+  return {
+    label: triggerConfig?.inputLabel || DEFAULT_MANUAL_TRIGGER_CONFIG.inputLabel,
+    placeholder: triggerConfig?.defaultPrompt || DEFAULT_MANUAL_TRIGGER_CONFIG.defaultPrompt,
+    disabled: false,
+  };
+}
+
 interface Props {
   onFlowPhase?: (phase: FlowPhase) => void;
   onActiveAgent?: (agent: string | null) => void;
@@ -70,6 +144,8 @@ interface Props {
   isCollapsed?: boolean;
   /** v2.0: Callback when collapse state changes */
   onCollapseChange?: (collapsed: boolean) => void;
+  /** HITL: Callback when interrupt state changes */
+  onInterruptChange?: (interrupt: InterruptData | null) => void;
 }
 
 /** Validate workflow and return current state */
@@ -112,12 +188,34 @@ export function TestConsole({
   buildStatus = 'none',
   isCollapsed: controlledCollapsed,
   onCollapseChange,
+  onInterruptChange,
 }: Props) {
   const { currentProject } = useStore();
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [activeTab, setActiveTab] = useState<Tab>('chat');
-  const { send, cancel, isStreaming, streamingText, currentAgent, toolCalls, events, clearEvents, sessionId, newSession, iteration, snapshots, currentSnapshotIndex, scrubTo, stateKeys } = useSSE(currentProject?.id ?? null, binaryPath);
+  const { 
+    send, 
+    cancel, 
+    isStreaming, 
+    streamingText, 
+    currentAgent, 
+    toolCalls, 
+    events, 
+    clearEvents, 
+    sessionId, 
+    newSession, 
+    iteration, 
+    snapshots, 
+    currentSnapshotIndex, 
+    scrubTo, 
+    stateKeys,
+    // HITL: Interrupt state from useSSE
+    // @see trigger-input-flow Requirements 3.1, 3.2
+    interrupt,
+    setInterrupt,
+    setFlowPhase,
+  } = useSSE(currentProject?.id ?? null, binaryPath);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const eventsEndRef = useRef<HTMLDivElement>(null);
   const sendingRef = useRef(false);
@@ -200,16 +298,98 @@ export function TestConsole({
     }
   }, [isStreaming]);
 
+  /**
+   * HITL: Display interrupt message in chat when interrupt state changes.
+   * @see trigger-input-flow Requirements 3.1, 4.2
+   */
+  useEffect(() => {
+    if (interrupt) {
+      // Add interrupt message to chat history
+      setMessages((m) => [...m, { 
+        role: 'interrupt', 
+        content: interrupt.message, 
+        agent: interrupt.nodeId,
+        interruptData: interrupt,
+      }]);
+      // Notify parent of interrupt state change
+      onInterruptChange?.(interrupt);
+    }
+  }, [interrupt, onInterruptChange]);
+
+  /**
+   * HITL: Notify parent when interrupt is cleared (workflow resumed).
+   * @see trigger-input-flow Requirements 3.2
+   */
+  useEffect(() => {
+    if (!interrupt) {
+      onInterruptChange?.(null);
+    }
+  }, [interrupt, onInterruptChange]);
+
+  /**
+   * HITL: Send resume API call when user responds to an interrupt.
+   * @see trigger-input-flow Requirements 3.2
+   */
+  const sendInterruptResponse = useCallback(async (response: string) => {
+    if (!sessionId || !interrupt) return;
+    
+    try {
+      const res = await fetch(`/api/sessions/${sessionId}/resume`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ response }),
+      });
+      
+      if (!res.ok) {
+        const errorText = await res.text();
+        throw new Error(errorText || 'Failed to resume workflow');
+      }
+      
+      // Add user response to chat history
+      setMessages((m) => [...m, { role: 'user', content: response }]);
+      
+      // Clear interrupt state (will be cleared by SSE resume event, but clear locally too)
+      setInterrupt(null);
+      setFlowPhase('input');
+      
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : 'Failed to resume workflow';
+      setMessages((m) => [...m, { role: 'assistant', content: `Error: ${errorMsg}` }]);
+      setLastError(errorMsg);
+    }
+  }, [sessionId, interrupt, setInterrupt, setFlowPhase]);
+
   const sendMessage = () => {
-    if (!input.trim() || !currentProject || isStreaming || sendingRef.current) return;
+    if (!input.trim() || !currentProject || sendingRef.current) return;
+    
+    // HITL: If there's an active interrupt, send response to resume endpoint
+    // @see trigger-input-flow Requirements 3.2
+    if (interrupt) {
+      sendInterruptResponse(input.trim());
+      setInput('');
+      return;
+    }
+    
+    // Don't allow new messages while streaming (unless responding to interrupt)
+    if (isStreaming) return;
+    
     sendingRef.current = true;
     const userMsg = input.trim();
     setInput('');
     setMessages((m) => [...m, { role: 'user', content: userMsg }]);
-    onFlowPhase?.('input');
+    
+    // Phase 1: Set trigger_input phase to animate trigger→START edge
+    // @see trigger-input-flow Requirements 2.2, 2.3
+    onFlowPhase?.('trigger_input');
     lastAgentRef.current = null;
     setRunStatus('running');
     setLastError(null);
+    
+    // Phase 2: After 500ms, transition to 'input' phase for START→agent animation
+    // This timing allows the trigger→START edge to animate before START→agent
+    setTimeout(() => {
+      onFlowPhase?.('input');
+    }, 500);
     
     send(
       userMsg,
@@ -501,14 +681,66 @@ export function TestConsole({
             </div>
           )}
           {messages.map((m, i) => (
-            <div key={i} className="text-sm" style={{ color: m.role === 'user' ? 'var(--accent-primary)' : 'var(--text-primary)' }}>
-              <span className="font-semibold">{m.role === 'user' ? 'You: ' : `${m.agent || 'Agent'}: `}</span>
-              {m.role === 'user' ? (
-                <span>{m.content}</span>
-              ) : (
-                <div className="prose prose-sm max-w-none inline" style={{ color: 'var(--text-primary)' }}>
-                  <ReactMarkdown>{m.content}</ReactMarkdown>
+            <div 
+              key={i} 
+              className={`text-sm ${m.role === 'interrupt' ? 'my-3' : ''}`}
+              style={{ 
+                color: m.role === 'user' 
+                  ? 'var(--accent-primary)' 
+                  : m.role === 'interrupt'
+                    ? 'var(--accent-warning)'
+                    : 'var(--text-primary)' 
+              }}
+            >
+              {/* HITL: Interrupt messages with distinct styling */}
+              {/* @see trigger-input-flow Requirements 3.1, 4.2 */}
+              {m.role === 'interrupt' ? (
+                <div 
+                  className="p-3 rounded-lg border-l-4"
+                  style={{ 
+                    backgroundColor: 'var(--bg-secondary)',
+                    borderLeftColor: 'var(--accent-warning)',
+                  }}
+                >
+                  <div className="flex items-center gap-2 mb-2">
+                    <span className="text-lg">⚠️</span>
+                    <span className="font-semibold">INTERRUPT: {m.agent} requires input</span>
+                  </div>
+                  <div 
+                    className="prose prose-sm max-w-none"
+                    style={{ color: 'var(--text-primary)' }}
+                  >
+                    <ReactMarkdown>{m.content}</ReactMarkdown>
+                  </div>
+                  {/* Show additional interrupt data if available */}
+                  {m.interruptData?.data && Object.keys(m.interruptData.data).length > 0 && (
+                    <div 
+                      className="mt-2 p-2 rounded text-xs font-mono"
+                      style={{ 
+                        backgroundColor: 'var(--bg-primary)',
+                        color: 'var(--text-secondary)',
+                      }}
+                    >
+                      {Object.entries(m.interruptData.data).map(([key, value]) => (
+                        <div key={key} className="mb-1">
+                          <span className="font-semibold">{key}:</span>{' '}
+                          <span>{typeof value === 'string' ? value : JSON.stringify(value)}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
+              ) : (
+                <>
+                  <span className="font-semibold">{m.role === 'user' ? 'You: ' : `${m.agent || 'Agent'}: `}</span>
+                  {m.role === 'user' ? (
+                    <span>{m.content}</span>
+                  ) : (
+                    <div className="prose prose-sm max-w-none inline" style={{ color: 'var(--text-primary)' }}>
+                      <ReactMarkdown>{m.content}</ReactMarkdown>
+                    </div>
+                  )}
+                </>
               )}
             </div>
           ))}
@@ -585,44 +817,80 @@ export function TestConsole({
         </div>
       )}
 
-      <div className="p-2 border-t flex gap-2" style={{ borderColor: 'var(--border-default)' }}>
+      <div className="p-2 border-t flex flex-col gap-2" style={{ borderColor: 'var(--border-default)' }}>
         {(() => {
           const workflowState = validateWorkflow(currentProject, binaryPath, buildStatus);
-          const isReady = workflowState === 'ready';
-          const placeholder = getPlaceholderText(workflowState, buildStatus);
-          const isDisabled = !isReady || isStreaming;
+          const triggerConfig = getTriggerConfig(currentProject);
+          // HITL: Pass interrupt state to getInputContext
+          // @see trigger-input-flow Requirements 3.1, 4.1
+          const inputContext = getInputContext(workflowState, buildStatus, triggerConfig, interrupt);
+          // Allow input when interrupted (to respond) or when workflow is ready
+          const isDisabled = inputContext.disabled || (isStreaming && !interrupt);
           
           return (
             <>
-              <input
-                type="text"
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' && !e.repeat && isReady) {
-                    e.preventDefault();
-                    sendMessage();
+              {/* Input label - shown above input when workflow is ready or interrupted (Requirement 2.1, 3.1, 4.1) */}
+              {inputContext.label && (
+                <label 
+                  className="text-xs font-medium px-1"
+                  style={{ 
+                    // Use warning color for interrupt labels
+                    color: interrupt ? 'var(--accent-warning)' : 'var(--accent-primary)',
+                    letterSpacing: '0.025em',
+                  }}
+                >
+                  {inputContext.label}
+                </label>
+              )}
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={input}
+                  onChange={(e) => setInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && !e.repeat && !inputContext.disabled) {
+                      e.preventDefault();
+                      sendMessage();
+                    }
+                  }}
+                  placeholder={inputContext.placeholder}
+                  className="flex-1 px-3 py-2 rounded text-sm"
+                  style={{ 
+                    backgroundColor: isDisabled ? 'var(--bg-secondary)' : 'var(--bg-primary)', 
+                    // HITL: Use warning border when interrupted, error border when disabled
+                    // @see trigger-input-flow Requirements 3.1, 4.1
+                    border: `1px solid ${
+                      interrupt 
+                        ? 'var(--accent-warning)' 
+                        : inputContext.disabled 
+                          ? 'var(--accent-warning)' 
+                          : 'var(--border-default)'
+                    }`,
+                    color: isDisabled ? 'var(--text-muted)' : 'var(--text-primary)',
+                    cursor: isDisabled ? 'not-allowed' : 'text',
+                  }}
+                  disabled={isDisabled}
+                />
+                <button
+                  onClick={sendMessage}
+                  disabled={isDisabled || !input.trim()}
+                  className="px-4 py-2 rounded text-sm disabled:opacity-50 disabled:cursor-not-allowed"
+                  style={{ 
+                    // HITL: Use warning color for button when responding to interrupt
+                    backgroundColor: interrupt ? 'var(--accent-warning)' : 'var(--accent-primary)', 
+                    color: 'white' 
+                  }}
+                  title={
+                    inputContext.disabled 
+                      ? inputContext.placeholder 
+                      : interrupt 
+                        ? 'Send response to resume workflow'
+                        : 'Send message'
                   }
-                }}
-                placeholder={placeholder}
-                className="flex-1 px-3 py-2 rounded text-sm"
-                style={{ 
-                  backgroundColor: isDisabled ? 'var(--bg-secondary)' : 'var(--bg-primary)', 
-                  border: `1px solid ${!isReady ? 'var(--accent-warning)' : 'var(--border-default)'}`,
-                  color: isDisabled ? 'var(--text-muted)' : 'var(--text-primary)',
-                  cursor: isDisabled ? 'not-allowed' : 'text',
-                }}
-                disabled={isDisabled}
-              />
-              <button
-                onClick={sendMessage}
-                disabled={isDisabled || !input.trim()}
-                className="px-4 py-2 rounded text-sm disabled:opacity-50 disabled:cursor-not-allowed"
-                style={{ backgroundColor: 'var(--accent-primary)', color: 'white' }}
-                title={!isReady ? placeholder : 'Send message'}
-              >
-                Send
-              </button>
+                >
+                  {interrupt ? 'Resume' : 'Send'}
+                </button>
+              </div>
             </>
           );
         })()}

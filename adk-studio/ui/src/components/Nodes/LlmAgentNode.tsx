@@ -59,6 +59,8 @@ interface LlmNodeData {
   tools?: string[];
   /** Whether the node is currently executing */
   isActive?: boolean;
+  /** Whether the node is interrupted (HITL waiting for input) */
+  isInterrupted?: boolean;
   /** Current thought/reasoning text (for thought bubble) */
   thought?: string;
   /** Execution status */
@@ -120,16 +122,18 @@ function ModelInfo({ model }: { model: string }) {
  * - Tool badges as compact chips (Requirement 7.8)
  * - Theme-aware styling (Requirement 7.10)
  * - Thought indicator when thinking
+ * - Interrupted state for HITL (trigger-input-flow Requirement 3.3)
  */
 export const LlmAgentNode = memo(function LlmAgentNode({ data, selected }: Props) {
   const isActive = data.isActive || false;
+  const isInterrupted = data.isInterrupted || false;
   const hasThought = !!data.thought;
   const model = data.model || 'gemini-2.0-flash';
   const tools = data.tools || [];
   const status = data.status || (isActive ? 'running' : 'idle');
 
-  // Custom icon with thought indicator
-  const icon = hasThought ? '🤖💭' : '🤖';
+  // Custom icon with thought indicator or interrupted indicator
+  const icon = isInterrupted ? '🤖⏸️' : (hasThought ? '🤖💭' : '🤖');
 
   return (
     <BaseNode
@@ -138,6 +142,7 @@ export const LlmAgentNode = memo(function LlmAgentNode({ data, selected }: Props
       nodeType="agent"
       isActive={isActive}
       isSelected={selected}
+      isInterrupted={isInterrupted}
       status={status}
     >
       {/* Model info section */}

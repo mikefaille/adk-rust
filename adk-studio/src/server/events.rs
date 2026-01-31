@@ -1,15 +1,17 @@
 //! SSE Event Schema v2.0
 //!
 //! This module defines the enhanced SSE event types for ADK Studio v2.0,
-//! which adds support for state snapshots and data flow overlays.
+//! which adds support for state snapshots, data flow overlays, and HITL interrupts.
 //!
 //! ## Features
 //! - State snapshots: Input/output state at each agent execution step
 //! - State keys: List of state keys for data flow overlay visualization
+//! - HITL Interrupts: Events for human-in-the-loop workflow interactions
 //!
 //! ## Requirements Traceability
 //! - Requirement 5.8: State snapshot capture at each node during execution
 //! - Requirement 3.3: State keys sourced from runtime execution events
+//! - Requirement 5.1: SSE event types for trigger/HITL flow
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -45,6 +47,295 @@ impl StateSnapshot {
             _ => Vec::new(),
         }
     }
+}
+
+// ============================================
+// HITL (Human-in-the-Loop) Event Types
+// ============================================
+// These event types support the trigger/HITL flow as defined in Requirement 5.1:
+// - `trigger_input`: When trigger receives user input
+// - `interrupt`: When workflow requests human intervention
+// - `interrupt_response`: When user responds to interrupt
+// - `resume`: When workflow resumes after interrupt
+
+/// Event emitted when a trigger node receives user input.
+/// This marks the start of workflow execution from a manual trigger.
+///
+/// ## SSE Event Format
+/// ```json
+/// {
+///   "type": "trigger_input",
+///   "trigger_id": "manual_trigger_1",
+///   "input": "User's input message",
+///   "timestamp": 1706400000000
+/// }
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TriggerInputEvent {
+    /// Event type identifier (always "trigger_input")
+    #[serde(rename = "type")]
+    pub event_type: String,
+    /// ID of the trigger node that received input
+    pub trigger_id: String,
+    /// The user's input text
+    pub input: String,
+    /// Timestamp in milliseconds since Unix epoch
+    pub timestamp: u64,
+}
+
+impl TriggerInputEvent {
+    /// Create a new trigger input event.
+    pub fn new(trigger_id: impl Into<String>, input: impl Into<String>) -> Self {
+        Self {
+            event_type: "trigger_input".to_string(),
+            trigger_id: trigger_id.into(),
+            input: input.into(),
+            timestamp: current_timestamp_ms(),
+        }
+    }
+
+    /// Convert to JSON string for SSE emission.
+    pub fn to_json(&self) -> String {
+        serde_json::to_string(self).unwrap_or_else(|_| "{}".to_string())
+    }
+}
+
+/// Event emitted when a workflow requests human intervention (HITL interrupt).
+/// The workflow pauses at this point until the user responds.
+///
+/// ## SSE Event Format
+/// ```json
+/// {
+///   "type": "interrupt",
+///   "node_id": "review",
+///   "message": "HIGH RISK: Human approval required",
+///   "data": {
+///     "plan": "...",
+///     "risk_level": "high",
+///     "action": "Set 'approved' to true to continue"
+///   },
+///   "timestamp": 1706400000000
+/// }
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InterruptEvent {
+    /// Event type identifier (always "interrupt")
+    #[serde(rename = "type")]
+    pub event_type: String,
+    /// ID of the node that triggered the interrupt
+    pub node_id: String,
+    /// Human-readable message explaining what input is needed
+    pub message: String,
+    /// Additional data for the interrupt (plan details, options, etc.)
+    pub data: serde_json::Value,
+    /// Timestamp in milliseconds since Unix epoch
+    pub timestamp: u64,
+}
+
+impl InterruptEvent {
+    /// Create a new interrupt event.
+    pub fn new(
+        node_id: impl Into<String>,
+        message: impl Into<String>,
+        data: serde_json::Value,
+    ) -> Self {
+        Self {
+            event_type: "interrupt".to_string(),
+            node_id: node_id.into(),
+            message: message.into(),
+            data,
+            timestamp: current_timestamp_ms(),
+        }
+    }
+
+    /// Create an interrupt event with empty data.
+    pub fn simple(node_id: impl Into<String>, message: impl Into<String>) -> Self {
+        Self::new(node_id, message, serde_json::Value::Object(Default::default()))
+    }
+
+    /// Convert to JSON string for SSE emission.
+    pub fn to_json(&self) -> String {
+        serde_json::to_string(self).unwrap_or_else(|_| "{}".to_string())
+    }
+}
+
+/// Event emitted when a user responds to an interrupt.
+/// This is sent before the workflow resumes to acknowledge the response.
+///
+/// ## SSE Event Format
+/// ```json
+/// {
+///   "type": "interrupt_response",
+///   "node_id": "review",
+///   "response": { "approved": true },
+///   "timestamp": 1706400000000
+/// }
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InterruptResponseEvent {
+    /// Event type identifier (always "interrupt_response")
+    #[serde(rename = "type")]
+    pub event_type: String,
+    /// ID of the node that was interrupted
+    pub node_id: String,
+    /// The user's response data
+    pub response: serde_json::Value,
+    /// Timestamp in milliseconds since Unix epoch
+    pub timestamp: u64,
+}
+
+impl InterruptResponseEvent {
+    /// Create a new interrupt response event.
+    pub fn new(node_id: impl Into<String>, response: serde_json::Value) -> Self {
+        Self {
+            event_type: "interrupt_response".to_string(),
+            node_id: node_id.into(),
+            response,
+            timestamp: current_timestamp_ms(),
+        }
+    }
+
+    /// Convert to JSON string for SSE emission.
+    pub fn to_json(&self) -> String {
+        serde_json::to_string(self).unwrap_or_else(|_| "{}".to_string())
+    }
+}
+
+/// Event emitted when a workflow resumes after an interrupt.
+/// This signals that execution is continuing from the checkpoint.
+///
+/// ## SSE Event Format
+/// ```json
+/// {
+///   "type": "resume",
+///   "node_id": "review",
+///   "timestamp": 1706400000000
+/// }
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResumeEvent {
+    /// Event type identifier (always "resume")
+    #[serde(rename = "type")]
+    pub event_type: String,
+    /// ID of the node that is resuming
+    pub node_id: String,
+    /// Timestamp in milliseconds since Unix epoch
+    pub timestamp: u64,
+}
+
+impl ResumeEvent {
+    /// Create a new resume event.
+    pub fn new(node_id: impl Into<String>) -> Self {
+        Self {
+            event_type: "resume".to_string(),
+            node_id: node_id.into(),
+            timestamp: current_timestamp_ms(),
+        }
+    }
+
+    /// Convert to JSON string for SSE emission.
+    pub fn to_json(&self) -> String {
+        serde_json::to_string(self).unwrap_or_else(|_| "{}".to_string())
+    }
+}
+
+// ============================================
+// SSE Emitter for HITL Events
+// ============================================
+
+/// SSE emitter for HITL (Human-in-the-Loop) events.
+/// Provides convenient methods for emitting interrupt-related events.
+///
+/// ## Usage
+/// ```rust,ignore
+/// let emitter = HitlEventEmitter::new(sender);
+/// emitter.emit_trigger_input("trigger_1", "Hello").await;
+/// emitter.emit_interrupt("review", "Approval needed", data).await;
+/// emitter.emit_resume("review").await;
+/// ```
+pub struct HitlEventEmitter {
+    /// Channel sender for SSE events
+    sender: tokio::sync::mpsc::Sender<String>,
+}
+
+impl HitlEventEmitter {
+    /// Create a new HITL event emitter with the given channel sender.
+    pub fn new(sender: tokio::sync::mpsc::Sender<String>) -> Self {
+        Self { sender }
+    }
+
+    /// Emit a trigger_input event when a manual trigger receives user input.
+    ///
+    /// ## Arguments
+    /// * `trigger_id` - ID of the trigger node
+    /// * `input` - The user's input text
+    ///
+    /// ## Requirements
+    /// Validates: Requirement 5.1 - `trigger_input` event type
+    pub async fn emit_trigger_input(
+        &self,
+        trigger_id: impl Into<String>,
+        input: impl Into<String>,
+    ) {
+        let event = TriggerInputEvent::new(trigger_id, input);
+        let _ = self.sender.send(event.to_json()).await;
+    }
+
+    /// Emit an interrupt event when the workflow requests human intervention.
+    ///
+    /// ## Arguments
+    /// * `node_id` - ID of the node requesting intervention
+    /// * `message` - Human-readable message explaining what input is needed
+    /// * `data` - Additional context data (plan details, options, etc.)
+    ///
+    /// ## Requirements
+    /// Validates: Requirement 5.1 - `interrupt` event type
+    pub async fn emit_interrupt(
+        &self,
+        node_id: impl Into<String>,
+        message: impl Into<String>,
+        data: serde_json::Value,
+    ) {
+        let event = InterruptEvent::new(node_id, message, data);
+        let _ = self.sender.send(event.to_json()).await;
+    }
+
+    /// Emit an interrupt_response event when the user responds to an interrupt.
+    ///
+    /// ## Arguments
+    /// * `node_id` - ID of the node that was interrupted
+    /// * `response` - The user's response data
+    ///
+    /// ## Requirements
+    /// Validates: Requirement 5.1 - `interrupt_response` event type
+    pub async fn emit_interrupt_response(
+        &self,
+        node_id: impl Into<String>,
+        response: serde_json::Value,
+    ) {
+        let event = InterruptResponseEvent::new(node_id, response);
+        let _ = self.sender.send(event.to_json()).await;
+    }
+
+    /// Emit a resume event when the workflow resumes after an interrupt.
+    ///
+    /// ## Arguments
+    /// * `node_id` - ID of the node that is resuming
+    ///
+    /// ## Requirements
+    /// Validates: Requirement 5.1 - `resume` event type
+    pub async fn emit_resume(&self, node_id: impl Into<String>) {
+        let event = ResumeEvent::new(node_id);
+        let _ = self.sender.send(event.to_json()).await;
+    }
+}
+
+/// Get current timestamp in milliseconds since Unix epoch.
+fn current_timestamp_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 /// Enhanced trace event for SSE v2.0.
@@ -310,5 +601,108 @@ mod tests {
         let done_event = tracker.done();
         assert_eq!(done_event.event_type, "done");
         assert_eq!(done_event.total_steps, Some(1));
+    }
+
+    // ============================================
+    // HITL Event Tests
+    // ============================================
+
+    #[test]
+    fn test_trigger_input_event() {
+        let event = TriggerInputEvent::new("manual_trigger_1", "Hello, world!");
+        assert_eq!(event.event_type, "trigger_input");
+        assert_eq!(event.trigger_id, "manual_trigger_1");
+        assert_eq!(event.input, "Hello, world!");
+        assert!(event.timestamp > 0);
+
+        // Test JSON serialization
+        let json = event.to_json();
+        assert!(json.contains("\"type\":\"trigger_input\""));
+        assert!(json.contains("\"trigger_id\":\"manual_trigger_1\""));
+        assert!(json.contains("\"input\":\"Hello, world!\""));
+    }
+
+    #[test]
+    fn test_interrupt_event() {
+        let data = serde_json::json!({
+            "plan": "Delete all backup files",
+            "risk_level": "high",
+            "action": "Set 'approved' to true to continue"
+        });
+        let event = InterruptEvent::new("review", "HIGH RISK: Human approval required", data.clone());
+        
+        assert_eq!(event.event_type, "interrupt");
+        assert_eq!(event.node_id, "review");
+        assert_eq!(event.message, "HIGH RISK: Human approval required");
+        assert_eq!(event.data, data);
+        assert!(event.timestamp > 0);
+
+        // Test JSON serialization
+        let json = event.to_json();
+        assert!(json.contains("\"type\":\"interrupt\""));
+        assert!(json.contains("\"node_id\":\"review\""));
+        assert!(json.contains("\"risk_level\":\"high\""));
+    }
+
+    #[test]
+    fn test_interrupt_event_simple() {
+        let event = InterruptEvent::simple("approval_node", "Please approve this action");
+        assert_eq!(event.event_type, "interrupt");
+        assert_eq!(event.node_id, "approval_node");
+        assert_eq!(event.message, "Please approve this action");
+        assert_eq!(event.data, serde_json::Value::Object(Default::default()));
+    }
+
+    #[test]
+    fn test_interrupt_response_event() {
+        let response = serde_json::json!({ "approved": true, "comment": "Looks good" });
+        let event = InterruptResponseEvent::new("review", response.clone());
+        
+        assert_eq!(event.event_type, "interrupt_response");
+        assert_eq!(event.node_id, "review");
+        assert_eq!(event.response, response);
+        assert!(event.timestamp > 0);
+
+        // Test JSON serialization
+        let json = event.to_json();
+        assert!(json.contains("\"type\":\"interrupt_response\""));
+        assert!(json.contains("\"approved\":true"));
+    }
+
+    #[test]
+    fn test_resume_event() {
+        let event = ResumeEvent::new("review");
+        
+        assert_eq!(event.event_type, "resume");
+        assert_eq!(event.node_id, "review");
+        assert!(event.timestamp > 0);
+
+        // Test JSON serialization
+        let json = event.to_json();
+        assert!(json.contains("\"type\":\"resume\""));
+        assert!(json.contains("\"node_id\":\"review\""));
+    }
+
+    #[test]
+    fn test_hitl_event_json_format() {
+        // Verify the JSON format matches the design document schema
+        let interrupt = InterruptEvent::new(
+            "review",
+            "HIGH RISK: Human approval required",
+            serde_json::json!({
+                "plan": "...",
+                "risk_level": "high",
+                "action": "Set 'approved' to true to continue"
+            }),
+        );
+        
+        let parsed: serde_json::Value = serde_json::from_str(&interrupt.to_json()).unwrap();
+        
+        // Verify required fields exist
+        assert_eq!(parsed["type"], "interrupt");
+        assert_eq!(parsed["node_id"], "review");
+        assert!(parsed["message"].is_string());
+        assert!(parsed["data"].is_object());
+        assert!(parsed["timestamp"].is_number());
     }
 }

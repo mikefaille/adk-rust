@@ -1,4 +1,7 @@
 use crate::server::events::TraceEventV2;
+use crate::server::graph_runner::{
+    GraphInterruptHandler, INTERRUPTED_SESSIONS,
+};
 use crate::server::state::AppState;
 use axum::{
     extract::{Path, Query, State},
@@ -22,6 +25,18 @@ struct SessionProcess {
     stdout_rx: tokio::sync::mpsc::Receiver<String>,
     stderr_rx: tokio::sync::mpsc::Receiver<String>,
     _child: Child,
+}
+
+/// Information about an interrupt extracted from TRACE output.
+#[derive(Debug, Clone)]
+struct InterruptInfo {
+    node_id: String,
+    message: String,
+    data: serde_json::Value,
+    thread_id: String,
+    checkpoint_id: String,
+    step: usize,
+    state: HashMap<String, serde_json::Value>,
 }
 
 /// Pending agent info - tracks agents that have started but not yet ended
@@ -218,7 +233,53 @@ impl ExecutionContext {
                 }
                 (None, true)
             }
+            "interrupted" => {
+                // Interrupt event from ADK-Graph - workflow is paused
+                // This is handled separately via the interrupt SSE event
+                // Just update state if provided
+                if let Some(state) = event.get("state") {
+                    if let serde_json::Value::Object(map) = state {
+                        for (k, v) in map {
+                            self.current_state.insert(k.clone(), v.clone());
+                        }
+                    }
+                }
+                (None, false)
+            }
             _ => (None, false),
+        }
+    }
+
+    /// Process an interrupt event from TRACE output.
+    /// Returns the interrupt data if this is an interrupt event.
+    fn process_interrupt_event(&self, trace_json: &str) -> Option<InterruptInfo> {
+        let event: serde_json::Value = serde_json::from_str(trace_json).ok()?;
+        let event_type = event.get("type").and_then(|v| v.as_str())?;
+        
+        if event_type == "interrupted" {
+            let node_id = event.get("node").and_then(|v| v.as_str())
+                .unwrap_or("unknown").to_string();
+            let message = event.get("message").and_then(|v| v.as_str())
+                .unwrap_or("Workflow interrupted").to_string();
+            let data = event.get("data").cloned().unwrap_or(serde_json::Value::Null);
+            let thread_id = event.get("thread_id").and_then(|v| v.as_str())
+                .unwrap_or("").to_string();
+            let checkpoint_id = event.get("checkpoint_id").and_then(|v| v.as_str())
+                .unwrap_or("").to_string();
+            let step = event.get("step").and_then(|v| v.as_u64())
+                .unwrap_or(0) as usize;
+            
+            Some(InterruptInfo {
+                node_id,
+                message,
+                data,
+                thread_id,
+                checkpoint_id,
+                step,
+                state: self.current_state.clone(),
+            })
+        } else {
+            None
         }
     }
 
@@ -427,6 +488,41 @@ pub async fn stream_handler(
                     // This is where we get the actual output state for each agent
                     let (node_end_event, is_done) = exec_ctx.process_stream_event(trace);
                     
+                    // Check for interrupt events (Task 9: Handle ADK-Graph Interrupts)
+                    // Requirements: 3.1, 5.2
+                    if let Some(interrupt_info) = exec_ctx.process_interrupt_event(trace) {
+                        // Create interrupt handler and store the interrupted state
+                        let handler = GraphInterruptHandler::new(INTERRUPTED_SESSIONS.clone());
+                        handler.handle_interrupt(
+                            &session_id,
+                            interrupt_info.thread_id.clone(),
+                            interrupt_info.checkpoint_id.clone(),
+                            interrupt_info.node_id.clone(),
+                            interrupt_info.message.clone(),
+                            interrupt_info.data.clone(),
+                            interrupt_info.state.clone(),
+                            interrupt_info.step,
+                        ).await;
+                        
+                        // Emit interrupt event to frontend
+                        let interrupt_event = serde_json::json!({
+                            "type": "interrupt",
+                            "node_id": interrupt_info.node_id,
+                            "message": interrupt_info.message,
+                            "data": interrupt_info.data,
+                            "thread_id": interrupt_info.thread_id,
+                            "checkpoint_id": interrupt_info.checkpoint_id,
+                            "timestamp": std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_millis() as u64)
+                                .unwrap_or(0)
+                        });
+                        yield Ok(Event::default().event("interrupt").data(interrupt_event.to_string()));
+                        
+                        // Don't break - the workflow is paused, waiting for user input
+                        // The frontend will call the resume endpoint when ready
+                    }
+                    
                     // If we got a node_end event with state, emit it
                     if let Some(event_json) = node_end_event {
                         yield Ok(Event::default().event("trace").data(event_json));
@@ -523,4 +619,75 @@ pub async fn kill_session(Path(session_id): Path<String>) -> &'static str {
         }
     }
     "ok"
+}
+
+// ============================================
+// Task 10: Resume Workflow Functions
+// ============================================
+// These functions support resuming interrupted workflows by sending
+// the user's response to the subprocess via stdin.
+// Requirements: 3.2, 5.2
+
+/// Send a resume response to an interrupted workflow session.
+///
+/// This function sends the user's response to the subprocess stdin,
+/// which triggers the workflow to resume from its checkpoint.
+///
+/// ## Arguments
+/// * `session_id` - The session ID of the interrupted workflow
+/// * `response` - The user's response as a JSON value
+///
+/// ## Returns
+/// * `Ok(())` if the response was sent successfully
+/// * `Err(String)` if the session was not found or the send failed
+///
+/// ## Requirements
+/// - Requirement 3.2: After user response, workflow resumes
+/// - Requirement 5.2: State persistence - workflow resumes from checkpoint
+pub async fn send_resume_response(
+    session_id: &str,
+    response: serde_json::Value,
+) -> Result<(), String> {
+    let mut sessions = SESSIONS.lock().await;
+    
+    let session = sessions
+        .get_mut(session_id)
+        .ok_or_else(|| format!("Session '{}' not found", session_id))?;
+    
+    // Format the response as a JSON string to send to the subprocess
+    let response_str = serde_json::to_string(&response)
+        .map_err(|e| format!("Failed to serialize response: {}", e))?;
+    
+    // Send the response to the subprocess stdin
+    session
+        .stdin
+        .write_all(format!("{}\n", response_str).as_bytes())
+        .await
+        .map_err(|e| format!("Failed to write to stdin: {}", e))?;
+    
+    session
+        .stdin
+        .flush()
+        .await
+        .map_err(|e| format!("Failed to flush stdin: {}", e))?;
+    
+    tracing::info!(
+        session_id = %session_id,
+        response = %response_str,
+        "Sent resume response to subprocess"
+    );
+    
+    Ok(())
+}
+
+/// Check if a session exists and is active.
+pub async fn session_exists(session_id: &str) -> bool {
+    let sessions = SESSIONS.lock().await;
+    sessions.contains_key(session_id)
+}
+
+/// Get the list of active session IDs.
+pub async fn list_active_sessions() -> Vec<String> {
+    let sessions = SESSIONS.lock().await;
+    sessions.keys().cloned().collect()
 }

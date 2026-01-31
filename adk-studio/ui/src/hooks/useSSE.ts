@@ -1,5 +1,11 @@
 import { useCallback, useRef, useState } from 'react';
-import type { StateSnapshot, TraceEventPayload } from '../types/execution';
+import type { InterruptData, StateSnapshot, TraceEventPayload } from '../types/execution';
+
+/**
+ * Flow phase for edge animations.
+ * @see trigger-input-flow Requirements 2.2, 2.3, 3.1, 3.2
+ */
+export type FlowPhase = 'idle' | 'trigger_input' | 'input' | 'output' | 'interrupted';
 
 interface ToolCall {
   name: string;
@@ -7,11 +13,13 @@ interface ToolCall {
 }
 
 export interface TraceEvent {
-  type: 'user' | 'agent_start' | 'agent_end' | 'model' | 'tool_call' | 'tool_result' | 'done' | 'error';
+  type: 'user' | 'agent_start' | 'agent_end' | 'model' | 'tool_call' | 'tool_result' | 'done' | 'error' | 'interrupt' | 'resume';
   timestamp: number;
   data: string;
   agent?: string;
   screenshot?: string; // base64 image for browser screenshots
+  /** Interrupt data for HITL events */
+  interruptData?: InterruptData;
 }
 
 /**
@@ -65,6 +73,14 @@ export function useSSE(projectId: string | null, binaryPath?: string | null) {
   
   // v2.0: State keys for data flow overlays (edge ID -> state keys)
   const [stateKeys, setStateKeys] = useState<Map<string, string[]>>(new Map());
+  
+  // HITL: Flow phase for edge animations
+  // @see trigger-input-flow Requirements 2.2, 2.3, 3.1, 3.2
+  const [flowPhase, setFlowPhase] = useState<FlowPhase>('idle');
+  
+  // HITL: Interrupt state for human-in-the-loop interactions
+  // @see trigger-input-flow Requirements 3.1, 3.2
+  const [interrupt, setInterrupt] = useState<InterruptData | null>(null);
   
   const esRef = useRef<EventSource | null>(null);
   const textRef = useRef('');
@@ -133,6 +149,12 @@ export function useSSE(projectId: string | null, binaryPath?: string | null) {
       setSnapshots([]);
       setCurrentSnapshotIndex(-1);
       setStateKeys(new Map());
+      // HITL: Reset interrupt state and set flow phase to trigger_input
+      // @see trigger-input-flow Requirements 2.2, 3.1, 3.2
+      setInterrupt(null);
+      setFlowPhase('trigger_input');
+      // Transition from trigger_input to input phase after animation
+      setTimeout(() => setFlowPhase('input'), 500);
       // Append new user event, don't clear history
       setEvents(prev => [...prev, { type: 'user', timestamp: Date.now(), data: input }]);
       setIsStreaming(true);
@@ -285,12 +307,71 @@ export function useSSE(projectId: string | null, binaryPath?: string | null) {
         } catch {}
       });
 
+      /**
+       * Handle interrupt event from ADK-Graph HITL.
+       * Sets the flow phase to 'interrupted' and stores interrupt data.
+       * @see trigger-input-flow Requirements 3.1: Interrupt detection
+       */
+      es.addEventListener('interrupt', (e) => {
+        try {
+          const data = JSON.parse(e.data);
+          const interruptData: InterruptData = {
+            nodeId: data.node_id || data.nodeId || '',
+            message: data.message || 'Human input required',
+            data: data.data || {},
+          };
+          
+          // Set flow phase to interrupted
+          setFlowPhase('interrupted');
+          
+          // Store interrupt data for UI display
+          setInterrupt(interruptData);
+          
+          // Add interrupt event to trace history
+          setEvents(prev => [...prev, {
+            type: 'interrupt',
+            timestamp: Date.now(),
+            data: interruptData.message,
+            agent: interruptData.nodeId,
+            interruptData,
+          }]);
+        } catch {}
+      });
+
+      /**
+       * Handle resume event after user responds to interrupt.
+       * Clears interrupt state and resumes normal flow.
+       * @see trigger-input-flow Requirements 3.2: Interrupt response
+       */
+      es.addEventListener('resume', (e) => {
+        try {
+          const data = JSON.parse(e.data);
+          const nodeId = data.node_id || data.nodeId || '';
+          
+          // Clear interrupt state
+          setInterrupt(null);
+          
+          // Resume normal flow phase
+          setFlowPhase('input');
+          
+          // Add resume event to trace history
+          setEvents(prev => [...prev, {
+            type: 'resume',
+            timestamp: Date.now(),
+            data: `Resumed from ${nodeId}`,
+            agent: nodeId,
+          }]);
+        } catch {}
+      });
+
       es.addEventListener('end', () => {
         ended = true;
         const finalText = textRef.current;
         setStreamingText('');
         setCurrentAgent('');
         setIsStreaming(false);
+        // HITL: Reset flow phase on completion
+        setFlowPhase('idle');
         es.close();
         onComplete(finalText);
       });
@@ -301,6 +382,9 @@ export function useSSE(projectId: string | null, binaryPath?: string | null) {
           setStreamingText('');
           setCurrentAgent('');
           setIsStreaming(false);
+          // HITL: Reset flow phase on error
+          setFlowPhase('idle');
+          setInterrupt(null);
           es.close();
           addEvent('error', msg);
           onError?.(msg);
@@ -315,6 +399,9 @@ export function useSSE(projectId: string | null, binaryPath?: string | null) {
     setStreamingText('');
     setCurrentAgent('');
     setIsStreaming(false);
+    // HITL: Reset flow phase and interrupt state on cancel
+    setFlowPhase('idle');
+    setInterrupt(null);
     
     // Also kill the backend session to stop the running process
     if (sessionRef.current) {
@@ -336,6 +423,9 @@ export function useSSE(projectId: string | null, binaryPath?: string | null) {
     setSnapshots([]);
     setCurrentSnapshotIndex(-1);
     setStateKeys(new Map());
+    // HITL: Clear interrupt state and flow phase
+    setInterrupt(null);
+    setFlowPhase('idle');
   }, []);
 
   return {
@@ -355,5 +445,11 @@ export function useSSE(projectId: string | null, binaryPath?: string | null) {
     currentSnapshotIndex,
     scrubTo,
     stateKeys,
+    // HITL: Flow phase and interrupt state
+    // @see trigger-input-flow Requirements 3.1, 3.2
+    flowPhase,
+    setFlowPhase,
+    interrupt,
+    setInterrupt,
   };
 }

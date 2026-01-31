@@ -7,7 +7,16 @@ import { useStore } from '../store';
 interface ExecutionState {
   activeAgent: string | null;
   iteration: number;
-  flowPhase: 'idle' | 'input' | 'output';
+  /** 
+   * Flow phase for edge animations.
+   * - 'idle': No activity
+   * - 'trigger_input': User submitting input to trigger (animates trigger→START)
+   * - 'input': Data flowing from START to agents
+   * - 'output': Agent generating response
+   * - 'interrupted': Waiting for HITL response
+   * @see trigger-input-flow Requirements 2.2, 2.3, 3.1, 3.2
+   */
+  flowPhase: 'idle' | 'trigger_input' | 'input' | 'output' | 'interrupted';
   thoughts?: Record<string, string>;
   /** v2.0: State keys from SSE events for data flow overlays (nodeId -> keys) */
   stateKeys?: Map<string, string[]>;
@@ -21,6 +30,12 @@ interface ExecutionState {
   executionPath?: string[];
   /** v2.0: Whether execution is in progress */
   isExecuting?: boolean;
+  /** 
+   * HITL: Node ID that triggered the interrupt (for visual indicator).
+   * When set, the node with this ID will show the interrupted visual state.
+   * @see trigger-input-flow Requirement 3.3: Interrupt visual indicator
+   */
+  interruptedNodeId?: string | null;
 }
 
 /**
@@ -66,6 +81,7 @@ export function useCanvasNodes(project: Project | null, execution: ExecutionStat
     onKeyHover,
     executionPath = [],
     isExecuting = false,
+    interruptedNodeId = null,
   } = execution;
   const layoutDirection = useStore(s => s.layoutDirection);
   const isHorizontal = layoutDirection === 'LR' || layoutDirection === 'RL';
@@ -161,7 +177,7 @@ export function useCanvasNodes(project: Project | null, execution: ExecutionStat
     const itemsAfterStart = sortedWorkflowItems.length;
     
     // Add trigger nodes (connect TO START)
-    nodesConnectingToStart.forEach((id, i) => {
+    nodesConnectingToStart.forEach((id, _i) => {
       const actionNode = project.actionNodes?.[id];
       if (actionNode) {
         const pos = isHorizontal
@@ -235,7 +251,7 @@ export function useCanvasNodes(project: Project | null, execution: ExecutionStat
     setNodes(newNodes);
   }, [project, currentStructureHash, setNodes]);
 
-  // Update execution state (isActive, iteration, thoughts, execution path) WITHOUT changing positions
+  // Update execution state (isActive, iteration, thoughts, execution path, interrupted) WITHOUT changing positions
   useEffect(() => {
     if (!project) return;
     setNodes(nds => nds.map(n => {
@@ -257,6 +273,9 @@ export function useCanvasNodes(project: Project | null, execution: ExecutionStat
       if (actionNode) {
         const isActive = activeAgent === n.id;
         const isInPath = executionPath.includes(n.id);
+        // HITL: Check if this node is interrupted
+        // @see trigger-input-flow Requirement 3.3: Interrupt visual indicator
+        const isInterrupted = interruptedNodeId === n.id;
         
         return {
           ...n,
@@ -264,9 +283,10 @@ export function useCanvasNodes(project: Project | null, execution: ExecutionStat
             ...n.data,
             ...actionNode, // Include latest action node config
             isActive,
+            isInterrupted,
             isInExecutionPath: isInPath,
           },
-          className: isActive ? 'node-active' : (isInPath ? 'node-execution-path' : undefined),
+          className: isInterrupted ? 'node-interrupted' : (isActive ? 'node-active' : (isInPath ? 'node-execution-path' : undefined)),
         };
       }
       
@@ -281,27 +301,49 @@ export function useCanvasNodes(project: Project | null, execution: ExecutionStat
       // @see Requirement 10.5: Highlight execution path from start to current node
       const isInPath = executionPath.includes(n.id);
       
+      // HITL: Check if this node is interrupted
+      // @see trigger-input-flow Requirement 3.3: Interrupt visual indicator
+      const isInterrupted = interruptedNodeId === n.id;
+      
       return {
         ...n,
         data: {
           ...n.data,
           isActive,
+          isInterrupted,
           activeSubAgent: activeSub,
           currentIteration: agent.type === 'loop' ? iteration : undefined,
           thought: n.type === 'llm' ? thoughts[n.id] : undefined,
           isInExecutionPath: isInPath,
         },
         // Add CSS class for execution path styling
-        className: isActive ? 'node-active' : (isInPath ? 'node-execution-path' : undefined),
+        // HITL: Interrupted state takes precedence over active state
+        className: isInterrupted ? 'node-interrupted' : (isActive ? 'node-active' : (isInPath ? 'node-execution-path' : undefined)),
       };
     }));
-  }, [project, activeAgent, iteration, thoughts, executionPath, setNodes]);
+  }, [project, activeAgent, iteration, thoughts, executionPath, interruptedNodeId, setNodes]);
 
   // Rebuild edges when project edges or layout direction changes
   useEffect(() => {
     if (!project) return;
+    
+    // Find trigger node ID for trigger_input phase animation
+    // @see trigger-input-flow Requirements 2.2, 2.3
+    const triggerNodeId = Object.entries(project.actionNodes || {})
+      .find(([_, node]) => node.type === 'trigger')?.[0];
+    
     setEdges(project.workflow.edges.map((e: WorkflowEdge, i: number) => {
-      const animated = (activeAgent && e.to === activeAgent) || (flowPhase === 'input' && e.from === 'START') || (flowPhase === 'output' && e.to === 'END');
+      // Animate edges based on flow phase:
+      // - trigger_input: Animate trigger→START edge (user submitting input)
+      // - input: Animate START→agent edges (data flowing to agents)
+      // - output: Animate agent→END edges (response flowing to output)
+      // @see trigger-input-flow Requirements 2.2, 2.3
+      const isTriggerToStart = flowPhase === 'trigger_input' && e.from === triggerNodeId && e.to === 'START';
+      const isStartToAgent = flowPhase === 'input' && e.from === 'START';
+      const isAgentToEnd = flowPhase === 'output' && e.to === 'END';
+      const isActiveAgentEdge = activeAgent && e.to === activeAgent;
+      
+      const animated = isTriggerToStart || isStartToAgent || isAgentToEnd || isActiveAgentEdge;
       
       // v2.0: Get state keys for this edge from the source node
       // @see Requirements 3.3: State keys from runtime execution events

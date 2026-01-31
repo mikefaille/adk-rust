@@ -61,6 +61,35 @@
   }
 }
 
+/* Interrupted state - HITL waiting for human input */
+/* @see trigger-input-flow Requirement 3.3: Interrupt visual indicator */
+.node-base.node-interrupted {
+  border-color: var(--accent-warning) !important;
+  box-shadow: 
+    0 0 20px rgba(245, 158, 11, 0.5),
+    0 0 40px rgba(245, 158, 11, 0.3),
+    var(--shadow-lg);
+  animation: interruptedPulse 1.5s ease-in-out infinite;
+}
+
+/* Pulsing animation for interrupted nodes */
+@keyframes interruptedPulse {
+  0%, 100% {
+    box-shadow: 
+      0 0 20px rgba(245, 158, 11, 0.5),
+      0 0 40px rgba(245, 158, 11, 0.3),
+      var(--shadow-lg);
+    border-color: var(--accent-warning);
+  }
+  50% {
+    box-shadow: 
+      0 0 30px rgba(245, 158, 11, 0.7),
+      0 0 60px rgba(245, 158, 11, 0.5),
+      var(--shadow-lg);
+    border-color: #f59e0b;
+  }
+}
+
 /* Execution path node (completed but part of current path) */
 .node-base.node-execution-path {
   border-color: var(--accent-success) !important;
@@ -184,6 +213,32 @@
 
 .status-indicator.status-error {
   background: rgba(255, 255, 255, 0.2);
+}
+
+/* Interrupted state indicator - amber/warning color */
+/* @see trigger-input-flow Requirement 3.3: Interrupt visual indicator */
+.status-indicator.status-interrupted {
+  background: rgba(245, 158, 11, 0.3);
+  animation: statusPulse 1.5s ease-in-out infinite;
+}
+
+/* Pulsing animation for interrupted status indicator */
+@keyframes statusPulse {
+  0%, 100% {
+    background: rgba(245, 158, 11, 0.3);
+    transform: scale(1);
+  }
+  50% {
+    background: rgba(245, 158, 11, 0.5);
+    transform: scale(1.1);
+  }
+}
+
+/* Interrupted icon styling */
+.status-interrupted-icon {
+  color: white;
+  font-size: 12px;
+  font-weight: bold;
 }
 
 /* Spinner animation for running state */

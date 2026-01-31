@@ -18,4 +18,8 @@ pub fn api_routes() -> Router<AppState> {
         .route("/projects/:id/build", post(handlers::build_project))
         .route("/projects/:id/build-stream", get(handlers::build_project_stream))
         .route("/sessions/:session_id", delete(sse::kill_session))
+        // Task 10: HITL Resume Endpoint
+        // POST /api/sessions/{session_id}/resume - Resume an interrupted workflow
+        // Requirements: 3.2, 5.2
+        .route("/sessions/:session_id/resume", post(handlers::resume_session))
 }

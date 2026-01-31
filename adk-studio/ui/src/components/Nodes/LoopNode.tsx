@@ -53,6 +53,8 @@ interface LoopNodeData {
   currentIteration?: number;
   /** Whether the node is currently executing */
   isActive?: boolean;
+  /** Whether the node is interrupted (HITL waiting for input) */
+  isInterrupted?: boolean;
   /** Execution status */
   status?: NodeStatus;
 }
@@ -133,9 +135,11 @@ function SubAgentItem({
  * - List of sub-agents
  * - Active sub-agent highlighting
  * - Theme-aware styling
+ * - Interrupted state for HITL (trigger-input-flow Requirement 3.3)
  */
 export const LoopNode = memo(function LoopNode({ data, selected }: Props) {
   const isActive = data.isActive || false;
+  const isInterrupted = data.isInterrupted || false;
   const subAgents = data.subAgents || [];
   const subAgentTools = data.subAgentTools || {};
   const activeSubAgent = data.activeSubAgent;
@@ -149,6 +153,7 @@ export const LoopNode = memo(function LoopNode({ data, selected }: Props) {
       nodeType="loop"
       isActive={isActive}
       isSelected={selected}
+      isInterrupted={isInterrupted}
       status={status}
     >
       {/* Iteration info */}

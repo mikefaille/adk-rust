@@ -6,16 +6,19 @@
  * - running: Animated spinner
  * - success: Green checkmark
  * - error: Red X icon
+ * - interrupted: Pulsing pause icon (HITL waiting for input)
  * 
  * Requirements: 7.4, 7.5, 7.6, 7.7
+ * @see trigger-input-flow Requirement 3.3: Interrupt visual indicator
  */
 
 import { memo } from 'react';
 
 /**
  * Node execution status types
+ * @see trigger-input-flow Requirement 3.3: 'interrupted' status for HITL
  */
-export type NodeStatus = 'idle' | 'running' | 'success' | 'error';
+export type NodeStatus = 'idle' | 'running' | 'success' | 'error' | 'interrupted';
 
 interface StatusIndicatorProps {
   /** Current status of the node */
@@ -42,6 +45,7 @@ const sizeConfig = {
  * - running: Animated spinner indicating active processing
  * - success: Green checkmark indicating successful completion
  * - error: Red X indicating an error occurred
+ * - interrupted: Pulsing pause icon indicating HITL waiting for input
  */
 export const StatusIndicator = memo(function StatusIndicator({
   status,
@@ -73,6 +77,7 @@ export const StatusIndicator = memo(function StatusIndicator({
       {status === 'running' && <SpinnerIcon size={icon} />}
       {status === 'success' && <CheckmarkIcon size={icon} />}
       {status === 'error' && <ErrorIcon size={icon} />}
+      {status === 'interrupted' && <InterruptedIcon size={icon} />}
     </div>
   );
 });
@@ -88,6 +93,8 @@ function getAriaLabel(status: NodeStatus): string {
       return 'Completed successfully';
     case 'error':
       return 'Error occurred';
+    case 'interrupted':
+      return 'Waiting for human input';
     default:
       return 'Idle';
   }
@@ -172,6 +179,30 @@ function ErrorIcon({ size }: { size: number }) {
     >
       <line x1="18" y1="6" x2="6" y2="18" />
       <line x1="6" y1="6" x2="18" y2="18" />
+    </svg>
+  );
+}
+
+/**
+ * Pause/hand icon for interrupted state (HITL waiting for input)
+ * @see trigger-input-flow Requirement 3.3: Interrupt visual indicator
+ */
+function InterruptedIcon({ size }: { size: number }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="3"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className="status-interrupted-icon"
+    >
+      {/* Hand/stop icon to indicate waiting for human input */}
+      <rect x="6" y="4" width="4" height="16" rx="1" />
+      <rect x="14" y="4" width="4" height="16" rx="1" />
     </svg>
   );
 }
