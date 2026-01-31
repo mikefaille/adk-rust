@@ -2,6 +2,7 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 import ReactMarkdown from 'react-markdown';
 import { useStore } from '../../store';
 import { useSSE, TraceEvent, FlowPhase } from '../../hooks/useSSE';
+import { useWebhookEvents, WebhookNotification } from '../../hooks/useWebhookEvents';
 import type { StateSnapshot, InterruptData } from '../../types/execution';
 import type { Project } from '../../types/project';
 import { ConsoleFilters, EventFilter } from './ConsoleFilters';
@@ -229,6 +230,69 @@ export function TestConsole({
   const eventsEndRef = useRef<HTMLDivElement>(null);
   const sendingRef = useRef(false);
   const lastAgentRef = useRef<string | null>(null);
+  
+  // Webhook events: Subscribe to webhook notifications and auto-trigger workflow
+  const handleWebhookReceived = useCallback((notification: WebhookNotification) => {
+    // Only process if we have a binary and are not already streaming
+    if (!binaryPath || isStreaming || sendingRef.current) {
+      console.log('[TestConsole] Ignoring webhook - not ready or already streaming');
+      return;
+    }
+    
+    // Add a message showing the webhook was received
+    const payloadStr = typeof notification.payload === 'string' 
+      ? notification.payload 
+      : JSON.stringify(notification.payload, null, 2);
+    
+    setMessages((m) => [...m, { 
+      role: 'user', 
+      content: `🔗 Webhook received: ${notification.path}\n\`\`\`json\n${payloadStr}\n\`\`\`` 
+    }]);
+    
+    // Trigger the workflow with the webhook payload
+    sendingRef.current = true;
+    
+    // Phase 1: Set trigger_input phase to animate trigger→START edge
+    onFlowPhase?.('trigger_input');
+    lastAgentRef.current = null;
+    setRunStatus('running');
+    setLastError(null);
+    
+    // Phase 2: After 500ms, transition to 'input' phase for START→agent animation
+    setTimeout(() => {
+      onFlowPhase?.('input');
+    }, 500);
+    
+    // Send the webhook payload as input (use __webhook__ marker so SSE handler retrieves stored payload)
+    send(
+      '__webhook__',
+      (text) => {
+        if (text) {
+          setMessages((m) => [...m, { role: 'assistant', content: text, agent: lastAgentRef.current || undefined }]);
+        }
+        onFlowPhase?.('idle');
+        sendingRef.current = false;
+        setRunStatus('success');
+      },
+      (error) => {
+        setMessages((m) => [...m, { role: 'assistant', content: `Error: ${error}` }]);
+        onFlowPhase?.('idle');
+        sendingRef.current = false;
+        setRunStatus('error');
+        setLastError(error);
+      },
+      notification.session_id // Pass the session_id from the webhook
+    );
+  }, [binaryPath, isStreaming, onFlowPhase, send]);
+  
+  // Subscribe to webhook events for this project
+  const { isConnected: webhookConnected } = useWebhookEvents(
+    currentProject?.id ?? null,
+    {
+      onWebhook: handleWebhookReceived,
+      enabled: !!binaryPath, // Only connect when we have a binary
+    }
+  );
   
   // v2.0: Collapse state (controlled or uncontrolled)
   const [internalCollapsed, setInternalCollapsed] = useState(false);

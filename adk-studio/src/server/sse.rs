@@ -711,3 +711,54 @@ pub async fn list_active_sessions() -> Vec<String> {
     let sessions = SESSIONS.lock().await;
     sessions.keys().cloned().collect()
 }
+
+// ============================================
+// Webhook Notification SSE Endpoint
+// ============================================
+// SSE endpoint for UI clients to receive webhook notifications.
+
+/// SSE endpoint for webhook notifications.
+/// 
+/// The UI subscribes to this endpoint to receive real-time notifications
+/// when webhooks are triggered. This allows the UI to automatically
+/// start streaming the workflow execution.
+///
+/// ## Endpoint
+/// `GET /api/projects/{id}/webhook-events`
+///
+/// ## Events
+/// - `webhook`: A webhook was received, contains session_id, path, payload, binary_path
+pub async fn webhook_events_handler(
+    Path(id): Path<String>,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    let stream = async_stream::stream! {
+        // Subscribe to webhook notifications for this project
+        let mut receiver = crate::server::handlers::subscribe_webhook_notifications(&id).await;
+        
+        // Send initial connection event
+        yield Ok(Event::default().event("connected").data(format!("{{\"project_id\":\"{}\"}}", id)));
+        
+        // Listen for webhook notifications
+        loop {
+            match receiver.recv().await {
+                Ok(notification) => {
+                    // Serialize the notification to JSON
+                    if let Ok(json) = serde_json::to_string(&notification) {
+                        yield Ok(Event::default().event("webhook").data(json));
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    // Some messages were dropped due to slow consumer
+                    tracing::warn!(project_id = %id, dropped = n, "Webhook notification consumer lagged");
+                    continue;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    // Channel closed, end the stream
+                    break;
+                }
+            }
+        }
+    };
+
+    Sse::new(stream)
+}

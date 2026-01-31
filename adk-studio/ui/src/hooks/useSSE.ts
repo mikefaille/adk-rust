@@ -134,7 +134,7 @@ export function useSSE(projectId: string | null, binaryPath?: string | null) {
   }, [snapshots.length]);
 
   const send = useCallback(
-    (input: string, onComplete: (text: string) => void, onError?: (msg: string) => void) => {
+    (input: string, onComplete: (text: string) => void, onError?: (msg: string) => void, overrideSessionId?: string) => {
       if (!projectId) return;
 
       textRef.current = '';
@@ -163,9 +163,10 @@ export function useSSE(projectId: string | null, binaryPath?: string | null) {
       if (binaryPath) {
         params.set('binary_path', binaryPath);
       }
-      // Pass session ID if we have one
-      if (sessionRef.current) {
-        params.set('session_id', sessionRef.current);
+      // Pass session ID - use override if provided (for webhooks), otherwise use existing session
+      const sessionToUse = overrideSessionId || sessionRef.current;
+      if (sessionToUse) {
+        params.set('session_id', sessionToUse);
       }
       const es = new EventSource(`/api/projects/${projectId}/stream?${params}`);
       esRef.current = es;

@@ -592,6 +592,21 @@ pub async fn webhook_trigger(
         id, session_id, percent_encode(&binary_path)
     );
 
+    // Notify UI clients that a webhook was received
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    
+    notify_webhook(&id.to_string(), WebhookNotification {
+        session_id: session_id.clone(),
+        path: webhook_path.clone(),
+        method: "POST".to_string(),
+        payload: payload.clone(),
+        timestamp,
+        binary_path: if binary_exists { Some(binary_path.clone()) } else { None },
+    }).await;
+
     tracing::info!(
         project_id = %id,
         path = %webhook_path,
@@ -670,6 +685,21 @@ pub async fn webhook_trigger_get(
         "/api/projects/{}/stream?input=__webhook__&session_id={}&binary_path={}",
         id, session_id, percent_encode(&binary_path)
     );
+
+    // Notify UI clients that a webhook was received
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    
+    notify_webhook(&id.to_string(), WebhookNotification {
+        session_id: session_id.clone(),
+        path: webhook_path.clone(),
+        method: "GET".to_string(),
+        payload: payload.clone(),
+        timestamp,
+        binary_path: if binary_exists { Some(binary_path.clone()) } else { None },
+    }).await;
 
     tracing::info!(
         project_id = %id,
@@ -1068,4 +1098,57 @@ pub async fn get_webhook_payload(session_id: &str) -> Option<WebhookPayload> {
 pub async fn has_webhook_payload(session_id: &str) -> bool {
     let payloads = WEBHOOK_PAYLOADS.read().await;
     payloads.contains_key(session_id)
+}
+
+// ============================================
+// Webhook Notification Channel
+// ============================================
+// Broadcast channel for notifying UI clients when webhooks are received.
+
+lazy_static::lazy_static! {
+    /// Map of project_id -> broadcast sender for webhook notifications
+    static ref WEBHOOK_CHANNELS: tokio::sync::RwLock<HashMap<String, tokio::sync::broadcast::Sender<WebhookNotification>>> =
+        tokio::sync::RwLock::new(HashMap::new());
+}
+
+/// Webhook notification sent to UI clients.
+#[derive(Debug, Clone, Serialize)]
+pub struct WebhookNotification {
+    /// Session ID for this webhook execution
+    pub session_id: String,
+    /// The webhook path that was triggered
+    pub path: String,
+    /// HTTP method (POST/GET)
+    pub method: String,
+    /// The webhook payload
+    pub payload: serde_json::Value,
+    /// Timestamp when webhook was received
+    pub timestamp: u64,
+    /// Path to the built binary (if available)
+    pub binary_path: Option<String>,
+}
+
+/// Get or create a broadcast channel for a project's webhook notifications.
+async fn get_webhook_channel(project_id: &str) -> tokio::sync::broadcast::Sender<WebhookNotification> {
+    let mut channels = WEBHOOK_CHANNELS.write().await;
+    if let Some(sender) = channels.get(project_id) {
+        sender.clone()
+    } else {
+        let (sender, _) = tokio::sync::broadcast::channel(16);
+        channels.insert(project_id.to_string(), sender.clone());
+        sender
+    }
+}
+
+/// Notify UI clients that a webhook was received.
+pub async fn notify_webhook(project_id: &str, notification: WebhookNotification) {
+    let sender = get_webhook_channel(project_id).await;
+    // Ignore send errors (no receivers connected)
+    let _ = sender.send(notification);
+}
+
+/// Subscribe to webhook notifications for a project.
+pub async fn subscribe_webhook_notifications(project_id: &str) -> tokio::sync::broadcast::Receiver<WebhookNotification> {
+    let sender = get_webhook_channel(project_id).await;
+    sender.subscribe()
 }

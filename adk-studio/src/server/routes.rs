@@ -30,4 +30,7 @@ pub fn api_routes() -> Router<AppState> {
         // Synchronous webhook execution - waits for response
         // POST /api/projects/{id}/webhook-exec/*path - Execute workflow and return response
         .route("/projects/:id/webhook-exec/*path", post(handlers::webhook_execute))
+        // Webhook notification SSE endpoint - UI subscribes to receive webhook events
+        // GET /api/projects/{id}/webhook-events - SSE stream of webhook notifications
+        .route("/projects/:id/webhook-events", get(sse::webhook_events_handler))
 }
