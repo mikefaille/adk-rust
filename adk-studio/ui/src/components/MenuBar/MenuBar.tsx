@@ -20,9 +20,13 @@ interface MenuBarProps {
   buildStatus?: BuildStatusType;
   /** Callback when build status indicator is clicked */
   onBuildStatusClick?: () => void;
+  /** Whether debug mode is enabled */
+  debugMode?: boolean;
+  /** Callback when debug mode is toggled */
+  onDebugModeToggle?: () => void;
 }
 
-export function MenuBar({ onExportCode, onNewProject, onTemplateApplied, onRunTemplate, buildStatus = 'none', onBuildStatusClick }: MenuBarProps) {
+export function MenuBar({ onExportCode, onNewProject, onTemplateApplied, onRunTemplate, buildStatus = 'none', onBuildStatusClick, debugMode = false, onDebugModeToggle }: MenuBarProps) {
   const [openMenu, setOpenMenu] = useState<string | null>(null);
   const [showTemplateGallery, setShowTemplateGallery] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -297,6 +301,21 @@ export function MenuBar({ onExportCode, onNewProject, onTemplateApplied, onRunTe
                 <span>Not Built</span>
               </>
             )}
+          </button>
+          
+          {/* Debug Mode Toggle */}
+          <button
+            onClick={onDebugModeToggle}
+            className="flex items-center gap-1.5 px-2 py-0.5 rounded text-xs font-medium transition-colors"
+            style={{
+              backgroundColor: debugMode ? '#8b5cf6' : 'var(--bg-secondary)',
+              color: debugMode ? 'white' : 'var(--text-muted)',
+              border: debugMode ? 'none' : '1px solid var(--border-default)',
+            }}
+            title={debugMode ? 'Debug mode ON - showing state inspector and timeline' : 'Debug mode OFF - click to show state inspector and timeline'}
+          >
+            <span>🐛</span>
+            <span>{debugMode ? 'Debug' : 'Debug'}</span>
           </button>
         </div>
       )}

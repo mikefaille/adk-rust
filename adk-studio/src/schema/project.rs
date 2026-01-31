@@ -53,7 +53,7 @@ impl ProjectSchema {
 }
 
 /// Project-level settings
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectSettings {
     #[serde(default = "default_model")]
@@ -63,7 +63,7 @@ pub struct ProjectSettings {
     // Layout settings (v2.0)
     #[serde(default)]
     pub layout_mode: Option<String>,
-    #[serde(default)]
+    #[serde(default = "default_layout_direction")]
     pub layout_direction: Option<String>,
     #[serde(default)]
     pub show_data_flow_overlay: Option<bool>,
@@ -76,7 +76,7 @@ pub struct ProjectSettings {
     #[serde(default)]
     pub default_provider: Option<String>,
     // Build settings
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub autobuild_enabled: Option<bool>,
     #[serde(default)]
     pub autobuild_triggers: Option<AutobuildTriggers>,
@@ -87,6 +87,30 @@ pub struct ProjectSettings {
     pub show_timeline: Option<bool>,
     #[serde(default)]
     pub console_position: Option<String>,
+    // Debug mode (v2.0) - controls visibility of StateInspector and Timeline
+    #[serde(default)]
+    pub debug_mode: Option<bool>,
+}
+
+impl Default for ProjectSettings {
+    fn default() -> Self {
+        Self {
+            default_model: default_model(),
+            env_vars: HashMap::new(),
+            layout_mode: None,
+            layout_direction: default_layout_direction(),
+            show_data_flow_overlay: None,
+            adk_version: default_adk_version(),
+            rust_edition: default_rust_edition(),
+            default_provider: None,
+            autobuild_enabled: default_true(),
+            autobuild_triggers: None,
+            show_minimap: None,
+            show_timeline: None,
+            console_position: None,
+            debug_mode: None,
+        }
+    }
 }
 
 /// Autobuild trigger configuration
@@ -119,6 +143,10 @@ fn default_adk_version() -> Option<String> {
 
 fn default_rust_edition() -> Option<String> {
     Some("2024".to_string())
+}
+
+fn default_layout_direction() -> Option<String> {
+    Some("LR".to_string())
 }
 
 fn default_true() -> Option<bool> {

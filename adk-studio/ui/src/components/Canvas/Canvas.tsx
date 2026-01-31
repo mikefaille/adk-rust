@@ -68,6 +68,9 @@ export function Canvas() {
     // v2.0: Data flow overlay state
     showDataFlowOverlay,
     setShowDataFlowOverlay,
+    // v2.0: Debug mode state
+    debugMode,
+    setDebugMode,
     // Settings
     updateProjectMeta,
     updateProjectSettings,
@@ -803,6 +806,8 @@ export function Canvas() {
             handleBuild();
           }
         }}
+        debugMode={debugMode}
+        onDebugModeToggle={() => setDebugMode(!debugMode)}
       />
       
       <div className="flex flex-1 overflow-hidden">
@@ -891,7 +896,7 @@ export function Canvas() {
             >
               {showConsole ? 'Hide Console' : 'Show Console'}
             </button>
-            {showConsole && snapshots.length > 0 && (
+            {showConsole && debugMode && snapshots.length > 0 && (
               <button 
                 onClick={() => setShowStateInspector(!showStateInspector)} 
                 className="w-full px-2 py-1.5 rounded text-xs font-medium"
@@ -1017,7 +1022,8 @@ export function Canvas() {
         
         {/* State Inspector Panel - shows runtime state during execution (v2.0) */}
         {/* @see Requirements 4.1, 4.2, 4.5, 5.4 */}
-        {showConsole && showStateInspector && snapshots.length > 0 && (
+        {/* Only visible when debug mode is enabled */}
+        {showConsole && debugMode && showStateInspector && snapshots.length > 0 && (
           <div className="w-72 flex-shrink-0">
             <StateInspector
               snapshot={currentSnapshot}
@@ -1032,7 +1038,8 @@ export function Canvas() {
       </div>
 
       {/* Timeline View - shows execution history */}
-      {showConsole && showTimeline && hasAgents && builtBinaryPath && snapshots.length > 0 && (
+      {/* Only visible when debug mode is enabled */}
+      {showConsole && debugMode && showTimeline && hasAgents && builtBinaryPath && snapshots.length > 0 && (
         <TimelineView
           snapshots={snapshots}
           currentIndex={currentSnapshotIndex}

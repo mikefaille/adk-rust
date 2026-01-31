@@ -5,7 +5,7 @@ import { useSSE, TraceEvent, FlowPhase } from '../../hooks/useSSE';
 import type { StateSnapshot, InterruptData } from '../../types/execution';
 import type { Project } from '../../types/project';
 import { ConsoleFilters, EventFilter } from './ConsoleFilters';
-import { DEFAULT_MANUAL_TRIGGER_CONFIG, type ManualTriggerConfig } from '../../types/actionNodes';
+import { DEFAULT_MANUAL_TRIGGER_CONFIG, type ManualTriggerConfig, type TriggerNodeConfig } from '../../types/actionNodes';
 
 interface Message {
   role: 'user' | 'assistant' | 'interrupt';
@@ -199,7 +199,7 @@ export function TestConsole({
   onAutoSendComplete,
   onCancelReady,
 }: Props) {
-  const { currentProject } = useStore();
+  const { currentProject, updateActionNode } = useStore();
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [activeTab, setActiveTab] = useState<Tab>('chat');
@@ -250,6 +250,35 @@ export function TestConsole({
   // v2.0: Run status tracking
   const [runStatus, setRunStatus] = useState<RunStatus>('idle');
   const [lastError, setLastError] = useState<string | null>(null);
+
+  /**
+   * Update the manual trigger's default prompt with the latest user input.
+   * This allows the trigger to remember the user's last prompt for the Run button.
+   */
+  const updateTriggerDefaultPrompt = useCallback((prompt: string) => {
+    if (!currentProject) return;
+    
+    const actionNodes = currentProject.actionNodes || {};
+    const triggerEntry = Object.entries(actionNodes).find(
+      ([, node]) => node.type === 'trigger' && node.triggerType === 'manual'
+    );
+    
+    if (!triggerEntry) return;
+    
+    const [triggerId, triggerNode] = triggerEntry;
+    if (triggerNode.type !== 'trigger') return;
+    
+    // Update the trigger's manual config with the new default prompt
+    const updatedNode: TriggerNodeConfig = {
+      ...triggerNode,
+      manual: {
+        ...(triggerNode.manual || DEFAULT_MANUAL_TRIGGER_CONFIG),
+        defaultPrompt: prompt,
+      },
+    };
+    
+    updateActionNode(triggerId, updatedNode);
+  }, [currentProject, updateActionNode]);
 
   // v2.0: Pass snapshots and state keys to parent for Timeline and Data Flow Overlays
   useEffect(() => {
@@ -387,6 +416,10 @@ export function TestConsole({
     setInput('');
     setMessages((m) => [...m, { role: 'user', content: userMsg }]);
     
+    // Update the trigger's default prompt with the latest user input
+    // This allows the Run button to use the user's last prompt
+    updateTriggerDefaultPrompt(userMsg);
+    
     // Phase 1: Set trigger_input phase to animate trigger→START edge
     // @see trigger-input-flow Requirements 2.2, 2.3
     onFlowPhase?.('trigger_input');
@@ -431,6 +464,10 @@ export function TestConsole({
     const userMsg = prompt.trim();
     setMessages((m) => [...m, { role: 'user', content: userMsg }]);
     
+    // Update the trigger's default prompt with the latest user input
+    // This allows the Run button to use the user's last prompt
+    updateTriggerDefaultPrompt(userMsg);
+    
     // Phase 1: Set trigger_input phase to animate trigger→START edge
     onFlowPhase?.('trigger_input');
     lastAgentRef.current = null;
@@ -460,7 +497,7 @@ export function TestConsole({
         setLastError(error);
       }
     );
-  }, [currentProject, isStreaming, onFlowPhase, send]);
+  }, [currentProject, isStreaming, onFlowPhase, send, updateTriggerDefaultPrompt]);
 
   // Handle autoSendPrompt - when Run button is clicked with a default prompt
   useEffect(() => {

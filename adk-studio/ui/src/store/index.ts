@@ -27,6 +27,9 @@ interface StudioState {
   // Data flow overlay state (v2.0)
   showDataFlowOverlay: boolean;
   
+  // Debug mode state (v2.0) - controls visibility of StateInspector and Timeline
+  debugMode: boolean;
+  
   // Actions
   fetchProjects: () => Promise<void>;
   createProject: (name: string, description?: string) => Promise<Project>;
@@ -69,6 +72,9 @@ interface StudioState {
   
   // Data flow overlay actions (v2.0)
   setShowDataFlowOverlay: (show: boolean) => void;
+  
+  // Debug mode actions (v2.0)
+  setDebugMode: (enabled: boolean) => void;
 }
 
 export const useStore = create<StudioState>((set, get) => ({
@@ -89,6 +95,9 @@ export const useStore = create<StudioState>((set, get) => ({
   
   // Data flow overlay state (v2.0)
   showDataFlowOverlay: false,
+  
+  // Debug mode state (v2.0) - controls visibility of StateInspector and Timeline
+  debugMode: false,
 
   fetchProjects: async () => {
     set({ loadingProjects: true });
@@ -113,17 +122,19 @@ export const useStore = create<StudioState>((set, get) => ({
     const layoutMode = project.settings?.layoutMode || globalSettings.layoutMode;
     const layoutDirection = project.settings?.layoutDirection || globalSettings.layoutDirection;
     const showDataFlowOverlay = project.settings?.showDataFlowOverlay ?? globalSettings.showDataFlowOverlay;
+    const debugMode = project.settings?.debugMode ?? false;
     set({ 
       currentProject: project, 
       selectedNodeId: null,
       layoutMode,
       layoutDirection,
       showDataFlowOverlay,
+      debugMode,
     });
   },
 
   saveProject: async () => {
-    const { currentProject, layoutMode, layoutDirection, showDataFlowOverlay } = get();
+    const { currentProject, layoutMode, layoutDirection, showDataFlowOverlay, debugMode } = get();
     if (!currentProject) return;
     // Include layout settings and data flow overlay preference in project before saving
     const projectToSave = {
@@ -133,6 +144,7 @@ export const useStore = create<StudioState>((set, get) => ({
         layoutMode,
         layoutDirection,
         showDataFlowOverlay,
+        debugMode,
       },
     };
     await api.projects.update(currentProject.id, projectToSave);
@@ -684,6 +696,14 @@ export const useStore = create<StudioState>((set, get) => ({
   // @see Requirements 3.4: Store preference in project settings
   setShowDataFlowOverlay: (show) => {
     set({ showDataFlowOverlay: show });
+    // Auto-save after state update
+    setTimeout(() => get().saveProject(), 0);
+  },
+  
+  // Debug mode actions (v2.0)
+  // Controls visibility of StateInspector and Timeline
+  setDebugMode: (enabled) => {
+    set({ debugMode: enabled });
     // Auto-save after state update
     setTimeout(() => get().saveProject(), 0);
   },

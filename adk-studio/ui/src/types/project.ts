@@ -23,6 +23,7 @@ export interface ProjectSettings {
   layoutMode?: 'free' | 'fixed';
   layoutDirection?: 'TB' | 'LR' | 'BT' | 'RL';
   showDataFlowOverlay?: boolean;
+  debugMode?: boolean;
   // Code generation settings
   adkVersion?: string;
   rustEdition?: '2021' | '2024';
