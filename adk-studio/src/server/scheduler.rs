@@ -13,6 +13,7 @@ use crate::server::handlers::{
     get_project_binary_path, is_project_built, notify_webhook, WebhookNotification,
 };
 use crate::server::state::AppState;
+use chrono::Timelike;
 use crate::codegen::action_nodes::{ActionNodeConfig, TriggerType};
 use chrono::{DateTime, Utc};
 use cron::Schedule;
@@ -41,6 +42,8 @@ pub struct SchedulerState {
     jobs: HashMap<String, Vec<ScheduledJob>>,
     /// Whether the scheduler is running
     running: bool,
+    /// Track last execution time per job (project_id:trigger_id -> last_run)
+    last_executed: HashMap<String, DateTime<Utc>>,
 }
 
 impl SchedulerState {
@@ -48,6 +51,7 @@ impl SchedulerState {
         Self {
             jobs: HashMap::new(),
             running: false,
+            last_executed: HashMap::new(),
         }
     }
 }
@@ -58,9 +62,20 @@ lazy_static::lazy_static! {
 }
 
 /// Parse a cron expression and get the next run time
+/// Supports both 5-field (standard cron) and 6-field (with seconds) expressions
 fn get_next_run(cron_expr: &str, _timezone: &str) -> Option<DateTime<Utc>> {
+    // The cron crate expects 6 or 7 fields (with seconds)
+    // Standard cron has 5 fields: minute hour day month weekday
+    // Convert 5-field to 6-field by prepending "0" for seconds
+    let parts: Vec<&str> = cron_expr.trim().split_whitespace().collect();
+    let cron_with_seconds = if parts.len() == 5 {
+        format!("0 {}", cron_expr)
+    } else {
+        cron_expr.to_string()
+    };
+    
     // Parse the cron expression
-    let schedule = Schedule::from_str(cron_expr).ok()?;
+    let schedule = Schedule::from_str(&cron_with_seconds).ok()?;
     
     // Get the next occurrence
     // Note: For simplicity, we're using UTC. In production, you'd want to
@@ -88,18 +103,58 @@ async fn scan_projects(state: &AppState) -> Vec<ScheduledJob> {
         };
         
         // Check if project is built
-        if !is_project_built(&project.name) {
-            continue;
+        let is_built = is_project_built(&project.name);
+        let binary_path = get_project_binary_path(&project.name);
+        
+        // Debug: Log projects with triggers
+        for (trigger_id, node) in &project.action_nodes {
+            if let ActionNodeConfig::Trigger(trigger) = node {
+                tracing::debug!(
+                    project = %project.name,
+                    trigger_id = %trigger_id,
+                    trigger_type = ?trigger.trigger_type,
+                    is_built = is_built,
+                    binary_path = %binary_path,
+                    has_schedule = trigger.schedule.is_some(),
+                    "Found trigger in project"
+                );
+            }
         }
         
-        let binary_path = get_project_binary_path(&project.name);
+        if !is_built {
+            continue;
+        }
         
         // Find schedule triggers
         for (trigger_id, node) in &project.action_nodes {
             if let ActionNodeConfig::Trigger(trigger) = node {
+                tracing::debug!(
+                    project = %project.name,
+                    trigger_type = ?trigger.trigger_type,
+                    is_schedule = (trigger.trigger_type == TriggerType::Schedule),
+                    "Checking trigger for schedule"
+                );
                 if trigger.trigger_type == TriggerType::Schedule {
+                    tracing::debug!(
+                        project = %project.name,
+                        has_schedule_config = trigger.schedule.is_some(),
+                        "Trigger is Schedule type"
+                    );
                     if let Some(schedule) = &trigger.schedule {
-                        if let Some(next_run) = get_next_run(&schedule.cron, &schedule.timezone) {
+                        let next_run_result = get_next_run(&schedule.cron, &schedule.timezone);
+                        tracing::debug!(
+                            project = %project.name,
+                            cron = %schedule.cron,
+                            next_run = ?next_run_result,
+                            "Parsed cron expression"
+                        );
+                        if let Some(next_run) = next_run_result {
+                            tracing::info!(
+                                project = %project.name,
+                                cron = %schedule.cron,
+                                next_run = %next_run,
+                                "Adding scheduled job"
+                            );
                             jobs.push(ScheduledJob {
                                 project_id: meta.id.to_string(),
                                 project_name: project.name.clone(),
@@ -191,8 +246,23 @@ pub async fn start_scheduler(state: AppState) {
     
     // Scheduler loop
     loop {
-        // Scan projects every 60 seconds
+        // Scan projects every 30 seconds
         let jobs = scan_projects(&state).await;
+        
+        tracing::info!(
+            job_count = jobs.len(),
+            "Scheduler scan complete - found {} schedule triggers",
+            jobs.len()
+        );
+        
+        for job in &jobs {
+            tracing::debug!(
+                project = %job.project_name,
+                cron = %job.cron,
+                next_run = %job.next_run,
+                "Found scheduled job"
+            );
+        }
         
         // Update scheduler state
         {
@@ -213,10 +283,52 @@ pub async fn start_scheduler(state: AppState) {
         
         // Check for jobs that need to run
         let now = Utc::now();
+        // Round down to the current minute for comparison
+        let current_minute = now.with_second(0).unwrap().with_nanosecond(0).unwrap();
+        
         for job in &jobs {
-            // If the job's next run time is within the next minute, execute it
-            let time_until = job.next_run.signed_duration_since(now);
-            if time_until.num_seconds() <= 0 && time_until.num_seconds() > -60 {
+            let job_key = format!("{}:{}", job.project_id, job.trigger_id);
+            
+            // Check if we should execute this job
+            // A job should run if:
+            // 1. The current minute matches the cron schedule
+            // 2. We haven't already executed it for this minute
+            let should_execute = {
+                let scheduler = SCHEDULER.read().await;
+                let last_exec = scheduler.last_executed.get(&job_key);
+                
+                // Check if we already executed in this minute
+                let already_executed = last_exec
+                    .map(|t| t.with_second(0).unwrap().with_nanosecond(0).unwrap() >= current_minute)
+                    .unwrap_or(false);
+                
+                // The cron library's next_run is always in the future
+                // If next_run is within the next minute, it means the current minute matches the schedule
+                // (because cron gives us the NEXT occurrence, and if it's in the next minute, we're currently in a matching minute)
+                let next_run_minute = job.next_run.with_second(0).unwrap().with_nanosecond(0).unwrap();
+                let time_to_next = (next_run_minute - current_minute).num_seconds();
+                
+                // If next run is within 60 seconds, we're in a matching minute
+                let is_matching_minute = time_to_next <= 60 && time_to_next > 0;
+                
+                is_matching_minute && !already_executed
+            };
+            
+            if should_execute {
+                tracing::info!(
+                    project = %job.project_name,
+                    trigger_id = %job.trigger_id,
+                    next_run = %job.next_run,
+                    current_minute = %current_minute,
+                    "Executing scheduled job"
+                );
+                
+                // Mark as executed
+                {
+                    let mut scheduler = SCHEDULER.write().await;
+                    scheduler.last_executed.insert(job_key, now);
+                }
+                
                 execute_job(&job).await;
             }
         }
