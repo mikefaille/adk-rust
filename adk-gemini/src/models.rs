@@ -26,6 +26,7 @@
 
 #![allow(clippy::enum_variant_names)]
 
+use std::fmt::{self, Formatter};
 use serde::{Deserialize, Serialize};
 
 /// Role of a message in a conversation
@@ -266,3 +267,59 @@ pub enum Modality {
     #[serde(other)]
     Unknown,
 }
+
+/// Available Gemini models
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize, Serialize)]
+pub struct Model(String);
+
+impl Default for Model {
+    fn default() -> Self {
+        Self::GEMINI_2_5_FLASH.into()
+    }
+}
+
+impl Model {
+    pub const GEMINI_2_5_FLASH: &'static str = "models/gemini-2.5-flash";
+    pub const GEMINI_2_5_FLASH_LITE: &'static str = "models/gemini-2.5-flash-lite";
+    pub const GEMINI_2_5_PRO: &'static str = "models/gemini-2.5-pro";
+    pub const TEXT_EMBEDDING_004: &'static str = "models/text-embedding-004";
+
+    pub fn new(model: impl Into<String>) -> Self {
+        Self(model.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn vertex_model_path(&self, project_id: &str, location: &str) -> String {
+        let model = self.as_str();
+        if model.starts_with("projects/") {
+            return model.to_string();
+        }
+        if model.starts_with("publishers/") {
+            return format!("projects/{project_id}/locations/{location}/{model}");
+        }
+        let model_id = model.strip_prefix("models/").unwrap_or(model);
+        format!("projects/{project_id}/locations/{location}/publishers/google/models/{model_id}")
+    }
+}
+
+impl From<String> for Model {
+    fn from(model: String) -> Self {
+        Self(model)
+    }
+}
+
+impl From<&str> for Model {
+    fn from(model: &str) -> Self {
+        Self(model.to_string())
+    }
+}
+
+impl fmt::Display for Model {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+

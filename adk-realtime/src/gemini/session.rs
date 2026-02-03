@@ -125,7 +125,6 @@ impl GeminiRealtimeSession {
                     RealtimeError::connection(format!("WebSocket connect error: {}", e))
                 })?
             }
-            #[cfg(feature = "vertex")]
             GeminiLiveBackend::Vertex(context) => {
                 let url = format!(
                     "wss://{}-aiplatform.googleapis.com/ws/google.cloud.aiplatform.v1beta1.LlmInferenceService.BidiGenerateContent",
@@ -135,13 +134,9 @@ impl GeminiRealtimeSession {
                     RealtimeError::connection(format!("Failed to create client request: {}", e))
                 })?;
 
-                let token = context.auth.get_token().await.map_err(|e| {
-                    RealtimeError::connection(format!("Failed to get auth token: {}", e))
-                })?;
-
                 request.headers_mut().insert(
                     "Authorization",
-                    HeaderValue::from_str(&format!("Bearer {}", token)).map_err(|e| {
+                    HeaderValue::from_str(&format!("Bearer {}", context.token)).map_err(|e| {
                         RealtimeError::connection(format!("Invalid auth token header: {}", e))
                     })?,
                 );
