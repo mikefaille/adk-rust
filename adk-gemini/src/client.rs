@@ -784,27 +784,23 @@ impl GeminiClient {
         let upload_url = self.create_upload(file_bytes.len(), display_name, mime_type).await?;
 
         // Step 2: Upload file content
-        let upload_response = self
-            .rest_client("upload")?
-            .http_client
-            .post(upload_url.clone())
-            .header("X-Goog-Upload-Command", "upload, finalize")
-            .header("X-Goog-Upload-Offset", "0")
-            .body(file_bytes)
-            .send()
-            .await
-            .map_err(|e| Error::PerformRequest { source: e, url: upload_url })?;
-
-        let final_response = Self::check_response(upload_response).await?;
-
-        #[derive(serde::Deserialize)]
-        struct UploadResponse {
-            file: File,
-        }
-
-        let upload_response: UploadResponse =
-            final_response.json().await.context(DecodeResponseSnafu)?;
-        Ok(upload_response.file)
+        self.perform_request(
+            |c| {
+                c.post(upload_url)
+                    .header("X-Goog-Upload-Command", "upload, finalize")
+                    .header("X-Goog-Upload-Offset", "0")
+                    .body(file_bytes)
+            },
+            async |r| {
+                #[derive(serde::Deserialize)]
+                struct UploadResponse {
+                    file: File,
+                }
+                let upload_response: UploadResponse = r.json().await.context(DecodeResponseSnafu)?;
+                Ok(upload_response.file)
+            },
+        )
+        .await
     }
 
     /// Get a file resource
