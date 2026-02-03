@@ -43,7 +43,7 @@ Real-time bidirectional audio streaming for Rust Agent Development Kit (ADK-Rust
 |----------|-------|--------------|-------------|
 | OpenAI | `gpt-4o-realtime-preview-2024-12-17` | `openai` | Stable realtime model |
 | OpenAI | `gpt-realtime` | `openai` | Latest model with improved speech & function calling |
-| Google | `gemini-2.0-flash-live-preview-04-09` | `gemini` | Gemini Live API |
+| Google | `gemini-live-2.5-flash-native-audio` | `gemini` | Gemini Live API (Latest) |
 
 ## Quick Start
 
@@ -74,6 +74,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // RealtimeAgent implements the Agent trait
     // Use with ADK runner or directly via agent.run(ctx)
+    Ok(())
+}
+```
+
+### Using Gemini Live
+
+```rust
+use adk_realtime::{RealtimeAgent, gemini::GeminiRealtimeModel};
+use adk_gemini::GeminiLiveBackend;
+use std::sync::Arc;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // 1. Public API (API Key)
+    let api_key = std::env::var("GOOGLE_API_KEY")?;
+    let backend = GeminiLiveBackend::Public { api_key };
+    
+    // 2. Vertex AI (OAuth)
+    // let backend = GeminiLiveBackend::Vertex(vertex_context);
+
+    let model = Arc::new(GeminiRealtimeModel::new(
+        backend, 
+        "gemini-live-2.5-flash-native-audio"
+    ));
+
+    let agent = RealtimeAgent::builder("gemini_voice")
+        .model(model)
+        .instruction("You are a helpful assistant.")
+        // Gemini voice names: "Puck", "Charon", "Kore", "Fenrir", "Aoede"
+        .voice("Puck") 
+        .build()?;
+
     Ok(())
 }
 ```
