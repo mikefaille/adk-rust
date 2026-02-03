@@ -18,13 +18,18 @@
 //! ```rust,ignore
 //! use adk_realtime::gemini::GeminiRealtimeModel;
 //! use adk_realtime::{RealtimeModel, RealtimeConfig};
+//! use adk_gemini::GeminiLiveBackend;
 //!
 //! #[tokio::main]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
+//!     let backend = GeminiLiveBackend::Public { 
+//!         api_key: std::env::var("GOOGLE_API_KEY")? 
+//!     };
+//!     
 //!     let model = GeminiRealtimeModel::new(
-//!         std::env::var("GOOGLE_API_KEY")?,
-//!         "models/gemini-2.0-flash-live-preview-04-09",
-//!     );
+        backend,
+        "gemini-live-2.5-flash-native-audio",
+    );
 //!
 //!     let config = RealtimeConfig::default()
 //!         .with_instruction("You are a helpful assistant.");

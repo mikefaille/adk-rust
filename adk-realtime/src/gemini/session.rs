@@ -1,5 +1,3 @@
-//! Gemini Live session implementation.
-
 use crate::audio::AudioChunk;
 use crate::config::RealtimeConfig;
 use crate::error::{RealtimeError, Result};
@@ -14,7 +12,10 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::Mutex;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
+use adk_gemini::GeminiLiveBackend;
 
 type WsStream =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
@@ -106,13 +107,52 @@ pub struct GeminiRealtimeSession {
 
 impl GeminiRealtimeSession {
     /// Connect to Gemini Live API.
-    pub async fn connect(url: &str, model: &str, config: RealtimeConfig) -> Result<Self> {
-        // Connect WebSocket
-        let (ws_stream, _response) = connect_async(url)
-            .await
-            .map_err(|e| RealtimeError::connection(format!("WebSocket connect error: {}", e)))?;
+    pub async fn connect(
+        backend: GeminiLiveBackend,
+        model: &str,
+        config: RealtimeConfig,
+    ) -> Result<Self> {
+        let (request, _response) = match backend {
+            GeminiLiveBackend::Public { api_key } => {
+                let url = format!(
+                    "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BiDiGenerateContent?key={}",
+                    api_key
+                );
+                let request = url.into_client_request().map_err(|e| {
+                    RealtimeError::connection(format!("Failed to create client request: {}", e))
+                })?;
+                connect_async(request).await.map_err(|e| {
+                    RealtimeError::connection(format!("WebSocket connect error: {}", e))
+                })?
+            }
+            #[cfg(feature = "vertex")]
+            GeminiLiveBackend::Vertex(context) => {
+                let url = format!(
+                    "wss://{}-aiplatform.googleapis.com/ws/google.cloud.aiplatform.v1beta1.LlmInferenceService.BidiGenerateContent",
+                    context.location
+                );
+                let mut request = url.into_client_request().map_err(|e| {
+                    RealtimeError::connection(format!("Failed to create client request: {}", e))
+                })?;
 
-        let (sink, source) = ws_stream.split();
+                let token = context.auth.get_token().await.map_err(|e| {
+                    RealtimeError::connection(format!("Failed to get auth token: {}", e))
+                })?;
+
+                request.headers_mut().insert(
+                    "Authorization",
+                    HeaderValue::from_str(&format!("Bearer {}", token)).map_err(|e| {
+                        RealtimeError::connection(format!("Invalid auth token header: {}", e))
+                    })?,
+                );
+
+                connect_async(request).await.map_err(|e| {
+                    RealtimeError::connection(format!("WebSocket connect error: {}", e))
+                })?
+            }
+        };
+
+        let (sink, source) = request.split();
 
         // Generate session ID
         let session_id = uuid::Uuid::new_v4().to_string();
