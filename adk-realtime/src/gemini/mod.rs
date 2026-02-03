@@ -27,9 +27,9 @@
 //!     };
 //!     
 //!     let model = GeminiRealtimeModel::new(
-        backend,
-        "gemini-live-2.5-flash-native-audio",
-    );
+//!         backend,
+//!         "gemini-live-2.5-flash-native-audio",
+//!     );
 //!
 //!     let config = RealtimeConfig::default()
 //!         .with_instruction("You are a helpful assistant.");
@@ -52,7 +52,7 @@ pub use session::GeminiRealtimeSession;
 pub const GEMINI_LIVE_URL: &str = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent";
 
 /// Default model for Gemini Live.
-pub const DEFAULT_MODEL: &str = "models/gemini-2.0-flash-live-preview-04-09";
+pub const DEFAULT_MODEL: &str = "models/gemini-live-2.5-flash-native-audio";
 
 /// Available voices for Gemini Live (varies by model).
 pub const GEMINI_VOICES: &[&str] = &["Puck", "Charon", "Kore", "Fenrir", "Aoede"];

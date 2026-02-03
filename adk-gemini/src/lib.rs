@@ -71,7 +71,9 @@ pub use client::Gemini;
 /// Builder for creating a new Gemini client
 pub use client::GeminiBuilder;
 /// Available Gemini models
-pub use client::Model;
+pub use models::Model;
+/// Configuration for Gemini Live backend (Public or Vertex)
+pub use client::GeminiLiveBackend;
 
 /// Core primitive types for building requests and parsing responses
 pub use models::{Blob, Content, Message, Modality, Part, Role};
