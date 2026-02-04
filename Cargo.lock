@@ -360,6 +360,7 @@ dependencies = [
  "async-stream",
  "async-trait",
  "base64 0.22.1",
+ "bytemuck",
  "dotenvy",
  "futures",
  "getrandom 0.2.16",
@@ -4396,6 +4397,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "30e4ccbe6d3e025b5bfdb58d23c7b9913a124b0decfd8de3dd581a70a9a2fbaa"
 dependencies = [
  "http 0.2.12",
+ "jsonwebtoken",
  "livekit-protocol 0.3.10",
  "log",
  "parking_lot",

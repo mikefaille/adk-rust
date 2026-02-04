@@ -21,11 +21,16 @@ use adk_realtime::config::RealtimeConfig;
 use adk_realtime::events::ServerEvent;
 use adk_realtime::gemini::GeminiRealtimeModel;
 use adk_realtime::model::RealtimeModel;
-use adk_realtime::session::RealtimeSession;
+use adk_realtime::session::BoxedSession;
+use base64::engine::general_purpose::STANDARD;
+use base64::Engine;
+use std::fs::File;
+use std::io::Write;
 use std::process::ExitCode;
 use tracing::{error, info, warn};
 
 const TEST_PROMPT: &str = "Hello! Please introduce yourself briefly.";
+const OUTPUT_FILE: &str = "gemini_tts.pcm";
 
 async fn run_realtime_test(api_key: &str) -> Result<(), Box<dyn std::error::Error>> {
     info!("Initializing Gemini Live connection...");
@@ -36,7 +41,7 @@ async fn run_realtime_test(api_key: &str) -> Result<(), Box<dyn std::error::Erro
     };
 
     // 2. Create the realtime model
-    let model = GeminiRealtimeModel::with_default_model(backend);
+    let model = GeminiRealtimeModel::new(backend, "models/gemini-2.5-flash-native-audio-preview-12-2025");
     info!(model_id = model.model_id(), provider = model.provider(), "Model configured");
 
     // 3. Build config with system instruction
@@ -51,6 +56,10 @@ async fn run_realtime_test(api_key: &str) -> Result<(), Box<dyn std::error::Erro
     // 5. Send text input
     info!(prompt = TEST_PROMPT, "Sending text prompt...");
     session.send_text(TEST_PROMPT).await?;
+
+    // 5. Create output file
+    let mut file = std::fs::File::create(OUTPUT_FILE)?;
+    info!(file = OUTPUT_FILE, "Created output file for audio");
 
     // 6. Receive and process events
     info!("Waiting for response events...");
@@ -70,22 +79,24 @@ async fn run_realtime_test(api_key: &str) -> Result<(), Box<dyn std::error::Erro
         match tokio::time::timeout(tokio::time::Duration::from_secs(5), session.next_event()).await
         {
             Ok(Some(Ok(event))) => match event {
-                ServerEvent::SessionCreated { session_id, .. } => {
-                    info!(session_id = %session_id, "Session created");
+                ServerEvent::SessionCreated { .. } => {
+                    info!("Session created");
                 }
-                ServerEvent::SpeechStarted => {
+                ServerEvent::SpeechStarted { .. } => {
                     info!("🎤 Agent started speaking...");
                 }
-                ServerEvent::SpeechStopped => {
+                ServerEvent::SpeechStopped { .. } => {
                     info!("🔇 Agent stopped speaking");
                 }
                 ServerEvent::AudioDelta { delta, item_id, .. } => {
                     audio_chunks_received += 1;
+                    // delta is already Vec<u8> decoded by session
+                    file.write_all(&delta)?;
                     let bytes = delta.len();
                     info!(
                         chunk = audio_chunks_received,
                         bytes = bytes,
-                        item_id = %item_id.unwrap_or_default(),
+                        item_id = %item_id,
                         "📢 Received audio chunk (24kHz PCM)"
                     );
                 }
@@ -99,15 +110,13 @@ async fn run_realtime_test(api_key: &str) -> Result<(), Box<dyn std::error::Erro
                 }
                 ServerEvent::Error { error, .. } => {
                     error!(
-                        code = ?error.code,
-                        message = %error.message,
-                        "❌ Error from server"
+                        error = %error.message,
+                        type = %error.error_type,
+                        "❌ Server error"
                     );
                     break;
                 }
-                other => {
-                    info!(event = ?other, "Other event received");
-                }
+                _ => {}
             },
             Ok(Some(Err(e))) => {
                 error!(error = %e, "Event error");
