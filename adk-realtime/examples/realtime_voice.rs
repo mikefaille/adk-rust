@@ -21,10 +21,7 @@ use adk_realtime::config::RealtimeConfig;
 use adk_realtime::events::ServerEvent;
 use adk_realtime::gemini::GeminiRealtimeModel;
 use adk_realtime::model::RealtimeModel;
-use adk_realtime::session::BoxedSession;
-use base64::engine::general_purpose::STANDARD;
-use base64::Engine;
-use std::fs::File;
+
 use std::io::Write;
 use std::process::ExitCode;
 use tracing::{error, info, warn};
