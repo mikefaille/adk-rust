@@ -363,12 +363,14 @@ dependencies = [
  "dotenvy",
  "futures",
  "getrandom 0.2.16",
+ "http 1.4.0",
  "serde",
  "serde_json",
  "thiserror 2.0.17",
  "tokio",
  "tokio-tungstenite",
  "tracing",
+ "tracing-subscriber",
  "uuid 1.19.0",
 ]
 

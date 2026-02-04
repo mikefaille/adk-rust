@@ -145,6 +145,50 @@ impl GeminiRealtimeSession {
                     RealtimeError::connection(format!("WebSocket connect error: {}", e))
                 })?
             }
+            GeminiLiveBackend::VertexADC { project: _, location } => {
+                use adk_gemini::credentials::{Builder, CacheableResource};
+                
+                // Fetch token from ADC
+                let credentials = Builder::default().build().map_err(|e| {
+                    RealtimeError::connection(format!("Failed to load ADC credentials: {}", e))
+                })?;
+                
+                let headers = credentials.headers(Default::default()).await.map_err(|e| {
+                    RealtimeError::connection(format!("Failed to fetch auth headers: {}", e))
+                })?;
+                
+                let auth_headers = match headers {
+                    CacheableResource::New { data, .. } => data,
+                    CacheableResource::NotModified => {
+                        return Err(RealtimeError::connection("Credentials returned NotModified unexpectedly".to_string()));
+                    }
+                };
+                
+                let token = auth_headers
+                    .get(http::header::AUTHORIZATION)
+                    .and_then(|h| h.to_str().ok())
+                    .and_then(|s| s.strip_prefix("Bearer "))
+                    .ok_or_else(|| RealtimeError::connection("No Bearer token in ADC headers".to_string()))?;
+
+                let url = format!(
+                    "wss://{}-aiplatform.googleapis.com/ws/google.cloud.aiplatform.v1beta1.LlmInferenceService.BidiGenerateContent",
+                    location
+                );
+                let mut request = url.into_client_request().map_err(|e| {
+                    RealtimeError::connection(format!("Failed to create client request: {}", e))
+                })?;
+
+                request.headers_mut().insert(
+                    "Authorization",
+                    HeaderValue::from_str(&format!("Bearer {}", token)).map_err(|e| {
+                        RealtimeError::connection(format!("Invalid auth token header: {}", e))
+                    })?,
+                );
+
+                connect_async(request).await.map_err(|e| {
+                    RealtimeError::connection(format!("WebSocket connect error: {}", e))
+                })?
+            }
         };
 
         let (sink, source) = request.split();

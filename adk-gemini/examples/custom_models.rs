@@ -40,21 +40,21 @@ async fn do_main() -> Result<(), Box<dyn std::error::Error>> {
     info!("created client with Gemini 2.5 Pro model using convenience method");
 
     // 3. Using enum variants for predefined models
-    let client_flash_lite = Gemini::with_model(api_key.clone(), Model::Gemini25FlashLite)?;
+    let client_flash_lite = Gemini::with_model(api_key.clone(), Model::new(Model::GEMINI_2_5_FLASH_LITE))?;
     info!("created client with Gemini 2.5 Flash Lite using Model enum");
 
-    let client_embedding = Gemini::with_model(api_key.clone(), Model::TextEmbedding004)?;
-    info!("created client with Text Embedding 004 model using Model enum");
+    let client_embedding = Gemini::with_model(api_key.clone(), Model::new(Model::GEMINI_EMBEDDING_001))?;
+    info!("created client with Gemini Embedding 001 model using Model enum");
 
     // 4. Using custom model strings for specific versions or preview models
     let client_custom_string =
         Gemini::with_model(api_key.clone(), "models/gemini-2.5-flash-image-preview".to_string())?;
     info!("created client with custom model string for image generation");
 
-    // 5. Using Model::Custom for any other model
+    // 5. Using Model::new for any other model
     let client_custom_enum = Gemini::with_model(
         api_key.clone(),
-        Model::Custom("models/gemini-2.5-flash-preview-tts".to_string()),
+        Model::new("models/gemini-2.5-flash-preview-tts".to_string()),
     )?;
     info!("created client with Model::Custom for text-to-speech model");
 
