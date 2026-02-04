@@ -75,6 +75,12 @@ pub use client::GeminiBuilder;
 pub use models::Model;
 /// Configuration for Gemini Live backend (Public or Vertex)
 pub use client::GeminiLiveBackend;
+/// Context for Vertex AI backend (project_id, location, token)
+#[cfg(feature = "vertex")]
+pub use client::VertexContext;
+/// Re-export google_cloud_auth credentials for downstream crates (VertexADC)
+#[cfg(feature = "vertex")]
+pub use google_cloud_auth::credentials;
 
 /// Core primitive types for building requests and parsing responses
 pub use models::{Blob, Content, Message, Modality, Part, Role};
