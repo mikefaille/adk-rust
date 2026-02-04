@@ -94,7 +94,17 @@ pub mod openai;
 pub mod gemini;
 
 #[cfg(feature = "livekit")]
-pub use livekit;
+pub use livekit as livekit_sdk;
+
+#[cfg(feature = "livekit")]
+pub mod livekit_ext;
+
+#[cfg(feature = "livekit")]
+pub mod livekit {
+    pub use crate::livekit_sdk::*;
+    pub use crate::livekit_ext::*;
+}
+
 #[cfg(feature = "livekit")]
 pub use livekit_api;
 
