@@ -12,12 +12,12 @@ fn test_model_deserialization() {
         model: Model,
     }
 
-    let response = Response { model: Model::Custom("models/custom_gemini_model".to_string()) };
+    let response = Response { model: Model::new("models/custom_gemini_model") };
     let serialized = serde_json::to_string(&response).unwrap();
     let deserialized: Response = serde_json::from_str(&serialized).unwrap();
     assert_eq!(deserialized.model, response.model);
 
-    let response = Response { model: Model::Gemini25Flash };
+    let response = Response { model: Model::new("gemini-3-flash-preview") };
     let serialized = serde_json::to_string(&response).unwrap();
     let deserialized: Response = serde_json::from_str(&serialized).unwrap();
     assert_eq!(deserialized.model, response.model);
@@ -53,7 +53,7 @@ fn test_thought_signature_deserialization() {
             "totalTokenCount": 255,
             "thoughtsTokenCount": 164
         },
-        "modelVersion": "gemini-2.5-pro",
+        "modelVersion": "gemini-3-pro-preview",
         "responseId": "CCm8aJjzBaWh1MkP_cLEgQo"
     });
 
@@ -211,7 +211,7 @@ fn test_text_with_thought_signature() {
             "totalTokenCount": 96,
             "thoughtsTokenCount": 42
         },
-        "modelVersion": "gemini-2.5-flash",
+        "modelVersion": "gemini-3-flash-preview",
         "responseId": "gIC..."
     });
 
