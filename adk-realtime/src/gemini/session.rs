@@ -302,6 +302,16 @@ impl GeminiRealtimeSession {
                     Ok(event) => Some(Ok(event)),
                     Err(e) => Some(Err(e)),
                 }
+
+            }
+            Some(Ok(Message::Binary(bytes))) => {
+                match String::from_utf8(bytes) {
+                    Ok(text) => match self.translate_gemini_event(&text) {
+                        Ok(event) => Some(Ok(event)),
+                        Err(e) => Some(Err(e)),
+                    },
+                    Err(e) => Some(Err(RealtimeError::protocol(format!("Invalid UTF-8 in binary message: {}", e)))),
+                }
             }
             Some(Ok(Message::Close(_))) => {
                 self.connected.store(false, Ordering::SeqCst);
@@ -350,7 +360,7 @@ impl GeminiRealtimeSession {
                         // Audio output
                         if let Some(inline_data) = part.get("inlineData") {
                             if let Some(data) = inline_data.get("data").and_then(|d| d.as_str()) {
-                                let decoded = BASE64_STANDARD.decode(data).unwrap_or_default();
+                                let decoded = base64::engine::general_purpose::STANDARD.decode(data).unwrap_or_default();
                                 return Ok(ServerEvent::AudioDelta {
                                     event_id: uuid::Uuid::new_v4().to_string(),
                                     response_id: String::new(),
