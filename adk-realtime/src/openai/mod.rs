@@ -29,10 +29,15 @@
 //! ```
 
 mod model;
+
 mod session;
+#[cfg(feature = "webrtc")]
+pub mod rtc;
 
 pub use model::OpenAIRealtimeModel;
 pub use session::OpenAIRealtimeSession;
+#[cfg(feature = "webrtc")]
+pub use rtc::OpenAiWebRtcModel;
 
 /// OpenAI Realtime API WebSocket URL.
 pub const OPENAI_REALTIME_URL: &str = "wss://api.openai.com/v1/realtime";
