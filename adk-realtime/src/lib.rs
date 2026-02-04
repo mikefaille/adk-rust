@@ -93,6 +93,11 @@ pub mod openai;
 #[cfg(feature = "gemini")]
 pub mod gemini;
 
+#[cfg(feature = "livekit")]
+pub use livekit;
+#[cfg(feature = "livekit")]
+pub use livekit_api;
+
 // Re-exports
 pub use agent::{RealtimeAgent, RealtimeAgentBuilder};
 pub use audio::{AudioEncoding, AudioFormat};
