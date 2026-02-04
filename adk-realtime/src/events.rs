@@ -5,6 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use base64::Engine;
 
 /// Events sent from the client to the realtime server.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -256,8 +257,9 @@ pub enum ServerEvent {
         output_index: u32,
         /// Content index.
         content_index: u32,
-        /// Base64-encoded audio data.
-        delta: String,
+        /// Audio data (bytes).
+        #[serde(deserialize_with = "deserialize_audio_delta")]
+        delta: Vec<u8>,
     },
 
     /// Audio output completed.
@@ -455,4 +457,15 @@ impl ToolResponse {
     pub fn from_string(call_id: impl Into<String>, output: impl Into<String>) -> Self {
         Self { call_id: call_id.into(), output: Value::String(output.into()) }
     }
+}
+
+/// Custom deserializer for base64-encoded audio.
+fn deserialize_audio_delta<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let s = String::deserialize(deserializer)?;
+    base64::engine::general_purpose::STANDARD
+        .decode(&s)
+        .map_err(serde::de::Error::custom)
 }

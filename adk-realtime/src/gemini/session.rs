@@ -17,6 +17,7 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use adk_gemini::GeminiLiveBackend;
+use base64::prelude::*;
 
 type WsStream =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
@@ -33,6 +34,22 @@ struct GeminiClientMessage {
     realtime_input: Option<GeminiRealtimeInput>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_response: Option<GeminiToolResponse>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    client_content: Option<GeminiClientContent>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GeminiClientContent {
+    turns: Vec<GeminiTurn>,
+    turn_complete: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GeminiTurn {
+    role: String,
+    parts: Vec<GeminiPart>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -116,7 +133,7 @@ impl GeminiRealtimeSession {
         let (request, _response) = match backend {
             GeminiLiveBackend::Public { api_key } => {
                 let url = format!(
-                    "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BiDiGenerateContent?key={}",
+                    "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key={}",
                     api_key
                 );
                 let request = url.into_client_request().map_err(|e| {
@@ -126,6 +143,7 @@ impl GeminiRealtimeSession {
                     RealtimeError::connection(format!("WebSocket connect error: {}", e))
                 })?
             }
+            #[cfg(feature = "vertex")]
             GeminiLiveBackend::Vertex(context) => {
                 let url = format!(
                     "wss://{}-aiplatform.googleapis.com/ws/google.cloud.aiplatform.v1beta1.LlmInferenceService.BidiGenerateContent",
@@ -146,6 +164,7 @@ impl GeminiRealtimeSession {
                     RealtimeError::connection(format!("WebSocket connect error: {}", e))
                 })?
             }
+            #[cfg(feature = "vertex")]
             GeminiLiveBackend::VertexADC { project: _, location } => {
                 use adk_gemini::credentials::{Builder, CacheableResource};
                 
@@ -190,6 +209,10 @@ impl GeminiRealtimeSession {
                     RealtimeError::connection(format!("WebSocket connect error: {}", e))
                 })?
             }
+            #[cfg(not(feature = "vertex"))]
+            _ => {
+                return Err(RealtimeError::config("Vertex AI features are not enabled. Rebuild with 'vertex' feature."));
+            }
         };
 
         let (sink, source) = request.split();
@@ -212,10 +235,6 @@ impl GeminiRealtimeSession {
 
     /// Send initial setup message.
     async fn send_setup(&self, model: &str, config: RealtimeConfig) -> Result<()> {
-        let system_instruction = config.instruction.map(|text| GeminiContent {
-            parts: vec![GeminiPart { text: Some(text), inline_data: None }],
-        });
-
         let mut generation_config = json!({
             "responseModalities": config.modalities.unwrap_or_else(|| vec!["AUDIO".to_string()]),
         });
@@ -234,21 +253,8 @@ impl GeminiRealtimeSession {
             generation_config["temperature"] = json!(temp);
         }
 
-        let tools = config.tools.map(|tools| {
-            vec![json!({
-                "functionDeclarations": tools.iter().map(|t| {
-                    let mut decl = json!({
-                        "name": t.name,
-                    });
-                    if let Some(desc) = &t.description {
-                        decl["description"] = json!(desc);
-                    }
-                    if let Some(params) = &t.parameters {
-                        decl["parameters"] = params.clone();
-                    }
-                    decl
-                }).collect::<Vec<_>>()
-            })]
+        let system_instruction = config.instruction.map(|text| GeminiContent {
+            parts: vec![GeminiPart { text: Some(text), inline_data: None }],
         });
 
         let setup = GeminiClientMessage {
@@ -256,12 +262,18 @@ impl GeminiRealtimeSession {
                 model: model.to_string(),
                 system_instruction,
                 generation_config: Some(generation_config),
-                tools,
+                tools: None, // TODO: Implement tools
             }),
             realtime_input: None,
             tool_response: None,
+            client_content: None,
         };
 
+        let msg = serde_json::to_string(&setup)
+            .map_err(|e| RealtimeError::protocol(format!("Serialize error: {}", e)))?;
+        
+        tracing::info!(model_id = %model, "Sending setup message");
+        tracing::debug!(raw_setup = %msg, "Raw setup message");
         self.send_raw(&setup).await
     }
 
@@ -309,8 +321,9 @@ impl GeminiRealtimeSession {
 
     /// Translate Gemini-specific events to unified format.
     fn translate_gemini_event(&self, raw: &str) -> Result<ServerEvent> {
+        tracing::debug!(%raw, "Translating Gemini event");
         let value: Value = serde_json::from_str(raw)
-            .map_err(|e| RealtimeError::protocol(format!("Parse error: {}", e)))?;
+            .map_err(|e| RealtimeError::protocol(format!("Parse error: {}, raw: {}", e, raw)))?;
 
         // Check for setup completion
         if value.get("setupComplete").is_some() {
@@ -337,13 +350,14 @@ impl GeminiRealtimeSession {
                         // Audio output
                         if let Some(inline_data) = part.get("inlineData") {
                             if let Some(data) = inline_data.get("data").and_then(|d| d.as_str()) {
+                                let decoded = BASE64_STANDARD.decode(data).unwrap_or_default();
                                 return Ok(ServerEvent::AudioDelta {
                                     event_id: uuid::Uuid::new_v4().to_string(),
                                     response_id: String::new(),
                                     item_id: String::new(),
                                     output_index: 0,
                                     content_index: 0,
-                                    delta: data.to_string(),
+                                    delta: decoded,
                                 });
                             }
                         }
@@ -413,6 +427,7 @@ impl RealtimeSession for GeminiRealtimeSession {
                 text: None,
             }),
             tool_response: None,
+            client_content: None,
         };
         self.send_raw(&msg).await
     }
@@ -420,11 +435,18 @@ impl RealtimeSession for GeminiRealtimeSession {
     async fn send_text(&self, text: &str) -> Result<()> {
         let msg = GeminiClientMessage {
             setup: None,
-            realtime_input: Some(GeminiRealtimeInput {
-                media_chunks: None,
-                text: Some(text.to_string()),
-            }),
+            realtime_input: None,
             tool_response: None,
+            client_content: Some(GeminiClientContent {
+                turns: vec![GeminiTurn {
+                    role: "user".to_string(),
+                    parts: vec![GeminiPart {
+                        text: Some(text.to_string()),
+                        inline_data: None,
+                    }],
+                }],
+                turn_complete: true,
+            }),
         };
         self.send_raw(&msg).await
     }
@@ -444,6 +466,7 @@ impl RealtimeSession for GeminiRealtimeSession {
                     response: output,
                 }],
             }),
+            client_content: None,
         };
         self.send_raw(&msg).await
     }
