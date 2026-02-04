@@ -66,8 +66,8 @@ use async_trait::async_trait;
 use base64::Engine;
 use std::sync::{Arc, Mutex};
 
-/// Boxed realtime model type.
-pub type BoxedRealtimeModel = Arc<dyn RealtimeModel>;
+/// Shared realtime model type.
+pub use crate::model::BoxedModel as BoxedRealtimeModel;
 
 /// A real-time voice agent that implements the ADK Agent trait.
 ///

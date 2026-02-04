@@ -28,6 +28,7 @@ serde_json.workspace = true
 
 # WebSocket
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-native-roots"], optional = true }
+bytemuck = "1.14"
 
 # Error handling
 thiserror.workspace = true
