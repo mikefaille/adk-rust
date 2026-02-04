@@ -31,7 +31,9 @@ full = [
     "cli",
     "graph",
     "ui",
-    "doc-audit"
+    "doc-audit",
+    "realtime",
+    "livekit"
 ]
 
 # CLI launcher support
@@ -62,6 +64,10 @@ deepseek = ["models", "adk-model/deepseek"]
 groq = ["models", "adk-model/groq"]
 ollama = ["models", "adk-model/ollama"]
 
+# Real-time features
+realtime = ["dep:adk-realtime"]
+livekit = ["realtime", "adk-realtime/livekit"]
+
 [dependencies]
 # Core is always included
 adk-core.workspace = true
@@ -81,6 +87,7 @@ adk-cli = { workspace = true, optional = true }
 adk-graph = { workspace = true, optional = true }
 adk-ui = { workspace = true, optional = true }
 adk-doc-audit = { workspace = true, optional = true }
+adk-realtime = { workspace = true, optional = true }
 
 # Re-export common dependencies
 tokio = { workspace = true }
