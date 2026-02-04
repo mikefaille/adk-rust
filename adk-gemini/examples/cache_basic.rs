@@ -31,7 +31,7 @@ async fn do_main() -> Result<(), Box<dyn std::error::Error>> {
     let api_key =
         std::env::var("GEMINI_API_KEY").expect("GEMINI_API_KEY environment variable must be set");
 
-    let client = Gemini::with_model(api_key, Model::Gemini25FlashLite)?;
+    let client = Gemini::with_model(api_key, Model::new(Model::GEMINI_2_5_FLASH_LITE))?;
 
     info!("creating cached content with full story text");
 

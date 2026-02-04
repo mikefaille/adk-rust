@@ -48,16 +48,22 @@ getrandom = "0.2"
 # OpenAI realtime types (optional)
 async-openai = { version = "0.27", optional = true }
 adk-gemini = { workspace = true, optional = true, features = ["vertex", "studio"] }
+http = { version = "1.0", optional = true }
 
 [dev-dependencies]
 tokio.workspace = true
 dotenvy = "0.15"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[[example]]
+name = "realtime_voice"
+required-features = ["gemini"]
 
 [features]
 default = []
 # Enable OpenAI Realtime API support
 openai = ["dep:async-openai", "dep:tokio-tungstenite"]
 # Enable Gemini Live API support
-gemini = ["dep:tokio-tungstenite", "dep:adk-gemini"]
+gemini = ["dep:tokio-tungstenite", "dep:adk-gemini", "dep:http"]
 # Enable all providers
 full = ["openai", "gemini"]

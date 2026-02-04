@@ -283,6 +283,7 @@ impl Model {
     pub const GEMINI_2_5_FLASH_LITE: &'static str = "models/gemini-2.5-flash-lite";
     pub const GEMINI_2_5_PRO: &'static str = "models/gemini-2.5-pro";
     pub const TEXT_EMBEDDING_004: &'static str = "models/text-embedding-004";
+    pub const GEMINI_EMBEDDING_001: &'static str = "models/gemini-embedding-001";
 
     pub fn new(model: impl Into<String>) -> Self {
         Self(model.into())

@@ -123,6 +123,12 @@ pub enum Error {
     },
 
     #[cfg(feature = "vertex")]
+    #[snafu(display("failed to fetch google cloud credentials"))]
+    GoogleCloudCredentialsFetch {
+        source: google_cloud_auth::errors::CredentialsError,
+    },
+
+    #[cfg(feature = "vertex")]
     #[snafu(display("failed to send google cloud vertex request"))]
     GoogleCloudRequest {
         source: google_cloud_aiplatform_v1::Error,
@@ -216,6 +222,10 @@ struct RestClient {
 #[derive(Debug)]
 struct VertexClient {
     prediction: PredictionService,
+    credentials: Credentials,
+    project_id: String,
+    location: String,
+    http_client: Client,
 }
 
 #[derive(Debug)]
@@ -233,9 +243,17 @@ pub enum GeminiLiveBackend {
         /// The Google AI Studio API key.
         api_key: String,
     },
-    /// Vertex AI using OAuth credentials.
+    /// Vertex AI using pre-fetched OAuth credentials.
     #[cfg(feature = "vertex")]
     Vertex(VertexContext),
+    /// Vertex AI using Application Default Credentials (auto-fetches token).
+    #[cfg(feature = "vertex")]
+    VertexADC {
+        /// Google Cloud Project ID.
+        project: String,
+        /// GCP Location (e.g., "us-central1").
+        location: String,
+    },
 }
 
 /// Context for Vertex AI authentication.
@@ -278,8 +296,23 @@ impl GeminiClient {
     }
 
     #[cfg(feature = "vertex")]
-    fn with_vertex<M: Into<Model>>(model: M, prediction: PredictionService) -> Self {
-        Self { model: model.into(), backend: GeminiBackend::Vertex(VertexClient { prediction }) }
+    fn with_vertex<M: Into<Model>>(
+        model: M,
+        prediction: PredictionService,
+        credentials: Credentials,
+        project_id: String,
+        location: String,
+    ) -> Self {
+        Self {
+            model: model.into(),
+            backend: GeminiBackend::Vertex(VertexClient {
+                prediction,
+                credentials,
+                project_id,
+                location,
+                http_client: Client::new(),
+            }),
+        }
     }
 
     /// Check the response status code and return an error if it is not successful
@@ -382,8 +415,39 @@ impl GeminiClient {
         builder: B,
         deserializer: D,
     ) -> Result<T, Error> {
-        let rest = self.rest_client("perform_request")?;
-        let request = builder(&rest.http_client);
+        let client = match &self.backend {
+            GeminiBackend::Rest(rest) => &rest.http_client,
+            #[cfg(feature = "vertex")]
+            GeminiBackend::Vertex(vertex) => &vertex.http_client,
+        };
+
+        let request = builder(client);
+
+        #[cfg(feature = "vertex")]
+        let request = if let GeminiBackend::Vertex(vertex) = &self.backend {
+            let cached_headers = vertex
+                .credentials
+                .headers(Default::default())
+                .await
+                .context(GoogleCloudCredentialsFetchSnafu)?;
+            let auth_headers = match cached_headers {
+                google_cloud_auth::credentials::CacheableResource::New { data, .. } => data,
+                google_cloud_auth::credentials::CacheableResource::NotModified => {
+                    return Err(Error::BadResponse {
+                        code: 500,
+                        description: Some("Credentials returned NotModified without prior fetch".to_string()),
+                    });
+                }
+            };
+            let mut req = request;
+            for (name, value) in auth_headers.iter() {
+                req = req.header(name, value);
+            }
+            req
+        } else {
+            request
+        };
+
         tracing::debug!("request built successfully");
         let response = request.send().await.context(PerformRequestNewSnafu)?;
         tracing::debug!("response received successfully");
@@ -733,9 +797,17 @@ impl GeminiClient {
         display_name: Option<String>,
         mime_type: Mime,
     ) -> Result<Url, Error> {
-        let rest = self.rest_client("upload")?;
-        let url = rest
-            .base_url
+        let base_url = match &self.backend {
+            GeminiBackend::Rest(rest) => rest.base_url.clone(),
+            #[cfg(feature = "vertex")]
+            GeminiBackend::Vertex(vertex) => Url::parse(&format!(
+                "https://{}-aiplatform.googleapis.com",
+                vertex.location
+            ))
+            .context(UrlParseSnafu)?,
+        };
+
+        let url = base_url
             .join("/upload/v1beta/files")
             .context(ConstructUrlSnafu { suffix: "/upload/v1beta/files".to_string() })?;
 
@@ -1073,6 +1145,43 @@ impl GeminiBuilder {
         Ok(self)
     }
 
+    /// Creates a builder for Vertex AI with Application Default Credentials.
+    ///
+    /// This is the recommended way to create a client for Vertex AI, as it
+    /// automatically handles authentication using ADC (Application Default Credentials).
+    ///
+    /// # Example
+    /// ```rust,no_run
+    /// use adk_gemini::GeminiBuilder;
+    ///
+    /// let client = GeminiBuilder::for_vertex("my-project", "us-central1")?
+    ///     .with_model("gemini-3-flash-preview")
+    ///     .build()?;
+    /// # Ok::<(), adk_gemini::ClientError>(())
+    /// ```
+    #[cfg(feature = "vertex")]
+    pub fn for_vertex<P, L>(project: P, location: L) -> Result<Self, Error>
+    where
+        P: Into<String>,
+        L: Into<String>,
+    {
+        let credentials = google_cloud_auth::credentials::Builder::default()
+            .build()
+            .context(GoogleCloudAuthSnafu)?;
+        
+        Ok(Self {
+            model: Model::default(),
+            client_builder: ClientBuilder::default(),
+            base_url: DEFAULT_BASE_URL.clone(),
+            api_key: None,
+            google_cloud: Some(GoogleCloudConfig {
+                project_id: project.into(),
+                location: location.into(),
+            }),
+            google_cloud_auth: Some(GoogleCloudAuth::Credentials(credentials)),
+        })
+    }
+
     /// Configures the client to use Workload Identity Federation (external account) JSON.
     #[cfg(feature = "vertex")]
     pub fn with_google_cloud_wif_json(mut self, wif_json: &str) -> Result<Self, Error> {
@@ -1108,12 +1217,20 @@ impl GeminiBuilder {
                 .block_on(
                     PredictionService::builder()
                         .with_endpoint(endpoint)
-                        .with_credentials(credentials)
+                        .with_credentials(credentials.clone())
                         .build(),
                 )
                 .context(GoogleCloudClientBuildSnafu)?;
 
-            return Ok(Gemini { client: Arc::new(GeminiClient::with_vertex(model, prediction)) });
+            return Ok(Gemini {
+                client: Arc::new(GeminiClient::with_vertex(
+                    model,
+                    prediction,
+                    credentials,
+                    config.project_id.clone(),
+                    config.location.clone(),
+                )),
+            });
         }
 
         let api_key = self.api_key.ok_or(Error::MissingApiKey)?;
