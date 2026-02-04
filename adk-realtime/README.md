@@ -8,8 +8,9 @@ Real-time bidirectional audio streaming for Rust Agent Development Kit (ADK-Rust
 
 ## Features
 
-- **RealtimeAgent**: Implements `adk_core::Agent` with full callback/tool/instruction support
-- **Multiple Providers**: Support for OpenAI Realtime API and Gemini Live API
+- **RealtimeAgent**: Implemented `adk_core::Agent` with full callback/tool/instruction support
+- **Multiple Providers**: Unified interface for OpenAI Realtime and Gemini Live API
+- **LiveKit Integration**: Direct bridge for using AI agents in LiveKit real-time audio rooms
 - **Audio Streaming**: Bidirectional audio with PCM16, G711, and other formats
 - **Voice Activity Detection**: Server-side VAD for natural conversation flow
 - **Tool Calling**: Real-time function/tool execution during voice conversations
@@ -96,7 +97,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let model = Arc::new(GeminiRealtimeModel::new(
         backend, 
-        "gemini-live-2.5-flash-native-audio"
+        "models/gemini-live-2.5-flash-native-audio"
     ));
 
     let agent = RealtimeAgent::builder("gemini_voice")
@@ -137,7 +138,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     while let Some(event) = session.next_event().await {
         match event? {
             ServerEvent::AudioDelta { delta, .. } => {
-                // Play audio (delta is base64-encoded PCM)
+                // Play audio (delta is 24kHz PCM bytes)
             }
             ServerEvent::TextDelta { delta, .. } => {
                 print!("{}", delta);
@@ -182,7 +183,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 | `server_vad()` | Enable server-side VAD with defaults |
 | `vad(VadConfig)` | Custom VAD configuration |
 | `modalities(vec)` | Output modalities (["text", "audio"]) |
-| `on_audio(callback)` | Callback for audio output events |
+| `on_audio(callback)` | Callback for audio output events (`Fn(&[u8], &str)`) |
 | `on_transcript(callback)` | Callback for transcript events |
 | `on_speech_started(callback)` | Callback when speech detected |
 | `on_speech_stopped(callback)` | Callback when speech ends |
@@ -194,7 +195,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 | Event | Description |
 |-------|-------------|
 | `SessionCreated` | Connection established |
-| `AudioDelta` | Audio chunk (base64 PCM) |
+| `AudioDelta` | Audio chunk (Vec<u8> PCM) |
 | `TextDelta` | Text response chunk |
 | `TranscriptDelta` | Input audio transcript |
 | `FunctionCallDone` | Tool call request |
@@ -296,13 +297,58 @@ cargo run --example realtime_handoff --features realtime-openai
 | `realtime_tools` | Real-time tool calling (weather lookup) during conversations |
 | `realtime_handoff` | Multi-agent system with receptionist routing to booking, support, and sales agents |
 
+## LiveKit Integration
+
+The `adk-realtime` crate includes first-class support for **LiveKit**, allowing you to bridge your AI agents into real-time audio rooms.
+
+### The Bridge Pattern
+
+We use a "Facade" architecture where the LiveKit transport is completely decoupled from the AI provider. This allows you to "plug" any `RealtimeModel` (Gemini or OpenAI) into a LiveKit room without changing your integration logic.
+
+- **Hearing**: `bridge_input` subscribes to a LiveKit `RemoteAudioTrack` and feeds it to the AI.
+- **Speaking**: `LiveKitEventHandler` receives AI audio and pushes it to a LiveKit `NativeAudioSource`.
+
+### Usage Example
+
+```rust
+use adk_realtime::RealtimeRunner;
+use adk_realtime::livekit::{LiveKitEventHandler, bridge_input};
+use livekit::native::audio_source::NativeAudioSource;
+
+// 1. Setup LiveKit source for the AI's voice
+let source = NativeAudioSource::new(AudioSourceOptions::default());
+
+// 2. Setup your handler (can wrap any custom logic)
+let lk_handler = Arc::new(LiveKitEventHandler::new(source, inner_handler));
+
+// 3. Connect to ANY AI provider (Gemini or OpenAI)
+let model = Arc::new(GeminiRealtimeModel::new(backend, "models/gemini-live-2.5-flash-native-audio"));
+// OR: let model = Arc::new(OpenAIRealtimeModel::new(api_key, "gpt-4o-realtime"));
+
+// 4. Build the runner
+let runner = RealtimeRunner::builder()
+    .model(model)
+    .event_handler(lk_handler)
+    .build()?;
+
+// 5. Connect the room's audio to the AI
+bridge_input(remote_audio_track, runner.clone());
+```
+
+### Technical Benefits
+
+- **Backend Agnostic**: Swap between OpenAI and Gemini with a single line change.
+- **Unified Audio**: Automatically handles conversion to **24kHz Mono PCM** for optimal performance.
+- **Zero-Copy Intent**: Optimized for streaming raw PCM frames directly to the transport layer.
+
 ## Feature Flags
 
 | Flag | Description |
 |------|-------------|
 | `openai` | Enable OpenAI Realtime API |
 | `gemini` | Enable Gemini Live API |
-| `full` | Enable all providers |
+| `livekit` | Enable LiveKit transport support |
+| `full` | Enable all providers and integrations |
 
 ## License
 
