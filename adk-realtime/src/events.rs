@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use base64::Engine;
 
+use bytes::Bytes;
+
 /// Events sent from the client to the realtime server.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -24,7 +26,7 @@ pub enum ClientEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         event_id: Option<String>,
         #[serde(serialize_with = "serialize_audio_delta", deserialize_with = "deserialize_audio_delta")]
-        audio: Vec<u8>,
+        audio: Bytes,
         #[serde(skip)]
         format: crate::audio::AudioFormat,
     },
@@ -58,18 +60,19 @@ pub enum ClientEvent {
 }
 
 /// Custom deserializer for base64-encoded audio.
-fn deserialize_audio_delta<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
+fn deserialize_audio_delta<'de, D>(deserializer: D) -> Result<Bytes, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
     let s = String::deserialize(deserializer)?;
-    base64::engine::general_purpose::STANDARD
+    let decoded = base64::engine::general_purpose::STANDARD
         .decode(&s)
-        .map_err(serde::de::Error::custom)
+        .map_err(serde::de::Error::custom)?;
+    Ok(Bytes::from(decoded))
 }
 
 /// Custom serializer for base64-encoded audio.
-fn serialize_audio_delta<S>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error>
+fn serialize_audio_delta<S>(bytes: &Bytes, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: serde::Serializer,
 {
@@ -282,8 +285,8 @@ pub enum ServerEvent {
         /// Content index.
         content_index: u32,
         /// Audio data (bytes).
-        #[serde(deserialize_with = "deserialize_audio_delta")]
-        delta: Vec<u8>,
+        #[serde(serialize_with = "serialize_audio_delta", deserialize_with = "deserialize_audio_delta")]
+        delta: Bytes,
     },
 
     /// Audio output completed.

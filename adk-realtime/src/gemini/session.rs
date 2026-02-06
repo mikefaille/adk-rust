@@ -14,10 +14,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::Mutex;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use adk_gemini::GeminiLiveBackend;
 use base64::prelude::*;
+use bytes::Bytes;
 
 type WsStream =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
@@ -185,7 +185,7 @@ impl GeminiRealtimeSession {
                 };
                 
                 let token = auth_headers
-                    .get(http::header::AUTHORIZATION)
+                    .get(tokio_tungstenite::tungstenite::http::header::AUTHORIZATION)
                     .and_then(|h| h.to_str().ok())
                     .and_then(|s| s.strip_prefix("Bearer "))
                     .ok_or_else(|| RealtimeError::connection("No Bearer token in ADC headers".to_string()))?;
@@ -208,10 +208,6 @@ impl GeminiRealtimeSession {
                 connect_async(request).await.map_err(|e| {
                     RealtimeError::connection(format!("WebSocket connect error: {}", e))
                 })?
-            }
-            #[cfg(not(feature = "vertex"))]
-            _ => {
-                return Err(RealtimeError::config("Vertex AI features are not enabled. Rebuild with 'vertex' feature."));
             }
         };
 
@@ -367,7 +363,7 @@ impl GeminiRealtimeSession {
                                     item_id: String::new(),
                                     output_index: 0,
                                     content_index: 0,
-                                    delta: decoded,
+                                    delta: Bytes::from(decoded),
                                 });
                             }
                         }
