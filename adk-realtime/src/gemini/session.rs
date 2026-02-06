@@ -8,6 +8,7 @@ use crate::session::RealtimeSession;
 use async_trait::async_trait;
 use futures::stream::Stream;
 use futures::{SinkExt, StreamExt};
+use http::HeaderValue;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::pin::Pin;
