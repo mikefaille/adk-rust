@@ -128,7 +128,7 @@ pub trait RealtimeSessionExt: RealtimeSession {
         while let Some(event) = self.next_event().await {
             match event? {
                 ServerEvent::AudioDelta { delta, .. } => {
-                    audio_chunks.push(delta);
+                    audio_chunks.push(delta.to_vec());
                 }
                 ServerEvent::ResponseDone { .. } => break,
                 ServerEvent::Error { error, .. } => {

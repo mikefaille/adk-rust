@@ -214,8 +214,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 | `ResponseCreate` | Request a response |
 | `ResponseCancel` | Interrupt response |
 | `SessionUpdate` | Update configuration |
+| `InputAudioBufferAppend` | Send audio (via `bytes::Bytes`) |
 
-## Audio Formats
+## Audio Transport Architecture
+
+### Zero-Copy Performance
+The entire `adk-realtime` framework uses `bytes::Bytes` for audio transport. This ensures that large audio buffers are shared rather than copied as they flow from the AI provider through the agent loop to the transport layers (e.g., LiveKit or WebRTC).
+
+### OpenAI WebRTC (Sans-IO)
+The OpenAI WebRTC implementation utilizes the `rtc` crate (v0.8.5) and follows a **Sans-IO** pattern for maximum reliability and control. It is engineered for **production stability**:
+
+- **Stable SSRC Latching**: Locks onto a single SSRC at startup to prevent decoder resets and audio glitches on the server side.
+- **Zero-Allocation Hot Loop**: Uses pre-allocated byte buffers for the critical 20ms audio path, eliminating heap allocation jitter.
+- **Bounded Message Queues**: Enforces strict capacity limits (50 items) on pending DataChannel messages to prevent memory leaks during network interruptions.
+- **Robust Connection Monitoring**: Immediate termination and error reporting on `RTCPeerConnectionState::Failed`, enabling rapid application-level recovery.
+- **RFC 7587 Compliance**: Strictly follows the Opus RTP clock rate (48kHz) regardless of input sample rate.
+- **DataChannel Integration**: Securely routes JSON control events (`oai-events`) alongside the high-priority audio media track.
+
+### Gemini Live Optimization
+The Gemini Live implementation is optimized for the `gemini-live-2.5-flash-native-audio` model:
+- **Native Audio Support**: Direct streaming of 24kHz PCM16 bytes.
+- **Fast Turnaround**: Leveraging the model's native SAD (Server-side Activity Detection) for sub-second conversational latency.
+
 
 | Format | Sample Rate | Bits | Channels | Provider |
 |--------|-------------|------|----------|----------|
