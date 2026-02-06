@@ -12,7 +12,6 @@
 
 use adk_realtime::openai::OpenAiWebRtcModel;
 use adk_realtime::config::RealtimeConfig;
-use adk_realtime::events::ServerEvent;
 use adk_realtime::model::RealtimeModel;
 
 use std::process::ExitCode;
@@ -40,19 +39,55 @@ async fn run_webrtc_test(api_key: &str) -> Result<(), Box<dyn std::error::Error>
     info!(prompt = TEST_PROMPT, "Sending text prompt...");
     session.send_text(TEST_PROMPT).await?;
 
-    // 5. Wait for events (Stubbed loop will likely just exit or hang)
+    // 4.5 Create a response manually (since we sent text)
+    info!("Triggering response generation...");
+    session.create_response().await?;
+
+    // 5. Wait for events
     info!("Waiting for events...");
     let mut events = session.events();
     use futures::StreamExt;
-    
-    // In stub implementation, this might return nothing immediately or hang
-    match tokio::time::timeout(tokio::time::Duration::from_secs(5), events.next()).await {
-        Ok(Some(Ok(event))) => {
-            info!("Received event: {:?}", event);
-        },
-        Ok(None) => info!("Stream closed"),
-        Err(_) => info!("Timeout waiting for events (Expected for stub)"),
-        _ => {}
+
+    let timeout_duration = tokio::time::Duration::from_secs(60);
+    let timeout = tokio::time::sleep(timeout_duration);
+    tokio::pin!(timeout);
+
+    loop {
+        tokio::select! {
+            _ = &mut timeout => {
+                error!("Test timed out after 60 seconds.");
+                break;
+            }
+            maybe_event = events.next() => {
+                match maybe_event {
+                    Some(Ok(event)) => {
+                        info!("Event processed");
+                        
+                        match event {
+                            adk_realtime::ServerEvent::AudioDelta { delta, .. } => {
+                                info!("🔊 Audio Delta ({} bytes)", delta.len());
+                            }
+                            adk_realtime::ServerEvent::TranscriptDelta { delta, .. } => {
+                                info!("📝 Transcript: {}", delta);
+                            }
+                            adk_realtime::ServerEvent::ResponseDone { .. } => {
+                                info!("✅ Response complete. Test passed.");
+                                break;
+                            }
+                            adk_realtime::ServerEvent::Error { error, .. } => {
+                                error!("❌ Server Error: {:?}", error);
+                            }
+                            _ => {}
+                        }
+                    },
+                    Some(Err(e)) => error!("Stream Error: {:?}", e),
+                    None => {
+                        info!("Server closed the connection.");
+                        break;
+                    }
+                }
+            }
+        }
     }
 
     session.close().await?;

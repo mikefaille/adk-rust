@@ -619,7 +619,7 @@ impl Agent for RealtimeAgent {
                                     role: "model".to_string(),
                                     parts: vec![Part::InlineData {
                                         mime_type: "audio/pcm".to_string(),
-                                        data: delta,
+                                        data: delta.to_vec(),
                                     }],
                                 });
                                 yield Ok(audio_event);
