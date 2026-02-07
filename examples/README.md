@@ -14,6 +14,7 @@ examples/
 ├── roadmap_gemini_sdk/      # adk-gemini v1 + Vertex SDK surface
 ├── roadmap_retry_matrix/    # Standardized retry across providers
 ├── ui_protocol_profiles/    # Tri-protocol UI outputs (A2UI/AG-UI/MCP Apps)
+├── 3d_ui_ops_center/        # Agentic Three.js UI runtime (SSE + ops)
 ├── skills_llm_minimal/      # Basic LlmAgent + local skills
 ├── skills_auto_discovery/   # Auto-discover .skills with default policy
 ├── skills_conventions_index/# Discover AGENTS/CLAUDE/GEMINI/COPILOT/SKILLS files
@@ -157,6 +158,13 @@ Runs all 13 `adk-ui` render tools across all 3 UI protocols and prints output-sh
 ```bash
 cargo run --example ui_protocol_profiles
 ```
+
+### 3d_ui_ops_center
+Runs the `adk-3d-ui` DevOps vertical-slice demo server with embedded Three.js client.
+```bash
+cargo run --example 3d_ui_ops_center
+```
+Then open `http://127.0.0.1:8099` and run prompts from the left panel.
 
 ## Skills Feature Examples
 

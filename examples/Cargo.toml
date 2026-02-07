@@ -448,6 +448,10 @@ name = "ui_working_facilities"
 path = "ui_working/facilities/main.rs"
 
 [[example]]
+name = "3d_ui_ops_center"
+path = "3d_ui_ops_center/main.rs"
+
+[[example]]
 name = "streaming_demo"
 path = "streaming_demo/main.rs"
 
@@ -619,6 +623,7 @@ adk-realtime.workspace = true
 adk-graph.workspace = true
 adk-eval.workspace = true
 adk-ui.workspace = true
+adk-3d-ui.workspace = true
 adk-auth.workspace = true
 adk-browser = { workspace = true, optional = true }
 adk-guardrail = { workspace = true, optional = true }
