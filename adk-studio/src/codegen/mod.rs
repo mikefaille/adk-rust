@@ -2649,44 +2649,45 @@ fn generate_action_node_function(
                         match config.db_type {
                             crate::codegen::action_node_types::DatabaseType::Sqlite => {
                                 code.push_str("        let pool = sqlx::SqlitePool::connect(&conn_str).await\n");
-                                code.push_str("            .map_err(|e| adk_graph::node::NodeError::Other(format!(\"SQLite connection failed: {}\", e)))?;\n");
+                                code.push_str("            .map_err(|e| adk_graph::GraphError::NodeExecutionFailed { node: \"db\".into(), message: format!(\"SQLite connection failed: {}\", e) })?;\n");
                             }
                             crate::codegen::action_node_types::DatabaseType::Mysql => {
                                 code.push_str("        let pool = sqlx::MySqlPool::connect(&conn_str).await\n");
-                                code.push_str("            .map_err(|e| adk_graph::node::NodeError::Other(format!(\"MySQL connection failed: {}\", e)))?;\n");
+                                code.push_str("            .map_err(|e| adk_graph::GraphError::NodeExecutionFailed { node: \"db\".into(), message: format!(\"MySQL connection failed: {}\", e) })?;\n");
                             }
                             _ => {
                                 // PostgreSQL (default)
                                 code.push_str("        let pool = sqlx::PgPool::connect(&conn_str).await\n");
-                                code.push_str("            .map_err(|e| adk_graph::node::NodeError::Other(format!(\"PostgreSQL connection failed: {}\", e)))?;\n");
+                                code.push_str("            .map_err(|e| adk_graph::GraphError::NodeExecutionFailed { node: \"db\".into(), message: format!(\"PostgreSQL connection failed: {}\", e) })?;\n");
                             }
                         }
 
                         match sql.operation.as_str() {
                             "query" => {
                                 // SELECT — returns rows as JSON array
-                                code.push_str("        let rows: Vec<serde_json::Value> = sqlx::query(&query_str)\n");
+                                // Use database-specific row type for proper type inference
+                                code.push_str("        use sqlx::Row;\n");
+                                code.push_str("        use sqlx::Column;\n");
+                                code.push_str("        let raw_rows = sqlx::query(&query_str)\n");
                                 code.push_str("            .fetch_all(&pool).await\n");
-                                code.push_str("            .map_err(|e| adk_graph::node::NodeError::Other(format!(\"Query failed: {}\", e)))?\n");
-                                code.push_str("            .iter()\n");
-                                code.push_str("            .map(|row| {\n");
-                                code.push_str("                use sqlx::Row;\n");
-                                code.push_str("                let mut obj = serde_json::Map::new();\n");
-                                code.push_str("                for col in row.columns() {\n");
-                                code.push_str("                    let name = col.name().to_string();\n");
-                                code.push_str("                    let val: serde_json::Value = row.try_get::<String, _>(col.name())\n");
-                                code.push_str("                        .map(|s| json!(s))\n");
-                                code.push_str("                        .or_else(|_| row.try_get::<i64, _>(col.name()).map(|n| json!(n)))\n");
-                                code.push_str("                        .or_else(|_| row.try_get::<f64, _>(col.name()).map(|n| json!(n)))\n");
-                                code.push_str("                        .or_else(|_| row.try_get::<bool, _>(col.name()).map(|b| json!(b)))\n");
-                                code.push_str("                        .unwrap_or(json!(null));\n");
-                                code.push_str("                    obj.insert(name, val);\n");
-                                code.push_str("                }\n");
-                                code.push_str("                serde_json::Value::Object(obj)\n");
-                                code.push_str("            })\n");
-                                code.push_str("            .collect();\n");
+                                code.push_str("            .map_err(|e| adk_graph::GraphError::NodeExecutionFailed { node: \"db\".into(), message: format!(\"Query failed: {}\", e) })?;\n");
+                                code.push_str("        let rows: Vec<serde_json::Value> = raw_rows.iter().map(|row| {\n");
+                                code.push_str("            let mut obj = serde_json::Map::new();\n");
+                                code.push_str("            for col in row.columns() {\n");
+                                code.push_str("                let name = col.name().to_string();\n");
+                                code.push_str("                let val: serde_json::Value = row.try_get::<String, _>(col.name())\n");
+                                code.push_str("                    .map(|s| json!(s))\n");
+                                code.push_str("                    .or_else(|_| row.try_get::<i64, _>(col.name()).map(|n| json!(n)))\n");
+                                code.push_str("                    .or_else(|_| row.try_get::<f64, _>(col.name()).map(|n| json!(n)))\n");
+                                code.push_str("                    .or_else(|_| row.try_get::<bool, _>(col.name()).map(|b| json!(b)))\n");
+                                code.push_str("                    .unwrap_or(json!(null));\n");
+                                code.push_str("                obj.insert(name, val);\n");
+                                code.push_str("            }\n");
+                                code.push_str("            serde_json::Value::Object(obj)\n");
+                                code.push_str("        }).collect();\n");
+                                code.push_str("        let row_count = rows.len();\n");
                                 code.push_str(&format!(
-                                    "        Ok(NodeOutput::new().with_update(\"{}\", json!({{ \"rows\": rows, \"count\": rows.len() }})))\n",
+                                    "        Ok(NodeOutput::new().with_update(\"{}\", json!({{ \"rows\": rows, \"count\": row_count }})))\n",
                                     output_key
                                 ));
                             }
@@ -2694,7 +2695,7 @@ fn generate_action_node_function(
                                 // INSERT, UPDATE, DELETE, UPSERT — returns affected rows
                                 code.push_str("        let result = sqlx::query(&query_str)\n");
                                 code.push_str("            .execute(&pool).await\n");
-                                code.push_str("            .map_err(|e| adk_graph::node::NodeError::Other(format!(\"Query failed: {}\", e)))?;\n");
+                                code.push_str("            .map_err(|e| adk_graph::GraphError::NodeExecutionFailed { node: \"db\".into(), message: format!(\"Query failed: {}\", e) })?;\n");
                                 code.push_str(&format!(
                                     "        Ok(NodeOutput::new().with_update(\"{}\", json!({{ \"affected\": result.rows_affected(), \"operation\": \"{}\" }})))\n",
                                     output_key, sql.operation
@@ -2711,7 +2712,7 @@ fn generate_action_node_function(
                 crate::codegen::action_node_types::DatabaseType::Mongodb => {
                     if let Some(mongo) = &config.mongodb {
                         code.push_str("        let client = mongodb::Client::with_uri_str(&conn_str).await\n");
-                        code.push_str("            .map_err(|e| adk_graph::node::NodeError::Other(format!(\"MongoDB connection failed: {}\", e)))?;\n");
+                        code.push_str("            .map_err(|e| adk_graph::GraphError::NodeExecutionFailed { node: \"db\".into(), message: format!(\"MongoDB connection failed: {}\", e) })?;\n");
                         // Extract database name from connection string
                         code.push_str("        let db_name = conn_str.rsplit('/').next()\n");
                         code.push_str("            .and_then(|s| s.split('?').next())\n");
@@ -2736,10 +2737,10 @@ fn generate_action_node_function(
                                 code.push_str("        let filter_doc = mongodb::bson::to_document(&filter_json).unwrap_or_default();\n");
                                 code.push_str("        use futures::TryStreamExt;\n");
                                 code.push_str("        let mut cursor = collection.find(filter_doc).await\n");
-                                code.push_str("            .map_err(|e| adk_graph::node::NodeError::Other(format!(\"MongoDB find failed: {}\", e)))?;\n");
+                                code.push_str("            .map_err(|e| adk_graph::GraphError::NodeExecutionFailed { node: \"db\".into(), message: format!(\"MongoDB find failed: {}\", e) })?;\n");
                                 code.push_str("        let mut docs: Vec<serde_json::Value> = Vec::new();\n");
                                 code.push_str("        while let Some(doc) = cursor.try_next().await\n");
-                                code.push_str("            .map_err(|e| adk_graph::node::NodeError::Other(format!(\"Cursor error: {}\", e)))? {\n");
+                                code.push_str("            .map_err(|e| adk_graph::GraphError::NodeExecutionFailed { node: \"db\".into(), message: format!(\"Cursor error: {}\", e) })? {\n");
                                 code.push_str("            if let Ok(json) = mongodb::bson::from_document::<serde_json::Value>(doc) {\n");
                                 code.push_str("                docs.push(json);\n");
                                 code.push_str("            }\n");
@@ -2756,7 +2757,7 @@ fn generate_action_node_function(
                                 ));
                                 code.push_str("        let filter_doc = mongodb::bson::to_document(&filter_json).unwrap_or_default();\n");
                                 code.push_str("        let result = collection.find_one(filter_doc).await\n");
-                                code.push_str("            .map_err(|e| adk_graph::node::NodeError::Other(format!(\"MongoDB findOne failed: {}\", e)))?;\n");
+                                code.push_str("            .map_err(|e| adk_graph::GraphError::NodeExecutionFailed { node: \"db\".into(), message: format!(\"MongoDB findOne failed: {}\", e) })?;\n");
                                 code.push_str("        let doc_json = result.map(|d| mongodb::bson::from_document::<serde_json::Value>(d).unwrap_or(json!(null))).unwrap_or(json!(null));\n");
                                 code.push_str(&format!(
                                     "        Ok(NodeOutput::new().with_update(\"{}\", json!({{ \"doc\": doc_json }})))\n",
@@ -2773,7 +2774,7 @@ fn generate_action_node_function(
                                 ));
                                 code.push_str("        let doc = mongodb::bson::to_document(&doc_json).unwrap_or_default();\n");
                                 code.push_str("        let result = collection.insert_one(doc).await\n");
-                                code.push_str("            .map_err(|e| adk_graph::node::NodeError::Other(format!(\"MongoDB insert failed: {}\", e)))?;\n");
+                                code.push_str("            .map_err(|e| adk_graph::GraphError::NodeExecutionFailed { node: \"db\".into(), message: format!(\"MongoDB insert failed: {}\", e) })?;\n");
                                 code.push_str(&format!(
                                     "        Ok(NodeOutput::new().with_update(\"{}\", json!({{ \"inserted_id\": result.inserted_id.to_string() }})))\n",
                                     output_key
@@ -2794,7 +2795,7 @@ fn generate_action_node_function(
                                 ));
                                 code.push_str("        let update_doc = mongodb::bson::to_document(&update_json).unwrap_or_default();\n");
                                 code.push_str("        let result = collection.update_many(filter_doc, update_doc).await\n");
-                                code.push_str("            .map_err(|e| adk_graph::node::NodeError::Other(format!(\"MongoDB update failed: {}\", e)))?;\n");
+                                code.push_str("            .map_err(|e| adk_graph::GraphError::NodeExecutionFailed { node: \"db\".into(), message: format!(\"MongoDB update failed: {}\", e) })?;\n");
                                 code.push_str(&format!(
                                     "        Ok(NodeOutput::new().with_update(\"{}\", json!({{ \"matched\": result.matched_count, \"modified\": result.modified_count }})))\n",
                                     output_key
@@ -2807,7 +2808,7 @@ fn generate_action_node_function(
                                 ));
                                 code.push_str("        let filter_doc = mongodb::bson::to_document(&filter_json).unwrap_or_default();\n");
                                 code.push_str("        let result = collection.delete_many(filter_doc).await\n");
-                                code.push_str("            .map_err(|e| adk_graph::node::NodeError::Other(format!(\"MongoDB delete failed: {}\", e)))?;\n");
+                                code.push_str("            .map_err(|e| adk_graph::GraphError::NodeExecutionFailed { node: \"db\".into(), message: format!(\"MongoDB delete failed: {}\", e) })?;\n");
                                 code.push_str(&format!(
                                     "        Ok(NodeOutput::new().with_update(\"{}\", json!({{ \"deleted\": result.deleted_count }})))\n",
                                     output_key
@@ -2830,9 +2831,9 @@ fn generate_action_node_function(
                 crate::codegen::action_node_types::DatabaseType::Redis => {
                     if let Some(redis_cfg) = &config.redis {
                         code.push_str("        let client = redis::Client::open(conn_str.as_str())\n");
-                        code.push_str("            .map_err(|e| adk_graph::node::NodeError::Other(format!(\"Redis connection failed: {}\", e)))?;\n");
+                        code.push_str("            .map_err(|e| adk_graph::GraphError::NodeExecutionFailed { node: \"db\".into(), message: format!(\"Redis connection failed: {}\", e) })?;\n");
                         code.push_str("        let mut con = client.get_multiplexed_async_connection().await\n");
-                        code.push_str("            .map_err(|e| adk_graph::node::NodeError::Other(format!(\"Redis connect failed: {}\", e)))?;\n");
+                        code.push_str("            .map_err(|e| adk_graph::GraphError::NodeExecutionFailed { node: \"db\".into(), message: format!(\"Redis connect failed: {}\", e) })?;\n");
 
                         // Key with variable interpolation
                         let key = &redis_cfg.key;
@@ -2859,7 +2860,7 @@ fn generate_action_node_function(
                         match redis_cfg.operation.as_str() {
                             "get" => {
                                 code.push_str("        let val: Option<String> = con.get(&redis_key).await\n");
-                                code.push_str("            .map_err(|e| adk_graph::node::NodeError::Other(format!(\"Redis GET failed: {}\", e)))?;\n");
+                                code.push_str("            .map_err(|e| adk_graph::GraphError::NodeExecutionFailed { node: \"db\".into(), message: format!(\"Redis GET failed: {}\", e) })?;\n");
                                 code.push_str(&format!(
                                     "        Ok(NodeOutput::new().with_update(\"{}\", json!({{ \"value\": val }})))\n",
                                     output_key
@@ -2884,7 +2885,7 @@ fn generate_action_node_function(
                                 } else {
                                     code.push_str("        let _: () = con.set(&redis_key, val).await\n");
                                 }
-                                code.push_str("            .map_err(|e| adk_graph::node::NodeError::Other(format!(\"Redis SET failed: {}\", e)))?;\n");
+                                code.push_str("            .map_err(|e| adk_graph::GraphError::NodeExecutionFailed { node: \"db\".into(), message: format!(\"Redis SET failed: {}\", e) })?;\n");
                                 code.push_str(&format!(
                                     "        Ok(NodeOutput::new().with_update(\"{}\", json!({{ \"set\": true, \"key\": redis_key }})))\n",
                                     output_key
@@ -2892,7 +2893,7 @@ fn generate_action_node_function(
                             }
                             "del" => {
                                 code.push_str("        let deleted: i64 = con.del(&redis_key).await\n");
-                                code.push_str("            .map_err(|e| adk_graph::node::NodeError::Other(format!(\"Redis DEL failed: {}\", e)))?;\n");
+                                code.push_str("            .map_err(|e| adk_graph::GraphError::NodeExecutionFailed { node: \"db\".into(), message: format!(\"Redis DEL failed: {}\", e) })?;\n");
                                 code.push_str(&format!(
                                     "        Ok(NodeOutput::new().with_update(\"{}\", json!({{ \"deleted\": deleted }})))\n",
                                     output_key
@@ -2907,7 +2908,7 @@ fn generate_action_node_function(
                                     "        let val: Option<String> = con.hget(&redis_key, \"{}\").await\n",
                                     field.replace('"', "\\\"")
                                 ));
-                                code.push_str("            .map_err(|e| adk_graph::node::NodeError::Other(format!(\"Redis HGET failed: {}\", e)))?;\n");
+                                code.push_str("            .map_err(|e| adk_graph::GraphError::NodeExecutionFailed { node: \"db\".into(), message: format!(\"Redis HGET failed: {}\", e) })?;\n");
                                 code.push_str(&format!(
                                     "        Ok(NodeOutput::new().with_update(\"{}\", json!({{ \"value\": val }})))\n",
                                     output_key
@@ -2925,7 +2926,7 @@ fn generate_action_node_function(
                                 code.push_str("            for (field, val) in obj {\n");
                                 code.push_str("                let val_str = val.as_str().map(|s| s.to_string()).unwrap_or_else(|| val.to_string());\n");
                                 code.push_str("                let _: () = con.hset(&redis_key, field, &val_str).await\n");
-                                code.push_str("                    .map_err(|e| adk_graph::node::NodeError::Other(format!(\"Redis HSET failed: {}\", e)))?;\n");
+                                code.push_str("                    .map_err(|e| adk_graph::GraphError::NodeExecutionFailed { node: \"db\".into(), message: format!(\"Redis HSET failed: {}\", e) })?;\n");
                                 code.push_str("            }\n");
                                 code.push_str("        }\n");
                                 code.push_str(&format!(
@@ -2944,7 +2945,7 @@ fn generate_action_node_function(
                                     "        let len: i64 = con.lpush(&redis_key, \"{}\").await\n",
                                     val_str.replace('"', "\\\"")
                                 ));
-                                code.push_str("            .map_err(|e| adk_graph::node::NodeError::Other(format!(\"Redis LPUSH failed: {}\", e)))?;\n");
+                                code.push_str("            .map_err(|e| adk_graph::GraphError::NodeExecutionFailed { node: \"db\".into(), message: format!(\"Redis LPUSH failed: {}\", e) })?;\n");
                                 code.push_str(&format!(
                                     "        Ok(NodeOutput::new().with_update(\"{}\", json!({{ \"length\": len }})))\n",
                                     output_key
@@ -2952,7 +2953,7 @@ fn generate_action_node_function(
                             }
                             "rpop" => {
                                 code.push_str("        let val: Option<String> = con.rpop(&redis_key, None).await\n");
-                                code.push_str("            .map_err(|e| adk_graph::node::NodeError::Other(format!(\"Redis RPOP failed: {}\", e)))?;\n");
+                                code.push_str("            .map_err(|e| adk_graph::GraphError::NodeExecutionFailed { node: \"db\".into(), message: format!(\"Redis RPOP failed: {}\", e) })?;\n");
                                 code.push_str(&format!(
                                     "        Ok(NodeOutput::new().with_update(\"{}\", json!({{ \"value\": val }})))\n",
                                     output_key
