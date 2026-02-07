@@ -7,6 +7,7 @@
 //! This crate provides session and state management:
 //!
 //! - [`InMemorySessionService`] - Simple in-memory session storage
+//! - `VertexAiSessionService` - Vertex AI Session API backend (`vertex-session` feature)
 //! - [`Session`] - Conversation session with state and events
 //! - [`State`] - Key-value state with typed prefixes
 //! - [`SessionService`] - Trait for custom session backends
@@ -40,6 +41,8 @@ pub mod state;
 
 #[cfg(feature = "database")]
 pub mod database;
+#[cfg(feature = "vertex-session")]
+pub mod vertex;
 
 pub use event::{Event, EventActions, Events};
 pub use inmemory::InMemorySessionService;
@@ -49,3 +52,5 @@ pub use state::{ReadonlyState, State};
 
 #[cfg(feature = "database")]
 pub use database::DatabaseSessionService;
+#[cfg(feature = "vertex-session")]
+pub use vertex::{VertexAiSessionConfig, VertexAiSessionService};
