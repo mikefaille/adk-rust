@@ -444,7 +444,7 @@ fn generate_main_rs(project: &ProjectSchema) -> String {
                     code.push_str(&generate_router_node(agent_id, agent));
                 }
                 AgentType::Llm => {
-                    code.push_str(&generate_llm_node_v2(agent_id, agent, project, predecessor));
+                    code.push_str(&generate_llm_node_v2(agent_id, agent, project, predecessor, &predecessor_map));
                 }
                 _ => {
                     // Sequential/Loop/Parallel - generate as single node wrapping container
@@ -718,6 +718,7 @@ fn generate_llm_node_v2(
     agent: &AgentSchema,
     project: &ProjectSchema,
     predecessor: Option<&str>,
+    predecessor_map: &std::collections::HashMap<&str, &str>,
 ) -> String {
     let mut code = String::new();
     let model = agent.model.as_deref().unwrap_or("gemini-2.0-flash");
@@ -856,7 +857,12 @@ fn generate_llm_node_v2(
         code.push_str("                .or_else(|| state.get(\"message\").and_then(|v| v.as_str())).unwrap_or(\"\");\n");
     }
 
-    // Check if instruction references state variables
+    // Collect state variables to inject into the agent's input:
+    // 1. Variables from {{var}} references in the instruction
+    // 2. Variables from predecessor Set/Transform action nodes
+    let mut inject_vars: Vec<String> = Vec::new();
+    
+    // Check if instruction references state variables via {{var}} syntax
     let var_refs: Vec<&str> = agent.instruction
         .match_indices("{{")
         .filter_map(|(start, _)| {
@@ -864,18 +870,54 @@ fn generate_llm_node_v2(
             rest.find("}}").map(|end| &rest[..end])
         })
         .collect();
+    for var in &var_refs {
+        if *var != "message" && *var != "response" && !inject_vars.contains(&var.to_string()) {
+            inject_vars.push(var.to_string());
+        }
+    }
     
-    if !var_refs.is_empty() {
-        code.push_str("            // Include state variables referenced in instruction\n");
-        code.push_str("            let mut full_msg = msg.to_string();\n");
-        for var in &var_refs {
-            if *var == "message" || *var == "response" {
-                continue;
+    // Check if any predecessor in the chain is a Set or Transform action node
+    // Walk backwards through the predecessor chain to find all Set nodes that feed into this agent
+    {
+        use crate::codegen::action_nodes::ActionNodeConfig;
+        let mut current = predecessor;
+        while let Some(pred_id) = current {
+            if pred_id == "START" { break; }
+            if let Some(action_node) = project.action_nodes.get(pred_id) {
+                match action_node {
+                    ActionNodeConfig::Set(set_config) => {
+                        for var in &set_config.variables {
+                            if !inject_vars.contains(&var.key) {
+                                inject_vars.push(var.key.clone());
+                            }
+                        }
+                    }
+                    ActionNodeConfig::Transform(transform_config) => {
+                        let out_key = &transform_config.standard.mapping.output_key;
+                        if !inject_vars.contains(out_key) {
+                            inject_vars.push(out_key.clone());
+                        }
+                    }
+                    _ => {}
+                }
             }
+            // Walk to the next predecessor
+            current = predecessor_map.get(pred_id).copied();
+        }
+    }
+    
+    if !inject_vars.is_empty() {
+        code.push_str("            // Include state variables from Set nodes and instruction references\n");
+        code.push_str("            let mut full_msg = msg.to_string();\n");
+        code.push_str("            let mut context_parts: Vec<String> = Vec::new();\n");
+        for var in &inject_vars {
             code.push_str(&format!("            if let Some(v) = state.get(\"{}\") {{\n", var));
-            code.push_str(&format!("                full_msg = format!(\"{{}}\\n\\n{}: {{}}\", full_msg, v.as_str().unwrap_or(&v.to_string()));\n", var));
+            code.push_str(&format!("                context_parts.push(format!(\"{}: {{}}\", v.as_str().unwrap_or(&v.to_string())));\n", var));
             code.push_str("            }\n");
         }
+        code.push_str("            if !context_parts.is_empty() {\n");
+        code.push_str("                full_msg = format!(\"{}\\n\\nContext:\\n{}\", full_msg, context_parts.join(\"\\n\"));\n");
+        code.push_str("            }\n");
         code.push_str("            adk_core::Content::new(\"user\").with_text(full_msg)\n");
     } else {
         code.push_str("            adk_core::Content::new(\"user\").with_text(msg.to_string())\n");
