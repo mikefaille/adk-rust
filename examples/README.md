@@ -13,6 +13,13 @@ examples/
 ├── roadmap_vertex_auth/     # Vertex auth modes (API key / ADC / SA / WIF)
 ├── roadmap_gemini_sdk/      # adk-gemini v1 + Vertex SDK surface
 ├── roadmap_retry_matrix/    # Standardized retry across providers
+├── skills_llm_minimal/      # Basic LlmAgent + local skills
+├── skills_auto_discovery/   # Auto-discover .skills with default policy
+├── skills_conventions_index/# Discover AGENTS/CLAUDE/GEMINI/COPILOT/SKILLS files
+├── skills_conventions_llm/  # Live Gemini + convention-file injection
+├── skills_policy_filters/   # Tag include/exclude + skill budget
+├── skills_runner_injector/  # Runner-level skill injection
+├── skills_workflow_minimal/ # Workflow agent + skills
 ├── function_tool/           # Custom function tool
 ├── multiple_tools/          # Agent composition
 ├── server/                  # REST API server
@@ -143,6 +150,57 @@ cargo run --example roadmap_retry_matrix
 cargo run --example roadmap_retry_matrix --features openai,anthropic,deepseek,groq
 ```
 Optional live call selector: `ROADMAP_RUN_PROVIDER=gemini|openai|anthropic|deepseek|groq`
+
+## Skills Feature Examples
+
+These examples were added to cover AgentSkills integration paths:
+
+### skills_llm_minimal
+Basic `LlmAgentBuilder::with_skills_from_root(...)` usage.
+```bash
+cargo run --example skills_llm_minimal
+```
+
+### skills_auto_discovery
+Demonstrates `LlmAgentBuilder::with_auto_skills()` loading `.skills/` from project root.
+```bash
+cargo run --example skills_auto_discovery
+```
+
+### skills_conventions_index
+Demonstrates convention-file discovery and matching for:
+- `AGENTS.md`
+- `CLAUDE.md`
+- `GEMINI.md`
+- `COPILOT.md`
+- `SKILLS.md`
+```bash
+cargo run --example skills_conventions_index
+```
+
+### skills_conventions_llm
+Demonstrates live Gemini generation using convention-file-loaded skills with tag filtering (for example `gemini-md`).
+```bash
+cargo run --example skills_conventions_llm
+```
+
+### skills_policy_filters
+Demonstrates explicit index loading + tag-based `SelectionPolicy` and injection budget.
+```bash
+cargo run --example skills_policy_filters
+```
+
+### skills_runner_injector
+Demonstrates runner-level injection via `Runner::with_auto_skills(...)`.
+```bash
+cargo run --example skills_runner_injector
+```
+
+### skills_workflow_minimal
+Demonstrates workflow-agent skills support (sequential agent).
+```bash
+cargo run --example skills_workflow_minimal
+```
 
 ## Available Examples
 
@@ -500,6 +558,7 @@ Demonstrates: Custom rubrics, weighted criteria.
 | **Workflows** | 4 | sequential, sequential_code, parallel, loop_workflow |
 | **Tools** | 2 | load_artifacts, mcp |
 | **Roadmap** | 4 | roadmap_gemini_compat, roadmap_vertex_auth, roadmap_gemini_sdk, roadmap_retry_matrix |
+| **Skills** | 7 | skills_llm_minimal, skills_auto_discovery, skills_conventions_index, skills_conventions_llm, skills_policy_filters, skills_runner_injector, skills_workflow_minimal |
 | **Full-Stack** | 1 | research_paper |
 | **OpenAI** | 4+ | openai_basic, openai_tools, openai_multimodal, etc. |
 | **Anthropic** | 2 | anthropic_basic, anthropic_tools |
@@ -509,7 +568,7 @@ Demonstrates: Custom rubrics, weighted criteria.
 | **Graph** | 9 | graph_workflow, graph_react, graph_supervisor, etc. |
 | **Browser** | 5 | browser_basic, browser_agent, browser_interactive, etc. |
 | **Evaluation** | 11 | eval_basic, eval_trajectory, eval_semantic, etc. |
-| **Total** | **59+** | |
+| **Total** | **64+** | |
 
 ## Parity with Go ADK
 

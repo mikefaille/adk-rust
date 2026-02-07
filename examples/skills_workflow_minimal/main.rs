@@ -1,13 +1,19 @@
-//! Minimal AgentSkills example for workflow agents.
+//! Minimal AgentSkills example for workflow agents using real Gemini models.
 //!
 //! Run:
 //!   cargo run --manifest-path examples/Cargo.toml --example skills_workflow_minimal
+//!
+//! Required env:
+//!   GOOGLE_API_KEY (or GEMINI_API_KEY)
 
-use adk_agent::{CustomAgentBuilder, SequentialAgent};
-use adk_core::{Content, Event, Part, Result};
+use adk_agent::{LlmAgentBuilder, SequentialAgent};
+use adk_core::{Content, Part};
+use adk_model::gemini::GeminiModel;
 use adk_runner::{Runner, RunnerConfig};
-use adk_session::InMemorySessionService;
+use adk_session::{CreateRequest, InMemorySessionService, SessionService};
+use anyhow::Result;
 use futures::StreamExt;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 fn setup_demo_skills_root() -> Result<std::path::PathBuf> {
@@ -23,33 +29,48 @@ fn setup_demo_skills_root() -> Result<std::path::PathBuf> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    dotenvy::dotenv().ok();
+
+    let api_key = std::env::var("GOOGLE_API_KEY")
+        .or_else(|_| std::env::var("GEMINI_API_KEY"))
+        .expect("GOOGLE_API_KEY or GEMINI_API_KEY must be set");
+
+    let model = Arc::new(GeminiModel::new(&api_key, "gemini-2.5-flash")?);
     let skills_root = setup_demo_skills_root()?;
 
-    let echo = CustomAgentBuilder::new("echo")
-        .description("Echoes current user content")
-        .handler(|ctx| async move {
-            let text = ctx
-                .user_content()
-                .parts
-                .iter()
-                .find_map(|p| p.text())
-                .unwrap_or_default()
-                .to_string();
-
-            let mut event = Event::new(ctx.invocation_id());
-            event.author = "echo".to_string();
-            event.llm_response.content = Some(Content::new("assistant").with_text(text));
-            Ok(Box::pin(futures::stream::iter(vec![Ok(event)])) as adk_core::EventStream)
-        })
+    let planner = LlmAgentBuilder::new("planner")
+        .description("Plans the search strategy")
+        .instruction("Given the request, produce a short 2-step search plan.")
+        .model(model.clone())
         .build()?;
 
-    let workflow = SequentialAgent::new("workflow", vec![Arc::new(echo)])
-        .with_skills_from_root(&skills_root)?;
+    let executor = LlmAgentBuilder::new("executor")
+        .description("Executes the planned search")
+        .instruction("Provide concrete ripgrep commands to execute the plan.")
+        .model(model)
+        .build()?;
+
+    let workflow =
+        SequentialAgent::new("search_workflow", vec![Arc::new(planner), Arc::new(executor)])
+            .with_skills_from_root(&skills_root)?;
+
+    let app_name = "skills_workflow_minimal".to_string();
+    let user_id = "user".to_string();
+    let session_service = Arc::new(InMemorySessionService::new());
+    let session = session_service
+        .create(CreateRequest {
+            app_name: app_name.clone(),
+            user_id: user_id.clone(),
+            session_id: None,
+            state: HashMap::new(),
+        })
+        .await?;
+    let session_id = session.id().to_string();
 
     let runner = Runner::new(RunnerConfig {
-        app_name: "skills_workflow_minimal".to_string(),
+        app_name,
         agent: Arc::new(workflow),
-        session_service: Arc::new(InMemorySessionService::new()),
+        session_service,
         artifact_service: None,
         memory_service: None,
         plugin_manager: None,
@@ -58,8 +79,8 @@ async fn main() -> Result<()> {
 
     let mut stream = runner
         .run(
-            "user".to_string(),
-            "session".to_string(),
+            user_id,
+            session_id,
             Content::new("user").with_text("Please search this repository for TODO markers."),
         )
         .await?;

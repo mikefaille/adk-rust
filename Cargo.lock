@@ -212,6 +212,7 @@ dependencies = [
  "adk-runner",
  "adk-server",
  "adk-session",
+ "adk-skill",
  "adk-tool",
  "adk-ui",
  "anyhow",

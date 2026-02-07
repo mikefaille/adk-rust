@@ -1,7 +1,7 @@
-use crate::discovery::discover_skill_files;
+use crate::discovery::discover_instruction_files;
 use crate::error::SkillResult;
 use crate::model::{SkillDocument, SkillIndex};
-use crate::parser::parse_skill_markdown;
+use crate::parser::parse_instruction_markdown;
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::Path;
@@ -9,9 +9,9 @@ use std::time::UNIX_EPOCH;
 
 pub fn load_skill_index(root: impl AsRef<Path>) -> SkillResult<SkillIndex> {
     let mut skills = Vec::new();
-    for path in discover_skill_files(root)? {
+    for path in discover_instruction_files(root)? {
         let content = fs::read_to_string(&path)?;
-        let parsed = parse_skill_markdown(&path, &content)?;
+        let parsed = parse_instruction_markdown(&path, &content)?;
 
         let mut hasher = Sha256::new();
         hasher.update(content.as_bytes());
@@ -79,5 +79,20 @@ mod tests {
         assert_eq!(skill.name, "search");
         assert!(!skill.hash.is_empty());
         assert!(skill.last_modified.is_some());
+    }
+
+    #[test]
+    fn loads_agents_md_as_skill_document() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        fs::write(root.join("AGENTS.md"), "# Repo Instructions\nUse cargo test before commit.\n")
+            .unwrap();
+
+        let index = load_skill_index(root).unwrap();
+        assert_eq!(index.len(), 1);
+        let skill = &index.skills()[0];
+        assert_eq!(skill.name, "agents");
+        assert!(skill.tags.iter().any(|t| t == "agents-md"));
+        assert!(skill.body.contains("Use cargo test before commit."));
     }
 }

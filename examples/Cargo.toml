@@ -41,6 +41,26 @@ name = "skills_llm_minimal"
 path = "skills_llm_minimal/main.rs"
 
 [[example]]
+name = "skills_auto_discovery"
+path = "skills_auto_discovery/main.rs"
+
+[[example]]
+name = "skills_conventions_index"
+path = "skills_conventions_index/main.rs"
+
+[[example]]
+name = "skills_conventions_llm"
+path = "skills_conventions_llm/main.rs"
+
+[[example]]
+name = "skills_policy_filters"
+path = "skills_policy_filters/main.rs"
+
+[[example]]
+name = "skills_runner_injector"
+path = "skills_runner_injector/main.rs"
+
+[[example]]
 name = "skills_workflow_minimal"
 path = "skills_workflow_minimal/main.rs"
 
@@ -590,6 +610,7 @@ adk-runner.workspace = true
 adk-session.workspace = true
 adk-server.workspace = true
 adk-memory.workspace = true
+adk-skill.workspace = true
 adk-realtime.workspace = true
 adk-graph.workspace = true
 adk-eval.workspace = true
