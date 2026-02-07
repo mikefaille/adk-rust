@@ -158,18 +158,27 @@ impl ExecutionContext {
     }
 
     /// Process a StreamEvent from TRACE output and extract state updates.
-    /// Returns (node_end_event, should_emit_done) if applicable.
-    fn process_stream_event(&mut self, trace_json: &str) -> (Option<String>, bool) {
+    /// Returns (enriched_event, should_emit_done, suppress_raw_passthrough).
+    fn process_stream_event(&mut self, trace_json: &str) -> (Option<String>, bool, bool) {
         let Ok(event) = serde_json::from_str::<serde_json::Value>(trace_json) else {
-            return (None, false);
+            return (None, false, false);
         };
         
         let event_type = event.get("type").and_then(|v| v.as_str()).unwrap_or("");
         
         match event_type {
             "node_start" => {
-                // NodeStart from adk-graph - we already handle this via stderr
-                (None, false)
+                // NodeStart from adk-graph — track action nodes that aren't
+                // already tracked via stderr ("Starting agent execution").
+                // This ensures set_node, transform_node, etc. appear in the
+                // timeline with proper state snapshots.
+                let node = event.get("node").and_then(|v| v.as_str()).unwrap_or("");
+                if !node.is_empty() && !self.pending_agents.iter().any(|p| p.name == node) {
+                    let trace_data = self.node_start(node);
+                    // suppress_raw=true: we emit our enriched version instead
+                    return (Some(trace_data), false, true);
+                }
+                (None, false, false)
             }
             "node_end" => {
                 // NodeEnd from adk-graph doesn't include state, just duration
@@ -180,11 +189,12 @@ impl ExecutionContext {
                     // Check if this node is still pending (hasn't been emitted via message event)
                     if self.pending_agents.iter().any(|p| p.name == node) {
                         if let Some(event_json) = self.node_end_fallback(node) {
-                            return (Some(event_json), false);
+                            // suppress_raw=true: our enriched version has state_snapshot
+                            return (Some(event_json), false, true);
                         }
                     }
                 }
-                (None, false)
+                (None, false, false)
             }
             "message" => {
                 // Message event contains agent output text
@@ -209,11 +219,11 @@ impl ExecutionContext {
                         // Emit node_end immediately for this agent since we have the final output
                         // This provides more granular timeline updates
                         if let Some(event_json) = self.node_end_with_state(node, agent_response) {
-                            return (Some(event_json), false);
+                            return (Some(event_json), false, false);
                         }
                     }
                 }
-                (None, false)
+                (None, false, false)
             }
             "state" => {
                 // State snapshot - update current state
@@ -224,7 +234,7 @@ impl ExecutionContext {
                         }
                     }
                 }
-                (None, false)
+                (None, false, false)
             }
             "updates" => {
                 // State updates from a node
@@ -239,7 +249,7 @@ impl ExecutionContext {
                         }
                     }
                 }
-                (None, false)
+                (None, false, false)
             }
             "done" => {
                 // Done event contains final state - emit node_end for all pending agents
@@ -250,7 +260,7 @@ impl ExecutionContext {
                         }
                     }
                 }
-                (None, true)
+                (None, true, false)
             }
             "interrupted" => {
                 // Interrupt event from ADK-Graph - workflow is paused
@@ -263,9 +273,9 @@ impl ExecutionContext {
                         }
                     }
                 }
-                (None, false)
+                (None, false, false)
             }
-            _ => (None, false),
+            _ => (None, false, false),
         }
     }
 
@@ -529,11 +539,13 @@ pub async fn stream_handler(
                                 if is_new_start {
                                     // This belongs to the new execution — process it and continue to main loop
                                     let trace = trimmed.trim_start_matches("TRACE:");
-                                    let (node_end_event, _is_done) = exec_ctx.process_stream_event(trace);
-                                    if let Some(event_json) = node_end_event {
+                                    let (enriched_event, _is_done, suppress_raw) = exec_ctx.process_stream_event(trace);
+                                    if let Some(event_json) = enriched_event {
                                         yield Ok(Event::default().event("trace").data(event_json));
                                     }
-                                    yield Ok(Event::default().event("trace").data(trace));
+                                    if !suppress_raw {
+                                        yield Ok(Event::default().event("trace").data(trace));
+                                    }
                                     break;
                                 }
                             }
@@ -583,7 +595,7 @@ pub async fn stream_handler(
                 } else if let Some(trace) = line.strip_prefix("TRACE:") {
                     // Process TRACE events from adk-graph to extract state information
                     // This is where we get the actual output state for each agent
-                    let (node_end_event, is_done) = exec_ctx.process_stream_event(trace);
+                    let (enriched_event, is_done, suppress_raw) = exec_ctx.process_stream_event(trace);
                     
                     // Check for interrupt events (Task 9: Handle ADK-Graph Interrupts)
                     // Requirements: 3.1, 5.2
@@ -620,8 +632,8 @@ pub async fn stream_handler(
                         // The frontend will call the resume endpoint when ready
                     }
                     
-                    // If we got a node_end event with state, emit it
-                    if let Some(event_json) = node_end_event {
+                    // Emit the enriched event (node_start/node_end with state_snapshot)
+                    if let Some(event_json) = enriched_event {
                         yield Ok(Event::default().event("trace").data(event_json));
                     }
                     
@@ -642,8 +654,11 @@ pub async fn stream_handler(
                         break;
                     }
                     
-                    // Also pass through the original trace for backward compatibility
-                    yield Ok(Event::default().event("trace").data(trace));
+                    // Pass through the raw trace for backward compatibility,
+                    // unless we already emitted an enriched version (suppress_raw)
+                    if !suppress_raw {
+                        yield Ok(Event::default().event("trace").data(trace));
+                    }
                 } else if let Some(chunk) = line.strip_prefix("CHUNK:") {
                     // Streaming chunk - emit immediately
                     let decoded = serde_json::from_str::<String>(chunk).unwrap_or_else(|_| chunk.to_string());
