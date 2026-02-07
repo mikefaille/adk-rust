@@ -66,6 +66,7 @@ export function useCanvasExecution(deps: {
   const processingRef = useRef(false);
   const currentDisplayedAgentRef = useRef<string | null>(null);
   const pendingIdleRef = useRef(false);
+  const pendingCompleteRef = useRef(false);
 
   // v2.0: Wrapper for flow phase that also updates execution path
   // Start execution on trigger_input (not input) so the path is ready
@@ -79,10 +80,18 @@ export function useCanvasExecution(deps: {
       activeAgentQueueRef.current = [];
       processingRef.current = false;
       pendingIdleRef.current = false;
+      pendingCompleteRef.current = false;
       currentDisplayedAgentRef.current = null;
       ep.startExecution();
     } else if (phase === 'idle' && ep.isExecuting) {
-      ep.completeExecution();
+      // Don't complete execution immediately — the animation queue may still
+      // be draining (action nodes queue with 300ms display each). Mark pending
+      // and let processAgentQueue handle completion when the queue is empty.
+      if (processingRef.current || activeAgentQueueRef.current.length > 0) {
+        pendingCompleteRef.current = true;
+      } else {
+        ep.completeExecution();
+      }
     }
   }, []);
 
@@ -99,6 +108,14 @@ export function useCanvasExecution(deps: {
         pendingIdleRef.current = false;
         currentDisplayedAgentRef.current = null;
         setActiveAgent(null);
+      }
+      // If completeExecution was deferred, run it now that the queue is drained
+      if (pendingCompleteRef.current) {
+        pendingCompleteRef.current = false;
+        const ep = execPathRef.current;
+        if (ep.isExecuting) {
+          ep.completeExecution();
+        }
       }
       return;
     }
@@ -183,16 +200,13 @@ export function useCanvasExecution(deps: {
       setStateKeys(newStateKeys);
     }
 
-    // v2.0: Update execution path based on snapshots
-    // @see Requirements 10.3, 10.5: Execution path highlighting
-    if (newSnapshots.length > 0) {
-      const ep = execPathRef.current;
-      ep.resetPath();
-      ep.startExecution();
-      newSnapshots.forEach(s => {
-        ep.moveToNode(s.nodeId);
-      });
-    }
+    // NOTE: Do NOT rebuild the execution path here during live execution.
+    // The execution path is managed by handleFlowPhase (startExecution) and
+    // handleActiveAgent (moveToNode via the queue). Rebuilding here races with
+    // the queue and causes handleActiveAgent to skip nodes (because they're
+    // already in the path), which breaks edge animation.
+    // The path is only rebuilt from snapshots during timeline scrubbing
+    // (see handleStateHistorySelect).
   }, []);
 
   // Current and previous snapshots for StateInspector (v2.0)
