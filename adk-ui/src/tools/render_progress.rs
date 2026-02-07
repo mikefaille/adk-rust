@@ -1,4 +1,5 @@
 use crate::schema::*;
+use crate::tools::{LegacyProtocolOptions, render_ui_response_with_protocol};
 use adk_core::{Result, Tool, ToolContext};
 use async_trait::async_trait;
 use schemars::JsonSchema;
@@ -19,6 +20,9 @@ pub struct RenderProgressParams {
     /// List of steps with their completion status
     #[serde(default)]
     pub steps: Option<Vec<ProgressStep>>,
+    /// Optional protocol output configuration.
+    #[serde(flatten)]
+    pub protocol: LegacyProtocolOptions,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -65,6 +69,7 @@ impl Tool for RenderProgressTool {
     async fn execute(&self, _ctx: Arc<dyn ToolContext>, args: Value) -> Result<Value> {
         let params: RenderProgressParams = serde_json::from_value(args)
             .map_err(|e| adk_core::AdkError::Tool(format!("Invalid parameters: {}", e)))?;
+        let protocol_options = params.protocol.clone();
 
         let mut components = Vec::new();
 
@@ -117,7 +122,6 @@ impl Tool for RenderProgressTool {
             footer: None,
         })]);
 
-        serde_json::to_value(ui)
-            .map_err(|e| adk_core::AdkError::Tool(format!("Failed to serialize UI: {}", e)))
+        render_ui_response_with_protocol(ui, &protocol_options, "progress")
     }
 }

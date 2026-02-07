@@ -1,3 +1,4 @@
+mod protocol_output;
 mod render_alert;
 mod render_card;
 mod render_chart;
@@ -25,6 +26,10 @@ pub use render_progress::RenderProgressTool;
 pub use render_screen::RenderScreenTool;
 pub use render_table::RenderTableTool;
 pub use render_toast::RenderToastTool;
+
+pub(crate) use protocol_output::{
+    LegacyProtocolOptions, SurfaceProtocolOptions, render_ui_response_with_protocol,
+};
 
 use schemars::{JsonSchema, r#gen::SchemaSettings};
 use serde::Serialize;

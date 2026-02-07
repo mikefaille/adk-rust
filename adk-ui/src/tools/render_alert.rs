@@ -1,4 +1,5 @@
 use crate::schema::*;
+use crate::tools::{LegacyProtocolOptions, render_ui_response_with_protocol};
 use adk_core::{Result, Tool, ToolContext};
 use async_trait::async_trait;
 use schemars::JsonSchema;
@@ -17,6 +18,9 @@ pub struct RenderAlertParams {
     /// Alert variant: info, success, warning, error
     #[serde(default = "default_variant")]
     pub variant: String,
+    /// Optional protocol output configuration.
+    #[serde(flatten)]
+    pub protocol: LegacyProtocolOptions,
 }
 
 fn default_variant() -> String {
@@ -55,6 +59,7 @@ impl Tool for RenderAlertTool {
     async fn execute(&self, _ctx: Arc<dyn ToolContext>, args: Value) -> Result<Value> {
         let params: RenderAlertParams = serde_json::from_value(args)
             .map_err(|e| adk_core::AdkError::Tool(format!("Invalid parameters: {}", e)))?;
+        let protocol_options = params.protocol.clone();
 
         let variant = match params.variant.as_str() {
             "success" => AlertVariant::Success,
@@ -70,7 +75,6 @@ impl Tool for RenderAlertTool {
             variant,
         })]);
 
-        serde_json::to_value(ui)
-            .map_err(|e| adk_core::AdkError::Tool(format!("Failed to serialize UI: {}", e)))
+        render_ui_response_with_protocol(ui, &protocol_options, "alert")
     }
 }

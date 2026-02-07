@@ -1,5 +1,6 @@
 pub mod a2ui;
 pub mod catalog_registry;
+pub mod interop;
 pub mod kit;
 pub mod prompts;
 pub mod schema;
@@ -10,6 +11,7 @@ pub mod validation;
 
 pub use a2ui::*;
 pub use catalog_registry::{CatalogArtifact, CatalogError, CatalogRegistry, CatalogSource};
+pub use interop::*;
 pub use kit::{KitArtifacts, KitGenerator, KitSpec};
 pub use prompts::{UI_AGENT_PROMPT, UI_AGENT_PROMPT_SHORT};
 pub use schema::*;

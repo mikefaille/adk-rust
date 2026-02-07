@@ -1,4 +1,5 @@
 use crate::schema::*;
+use crate::tools::{LegacyProtocolOptions, render_ui_response_with_protocol};
 use adk_core::{Result, Tool, ToolContext};
 use async_trait::async_trait;
 use schemars::JsonSchema;
@@ -19,6 +20,9 @@ pub struct RenderCardParams {
     /// Optional action buttons
     #[serde(default)]
     pub actions: Vec<CardAction>,
+    /// Optional protocol output configuration.
+    #[serde(flatten)]
+    pub protocol: LegacyProtocolOptions,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -92,6 +96,7 @@ Use for status updates, summaries, or any structured info with optional action b
     async fn execute(&self, _ctx: Arc<dyn ToolContext>, args: Value) -> Result<Value> {
         let params: RenderCardParams = serde_json::from_value(args)
             .map_err(|e| adk_core::AdkError::Tool(format!("Invalid parameters: {}", e)))?;
+        let protocol_options = params.protocol.clone();
 
         // Build card content
         let content = vec![Component::Text(Text {
@@ -137,7 +142,6 @@ Use for status updates, summaries, or any structured info with optional action b
             footer,
         })]);
 
-        serde_json::to_value(ui)
-            .map_err(|e| adk_core::AdkError::Tool(format!("Failed to serialize UI: {}", e)))
+        render_ui_response_with_protocol(ui, &protocol_options, "card")
     }
 }

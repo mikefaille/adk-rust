@@ -53,6 +53,7 @@ pub fn create_app_with_a2a(config: ServerConfig, a2a_base_url: Option<&str>) -> 
 
     let api_router = Router::new()
         .route("/health", get(health_check))
+        .route("/ui/capabilities", get(controllers::ui::ui_capabilities))
         .route("/apps", get(controllers::apps::list_apps))
         .route("/list-apps", get(controllers::apps::list_apps_compat))
         .with_state(apps_controller)

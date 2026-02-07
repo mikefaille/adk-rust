@@ -117,7 +117,10 @@ async fn render_screen_matches_reference_schema() {
 
     let ctx: Arc<dyn ToolContext> = Arc::new(TestContext::new());
     let value = tool.execute(ctx, args).await.unwrap();
-    let jsonl = value.as_str().expect("jsonl string");
+    let jsonl = value
+        .as_str()
+        .or_else(|| value.get("jsonl").and_then(Value::as_str))
+        .expect("jsonl string");
     validate_jsonl(&validator, jsonl);
 }
 

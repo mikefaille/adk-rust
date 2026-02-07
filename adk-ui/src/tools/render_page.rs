@@ -1,9 +1,12 @@
 use crate::a2ui::{
-    A2uiMessage, A2uiSchemaVersion, A2uiValidator, CreateSurface, CreateSurfaceMessage,
-    UpdateComponents, UpdateComponentsMessage, UpdateDataModel, UpdateDataModelMessage, column,
-    divider, encode_jsonl, image, row, stable_child_id, stable_id, stable_indexed_id, text,
+    A2uiSchemaVersion, A2uiValidator, column, divider, encode_jsonl, image, row, stable_child_id,
+    stable_id, stable_indexed_id, text,
 };
 use crate::catalog_registry::CatalogRegistry;
+use crate::interop::{
+    UiProtocol, UiSurface, surface_to_event_stream, surface_to_mcp_apps_payload,
+};
+use crate::tools::SurfaceProtocolOptions;
 use adk_core::{Result, Tool, ToolContext};
 use async_trait::async_trait;
 use schemars::JsonSchema;
@@ -86,6 +89,9 @@ pub struct RenderPageParams {
     /// Validate generated messages against the A2UI v0.9 schema (default: true)
     #[serde(default = "default_validate")]
     pub validate: bool,
+    /// Shared protocol output options.
+    #[serde(flatten)]
+    pub protocol_options: SurfaceProtocolOptions,
 }
 
 /// Tool for emitting A2UI JSONL for a multi-section page.
@@ -184,24 +190,20 @@ impl Tool for RenderPageTool {
                     // Build button with action
                     let mut button_comp = json!({
                         "id": button_id,
-                        "component": {
-                            "Button": {
-                                "child": label_id,
-                                "action": {
-                                    "event": {
-                                        "name": action.action
-                                    }
-                                }
+                        "component": "Button",
+                        "child": label_id,
+                        "action": {
+                            "event": {
+                                "name": action.action
                             }
                         }
                     });
 
                     if let Some(variant) = &action.variant {
-                        button_comp["component"]["Button"]["variant"] = json!(variant);
+                        button_comp["variant"] = json!(variant);
                     }
                     if let Some(context) = &action.context {
-                        button_comp["component"]["Button"]["action"]["event"]["context"] =
-                            context.clone();
+                        button_comp["action"]["event"]["context"] = context.clone();
                     }
 
                     components.push(button_comp);
@@ -227,56 +229,65 @@ impl Tool for RenderPageTool {
         let root_children_str: Vec<&str> = root_children.iter().map(|s| s.as_str()).collect();
         components.push(column("root", root_children_str));
 
-        let mut messages: Vec<A2uiMessage> = Vec::new();
-        messages.push(A2uiMessage::CreateSurface(CreateSurfaceMessage {
-            create_surface: CreateSurface {
-                surface_id: params.surface_id.clone(),
-                catalog_id,
-                theme: params.theme.clone(),
-                send_data_model: Some(params.send_data_model),
-            },
-        }));
+        let surface = UiSurface::new(params.surface_id.clone(), catalog_id, components)
+            .with_data_model(params.data_model.clone())
+            .with_theme(params.theme.clone())
+            .with_send_data_model(params.send_data_model);
 
-        if let Some(data_model) = params.data_model.clone() {
-            messages.push(A2uiMessage::UpdateDataModel(UpdateDataModelMessage {
-                update_data_model: UpdateDataModel {
-                    surface_id: params.surface_id.clone(),
-                    path: Some("/".to_string()),
-                    value: Some(data_model),
-                },
-            }));
-        }
-
-        messages.push(A2uiMessage::UpdateComponents(UpdateComponentsMessage {
-            update_components: UpdateComponents {
-                surface_id: params.surface_id.clone(),
-                components,
-            },
-        }));
-
-        if params.validate {
-            let validator = A2uiValidator::new().map_err(|e| {
-                adk_core::AdkError::Tool(format!("Failed to initialize A2UI validator: {}", e))
-            })?;
-            for message in &messages {
-                if let Err(errors) = validator.validate_message(message, A2uiSchemaVersion::V0_9) {
-                    let details = errors
-                        .iter()
-                        .map(|err| format!("{} at {}", err.message, err.instance_path))
-                        .collect::<Vec<_>>()
-                        .join("; ");
-                    return Err(adk_core::AdkError::Tool(format!(
-                        "A2UI validation failed: {}",
-                        details
-                    )));
+        match params.protocol_options.protocol {
+            UiProtocol::A2ui => {
+                let messages = surface.to_a2ui_messages();
+                if params.validate {
+                    let validator = A2uiValidator::new().map_err(|e| {
+                        adk_core::AdkError::Tool(format!(
+                            "Failed to initialize A2UI validator: {}",
+                            e
+                        ))
+                    })?;
+                    for message in &messages {
+                        if let Err(errors) =
+                            validator.validate_message(message, A2uiSchemaVersion::V0_9)
+                        {
+                            let details = errors
+                                .iter()
+                                .map(|err| format!("{} at {}", err.message, err.instance_path))
+                                .collect::<Vec<_>>()
+                                .join("; ");
+                            return Err(adk_core::AdkError::Tool(format!(
+                                "A2UI validation failed: {}",
+                                details
+                            )));
+                        }
+                    }
                 }
+
+                let jsonl = encode_jsonl(messages).map_err(|e| {
+                    adk_core::AdkError::Tool(format!("Failed to encode A2UI JSONL: {}", e))
+                })?;
+
+                // Keep historical return type for default protocol compatibility.
+                Ok(Value::String(jsonl))
+            }
+            UiProtocol::AgUi => {
+                let thread_id = params.protocol_options.resolved_ag_ui_thread_id(&params.surface_id);
+                let run_id = params.protocol_options.resolved_ag_ui_run_id(&params.surface_id);
+                let events = surface_to_event_stream(&surface, thread_id, run_id);
+                Ok(serde_json::json!({
+                    "protocol": "ag_ui",
+                    "surface_id": surface.surface_id,
+                    "events": events
+                }))
+            }
+            UiProtocol::McpApps => {
+                let options = params.protocol_options.parse_mcp_options()?;
+                let payload = surface_to_mcp_apps_payload(&surface, options);
+                Ok(serde_json::json!({
+                    "protocol": "mcp_apps",
+                    "surface_id": surface.surface_id,
+                    "payload": payload
+                }))
             }
         }
-
-        let jsonl = encode_jsonl(messages)
-            .map_err(|e| adk_core::AdkError::Tool(format!("Failed to encode A2UI JSONL: {}", e)))?;
-
-        Ok(Value::String(jsonl))
     }
 }
 
@@ -372,5 +383,42 @@ mod tests {
         assert_eq!(lines.len(), 2);
         assert!(lines[0].get("createSurface").is_some());
         assert!(lines[1].get("updateComponents").is_some());
+    }
+
+    #[tokio::test]
+    async fn render_page_emits_ag_ui_events() {
+        let tool = RenderPageTool::new();
+        let args = serde_json::json!({
+            "protocol": "ag_ui",
+            "title": "Launch",
+            "sections": [{ "heading": "Features" }]
+        });
+
+        let ctx: Arc<dyn ToolContext> = Arc::new(TestContext::new());
+        let value = tool.execute(ctx, args).await.unwrap();
+        assert_eq!(value["protocol"], "ag_ui");
+        let events = value["events"].as_array().unwrap();
+        assert_eq!(events[1]["type"], "CUSTOM");
+    }
+
+    #[tokio::test]
+    async fn render_page_emits_mcp_apps_payload() {
+        let tool = RenderPageTool::new();
+        let args = serde_json::json!({
+            "protocol": "mcp_apps",
+            "title": "Launch",
+            "sections": [{ "heading": "Features" }],
+            "mcp_apps": {
+                "resource_uri": "ui://tests/page"
+            }
+        });
+
+        let ctx: Arc<dyn ToolContext> = Arc::new(TestContext::new());
+        let value = tool.execute(ctx, args).await.unwrap();
+        assert_eq!(value["protocol"], "mcp_apps");
+        assert_eq!(
+            value["payload"]["toolMeta"]["_meta"]["ui"]["resourceUri"],
+            "ui://tests/page"
+        );
     }
 }

@@ -1,4 +1,5 @@
 use crate::schema::*;
+use crate::tools::{LegacyProtocolOptions, render_ui_response_with_protocol};
 use adk_core::{Result, Tool, ToolContext};
 use async_trait::async_trait;
 use schemars::JsonSchema;
@@ -29,6 +30,9 @@ pub struct RenderModalParams {
     /// Action ID for the cancel button
     #[serde(default = "default_cancel_action")]
     pub cancel_action: String,
+    /// Optional protocol output configuration.
+    #[serde(flatten)]
+    pub protocol: LegacyProtocolOptions,
 }
 
 fn default_size() -> String {
@@ -96,6 +100,7 @@ impl Tool for RenderModalTool {
     async fn execute(&self, _ctx: Arc<dyn ToolContext>, args: Value) -> Result<Value> {
         let params: RenderModalParams = serde_json::from_value(args)
             .map_err(|e| adk_core::AdkError::Tool(format!("Invalid parameters: {}", e)))?;
+        let protocol_options = params.protocol.clone();
 
         let size = match params.size.as_str() {
             "small" => ModalSize::Small,
@@ -148,7 +153,6 @@ impl Tool for RenderModalTool {
             closable: params.closable,
         })]);
 
-        serde_json::to_value(ui)
-            .map_err(|e| adk_core::AdkError::Tool(format!("Failed to serialize UI: {}", e)))
+        render_ui_response_with_protocol(ui, &protocol_options, "modal")
     }
 }

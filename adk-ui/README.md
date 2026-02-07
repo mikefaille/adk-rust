@@ -4,13 +4,14 @@ Dynamic UI generation for AI agents. Enables agents to render rich user interfac
 
 ## Features
 
-- **28 Component Types**: Text, buttons, forms, tables, charts, modals, toasts, and more
-- **10 Render Tools**: High-level tools for common UI patterns
+- **30 Component Types**: Text, buttons, forms, tables, charts, modals, toasts, and more
+- **13 Render Tools**: High-level tools for common UI patterns, including protocol-aware screen/page emitters
 - **10 Pre-built Templates**: Registration, login, dashboard, settings, and more
 - **Bidirectional Data Flow**: Forms submit data back to agents via `UiEvent`
 - **Streaming Updates**: Patch components by ID with `UiUpdate`
 - **Server-side Validation**: Catch malformed responses before they reach the client
 - **Type-Safe**: Full Rust schema with TypeScript types for React client
+- **Protocol Interop**: Emit UI payloads as `a2ui`, `ag_ui`, or MCP Apps (`mcp_apps`)
 
 ## Quick Start
 
@@ -23,7 +24,7 @@ adk-ui = "0.2.0"
 use adk_ui::{UiToolset, UI_AGENT_PROMPT};
 use adk_agent::LlmAgentBuilder;
 
-// Add all 10 UI tools to an agent with the tested system prompt
+// Add all 13 UI tools to an agent with the tested system prompt
 let tools = UiToolset::all_tools();
 let mut builder = LlmAgentBuilder::new("assistant")
     .model(model)
@@ -80,6 +81,9 @@ if let Err(errors) = result {
 
 | Tool | Description |
 |------|-------------|
+| `render_screen` | Emit protocol-aware surface payloads (`a2ui`, `ag_ui`, `mcp_apps`) from component definitions |
+| `render_page` | Build section-based pages and emit protocol-aware payloads |
+| `render_kit` | Generate A2UI kit/catalog payload artifacts |
 | `render_form` | Collect user input with forms (text, email, password, textarea, select, etc.) |
 | `render_card` | Display information cards with actions |
 | `render_alert` | Show notifications and status messages |
@@ -106,6 +110,25 @@ let update = UiUpdate::replace(
         label: Some("75%".to_string()),
     }),
 );
+```
+
+## Protocol Outputs
+
+`render_screen` and `render_page` can emit three interoperable output formats:
+
+- `a2ui` (default): A2UI JSONL payloads
+- `ag_ui`: AG-UI event stream (wrapped as `RUN_STARTED` -> `CUSTOM` -> `RUN_FINISHED`)
+- `mcp_apps`: MCP Apps payload with `ui://` resource + `_meta.ui.resourceUri` linkage
+
+Example tool args:
+
+```json
+{
+  "protocol": "mcp_apps",
+  "mcp_apps": {
+    "resource_uri": "ui://demo/surface"
+  }
+}
 ```
 
 ## React Client
@@ -135,9 +158,9 @@ Or use the reference implementation in `examples/ui_react_client/`.
 ## Architecture
 
 ```
-Agent ──[render_* tool]──> UiResponse ──[SSE]──> React Client
-             ↑                                        │
-             └────────── UiEvent <────────────────────┘
+Agent ──[render_screen/render_page]──> protocol payload (`a2ui` | `ag_ui` | `mcp_apps`)
+                 ↑
+                 └────────── UiEvent / action feedback loop
 ```
 
 ## License

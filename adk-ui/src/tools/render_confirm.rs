@@ -1,4 +1,5 @@
 use crate::schema::*;
+use crate::tools::{LegacyProtocolOptions, render_ui_response_with_protocol};
 use adk_core::{Result, Tool, ToolContext};
 use async_trait::async_trait;
 use schemars::JsonSchema;
@@ -27,6 +28,9 @@ pub struct RenderConfirmParams {
     /// Whether this is a destructive action (shows danger button)
     #[serde(default)]
     pub destructive: bool,
+    /// Optional protocol output configuration.
+    #[serde(flatten)]
+    pub protocol: LegacyProtocolOptions,
 }
 
 fn default_confirm_label() -> String {
@@ -69,6 +73,7 @@ impl Tool for RenderConfirmTool {
     async fn execute(&self, _ctx: Arc<dyn ToolContext>, args: Value) -> Result<Value> {
         let params: RenderConfirmParams = serde_json::from_value(args)
             .map_err(|e| adk_core::AdkError::Tool(format!("Invalid parameters: {}", e)))?;
+        let protocol_options = params.protocol.clone();
 
         let confirm_variant =
             if params.destructive { ButtonVariant::Danger } else { ButtonVariant::Primary };
@@ -104,7 +109,6 @@ impl Tool for RenderConfirmTool {
             footer: Some(footer),
         })]);
 
-        serde_json::to_value(ui)
-            .map_err(|e| adk_core::AdkError::Tool(format!("Failed to serialize UI: {}", e)))
+        render_ui_response_with_protocol(ui, &protocol_options, "confirm")
     }
 }

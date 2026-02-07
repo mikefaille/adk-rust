@@ -123,8 +123,11 @@ fn schema_v0_9() -> Value {
                                     "properties": {
                                         "id": { "type": "string" },
                                         "component": {
-                                            "type": "object",
-                                            "description": "Component definition with nested structure: {ComponentName: {props}}"
+                                            "oneOf": [
+                                                { "type": "string" },
+                                                { "type": "object" }
+                                            ],
+                                            "description": "Component discriminator in flat form (\"Text\") or legacy nested object form."
                                         }
                                     }
                                 }
@@ -290,6 +293,22 @@ mod tests {
                             "text": { "literalString": "Hello" }
                         }
                     }
+                })],
+            },
+        });
+        assert!(validator.validate_message(&message, A2uiSchemaVersion::V0_9).is_ok());
+    }
+
+    #[test]
+    fn validates_update_components_flat_shape() {
+        let validator = A2uiValidator::new().unwrap();
+        let message = A2uiMessage::UpdateComponents(UpdateComponentsMessage {
+            update_components: UpdateComponents {
+                surface_id: "main".to_string(),
+                components: vec![json!({
+                    "id": "root",
+                    "component": "Text",
+                    "text": "Hello"
                 })],
             },
         });

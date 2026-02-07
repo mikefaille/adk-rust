@@ -21,10 +21,11 @@ fn catalog_metadata_is_valid_json() {
 #[test]
 fn registry_resolves_default_catalog() {
     let registry = adk_ui::CatalogRegistry::default();
+    let default_catalog_id = registry.default_catalog_id().to_string();
     let artifact = registry
-        .load_local_catalog("zavora.ai:adk-ui/default@0.1.0")
+        .load_local_catalog(&default_catalog_id)
         .expect("default catalog should resolve");
-    assert_eq!(artifact.catalog_id, "zavora.ai:adk-ui/default@0.1.0");
+    assert_eq!(artifact.catalog_id, default_catalog_id);
     assert!(artifact.catalog.get("components").is_some());
     assert!(artifact.metadata.is_some());
 }

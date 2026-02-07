@@ -127,3 +127,37 @@ async fn test_health_check() {
 
     assert_eq!(response.status(), StatusCode::OK);
 }
+
+#[tokio::test]
+async fn test_ui_capabilities() {
+    let config =
+        adk_server::ServerConfig::new(Arc::new(MockAgentLoader), Arc::new(MockSessionService));
+    let app = create_app(config);
+
+    let response = app
+        .oneshot(
+            Request::builder().uri("/api/ui/capabilities").body(Body::empty()).unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["default_protocol"], "adk_ui");
+    assert!(json["protocols"].as_array().unwrap().iter().any(|entry| entry["protocol"] == "a2ui"));
+    assert!(
+        json["protocols"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["protocol"] == "ag_ui")
+    );
+    assert!(
+        json["protocols"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["protocol"] == "mcp_apps")
+    );
+}

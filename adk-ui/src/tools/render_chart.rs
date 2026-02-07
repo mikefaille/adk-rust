@@ -1,4 +1,5 @@
 use crate::schema::*;
+use crate::tools::{LegacyProtocolOptions, render_ui_response_with_protocol};
 use adk_core::{Result, Tool, ToolContext};
 use async_trait::async_trait;
 use schemars::JsonSchema;
@@ -22,6 +23,9 @@ pub struct RenderChartParams {
     pub x_key: String,
     /// Keys for y-axis values (can be multiple for multi-series)
     pub y_keys: Vec<String>,
+    /// Optional protocol output configuration.
+    #[serde(flatten)]
+    pub protocol: LegacyProtocolOptions,
 }
 
 fn default_chart_type() -> String {
@@ -86,6 +90,7 @@ impl Tool for RenderChartTool {
     async fn execute(&self, _ctx: Arc<dyn ToolContext>, args: Value) -> Result<Value> {
         let params: RenderChartParams = serde_json::from_value(args)
             .map_err(|e| adk_core::AdkError::Tool(format!("Invalid parameters: {}", e)))?;
+        let protocol_options = params.protocol.clone();
 
         let kind = match params.chart_type.as_str() {
             "line" => ChartKind::Line,
@@ -107,7 +112,6 @@ impl Tool for RenderChartTool {
             colors: None,
         })]);
 
-        serde_json::to_value(ui)
-            .map_err(|e| adk_core::AdkError::Tool(format!("Failed to serialize UI: {}", e)))
+        render_ui_response_with_protocol(ui, &protocol_options, "chart")
     }
 }

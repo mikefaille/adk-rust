@@ -1,5 +1,6 @@
 use crate::a2ui::{stable_child_id, stable_id};
 use crate::schema::*;
+use crate::tools::{LegacyProtocolOptions, render_ui_response_with_protocol};
 use adk_core::{Result, Tool, ToolContext};
 use async_trait::async_trait;
 use schemars::JsonSchema;
@@ -29,6 +30,9 @@ pub struct RenderFormParams {
     /// Optional data path prefix for binding form fields (e.g. "/user")
     #[serde(default)]
     pub data_path_prefix: Option<String>,
+    /// Optional protocol output configuration.
+    #[serde(flatten)]
+    pub protocol: LegacyProtocolOptions,
 }
 
 fn default_submit_action() -> String {
@@ -134,6 +138,7 @@ Use field types: text, email, password, number, select, textarea. Set required=t
     async fn execute(&self, _ctx: Arc<dyn ToolContext>, args: Value) -> Result<Value> {
         let params: RenderFormParams = serde_json::from_value(args)
             .map_err(|e| adk_core::AdkError::Tool(format!("Invalid parameters: {}", e)))?;
+        let protocol_options = params.protocol.clone();
 
         let form_id = stable_id(&format!("form:{}:{}", params.title, params.submit_action));
         // Build the form UI
@@ -224,9 +229,7 @@ Use field types: text, email, password, number, select, textarea. Set required=t
             ui = ui.with_theme(theme);
         }
 
-        // Return as JSON - the framework will convert to Part::InlineData
-        serde_json::to_value(ui)
-            .map_err(|e| adk_core::AdkError::Tool(format!("Failed to serialize UI: {}", e)))
+        render_ui_response_with_protocol(ui, &protocol_options, "form")
     }
 }
 

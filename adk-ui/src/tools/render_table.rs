@@ -1,4 +1,5 @@
 use crate::schema::*;
+use crate::tools::{LegacyProtocolOptions, render_ui_response_with_protocol};
 use adk_core::{Result, Tool, ToolContext};
 use async_trait::async_trait;
 use schemars::JsonSchema;
@@ -17,6 +18,9 @@ pub struct RenderTableParams {
     pub columns: Vec<ColumnDef>,
     /// Row data - array of objects with keys matching accessor_key
     pub data: Vec<HashMap<String, Value>>,
+    /// Optional protocol output configuration.
+    #[serde(flatten)]
+    pub protocol: LegacyProtocolOptions,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -86,6 +90,7 @@ Set sortable=true for clickable column headers. Set page_size for pagination. Se
     async fn execute(&self, _ctx: Arc<dyn ToolContext>, args: Value) -> Result<Value> {
         let params: RenderTableParams = serde_json::from_value(args)
             .map_err(|e| adk_core::AdkError::Tool(format!("Invalid parameters: {}", e)))?;
+        let protocol_options = params.protocol.clone();
 
         let columns: Vec<TableColumn> = params
             .columns
@@ -114,7 +119,6 @@ Set sortable=true for clickable column headers. Set page_size for pagination. Se
         }));
 
         let ui = UiResponse::new(components);
-        serde_json::to_value(ui)
-            .map_err(|e| adk_core::AdkError::Tool(format!("Failed to serialize UI: {}", e)))
+        render_ui_response_with_protocol(ui, &protocol_options, "table")
     }
 }

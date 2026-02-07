@@ -1,9 +1,11 @@
 use crate::a2ui::{
-    A2uiMessage, A2uiSchemaVersion, A2uiValidator, CreateSurface, CreateSurfaceMessage,
-    UpdateComponents, UpdateComponentsMessage, UpdateDataModel, UpdateDataModelMessage,
-    encode_jsonl,
+    A2uiSchemaVersion, A2uiValidator, encode_jsonl,
 };
 use crate::catalog_registry::CatalogRegistry;
+use crate::interop::{
+    UiProtocol, UiSurface, surface_to_event_stream, surface_to_mcp_apps_payload,
+};
+use crate::tools::SurfaceProtocolOptions;
 use adk_core::{Result, Tool, ToolContext};
 use async_trait::async_trait;
 use schemars::JsonSchema;
@@ -46,6 +48,9 @@ pub struct RenderScreenParams {
     /// Validate generated messages against the A2UI v0.9 schema (default: true)
     #[serde(default = "default_validate")]
     pub validate: bool,
+    /// Shared protocol output options.
+    #[serde(flatten)]
+    pub protocol_options: SurfaceProtocolOptions,
 }
 
 /// Tool for emitting A2UI JSONL for a single screen (surface).
@@ -109,64 +114,72 @@ Returns a JSONL string with createSurface/updateDataModel/updateComponents messa
         let catalog_id =
             params.catalog_id.unwrap_or_else(|| registry.default_catalog_id().to_string());
 
-        let mut messages: Vec<A2uiMessage> = Vec::new();
+        let surface = UiSurface::new(params.surface_id.clone(), catalog_id, params.components.clone())
+            .with_data_model(params.data_model.clone())
+            .with_theme(params.theme.clone())
+            .with_send_data_model(params.send_data_model);
 
-        messages.push(A2uiMessage::CreateSurface(CreateSurfaceMessage {
-            create_surface: CreateSurface {
-                surface_id: params.surface_id.clone(),
-                catalog_id,
-                theme: params.theme.clone(),
-                send_data_model: Some(params.send_data_model),
-            },
-        }));
-
-        if let Some(data_model) = params.data_model.clone() {
-            messages.push(A2uiMessage::UpdateDataModel(UpdateDataModelMessage {
-                update_data_model: UpdateDataModel {
-                    surface_id: params.surface_id.clone(),
-                    path: Some("/".to_string()),
-                    value: Some(data_model),
-                },
-            }));
-        }
-
-        messages.push(A2uiMessage::UpdateComponents(UpdateComponentsMessage {
-            update_components: UpdateComponents {
-                surface_id: params.surface_id.clone(),
-                components: params.components.clone(),
-            },
-        }));
-
-        if params.validate {
-            let validator = A2uiValidator::new().map_err(|e| {
-                adk_core::AdkError::Tool(format!("Failed to initialize A2UI validator: {}", e))
-            })?;
-            for message in &messages {
-                if let Err(errors) = validator.validate_message(message, A2uiSchemaVersion::V0_9) {
-                    let details = errors
-                        .iter()
-                        .map(|err| format!("{} at {}", err.message, err.instance_path))
-                        .collect::<Vec<_>>()
-                        .join("; ");
-                    return Err(adk_core::AdkError::Tool(format!(
-                        "A2UI validation failed: {}",
-                        details
-                    )));
+        match params.protocol_options.protocol {
+            UiProtocol::A2ui => {
+                let messages = surface.to_a2ui_messages();
+                if params.validate {
+                    let validator = A2uiValidator::new().map_err(|e| {
+                        adk_core::AdkError::Tool(format!(
+                            "Failed to initialize A2UI validator: {}",
+                            e
+                        ))
+                    })?;
+                    for message in &messages {
+                        if let Err(errors) =
+                            validator.validate_message(message, A2uiSchemaVersion::V0_9)
+                        {
+                            let details = errors
+                                .iter()
+                                .map(|err| format!("{} at {}", err.message, err.instance_path))
+                                .collect::<Vec<_>>()
+                                .join("; ");
+                            return Err(adk_core::AdkError::Tool(format!(
+                                "A2UI validation failed: {}",
+                                details
+                            )));
+                        }
+                    }
                 }
+
+                let jsonl = encode_jsonl(messages).map_err(|e| {
+                    adk_core::AdkError::Tool(format!("Failed to encode A2UI JSONL: {}", e))
+                })?;
+
+                // Return as JSON object with components for LLM compatibility.
+                Ok(serde_json::json!({
+                    "protocol": "a2ui",
+                    "surface_id": params.surface_id,
+                    "components": params.components,
+                    "data_model": params.data_model,
+                    "jsonl": jsonl
+                }))
+            }
+            UiProtocol::AgUi => {
+                let thread_id = params.protocol_options.resolved_ag_ui_thread_id(&params.surface_id);
+                let run_id = params.protocol_options.resolved_ag_ui_run_id(&params.surface_id);
+                let events = surface_to_event_stream(&surface, thread_id, run_id);
+                Ok(serde_json::json!({
+                    "protocol": "ag_ui",
+                    "surface_id": surface.surface_id,
+                    "events": events
+                }))
+            }
+            UiProtocol::McpApps => {
+                let options = params.protocol_options.parse_mcp_options()?;
+
+                let payload = surface_to_mcp_apps_payload(&surface, options);
+                Ok(serde_json::json!({
+                    "protocol": "mcp_apps",
+                    "surface_id": surface.surface_id,
+                    "payload": payload
+                }))
             }
         }
-
-        let jsonl = encode_jsonl(messages)
-            .map_err(|e| adk_core::AdkError::Tool(format!("Failed to encode A2UI JSONL: {}", e)))?;
-
-        // Return as JSON object with components for LLM compatibility
-        // The frontend will receive this and can render it
-        Ok(serde_json::json!({
-            "surface_id": params.surface_id,
-            "components": params.components,
-            "data_model": params.data_model,
-            "jsonl": jsonl
-        }))
     }
 }
 
@@ -274,6 +287,57 @@ mod tests {
         assert_eq!(components.len(), 3);
         let root = &components[2];
         assert_eq!(root["id"], "root");
-        assert!(root["component"]["Column"].is_object());
+        assert_eq!(root["component"], "Column");
+    }
+
+    #[tokio::test]
+    async fn render_screen_emits_ag_ui_events() {
+        use crate::a2ui::{column, text};
+
+        let tool = RenderScreenTool::new();
+        let args = serde_json::json!({
+            "protocol": "ag_ui",
+            "components": [
+                text("title", "Hello World", Some("h1")),
+                column("root", vec!["title"])
+            ]
+        });
+
+        let ctx: Arc<dyn ToolContext> = Arc::new(TestContext::new());
+        let value = tool.execute(ctx, args).await.unwrap();
+
+        assert_eq!(value["protocol"], "ag_ui");
+        let events = value["events"].as_array().unwrap();
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[0]["type"], "RUN_STARTED");
+        assert_eq!(events[1]["type"], "CUSTOM");
+        assert_eq!(events[2]["type"], "RUN_FINISHED");
+    }
+
+    #[tokio::test]
+    async fn render_screen_emits_mcp_apps_payload() {
+        use crate::a2ui::{column, text};
+
+        let tool = RenderScreenTool::new();
+        let args = serde_json::json!({
+            "protocol": "mcp_apps",
+            "components": [
+                text("title", "Hello World", Some("h1")),
+                column("root", vec!["title"])
+            ],
+            "mcp_apps": {
+                "resource_uri": "ui://tests/screen"
+            }
+        });
+
+        let ctx: Arc<dyn ToolContext> = Arc::new(TestContext::new());
+        let value = tool.execute(ctx, args).await.unwrap();
+
+        assert_eq!(value["protocol"], "mcp_apps");
+        assert_eq!(value["payload"]["resource"]["uri"], "ui://tests/screen");
+        assert_eq!(
+            value["payload"]["toolMeta"]["_meta"]["ui"]["resourceUri"],
+            "ui://tests/screen"
+        );
     }
 }
