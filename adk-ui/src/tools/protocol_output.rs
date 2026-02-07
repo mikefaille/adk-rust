@@ -1,9 +1,10 @@
 use crate::a2ui::{column, stable_id, stable_indexed_id, text};
 use crate::catalog_registry::CatalogRegistry;
 use crate::interop::{
-    McpAppsRenderOptions, UiProtocol, UiSurface, surface_to_event_stream,
-    surface_to_mcp_apps_payload,
+    AgUiEvent, McpAppsRenderOptions, McpAppsSurfacePayload, UiProtocol, UiSurface,
+    surface_to_event_stream, surface_to_mcp_apps_payload,
 };
+use crate::model::{ToolEnvelope, ToolEnvelopeProtocol};
 use crate::schema::{Component, UiResponse};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -127,6 +128,32 @@ fn project_ui_response_to_surface(ui: &UiResponse, surface_id: &str) -> UiSurfac
     })))
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct A2uiEnvelopePayload {
+    components: Vec<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    data_model: Option<Value>,
+    jsonl: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct AgUiEnvelopePayload {
+    events: Vec<AgUiEvent>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct McpAppsEnvelopePayload {
+    payload: McpAppsSurfacePayload,
+}
+
+fn serialize_envelope<P: Serialize>(
+    envelope: ToolEnvelope<P>,
+) -> Result<Value, adk_core::AdkError> {
+    serde_json::to_value(envelope).map_err(|e| {
+        adk_core::AdkError::Tool(format!("Failed to serialize protocol envelope: {}", e))
+    })
+}
+
 pub(crate) fn render_ui_response_with_protocol(
     ui: UiResponse,
     options: &LegacyProtocolOptions,
@@ -148,13 +175,16 @@ pub(crate) fn render_ui_response_with_protocol(
             let jsonl = surface.to_a2ui_jsonl().map_err(|e| {
                 adk_core::AdkError::Tool(format!("Failed to encode A2UI JSONL: {}", e))
             })?;
-            Ok(json!({
-                "protocol": "a2ui",
-                "surface_id": surface.surface_id,
-                "components": surface.components,
-                "data_model": surface.data_model,
-                "jsonl": jsonl
-            }))
+            let envelope = ToolEnvelope::new(
+                ToolEnvelopeProtocol::A2ui,
+                surface.surface_id,
+                A2uiEnvelopePayload {
+                    components: surface.components,
+                    data_model: surface.data_model,
+                    jsonl,
+                },
+            );
+            serialize_envelope(envelope)
         }
         UiProtocol::AgUi => {
             let thread_id = options
@@ -166,11 +196,12 @@ pub(crate) fn render_ui_response_with_protocol(
                 .clone()
                 .unwrap_or_else(|| format!("run-{}", surface.surface_id));
             let events = surface_to_event_stream(&surface, thread_id, run_id);
-            Ok(json!({
-                "protocol": "ag_ui",
-                "surface_id": surface.surface_id,
-                "events": events
-            }))
+            let envelope = ToolEnvelope::new(
+                ToolEnvelopeProtocol::AgUi,
+                surface.surface_id,
+                AgUiEnvelopePayload { events },
+            );
+            serialize_envelope(envelope)
         }
         UiProtocol::McpApps => {
             let mcp_options = match &options.mcp_apps {
@@ -184,11 +215,12 @@ pub(crate) fn render_ui_response_with_protocol(
                 None => McpAppsRenderOptions::default(),
             };
             let payload = surface_to_mcp_apps_payload(&surface, mcp_options);
-            Ok(json!({
-                "protocol": "mcp_apps",
-                "surface_id": surface.surface_id,
-                "payload": payload
-            }))
+            let envelope = ToolEnvelope::new(
+                ToolEnvelopeProtocol::McpApps,
+                surface.surface_id,
+                McpAppsEnvelopePayload { payload },
+            );
+            serialize_envelope(envelope)
         }
     }
 }
@@ -222,6 +254,7 @@ mod tests {
             LegacyProtocolOptions { protocol: Some(UiProtocol::McpApps), ..Default::default() };
         let value = render_ui_response_with_protocol(ui, &options, "main").expect("mcp payload");
         assert_eq!(value["protocol"], "mcp_apps");
+        assert_eq!(value["version"], "1.0");
         assert!(value["payload"]["resource"]["uri"].as_str().unwrap().starts_with("ui://"));
     }
 }
