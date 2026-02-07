@@ -7,8 +7,9 @@
  * Requirements: 5.1, 5.2, 5.3, 12.2
  */
 
-import React, { useCallback, useState } from 'react';
+import { useCallback, useState } from 'react';
 import { StandardPropertiesPanel } from './StandardPropertiesPanel';
+import { CollapsibleSection } from '../shared/CollapsibleSection';
 import type { 
   TransformNodeConfig, 
   TransformType,
@@ -89,38 +90,6 @@ const TRANSFORM_OPTIONS: Array<{
 const COERCION_TYPES: readonly CoercionTargetType[] = [
   'string', 'number', 'boolean', 'array', 'object'
 ];
-
-// ============================================
-// Helper Components
-// ============================================
-
-interface CollapsibleSectionProps {
-  title: string;
-  defaultOpen?: boolean;
-  children: React.ReactNode;
-}
-
-function CollapsibleSection({ title, defaultOpen = true, children }: CollapsibleSectionProps) {
-  const [isOpen, setIsOpen] = useState(defaultOpen);
-  
-  return (
-    <div className="transform-panel-section">
-      <button 
-        className="transform-panel-section-header"
-        onClick={() => setIsOpen(!isOpen)}
-        type="button"
-      >
-        <span className="transform-panel-section-toggle">{isOpen ? '▼' : '▶'}</span>
-        <span className="transform-panel-section-title">{title}</span>
-      </button>
-      {isOpen && (
-        <div className="transform-panel-section-content">
-          {children}
-        </div>
-      )}
-    </div>
-  );
-}
 
 // ============================================
 // Main Component
@@ -233,7 +202,7 @@ export function TransformPanel({ node, onChange }: TransformPanelProps) {
         <div className="transform-preview">
           <div className="transform-preview-label">
             <span className="transform-preview-icon">💡</span>
-            <span>Result will be stored in: <code>{node.standard?.mapping?.output_key || 'result'}</code></span>
+            <span>Result will be stored in: <code>{node.mapping?.outputKey || 'result'}</code></span>
           </div>
         </div>
       </div>

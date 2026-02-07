@@ -8,8 +8,10 @@
  * Requirements: 8.1, 8.2, 8.3, 12.2
  */
 
-import React, { useCallback, useState } from 'react';
+import { useCallback } from 'react';
 import { StandardPropertiesPanel } from './StandardPropertiesPanel';
+import { CollapsibleSection } from '../shared/CollapsibleSection';
+import { Field } from '../shared/Field';
 import type { 
   MergeNodeConfig, 
   MergeMode,
@@ -83,58 +85,6 @@ const TIMEOUT_BEHAVIOR_LABELS: Record<TimeoutBehavior, string> = {
   continue: 'Continue with available results',
   error: 'Throw error on timeout',
 };
-
-// ============================================
-// Helper Components
-// ============================================
-
-interface CollapsibleSectionProps {
-  title: string;
-  defaultOpen?: boolean;
-  children: React.ReactNode;
-}
-
-function CollapsibleSection({ title, defaultOpen = true, children }: CollapsibleSectionProps) {
-  const [isOpen, setIsOpen] = useState(defaultOpen);
-  
-  return (
-    <div className="merge-panel-section">
-      <button 
-        className="merge-panel-section-header"
-        onClick={() => setIsOpen(!isOpen)}
-        type="button"
-      >
-        <span className="merge-panel-section-toggle">{isOpen ? '▼' : '▶'}</span>
-        <span className="merge-panel-section-title">{title}</span>
-      </button>
-      {isOpen && (
-        <div className="merge-panel-section-content">
-          {children}
-        </div>
-      )}
-    </div>
-  );
-}
-
-interface FieldProps {
-  label: string;
-  hint?: string;
-  required?: boolean;
-  children: React.ReactNode;
-}
-
-function Field({ label, hint, required, children }: FieldProps) {
-  return (
-    <div className="merge-panel-field">
-      <label className="merge-panel-label">
-        {label}
-        {required && <span className="merge-panel-required">*</span>}
-        {hint && <span className="merge-panel-hint">({hint})</span>}
-      </label>
-      {children}
-    </div>
-  );
-}
 
 // ============================================
 // Main Component

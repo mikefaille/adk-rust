@@ -756,14 +756,15 @@ impl WorkflowExecutor {
         use crate::codegen::action_nodes::{CombineStrategy, MergeMode};
 
         // Get branch results from state (would be set by previous branches)
+        // Pre-fetch state once to avoid blocking calls inside iterators
+        let current_state = self.get_state().await;
         let branch_results: Vec<(String, Value)> = config
             .branch_keys
             .as_ref()
             .map(|keys| {
                 keys.iter()
                     .filter_map(|k| {
-                        let state = futures::executor::block_on(self.get_state());
-                        state.get(k).map(|v| (k.clone(), v.clone()))
+                        current_state.get(k).map(|v| (k.clone(), v.clone()))
                     })
                     .collect()
             })
@@ -1416,7 +1417,7 @@ impl WorkflowExecutor {
                                     .unwrap_or("application/octet-stream");
                                 
                                 let content_type: ContentType = mime_type_str.parse()
-                                    .unwrap_or(ContentType::parse("application/octet-stream").unwrap());
+                                    .unwrap_or_else(|_| ContentType::TEXT_PLAIN);
                                 
                                 let att = Attachment::new(attachment.filename.clone())
                                     .body(data, content_type);

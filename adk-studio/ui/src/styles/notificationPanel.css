@@ -1,338 +1,127 @@
 /**
- * NotificationPanel CSS Styles for ADK Studio
- * 
- * Styles for the Notification action node properties panel.
- * Supports both light and dark themes.
- * 
+ * NotificationPanel CSS Styles
+ *
+ * Node-type-specific overrides for the Notification action node properties panel.
+ * Common patterns are provided by panel-common.css.
+ *
  * Requirements: 17.1, 17.2, 12.2
  */
-
-/* ============================================
-   Panel Container
-   ============================================ */
-
-.notification-panel {
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-  padding: 16px;
-}
-
-/* ============================================
-   Section Styles
-   ============================================ */
-
-.notification-panel-section {
-  border: 1px solid var(--border-default);
-  border-radius: 8px;
-  overflow: hidden;
-  background: var(--bg-primary);
-}
-
-.notification-panel-section-header {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  padding: 12px 16px;
-  background: var(--bg-secondary);
-  border: none;
-  cursor: pointer;
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--text-primary);
-  text-align: left;
-  transition: background-color 0.2s ease;
-}
-
-.notification-panel-section-header:hover {
-  background: var(--bg-tertiary);
-}
-
-.notification-panel-section-toggle {
-  font-size: 10px;
-  color: var(--text-muted);
-  width: 12px;
-}
-
-.notification-panel-section-title {
-  flex: 1;
-}
-
-.notification-panel-section-content {
-  padding: 16px;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-/* ============================================
-   Field Styles
-   ============================================ */
-
-.notification-panel-field {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.notification-panel-label {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  font-size: 12px;
-  font-weight: 500;
-  color: var(--text-secondary);
-}
-
-.notification-panel-required {
-  color: var(--accent-error);
-}
-
-.notification-panel-hint {
-  font-size: 11px;
-  color: var(--text-muted);
-  font-weight: 400;
-}
-
-.notification-panel-tooltip-icon {
-  font-size: 12px;
-  cursor: help;
-}
-
-/* ============================================
-   Input Styles
-   ============================================ */
-
-.notification-panel-input {
-  width: 100%;
-  padding: 8px 12px;
-  border: 1px solid var(--border-default);
-  border-radius: 6px;
-  background: var(--bg-primary);
-  color: var(--text-primary);
-  font-size: 13px;
-  transition: border-color 0.2s ease, box-shadow 0.2s ease;
-}
-
-.notification-panel-input:focus {
-  outline: none;
-  border-color: var(--accent-primary);
-  box-shadow: 0 0 0 3px rgba(34, 211, 238, 0.15);
-}
-
-.notification-panel-input::placeholder {
-  color: var(--text-muted);
-}
-
-.notification-panel-textarea {
-  width: 100%;
-  padding: 10px 12px;
-  border: 1px solid var(--border-default);
-  border-radius: 6px;
-  background: var(--bg-primary);
-  color: var(--text-primary);
-  font-size: 13px;
-  font-family: inherit;
-  resize: vertical;
-  min-height: 80px;
-  transition: border-color 0.2s ease, box-shadow 0.2s ease;
-}
-
-.notification-panel-textarea:focus {
-  outline: none;
-  border-color: var(--accent-primary);
-  box-shadow: 0 0 0 3px rgba(34, 211, 238, 0.15);
-}
-
-.notification-panel-textarea::placeholder {
-  color: var(--text-muted);
-}
-
-.notification-panel-textarea-mono {
-  font-family: 'SF Mono', 'Monaco', 'Inconsolata', 'Fira Code', monospace;
-  font-size: 12px;
-}
-
-.notification-panel-textarea-error {
-  border-color: var(--accent-error);
-}
+@import './panel-common.css';
 
 /* ============================================
    Channel Selector
    ============================================ */
 
-.notification-channel-selector {
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: 8px;
-}
+.notification-channel-selector { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; }
 
 .notification-channel-option {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 10px 12px;
-  border: 2px solid var(--border-default);
-  border-radius: 8px;
-  background: var(--bg-primary);
-  cursor: pointer;
-  transition: all 0.2s ease;
+  display: flex; align-items: center; gap: 8px; padding: 10px 12px;
+  border: 2px solid var(--border-default); border-radius: 8px;
+  background: var(--bg-primary); cursor: pointer; transition: all 0.2s ease;
 }
 
-.notification-channel-option:hover {
-  border-color: var(--channel-color, var(--accent-primary));
-  background: var(--bg-secondary);
-}
+.notification-channel-option:hover { border-color: var(--channel-color, var(--accent-primary)); background: var(--bg-secondary); }
 
 .notification-channel-option.selected {
-  border-color: var(--channel-color, var(--accent-primary));
-  background: var(--bg-secondary);
+  border-color: var(--channel-color, var(--accent-primary)); background: var(--bg-secondary);
   box-shadow: 0 0 0 3px rgba(34, 211, 238, 0.15);
 }
 
-.notification-channel-icon {
-  font-size: 18px;
-}
+.notification-channel-icon { font-size: 18px; }
+.notification-channel-label { font-size: 12px; font-weight: 600; color: var(--text-primary); }
+.notification-panel-channel-description { font-size: 11px; color: var(--text-muted); padding: 8px 0 0; }
 
-.notification-channel-label {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--text-primary);
-}
-
-.notification-panel-channel-description {
-  font-size: 11px;
-  color: var(--text-muted);
-  padding: 8px 0 0;
-}
 
 /* ============================================
    Format Selector
    ============================================ */
 
-.notification-format-selector {
-  display: flex;
-  gap: 8px;
-}
+.notification-format-selector { display: flex; gap: 8px; }
 
 .notification-format-option {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 8px 12px;
-  border: 1px solid var(--border-default);
-  border-radius: 6px;
-  background: var(--bg-primary);
-  cursor: pointer;
-  transition: all 0.2s ease;
-  flex: 1;
-  justify-content: center;
+  display: flex; align-items: center; gap: 6px; padding: 8px 12px;
+  border: 1px solid var(--border-default); border-radius: 6px;
+  background: var(--bg-primary); cursor: pointer; transition: all 0.2s ease;
+  flex: 1; justify-content: center;
 }
 
-.notification-format-option:hover {
-  border-color: var(--accent-primary);
-  background: var(--bg-secondary);
+.notification-format-option:hover { border-color: var(--accent-primary); background: var(--bg-secondary); }
+.notification-format-option.selected { border-color: var(--accent-primary); background: rgba(34, 211, 238, 0.1); }
+.notification-format-icon { font-size: 14px; }
+.notification-format-label { font-size: 11px; font-weight: 500; color: var(--text-primary); }
+
+/* ============================================
+   Notification-specific Input Styles
+   ============================================ */
+
+.notification-panel-input {
+  width: 100%; padding: 8px 12px; border: 1px solid var(--border-default);
+  border-radius: 6px; background: var(--bg-primary); color: var(--text-primary);
+  font-size: 13px; transition: border-color 0.2s ease, box-shadow 0.2s ease;
 }
 
-.notification-format-option.selected {
-  border-color: var(--accent-primary);
-  background: rgba(34, 211, 238, 0.1);
+.notification-panel-input:focus {
+  outline: none; border-color: var(--accent-primary);
+  box-shadow: 0 0 0 3px rgba(34, 211, 238, 0.15);
 }
 
-.notification-format-icon {
-  font-size: 14px;
+.notification-panel-input::placeholder { color: var(--text-muted); }
+
+.notification-panel-textarea {
+  width: 100%; padding: 10px 12px; border: 1px solid var(--border-default);
+  border-radius: 6px; background: var(--bg-primary); color: var(--text-primary);
+  font-size: 13px; font-family: inherit; resize: vertical; min-height: 80px;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
 }
 
-.notification-format-label {
-  font-size: 11px;
-  font-weight: 500;
-  color: var(--text-primary);
+.notification-panel-textarea:focus {
+  outline: none; border-color: var(--accent-primary);
+  box-shadow: 0 0 0 3px rgba(34, 211, 238, 0.15);
 }
+
+.notification-panel-textarea::placeholder { color: var(--text-muted); }
+.notification-panel-textarea-mono { font-family: 'SF Mono', 'Monaco', 'Inconsolata', 'Fira Code', monospace; font-size: 12px; }
+.notification-panel-textarea-error { border-color: var(--accent-error); }
 
 /* ============================================
    Webhook Input
    ============================================ */
 
-.notification-webhook-input-wrapper {
-  display: flex;
-  gap: 8px;
-}
-
-.notification-webhook-input {
-  flex: 1;
-}
+.notification-webhook-input-wrapper { display: flex; gap: 8px; }
+.notification-webhook-input { flex: 1; }
 
 .notification-webhook-toggle {
-  padding: 8px 12px;
-  border: 1px solid var(--border-default);
-  border-radius: 6px;
-  background: var(--bg-secondary);
-  cursor: pointer;
-  font-size: 14px;
-  transition: all 0.2s ease;
+  padding: 8px 12px; border: 1px solid var(--border-default); border-radius: 6px;
+  background: var(--bg-secondary); cursor: pointer; font-size: 14px; transition: all 0.2s ease;
 }
 
-.notification-webhook-toggle:hover {
-  background: var(--bg-tertiary);
-}
+.notification-webhook-toggle:hover { background: var(--bg-tertiary); }
 
-.notification-webhook-help {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 11px;
-  padding-top: 4px;
-}
-
-.notification-webhook-help-label {
-  color: var(--text-muted);
-}
-
-.notification-webhook-help a {
-  color: var(--accent-primary);
-  text-decoration: none;
-}
-
-.notification-webhook-help a:hover {
-  text-decoration: underline;
-}
+.notification-webhook-help { display: flex; align-items: center; gap: 8px; font-size: 11px; padding-top: 4px; }
+.notification-webhook-help-label { color: var(--text-muted); }
+.notification-webhook-help a { color: var(--accent-primary); text-decoration: none; }
+.notification-webhook-help a:hover { text-decoration: underline; }
 
 /* ============================================
    Variable Preview
    ============================================ */
 
 .notification-variable-preview {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  padding: 8px 12px;
-  background: rgba(34, 211, 238, 0.08);
-  border: 1px solid rgba(34, 211, 238, 0.2);
-  border-radius: 6px;
+  display: flex; flex-direction: column; gap: 6px; padding: 8px 12px;
+  background: rgba(34, 211, 238, 0.08); border: 1px solid rgba(34, 211, 238, 0.2); border-radius: 6px;
 }
 
 .notification-variable-preview-label {
-  font-size: 10px;
-  font-weight: 500;
-  color: var(--text-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
+  font-size: 10px; font-weight: 500; color: var(--text-muted);
+  text-transform: uppercase; letter-spacing: 0.5px;
 }
 
-.notification-variable-preview-list {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
+.notification-variable-preview-list { display: flex; flex-wrap: wrap; gap: 6px; }
 
 .notification-variable-preview-item {
   font-family: 'SF Mono', 'Monaco', 'Inconsolata', 'Fira Code', monospace;
-  font-size: 11px;
-  padding: 2px 8px;
-  background: rgba(34, 211, 238, 0.15);
-  border-radius: 4px;
-  color: #22D3EE;
+  font-size: 11px; padding: 2px 8px; background: rgba(34, 211, 238, 0.15);
+  border-radius: 4px; color: #22D3EE;
 }
 
 /* ============================================
@@ -340,86 +129,23 @@
    ============================================ */
 
 .notification-blocks-editor {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding-top: 8px;
-  border-top: 1px solid var(--border-default);
-  margin-top: 8px;
+  display: flex; flex-direction: column; gap: 8px; padding-top: 8px;
+  border-top: 1px solid var(--border-default); margin-top: 8px;
 }
 
-.notification-blocks-error {
-  font-size: 11px;
-  color: var(--accent-error);
-  padding-top: 4px;
-}
-
-.notification-blocks-help {
-  font-size: 11px;
-}
-
-.notification-blocks-help a {
-  color: var(--accent-primary);
-  text-decoration: none;
-}
-
-.notification-blocks-help a:hover {
-  text-decoration: underline;
-}
+.notification-blocks-error { font-size: 11px; color: var(--accent-error); padding-top: 4px; }
+.notification-blocks-help { font-size: 11px; }
+.notification-blocks-help a { color: var(--accent-primary); text-decoration: none; }
+.notification-blocks-help a:hover { text-decoration: underline; }
 
 /* ============================================
-   Info Box
+   Dark Theme Overrides (Notification-specific)
    ============================================ */
 
-.notification-panel-info {
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-  padding: 10px 12px;
-  background: rgba(34, 211, 238, 0.08);
-  border: 1px solid rgba(34, 211, 238, 0.2);
-  border-radius: 6px;
-  font-size: 11px;
-}
-
-.notification-panel-info-icon {
-  font-size: 14px;
-  flex-shrink: 0;
-}
-
-.notification-panel-info-text {
-  color: var(--text-secondary);
-  line-height: 1.4;
-}
-
-/* ============================================
-   Dark Theme Overrides
-   ============================================ */
-
-:root[data-theme="dark"] .notification-channel-option.selected {
-  box-shadow: 0 0 0 3px rgba(103, 232, 249, 0.2);
-}
-
-:root[data-theme="dark"] .notification-format-option.selected {
-  background: rgba(103, 232, 249, 0.1);
-}
-
-:root[data-theme="dark"] .notification-variable-preview {
-  background: rgba(103, 232, 249, 0.08);
-  border-color: rgba(103, 232, 249, 0.2);
-}
-
-:root[data-theme="dark"] .notification-variable-preview-item {
-  background: rgba(103, 232, 249, 0.15);
-  color: #67E8F9;
-}
-
-:root[data-theme="dark"] .notification-panel-info {
-  background: rgba(103, 232, 249, 0.08);
-  border-color: rgba(103, 232, 249, 0.2);
-}
-
+:root[data-theme="dark"] .notification-channel-option.selected { box-shadow: 0 0 0 3px rgba(103, 232, 249, 0.2); }
+:root[data-theme="dark"] .notification-format-option.selected { background: rgba(103, 232, 249, 0.1); }
+:root[data-theme="dark"] .notification-variable-preview { background: rgba(103, 232, 249, 0.08); border-color: rgba(103, 232, 249, 0.2); }
+:root[data-theme="dark"] .notification-variable-preview-item { background: rgba(103, 232, 249, 0.15); color: #67E8F9; }
+:root[data-theme="dark"] .notification-panel-info { background: rgba(103, 232, 249, 0.08); border-color: rgba(103, 232, 249, 0.2); }
 :root[data-theme="dark"] .notification-panel-input:focus,
-:root[data-theme="dark"] .notification-panel-textarea:focus {
-  box-shadow: 0 0 0 3px rgba(103, 232, 249, 0.2);
-}
+:root[data-theme="dark"] .notification-panel-textarea:focus { box-shadow: 0 0 0 3px rgba(103, 232, 249, 0.2); }

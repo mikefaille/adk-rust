@@ -5,10 +5,21 @@ use chrono::{Duration, Utc};
 use serde_json::json;
 use std::collections::HashMap;
 
+#[allow(dead_code)]
 pub async fn assert_session_contract(
     service: &dyn SessionService,
     app_name: &str,
     other_app_name: &str,
+) {
+    assert_session_contract_with_users(service, app_name, other_app_name, "user1", "user2").await;
+}
+
+pub async fn assert_session_contract_with_users(
+    service: &dyn SessionService,
+    app_name: &str,
+    other_app_name: &str,
+    user_1: &str,
+    user_2: &str,
 ) {
     let mut initial_state = HashMap::new();
     initial_state.insert("app:locale".to_string(), json!("en-US"));
@@ -19,7 +30,7 @@ pub async fn assert_session_contract(
     let created = service
         .create(CreateRequest {
             app_name: app_name.to_string(),
-            user_id: "user1".to_string(),
+            user_id: user_1.to_string(),
             session_id: None,
             state: initial_state,
         })
@@ -29,12 +40,12 @@ pub async fn assert_session_contract(
     let session_id = created.id().to_string();
     assert!(!session_id.is_empty());
     assert_eq!(created.app_name(), app_name);
-    assert_eq!(created.user_id(), "user1");
+    assert_eq!(created.user_id(), user_1);
 
     let fetched = service
         .get(GetRequest {
             app_name: app_name.to_string(),
-            user_id: "user1".to_string(),
+            user_id: user_1.to_string(),
             session_id: session_id.clone(),
             num_recent_events: None,
             after: None,
@@ -69,7 +80,7 @@ pub async fn assert_session_contract(
     let with_events = service
         .get(GetRequest {
             app_name: app_name.to_string(),
-            user_id: "user1".to_string(),
+            user_id: user_1.to_string(),
             session_id: session_id.clone(),
             num_recent_events: None,
             after: None,
@@ -84,7 +95,7 @@ pub async fn assert_session_contract(
     let recent = service
         .get(GetRequest {
             app_name: app_name.to_string(),
-            user_id: "user1".to_string(),
+            user_id: user_1.to_string(),
             session_id: session_id.clone(),
             num_recent_events: Some(1),
             after: None,
@@ -98,7 +109,7 @@ pub async fn assert_session_contract(
     let after = service
         .get(GetRequest {
             app_name: app_name.to_string(),
-            user_id: "user1".to_string(),
+            user_id: user_1.to_string(),
             session_id: session_id.clone(),
             num_recent_events: None,
             after: Some(t2),
@@ -110,7 +121,7 @@ pub async fn assert_session_contract(
     assert_eq!(after.events().at(0).expect("event 0").timestamp, t2);
 
     let sessions_user1 = service
-        .list(ListRequest { app_name: app_name.to_string(), user_id: "user1".to_string() })
+        .list(ListRequest { app_name: app_name.to_string(), user_id: user_1.to_string() })
         .await
         .expect("list for user1 should succeed");
 
@@ -119,7 +130,7 @@ pub async fn assert_session_contract(
     let user2 = service
         .create(CreateRequest {
             app_name: app_name.to_string(),
-            user_id: "user2".to_string(),
+            user_id: user_2.to_string(),
             session_id: None,
             state: HashMap::new(),
         })
@@ -130,7 +141,7 @@ pub async fn assert_session_contract(
     let wrong_user_get = service
         .get(GetRequest {
             app_name: app_name.to_string(),
-            user_id: "user2".to_string(),
+            user_id: user_2.to_string(),
             session_id: session_id.clone(),
             num_recent_events: None,
             after: None,
@@ -139,7 +150,7 @@ pub async fn assert_session_contract(
     assert!(wrong_user_get.is_err());
 
     let sessions_user2 = service
-        .list(ListRequest { app_name: app_name.to_string(), user_id: "user2".to_string() })
+        .list(ListRequest { app_name: app_name.to_string(), user_id: user_2.to_string() })
         .await
         .expect("list for user2 should succeed");
 
@@ -149,7 +160,7 @@ pub async fn assert_session_contract(
     let other_app = service
         .create(CreateRequest {
             app_name: other_app_name.to_string(),
-            user_id: "user1".to_string(),
+            user_id: user_1.to_string(),
             session_id: None,
             state: HashMap::new(),
         })
@@ -158,7 +169,7 @@ pub async fn assert_session_contract(
     let other_app_session_id = other_app.id().to_string();
 
     let sessions_primary_app = service
-        .list(ListRequest { app_name: app_name.to_string(), user_id: "user1".to_string() })
+        .list(ListRequest { app_name: app_name.to_string(), user_id: user_1.to_string() })
         .await
         .expect("list primary app should succeed");
 
@@ -166,7 +177,7 @@ pub async fn assert_session_contract(
     assert!(!sessions_primary_app.iter().any(|session| session.id() == other_app_session_id));
 
     let sessions_other_app = service
-        .list(ListRequest { app_name: other_app_name.to_string(), user_id: "user1".to_string() })
+        .list(ListRequest { app_name: other_app_name.to_string(), user_id: user_1.to_string() })
         .await
         .expect("list secondary app should succeed");
 
@@ -176,16 +187,34 @@ pub async fn assert_session_contract(
     service
         .delete(DeleteRequest {
             app_name: app_name.to_string(),
-            user_id: "user1".to_string(),
+            user_id: user_1.to_string(),
             session_id: session_id.clone(),
         })
         .await
         .expect("delete should succeed");
 
+    service
+        .delete(DeleteRequest {
+            app_name: app_name.to_string(),
+            user_id: user_2.to_string(),
+            session_id: user2_session_id,
+        })
+        .await
+        .expect("delete secondary user session should succeed");
+
+    service
+        .delete(DeleteRequest {
+            app_name: other_app_name.to_string(),
+            user_id: user_1.to_string(),
+            session_id: other_app_session_id,
+        })
+        .await
+        .expect("delete secondary app session should succeed");
+
     let deleted_get = service
         .get(GetRequest {
             app_name: app_name.to_string(),
-            user_id: "user1".to_string(),
+            user_id: user_1.to_string(),
             session_id,
             num_recent_events: None,
             after: None,

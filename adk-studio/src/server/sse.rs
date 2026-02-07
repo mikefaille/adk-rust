@@ -25,6 +25,25 @@ struct SessionProcess {
     stdout_rx: tokio::sync::mpsc::Receiver<String>,
     stderr_rx: tokio::sync::mpsc::Receiver<String>,
     _child: Child,
+    created_at: std::time::Instant,
+}
+
+/// Remove stale sessions older than the given max age.
+/// Called periodically to prevent unbounded memory growth.
+pub async fn cleanup_stale_sessions(max_age: std::time::Duration) {
+    let mut sessions = SESSIONS.lock().await;
+    let before = sessions.len();
+    sessions.retain(|id, session| {
+        let stale = session.created_at.elapsed() > max_age;
+        if stale {
+            tracing::info!(session_id = %id, "Cleaning up stale session");
+        }
+        !stale
+    });
+    let removed = before - sessions.len();
+    if removed > 0 {
+        tracing::info!(removed = removed, remaining = sessions.len(), "Stale session cleanup complete");
+    }
 }
 
 /// Information about an interrupt extracted from TRACE output.
@@ -381,9 +400,11 @@ async fn get_or_create_session(
         .spawn()
         .map_err(|e| format!("Failed to start binary: {}", e))?;
 
-    let stdin = BufWriter::new(child.stdin.take().unwrap());
-    let stdout = child.stdout.take().unwrap();
-    let stderr = child.stderr.take().unwrap();
+    let stdin = BufWriter::new(
+        child.stdin.take().ok_or_else(|| "Failed to capture child stdin".to_string())?
+    );
+    let stdout = child.stdout.take().ok_or_else(|| "Failed to capture child stdout".to_string())?;
+    let stderr = child.stderr.take().ok_or_else(|| "Failed to capture child stderr".to_string())?;
 
     let (stdout_tx, stdout_rx) = tokio::sync::mpsc::channel(100);
     tokio::spawn(async move {
@@ -407,7 +428,7 @@ async fn get_or_create_session(
 
     sessions.insert(
         session_id.to_string(),
-        SessionProcess { stdin, stdout_rx, stderr_rx, _child: child },
+        SessionProcess { stdin, stdout_rx, stderr_rx, _child: child, created_at: std::time::Instant::now() },
     );
     Ok(())
 }
@@ -476,7 +497,12 @@ pub async fn stream_handler(
             }
         }
 
-        let timeout = tokio::time::Duration::from_secs(60);
+        // Timeout is configurable via ADK_STUDIO_STREAM_TIMEOUT_SECS env var (default: 300s / 5 min)
+        let timeout_secs: u64 = std::env::var("ADK_STUDIO_STREAM_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(300);
+        let timeout = tokio::time::Duration::from_secs(timeout_secs);
         let start = tokio::time::Instant::now();
 
         loop {

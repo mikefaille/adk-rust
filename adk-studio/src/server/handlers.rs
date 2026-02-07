@@ -238,7 +238,10 @@ pub async fn build_project_stream(
                 }
             };
 
-        let stderr = child.stderr.take().unwrap();
+        let Some(stderr) = child.stderr.take() else {
+            yield Ok(Event::default().event("error").data("Failed to capture build stderr"));
+            return;
+        };
         let mut reader = BufReader::new(stderr).lines();
 
         while let Ok(Some(line)) = reader.next_line().await {
@@ -274,7 +277,10 @@ pub async fn build_project(
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     // Write to temp directory
-    let project_name = project.name.to_lowercase().replace(' ', "_");
+    let mut project_name = project.name.to_lowercase().replace(' ', "_").replace(|c: char| !c.is_alphanumeric() && c != '_', "");
+    if project_name.is_empty() || project_name.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+        project_name = format!("project_{}", project_name);
+    }
     let build_dir = std::env::temp_dir().join("adk-studio-builds").join(&project_name);
     std::fs::create_dir_all(&build_dir)
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -292,12 +298,13 @@ pub async fn build_project(
     let shared_target = std::env::temp_dir().join("adk-studio-builds").join("_shared_target");
     let _ = std::fs::create_dir_all(&shared_target);
 
-    // Run cargo build
-    let output = std::process::Command::new("cargo")
+    // Run cargo build (async to avoid blocking the tokio runtime)
+    let output = tokio::process::Command::new("cargo")
         .arg("build")
         .env("CARGO_TARGET_DIR", &shared_target)
         .current_dir(&build_dir)
         .output()
+        .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);

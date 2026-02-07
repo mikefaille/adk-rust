@@ -10,7 +10,8 @@
 
 import React, { useCallback, useState, useMemo } from 'react';
 import { StandardPropertiesPanel } from './StandardPropertiesPanel';
-import { Tooltip } from '../Overlays/Tooltip';
+import { CollapsibleSection } from '../shared/CollapsibleSection';
+import { Field } from '../shared/Field';
 import type { 
   NotificationNodeConfig, 
   NotificationChannel,
@@ -77,70 +78,6 @@ const DEFAULT_MESSAGE: NotificationMessage = {
   text: '',
   format: 'plain',
 };
-
-// ============================================
-// Helper Components
-// ============================================
-
-interface CollapsibleSectionProps {
-  title: string;
-  defaultOpen?: boolean;
-  children: React.ReactNode;
-}
-
-function CollapsibleSection({ title, defaultOpen = true, children }: CollapsibleSectionProps) {
-  const [isOpen, setIsOpen] = useState(defaultOpen);
-  
-  return (
-    <div className="notification-panel-section">
-      <button 
-        className="notification-panel-section-header"
-        onClick={() => setIsOpen(!isOpen)}
-        type="button"
-      >
-        <span className="notification-panel-section-toggle">{isOpen ? '▼' : '▶'}</span>
-        <span className="notification-panel-section-title">{title}</span>
-      </button>
-      {isOpen && (
-        <div className="notification-panel-section-content">
-          {children}
-        </div>
-      )}
-    </div>
-  );
-}
-
-interface FieldProps {
-  label: string;
-  hint?: string;
-  required?: boolean;
-  tooltip?: string;
-  children: React.ReactNode;
-}
-
-function Field({ label, hint, required, tooltip, children }: FieldProps) {
-  const labelContent = (
-    <label className="notification-panel-label">
-      {label}
-      {required && <span className="notification-panel-required">*</span>}
-      {hint && <span className="notification-panel-hint">({hint})</span>}
-      {tooltip && <span className="notification-panel-tooltip-icon" title={tooltip}>ℹ️</span>}
-    </label>
-  );
-
-  return (
-    <div className="notification-panel-field">
-      {tooltip ? (
-        <Tooltip content={tooltip} position="right" delay={300}>
-          {labelContent}
-        </Tooltip>
-      ) : (
-        labelContent
-      )}
-      {children}
-    </div>
-  );
-}
 
 // ============================================
 // Main Component

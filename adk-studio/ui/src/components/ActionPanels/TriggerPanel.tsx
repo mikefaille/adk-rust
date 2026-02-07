@@ -8,9 +8,11 @@
  * Requirements: 2.1, 2.2, 2.3, 12.2
  */
 
-import React, { useCallback, useState } from 'react';
+import { useCallback, useState } from 'react';
 import { StandardPropertiesPanel } from './StandardPropertiesPanel';
-import { Tooltip, ACTION_NODE_TOOLTIPS } from '../Overlays/Tooltip';
+import { ACTION_NODE_TOOLTIPS } from '../Overlays/Tooltip';
+import { CollapsibleSection } from '../shared/CollapsibleSection';
+import { Field } from '../shared/Field';
 import type { 
   TriggerNodeConfig, 
   TriggerType, 
@@ -79,70 +81,6 @@ const COMMON_TIMEZONES = [
   'Asia/Singapore',
   'Australia/Sydney',
 ] as const;
-
-// ============================================
-// Helper Components
-// ============================================
-
-interface CollapsibleSectionProps {
-  title: string;
-  defaultOpen?: boolean;
-  children: React.ReactNode;
-}
-
-function CollapsibleSection({ title, defaultOpen = true, children }: CollapsibleSectionProps) {
-  const [isOpen, setIsOpen] = useState(defaultOpen);
-  
-  return (
-    <div className="trigger-panel-section">
-      <button 
-        className="trigger-panel-section-header"
-        onClick={() => setIsOpen(!isOpen)}
-        type="button"
-      >
-        <span className="trigger-panel-section-toggle">{isOpen ? '▼' : '▶'}</span>
-        <span className="trigger-panel-section-title">{title}</span>
-      </button>
-      {isOpen && (
-        <div className="trigger-panel-section-content">
-          {children}
-        </div>
-      )}
-    </div>
-  );
-}
-
-interface FieldProps {
-  label: string;
-  hint?: string;
-  required?: boolean;
-  tooltip?: string;
-  children: React.ReactNode;
-}
-
-function Field({ label, hint, required, tooltip, children }: FieldProps) {
-  const labelContent = (
-    <label className="trigger-panel-label">
-      {label}
-      {required && <span className="trigger-panel-required">*</span>}
-      {hint && <span className="trigger-panel-hint">({hint})</span>}
-      {tooltip && <span className="trigger-panel-tooltip-icon" title={tooltip}>ℹ️</span>}
-    </label>
-  );
-
-  return (
-    <div className="trigger-panel-field">
-      {tooltip ? (
-        <Tooltip content={tooltip} position="right" delay={300}>
-          {labelContent}
-        </Tooltip>
-      ) : (
-        labelContent
-      )}
-      {children}
-    </div>
-  );
-}
 
 // ============================================
 // Main Component

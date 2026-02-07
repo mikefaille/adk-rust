@@ -6,7 +6,7 @@ import { useWebhookEvents, WebhookNotification } from '../../hooks/useWebhookEve
 import type { StateSnapshot, InterruptData } from '../../types/execution';
 import type { Project } from '../../types/project';
 import { ConsoleFilters, EventFilter } from './ConsoleFilters';
-import { DEFAULT_MANUAL_TRIGGER_CONFIG, type ManualTriggerConfig, type TriggerNodeConfig, type TriggerType } from '../../types/actionNodes';
+import { DEFAULT_MANUAL_TRIGGER_CONFIG, type TriggerNodeConfig, type TriggerType } from '../../types/actionNodes';
 
 interface Message {
   role: 'user' | 'assistant' | 'interrupt';
@@ -354,7 +354,7 @@ export function TestConsole({
   }, [binaryPath, isStreaming, onFlowPhase, send]);
   
   // Subscribe to webhook events for this project
-  const { isConnected: webhookConnected } = useWebhookEvents(
+  const { isConnected: _webhookConnected } = useWebhookEvents(
     currentProject?.id ?? null,
     {
       onWebhook: handleWebhookReceived,

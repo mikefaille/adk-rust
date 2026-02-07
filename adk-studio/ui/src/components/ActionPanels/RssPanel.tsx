@@ -7,9 +7,10 @@
  * Requirements: 15.1, 15.2, 12.2
  */
 
-import React, { useCallback, useState } from 'react';
+import { useCallback, useState } from 'react';
 import { StandardPropertiesPanel } from './StandardPropertiesPanel';
-import { Tooltip } from '../Overlays/Tooltip';
+import { CollapsibleSection } from '../shared/CollapsibleSection';
+import { Field } from '../shared/Field';
 import type { 
   RssNodeConfig,
   FeedFilter,
@@ -43,70 +44,6 @@ const DEFAULT_SEEN_TRACKING: SeenItemTracking = {
   stateKey: 'seenFeedItems',
   maxItems: 1000,
 };
-
-// ============================================
-// Helper Components
-// ============================================
-
-interface CollapsibleSectionProps {
-  title: string;
-  defaultOpen?: boolean;
-  children: React.ReactNode;
-}
-
-function CollapsibleSection({ title, defaultOpen = true, children }: CollapsibleSectionProps) {
-  const [isOpen, setIsOpen] = useState(defaultOpen);
-  
-  return (
-    <div className="rss-panel-section">
-      <button 
-        className="rss-panel-section-header"
-        onClick={() => setIsOpen(!isOpen)}
-        type="button"
-      >
-        <span className="rss-panel-section-toggle">{isOpen ? '▼' : '▶'}</span>
-        <span className="rss-panel-section-title">{title}</span>
-      </button>
-      {isOpen && (
-        <div className="rss-panel-section-content">
-          {children}
-        </div>
-      )}
-    </div>
-  );
-}
-
-interface FieldProps {
-  label: string;
-  hint?: string;
-  required?: boolean;
-  tooltip?: string;
-  children: React.ReactNode;
-}
-
-function Field({ label, hint, required, tooltip, children }: FieldProps) {
-  const labelContent = (
-    <label className="rss-panel-label">
-      {label}
-      {required && <span className="rss-panel-required">*</span>}
-      {hint && <span className="rss-panel-hint">({hint})</span>}
-      {tooltip && <span className="rss-panel-tooltip-icon" title={tooltip}>ℹ️</span>}
-    </label>
-  );
-
-  return (
-    <div className="rss-panel-field">
-      {tooltip ? (
-        <Tooltip content={tooltip} position="right" delay={300}>
-          {labelContent}
-        </Tooltip>
-      ) : (
-        labelContent
-      )}
-      {children}
-    </div>
-  );
-}
 
 // ============================================
 // Main Component

@@ -8,8 +8,10 @@
  * Requirements: 6.1, 6.2, 6.3, 12.2
  */
 
-import React, { useCallback, useState } from 'react';
+import { useCallback, useState } from 'react';
 import { StandardPropertiesPanel } from './StandardPropertiesPanel';
+import { CollapsibleSection } from '../shared/CollapsibleSection';
+import { Field } from '../shared/Field';
 import type { 
   SwitchNodeConfig, 
   EvaluationMode,
@@ -68,58 +70,6 @@ const OPERATOR_CONFIG: Record<ConditionOperator, {
   empty: { label: 'is empty', description: 'Is empty/null', requiresValue: false },
   exists: { label: 'exists', description: 'Field exists', requiresValue: false },
 };
-
-// ============================================
-// Helper Components
-// ============================================
-
-interface CollapsibleSectionProps {
-  title: string;
-  defaultOpen?: boolean;
-  children: React.ReactNode;
-}
-
-function CollapsibleSection({ title, defaultOpen = true, children }: CollapsibleSectionProps) {
-  const [isOpen, setIsOpen] = useState(defaultOpen);
-  
-  return (
-    <div className="switch-panel-section">
-      <button 
-        className="switch-panel-section-header"
-        onClick={() => setIsOpen(!isOpen)}
-        type="button"
-      >
-        <span className="switch-panel-section-toggle">{isOpen ? '▼' : '▶'}</span>
-        <span className="switch-panel-section-title">{title}</span>
-      </button>
-      {isOpen && (
-        <div className="switch-panel-section-content">
-          {children}
-        </div>
-      )}
-    </div>
-  );
-}
-
-interface FieldProps {
-  label: string;
-  hint?: string;
-  required?: boolean;
-  children: React.ReactNode;
-}
-
-function Field({ label, hint, required, children }: FieldProps) {
-  return (
-    <div className="switch-panel-field">
-      <label className="switch-panel-label">
-        {label}
-        {required && <span className="switch-panel-required">*</span>}
-        {hint && <span className="switch-panel-hint">({hint})</span>}
-      </label>
-      {children}
-    </div>
-  );
-}
 
 // ============================================
 // Main Component

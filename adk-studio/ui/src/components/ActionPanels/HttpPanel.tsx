@@ -7,9 +7,11 @@
  * Requirements: 3.1, 3.2, 3.3, 3.4, 3.5, 12.2
  */
 
-import React, { useCallback, useState } from 'react';
+import { useCallback, useState } from 'react';
 import { StandardPropertiesPanel } from './StandardPropertiesPanel';
-import { Tooltip, ACTION_NODE_TOOLTIPS } from '../Overlays/Tooltip';
+import { ACTION_NODE_TOOLTIPS } from '../Overlays/Tooltip';
+import { CollapsibleSection } from '../shared/CollapsibleSection';
+import { Field } from '../shared/Field';
 import type { 
   HttpNodeConfig, 
   HttpMethod, 
@@ -63,70 +65,6 @@ const HTTP_RESPONSE_LABELS: Record<HttpResponseType, string> = {
   text: 'Plain Text',
   binary: 'Binary',
 };
-
-// ============================================
-// Helper Components
-// ============================================
-
-interface CollapsibleSectionProps {
-  title: string;
-  defaultOpen?: boolean;
-  children: React.ReactNode;
-}
-
-function CollapsibleSection({ title, defaultOpen = true, children }: CollapsibleSectionProps) {
-  const [isOpen, setIsOpen] = useState(defaultOpen);
-  
-  return (
-    <div className="http-panel-section">
-      <button 
-        className="http-panel-section-header"
-        onClick={() => setIsOpen(!isOpen)}
-        type="button"
-      >
-        <span className="http-panel-section-toggle">{isOpen ? '▼' : '▶'}</span>
-        <span className="http-panel-section-title">{title}</span>
-      </button>
-      {isOpen && (
-        <div className="http-panel-section-content">
-          {children}
-        </div>
-      )}
-    </div>
-  );
-}
-
-interface FieldProps {
-  label: string;
-  hint?: string;
-  required?: boolean;
-  tooltip?: string;
-  children: React.ReactNode;
-}
-
-function Field({ label, hint, required, tooltip, children }: FieldProps) {
-  const labelContent = (
-    <label className="http-panel-label">
-      {label}
-      {required && <span className="http-panel-required">*</span>}
-      {hint && <span className="http-panel-hint">({hint})</span>}
-      {tooltip && <span className="http-panel-tooltip-icon" title={tooltip}>ℹ️</span>}
-    </label>
-  );
-
-  return (
-    <div className="http-panel-field">
-      {tooltip ? (
-        <Tooltip content={tooltip} position="right" delay={300}>
-          {labelContent}
-        </Tooltip>
-      ) : (
-        labelContent
-      )}
-      {children}
-    </div>
-  );
-}
 
 // ============================================
 // Main Component

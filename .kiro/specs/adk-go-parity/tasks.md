@@ -99,7 +99,8 @@ Out of scope for this phase:
 - [x] 10. P2: Vertex AI Session Service
   - [x] 10.1 Add `VertexAiSessionService` implementation behind feature flag.
   - [x] 10.2 Support create/get/list/delete/append parity with existing session trait.
-  - [x] 10.3 Add contract tests shared with current session service test suite.
+  - [x] 10.3 Add contract tests shared with current session service test suite (mock-backed transport).
+  - [ ] 10.4 Add live Vertex integration acceptance test (ADC + real Reasoning Engine resources).
   - Files:
     - `adk-session/src/*`
     - `adk-session/tests/*`
@@ -176,15 +177,23 @@ Out of scope for this phase:
 
 ### P2 Acceptance Tests
 
-- [x] AT-P2-VERTEX-SESSION-01: Vertex session service passes session contract tests
-  - Setup: Run shared session service test suite against Vertex-backed implementation.
+- [x] AT-P2-VERTEX-CONTRACT-01: Vertex session service passes shared contract tests (mock transport)
+  - Setup: Run shared session service test suite against Vertex-backed implementation using local mock API.
   - Verify:
     - `create/get/list/delete/append_event` behavior matches trait expectations.
     - Isolation by `(app_name, user_id, session_id)` holds.
 
+- [ ] AT-P2-VERTEX-LIVE-01: Vertex session service passes live contract tests
+  - Setup: Run `adk-session/tests/session_contract_vertex_live.rs` with ADC and two real reasoning engines.
+  - Verify:
+    - `create/get/list/delete/append_event` succeeds against live Vertex Session Service.
+    - Isolation by `(app_name, user_id, session_id)` holds in live backend.
+
 ## Verification Commands (Target)
 
 - `cargo test -p adk-session --features database`
+- `cargo test -p adk-session --features vertex-session`
+- `cargo test -p adk-session --features vertex-session --test session_contract_vertex_live -- --ignored`
 - `cargo test -p adk-runner`
 - `cargo test -p adk-agent`
 - `cargo test -p adk-tool`

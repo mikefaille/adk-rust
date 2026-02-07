@@ -48,7 +48,12 @@ impl FileStorage {
     pub async fn save(&self, project: &ProjectSchema) -> Result<()> {
         let path = self.project_path(project.id);
         let content = serde_json::to_string_pretty(project)?;
-        fs::write(&path, content).await?;
+        // Atomic write: write to temp file then rename to avoid corruption on crash
+        let tmp_path = path.with_extension("json.tmp");
+        fs::write(&tmp_path, content).await?;
+        fs::rename(&tmp_path, &path).await.with_context(|| {
+            format!("Failed to rename temp file to {}", path.display())
+        })?;
         Ok(())
     }
 

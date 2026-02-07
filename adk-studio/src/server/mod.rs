@@ -15,4 +15,5 @@ pub use graph_runner::{
 pub use routes::api_routes;
 pub use runner::{ActionError, ActionNodeEvent, ActionResult, WorkflowExecutor};
 pub use scheduler::{start_scheduler, stop_scheduler, get_project_schedules, ScheduledJobInfo};
+pub use sse::cleanup_stale_sessions;
 pub use state::AppState;

@@ -1,278 +1,70 @@
 /**
  * SwitchPanel CSS Styles
- * 
- * Styles for the Switch node configuration panel.
- * Supports both light and dark themes using CSS variables.
- * 
+ *
+ * Node-type-specific overrides for the Switch node configuration panel.
+ * Common patterns are provided by panel-common.css.
+ *
  * @see Requirements 6.1, 6.2, 6.3, 12.2
  */
-
-/* ============================================
-   Panel Container
-   ============================================ */
-
-.switch-panel {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding: 8px 0;
-}
-
-/* ============================================
-   Collapsible Section
-   ============================================ */
-
-.switch-panel-section {
-  border-radius: 6px;
-  overflow: hidden;
-  background: var(--bg-secondary);
-  border: 1px solid var(--border-default);
-}
-
-.switch-panel-section-header {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  padding: 10px 12px;
-  background: transparent;
-  border: none;
-  cursor: pointer;
-  text-align: left;
-  color: var(--text-primary);
-  font-size: 12px;
-  font-weight: 600;
-  transition: background-color 0.15s ease;
-}
-
-.switch-panel-section-header:hover {
-  background: var(--bg-hover);
-}
-
-.switch-panel-section-toggle {
-  font-size: 10px;
-  color: var(--text-muted);
-  width: 12px;
-  flex-shrink: 0;
-}
-
-.switch-panel-section-title {
-  flex: 1;
-}
-
-.switch-panel-section-content {
-  padding: 8px 12px 12px;
-  border-top: 1px solid var(--border-default);
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
+@import './panel-common.css';
 
 /* ============================================
    Evaluation Mode Selector
    ============================================ */
 
-.switch-evaluation-mode-selector {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
+.switch-evaluation-mode-selector { display: flex; flex-direction: column; gap: 8px; }
 
 .switch-evaluation-mode-option {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 4px;
-  padding: 12px;
-  border: 2px solid var(--border-default);
-  border-radius: 8px;
-  background: var(--bg-primary);
-  cursor: pointer;
-  transition: all 0.15s ease;
-  text-align: left;
+  display: flex; flex-direction: column; align-items: flex-start; gap: 4px;
+  padding: 12px; border: 2px solid var(--border-default); border-radius: 8px;
+  background: var(--bg-primary); cursor: pointer; transition: all 0.15s ease; text-align: left;
 }
 
-.switch-evaluation-mode-option:hover {
-  border-color: var(--action-switch);
-}
+.switch-evaluation-mode-option:hover { border-color: var(--action-switch); }
 
 .switch-evaluation-mode-option.selected {
   border-color: var(--action-switch);
   background: rgba(245, 158, 11, 0.1);
 }
 
-.switch-evaluation-mode-icon {
-  font-size: 18px;
-}
+.switch-evaluation-mode-icon { font-size: 18px; }
+.switch-evaluation-mode-label { font-size: 13px; font-weight: 600; color: var(--text-primary); }
+.switch-evaluation-mode-description { font-size: 11px; color: var(--text-muted); }
 
-.switch-evaluation-mode-label {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--text-primary);
-}
-
-.switch-evaluation-mode-description {
-  font-size: 11px;
-  color: var(--text-muted);
-}
 
 /* ============================================
    Mode Toggle (Conditions vs Expression)
    ============================================ */
 
-.switch-mode-toggle {
-  display: flex;
-  gap: 8px;
-}
+.switch-mode-toggle { display: flex; gap: 8px; }
 
 .switch-mode-option {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 4px;
-  padding: 12px 8px;
-  border: 2px solid var(--border-default);
-  border-radius: 8px;
-  background: var(--bg-primary);
-  cursor: pointer;
-  transition: all 0.15s ease;
+  flex: 1; display: flex; flex-direction: column; align-items: center; gap: 4px;
+  padding: 12px 8px; border: 2px solid var(--border-default); border-radius: 8px;
+  background: var(--bg-primary); cursor: pointer; transition: all 0.15s ease;
 }
 
-.switch-mode-option:hover {
-  border-color: var(--action-switch);
-}
-
-.switch-mode-option.selected {
-  border-color: var(--action-switch);
-  background: rgba(245, 158, 11, 0.1);
-}
-
-.switch-mode-icon {
-  font-size: 20px;
-}
-
-.switch-mode-label {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--text-primary);
-}
-
-.switch-mode-hint {
-  font-size: 10px;
-  color: var(--text-muted);
-  text-align: center;
-}
-
-/* ============================================
-   Field Styles
-   ============================================ */
-
-.switch-panel-field {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.switch-panel-label {
-  font-size: 11px;
-  font-weight: 500;
-  color: var(--text-secondary);
-  display: flex;
-  align-items: center;
-  gap: 4px;
-}
-
-.switch-panel-required {
-  color: var(--accent-error);
-  font-weight: 600;
-}
-
-.switch-panel-hint {
-  font-size: 10px;
-  font-weight: 400;
-  color: var(--text-muted);
-}
-
-.switch-panel-field-help {
-  font-size: 10px;
-  color: var(--text-muted);
-  margin-top: 2px;
-  line-height: 1.4;
-}
-
-/* ============================================
-   Input Styles
-   ============================================ */
-
-.switch-panel-input,
-.switch-panel-select {
-  width: 100%;
-  padding: 6px 10px;
-  font-size: 12px;
-  border: 1px solid var(--border-default);
-  border-radius: 4px;
-  background: var(--bg-primary);
-  color: var(--text-primary);
-  transition: border-color 0.15s ease, box-shadow 0.15s ease;
-}
-
-.switch-panel-input:focus,
-.switch-panel-select:focus {
-  outline: none;
-  border-color: var(--action-switch);
-  box-shadow: 0 0 0 2px rgba(245, 158, 11, 0.2);
-}
-
-.switch-panel-input::placeholder {
-  color: var(--text-muted);
-}
-
-.switch-panel-input-mono {
-  font-family: monospace;
-  font-size: 11px;
-}
-
-.switch-panel-select {
-  cursor: pointer;
-  appearance: none;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%236B7280' d='M3 4.5L6 7.5L9 4.5'/%3E%3C/svg%3E");
-  background-repeat: no-repeat;
-  background-position: right 8px center;
-  padding-right: 28px;
-}
+.switch-mode-option:hover { border-color: var(--action-switch); }
+.switch-mode-option.selected { border-color: var(--action-switch); background: rgba(245, 158, 11, 0.1); }
+.switch-mode-icon { font-size: 20px; }
+.switch-mode-label { font-size: 12px; font-weight: 600; color: var(--text-primary); }
+.switch-mode-hint { font-size: 10px; color: var(--text-muted); text-align: center; }
 
 /* ============================================
    Condition Builder
    ============================================ */
 
-.switch-condition-builder {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.switch-conditions-list {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
+.switch-condition-builder { display: flex; flex-direction: column; gap: 8px; }
+.switch-conditions-list { display: flex; flex-direction: column; gap: 8px; }
 
 .switch-condition-add {
-  padding: 8px 12px;
-  font-size: 12px;
-  font-weight: 500;
-  border: 1px dashed var(--border-default);
-  border-radius: 6px;
-  background: transparent;
-  color: var(--text-secondary);
-  cursor: pointer;
-  transition: all 0.15s ease;
+  padding: 8px 12px; font-size: 12px; font-weight: 500;
+  border: 1px dashed var(--border-default); border-radius: 6px;
+  background: transparent; color: var(--text-secondary); cursor: pointer; transition: all 0.15s ease;
 }
 
 .switch-condition-add:hover {
-  border-color: var(--action-switch);
-  color: var(--action-switch);
+  border-color: var(--action-switch); color: var(--action-switch);
   background: rgba(245, 158, 11, 0.05);
 }
 
@@ -281,349 +73,108 @@
    ============================================ */
 
 .switch-condition-row {
-  border: 1px solid var(--border-default);
-  border-radius: 6px;
-  background: var(--bg-primary);
-  overflow: hidden;
+  border: 1px solid var(--border-default); border-radius: 6px;
+  background: var(--bg-primary); overflow: hidden;
 }
 
-.switch-condition-row.expanded {
-  border-color: var(--action-switch);
-}
+.switch-condition-row.expanded { border-color: var(--action-switch); }
 
 .switch-condition-header {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 10px;
-  background: var(--bg-secondary);
-  border-bottom: 1px solid var(--border-default);
+  display: flex; align-items: center; gap: 8px; padding: 8px 10px;
+  background: var(--bg-secondary); border-bottom: 1px solid var(--border-default);
 }
 
-.switch-condition-row.collapsed .switch-condition-header {
-  border-bottom: none;
-}
+.switch-condition-row.collapsed .switch-condition-header { border-bottom: none; }
 
 .switch-condition-toggle {
-  width: 20px;
-  height: 20px;
-  padding: 0;
-  border: none;
-  background: transparent;
-  color: var(--text-muted);
-  font-size: 10px;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
+  width: 20px; height: 20px; padding: 0; border: none; background: transparent;
+  color: var(--text-muted); font-size: 10px; cursor: pointer;
+  display: flex; align-items: center; justify-content: center; flex-shrink: 0;
 }
 
-.switch-condition-index {
-  font-size: 10px;
-  font-weight: 600;
-  color: var(--action-switch);
-  flex-shrink: 0;
-}
+.switch-condition-index { font-size: 10px; font-weight: 600; color: var(--action-switch); flex-shrink: 0; }
 
 .switch-condition-name-input {
-  flex: 1;
-  padding: 4px 8px;
-  font-size: 12px;
-  font-weight: 500;
-  border: 1px solid transparent;
-  border-radius: 4px;
-  background: transparent;
-  color: var(--text-primary);
-  min-width: 0;
+  flex: 1; padding: 4px 8px; font-size: 12px; font-weight: 500;
+  border: 1px solid transparent; border-radius: 4px; background: transparent;
+  color: var(--text-primary); min-width: 0;
 }
 
-.switch-condition-name-input:focus {
-  outline: none;
-  border-color: var(--action-switch);
-  background: var(--bg-primary);
-}
+.switch-condition-name-input:focus { outline: none; border-color: var(--action-switch); background: var(--bg-primary); }
 
-.switch-condition-actions {
-  display: flex;
-  gap: 2px;
-  flex-shrink: 0;
-}
+.switch-condition-actions { display: flex; gap: 2px; flex-shrink: 0; }
 
 .switch-condition-action {
-  width: 24px;
-  height: 24px;
-  padding: 0;
-  border: none;
-  background: transparent;
-  color: var(--text-muted);
-  font-size: 12px;
-  cursor: pointer;
-  border-radius: 4px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  transition: all 0.15s ease;
+  width: 24px; height: 24px; padding: 0; border: none; background: transparent;
+  color: var(--text-muted); font-size: 12px; cursor: pointer; border-radius: 4px;
+  display: flex; align-items: center; justify-content: center; transition: all 0.15s ease;
 }
 
-.switch-condition-action:hover:not(:disabled) {
-  background: var(--bg-hover);
-  color: var(--text-primary);
-}
-
-.switch-condition-action:disabled {
-  opacity: 0.3;
-  cursor: not-allowed;
-}
+.switch-condition-action:hover:not(:disabled) { background: var(--bg-hover); color: var(--text-primary); }
+.switch-condition-action:disabled { opacity: 0.3; cursor: not-allowed; }
 
 .switch-condition-remove {
-  width: 24px;
-  height: 24px;
-  padding: 0;
-  border: none;
-  background: transparent;
-  color: var(--accent-error);
-  font-size: 16px;
-  cursor: pointer;
-  border-radius: 4px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  transition: background-color 0.15s ease;
+  width: 24px; height: 24px; padding: 0; border: none; background: transparent;
+  color: var(--accent-error); font-size: 16px; cursor: pointer; border-radius: 4px;
+  display: flex; align-items: center; justify-content: center; transition: background-color 0.15s ease;
 }
 
-.switch-condition-remove:hover {
-  background: rgba(229, 62, 62, 0.1);
-}
+.switch-condition-remove:hover { background: rgba(229, 62, 62, 0.1); }
+.switch-condition-body { padding: 12px; display: flex; flex-direction: column; gap: 12px; }
 
-.switch-condition-body {
-  padding: 12px;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
 
 /* ============================================
    Expression Section
    ============================================ */
 
-.switch-expression-section {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
+.switch-expression-section { display: flex; flex-direction: column; gap: 12px; }
 
 .switch-panel-expression {
-  width: 100%;
-  padding: 10px 12px;
-  font-size: 12px;
-  font-family: monospace;
-  border: 1px solid var(--border-default);
-  border-radius: 6px;
-  background: var(--bg-primary);
-  color: var(--text-primary);
-  resize: vertical;
-  min-height: 150px;
-  line-height: 1.5;
+  width: 100%; padding: 10px 12px; font-size: 12px; font-family: monospace;
+  border: 1px solid var(--border-default); border-radius: 6px;
+  background: var(--bg-primary); color: var(--text-primary);
+  resize: vertical; min-height: 150px; line-height: 1.5;
   transition: border-color 0.15s ease, box-shadow 0.15s ease;
 }
 
 .switch-panel-expression:focus {
-  outline: none;
-  border-color: var(--action-switch);
+  outline: none; border-color: var(--action-switch);
   box-shadow: 0 0 0 2px rgba(245, 158, 11, 0.2);
 }
 
-.switch-panel-expression::placeholder {
-  color: var(--text-muted);
-}
+.switch-panel-expression::placeholder { color: var(--text-muted); }
 
 /* ============================================
    Expression Hints
    ============================================ */
 
-.switch-expression-hints {
-  margin-top: 4px;
-}
+.switch-expression-hints { margin-top: 4px; }
 
 .switch-hint-box {
-  padding: 10px 12px;
-  background: var(--bg-tertiary);
-  border-radius: 6px;
-  border: 1px solid var(--border-default);
+  padding: 10px 12px; background: var(--bg-tertiary);
+  border-radius: 6px; border: 1px solid var(--border-default);
 }
 
-.switch-hint-title {
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--text-secondary);
-  margin-bottom: 6px;
-}
+.switch-hint-title { font-size: 11px; font-weight: 600; color: var(--text-secondary); margin-bottom: 6px; }
 
 .switch-hint-list {
-  margin: 0;
-  padding-left: 16px;
-  font-size: 11px;
-  color: var(--text-muted);
-  line-height: 1.6;
+  margin: 0; padding-left: 16px; font-size: 11px;
+  color: var(--text-muted); line-height: 1.6;
 }
 
 .switch-hint-list code {
-  padding: 1px 4px;
-  background: var(--bg-secondary);
-  border-radius: 3px;
-  font-family: monospace;
-  font-size: 10px;
-  color: var(--action-switch);
+  padding: 1px 4px; background: var(--bg-secondary); border-radius: 3px;
+  font-family: monospace; font-size: 10px; color: var(--action-switch);
 }
+
+/* Default Branch */
+.switch-default-branch-section { display: flex; flex-direction: column; gap: 12px; }
 
 /* ============================================
-   Info Box
+   Dark Theme Overrides (Switch-specific)
    ============================================ */
 
-.switch-panel-info {
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-  padding: 10px 12px;
-  background: rgba(245, 158, 11, 0.1);
-  border: 1px solid rgba(245, 158, 11, 0.2);
-  border-radius: 6px;
-}
-
-.switch-panel-info-icon {
-  font-size: 14px;
-  flex-shrink: 0;
-}
-
-.switch-panel-info-text {
-  font-size: 11px;
-  color: var(--text-secondary);
-  line-height: 1.4;
-}
-
-/* ============================================
-   Empty State
-   ============================================ */
-
-.switch-panel-empty {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 4px;
-  padding: 20px;
-  text-align: center;
-}
-
-.switch-panel-empty-icon {
-  font-size: 24px;
-  opacity: 0.5;
-}
-
-.switch-panel-empty-text {
-  font-size: 12px;
-  font-weight: 500;
-  color: var(--text-secondary);
-}
-
-.switch-panel-empty-hint {
-  font-size: 11px;
-  color: var(--text-muted);
-}
-
-/* ============================================
-   Toggle Switch
-   ============================================ */
-
-.switch-panel-toggle {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  cursor: pointer;
-  user-select: none;
-}
-
-.switch-panel-toggle input {
-  position: absolute;
-  opacity: 0;
-  width: 0;
-  height: 0;
-}
-
-.switch-panel-toggle-slider {
-  position: relative;
-  width: 36px;
-  height: 20px;
-  background: var(--bg-tertiary);
-  border-radius: 10px;
-  transition: background-color 0.2s ease;
-}
-
-.switch-panel-toggle-slider::after {
-  content: '';
-  position: absolute;
-  top: 2px;
-  left: 2px;
-  width: 16px;
-  height: 16px;
-  background: white;
-  border-radius: 50%;
-  transition: transform 0.2s ease;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
-}
-
-.switch-panel-toggle input:checked + .switch-panel-toggle-slider {
-  background: var(--action-switch);
-}
-
-.switch-panel-toggle input:checked + .switch-panel-toggle-slider::after {
-  transform: translateX(16px);
-}
-
-.switch-panel-toggle input:focus + .switch-panel-toggle-slider {
-  box-shadow: 0 0 0 2px rgba(245, 158, 11, 0.2);
-}
-
-.switch-panel-toggle-label {
-  font-size: 12px;
-  color: var(--text-secondary);
-}
-
-/* ============================================
-   Default Branch Section
-   ============================================ */
-
-.switch-default-branch-section {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-/* ============================================
-   Dark Theme Overrides
-   ============================================ */
-
-:root[data-theme="dark"] .switch-panel-select {
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%239CA3AF' d='M3 4.5L6 7.5L9 4.5'/%3E%3C/svg%3E");
-}
-
-:root[data-theme="dark"] .switch-evaluation-mode-option.selected {
-  background: rgba(251, 191, 36, 0.1);
-}
-
-:root[data-theme="dark"] .switch-mode-option.selected {
-  background: rgba(251, 191, 36, 0.1);
-}
-
-:root[data-theme="dark"] .switch-panel-toggle-slider::after {
-  background: #e2e8f0;
-}
-
-:root[data-theme="dark"] .switch-panel-info {
-  background: rgba(251, 191, 36, 0.1);
-  border-color: rgba(251, 191, 36, 0.2);
-}
-
-:root[data-theme="dark"] .switch-hint-list code {
-  color: #FBBF24;
-}
+:root[data-theme="dark"] .switch-evaluation-mode-option.selected { background: rgba(251, 191, 36, 0.1); }
+:root[data-theme="dark"] .switch-mode-option.selected { background: rgba(251, 191, 36, 0.1); }
+:root[data-theme="dark"] .switch-panel-info { background: rgba(251, 191, 36, 0.1); border-color: rgba(251, 191, 36, 0.2); }
+:root[data-theme="dark"] .switch-hint-list code { color: #FBBF24; }

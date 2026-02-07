@@ -157,13 +157,13 @@ describe('ActionNodeBase', () => {
     /**
      * **Property 9.7: Complete Coverage of Action Node Types**
      * The ACTION_NODE_COLORS, ACTION_NODE_ICONS, and ACTION_NODE_LABELS
-     * SHALL cover all 10 action node types.
+     * SHALL cover all 14 action node types.
      */
-    it('should cover all 10 action node types', () => {
-      expect(ACTION_NODE_TYPES.length).toBe(10);
-      expect(Object.keys(ACTION_NODE_COLORS).length).toBe(10);
-      expect(Object.keys(ACTION_NODE_ICONS).length).toBe(10);
-      expect(Object.keys(ACTION_NODE_LABELS).length).toBe(10);
+    it('should cover all 14 action node types', () => {
+      expect(ACTION_NODE_TYPES.length).toBe(14);
+      expect(Object.keys(ACTION_NODE_COLORS).length).toBe(14);
+      expect(Object.keys(ACTION_NODE_ICONS).length).toBe(14);
+      expect(Object.keys(ACTION_NODE_LABELS).length).toBe(14);
       
       // Verify all types are covered
       for (const type of ACTION_NODE_TYPES) {

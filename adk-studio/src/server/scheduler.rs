@@ -284,7 +284,11 @@ pub async fn start_scheduler(state: AppState) {
         // Check for jobs that need to run
         let now = Utc::now();
         // Round down to the current minute for comparison
-        let current_minute = now.with_second(0).unwrap().with_nanosecond(0).unwrap();
+        let Some(current_minute) = now.with_second(0).and_then(|t| t.with_nanosecond(0)) else {
+            tracing::warn!("Failed to round current time to minute");
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            continue;
+        };
         
         for job in &jobs {
             let job_key = format!("{}:{}", job.project_id, job.trigger_id);
@@ -299,13 +303,17 @@ pub async fn start_scheduler(state: AppState) {
                 
                 // Check if we already executed in this minute
                 let already_executed = last_exec
-                    .map(|t| t.with_second(0).unwrap().with_nanosecond(0).unwrap() >= current_minute)
+                    .and_then(|t| t.with_second(0).and_then(|t| t.with_nanosecond(0)))
+                    .map(|t| t >= current_minute)
                     .unwrap_or(false);
                 
                 // The cron library's next_run is always in the future
                 // If next_run is within the next minute, it means the current minute matches the schedule
                 // (because cron gives us the NEXT occurrence, and if it's in the next minute, we're currently in a matching minute)
-                let next_run_minute = job.next_run.with_second(0).unwrap().with_nanosecond(0).unwrap();
+                let next_run_minute = match job.next_run.with_second(0).and_then(|t| t.with_nanosecond(0)) {
+                    Some(t) => t,
+                    None => continue,
+                };
                 let time_to_next = (next_run_minute - current_minute).num_seconds();
                 
                 // If next run is within 60 seconds, we're in a matching minute

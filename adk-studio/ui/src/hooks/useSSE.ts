@@ -276,7 +276,7 @@ export function useSSE(projectId: string | null, binaryPath?: string | null) {
           if (data.message) {
             addEvent('model', data.message, data.agent);
           }
-        } catch {}
+        } catch (err) { console.warn('Failed to parse log event:', err); }
       });
 
       es.addEventListener('tool_call', (e) => {
@@ -286,7 +286,7 @@ export function useSSE(projectId: string | null, binaryPath?: string | null) {
           textRef.current += `\n🔧 Calling ${data.name}...\n`;
           setStreamingText(textRef.current);
           addEvent('tool_call', `${data.name}(${JSON.stringify(data.args)})`);
-        } catch {}
+        } catch (err) { console.warn('Failed to parse tool_call event:', err); }
       });
 
       es.addEventListener('tool_result', (e) => {
@@ -305,7 +305,7 @@ export function useSSE(projectId: string | null, binaryPath?: string | null) {
           textRef.current += `✓ ${data.name}: ${resultStr}\n`;
           setStreamingText(textRef.current);
           addEvent('tool_result', `${data.name} → ${resultStr}`, undefined, screenshot);
-        } catch {}
+        } catch (err) { console.warn('Failed to parse tool_result event:', err); }
       });
 
       /**
@@ -336,7 +336,7 @@ export function useSSE(projectId: string | null, binaryPath?: string | null) {
             agent: interruptData.nodeId,
             interruptData,
           }]);
-        } catch {}
+        } catch (err) { console.warn('Failed to parse interrupt event:', err); }
       });
 
       /**
@@ -362,7 +362,7 @@ export function useSSE(projectId: string | null, binaryPath?: string | null) {
             data: `Resumed from ${nodeId}`,
             agent: nodeId,
           }]);
-        } catch {}
+        } catch (err) { console.warn('Failed to parse resume event:', err); }
       });
 
       es.addEventListener('end', () => {

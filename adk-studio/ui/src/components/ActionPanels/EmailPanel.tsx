@@ -8,9 +8,10 @@
  * Requirements: 14.1, 14.2, 14.3, 12.2
  */
 
-import React, { useCallback, useState } from 'react';
+import { useCallback } from 'react';
 import { StandardPropertiesPanel } from './StandardPropertiesPanel';
-import { Tooltip } from '../Overlays/Tooltip';
+import { CollapsibleSection } from '../shared/CollapsibleSection';
+import { Field } from '../shared/Field';
 import type { 
   EmailNodeConfig, 
   EmailMode,
@@ -81,70 +82,6 @@ const DEFAULT_CONTENT: EmailContent = {
   bodyType: 'text',
   body: '',
 };
-
-// ============================================
-// Helper Components
-// ============================================
-
-interface CollapsibleSectionProps {
-  title: string;
-  defaultOpen?: boolean;
-  children: React.ReactNode;
-}
-
-function CollapsibleSection({ title, defaultOpen = true, children }: CollapsibleSectionProps) {
-  const [isOpen, setIsOpen] = useState(defaultOpen);
-  
-  return (
-    <div className="email-panel-section">
-      <button 
-        className="email-panel-section-header"
-        onClick={() => setIsOpen(!isOpen)}
-        type="button"
-      >
-        <span className="email-panel-section-toggle">{isOpen ? '▼' : '▶'}</span>
-        <span className="email-panel-section-title">{title}</span>
-      </button>
-      {isOpen && (
-        <div className="email-panel-section-content">
-          {children}
-        </div>
-      )}
-    </div>
-  );
-}
-
-interface FieldProps {
-  label: string;
-  hint?: string;
-  required?: boolean;
-  tooltip?: string;
-  children: React.ReactNode;
-}
-
-function Field({ label, hint, required, tooltip, children }: FieldProps) {
-  const labelContent = (
-    <label className="email-panel-label">
-      {label}
-      {required && <span className="email-panel-required">*</span>}
-      {hint && <span className="email-panel-hint">({hint})</span>}
-      {tooltip && <span className="email-panel-tooltip-icon" title={tooltip}>ℹ️</span>}
-    </label>
-  );
-
-  return (
-    <div className="email-panel-field">
-      {tooltip ? (
-        <Tooltip content={tooltip} position="right" delay={300}>
-          {labelContent}
-        </Tooltip>
-      ) : (
-        labelContent
-      )}
-      {children}
-    </div>
-  );
-}
 
 // ============================================
 // Main Component

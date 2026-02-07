@@ -8,8 +8,10 @@
  * Requirements: 7.1, 7.2, 7.3, 7.4, 12.2
  */
 
-import React, { useCallback, useState } from 'react';
+import { useCallback, useState } from 'react';
 import { StandardPropertiesPanel } from './StandardPropertiesPanel';
+import { CollapsibleSection } from '../shared/CollapsibleSection';
+import { Field } from '../shared/Field';
 import type { 
   LoopNodeConfig, 
   LoopType,
@@ -49,58 +51,6 @@ const LOOP_TYPE_CONFIG: Record<LoopType, {
     icon: '🔢',
   },
 };
-
-// ============================================
-// Helper Components
-// ============================================
-
-interface CollapsibleSectionProps {
-  title: string;
-  defaultOpen?: boolean;
-  children: React.ReactNode;
-}
-
-function CollapsibleSection({ title, defaultOpen = true, children }: CollapsibleSectionProps) {
-  const [isOpen, setIsOpen] = useState(defaultOpen);
-  
-  return (
-    <div className="loop-panel-section">
-      <button 
-        className="loop-panel-section-header"
-        onClick={() => setIsOpen(!isOpen)}
-        type="button"
-      >
-        <span className="loop-panel-section-toggle">{isOpen ? '▼' : '▶'}</span>
-        <span className="loop-panel-section-title">{title}</span>
-      </button>
-      {isOpen && (
-        <div className="loop-panel-section-content">
-          {children}
-        </div>
-      )}
-    </div>
-  );
-}
-
-interface FieldProps {
-  label: string;
-  hint?: string;
-  required?: boolean;
-  children: React.ReactNode;
-}
-
-function Field({ label, hint, required, children }: FieldProps) {
-  return (
-    <div className="loop-panel-field">
-      <label className="loop-panel-label">
-        {label}
-        {required && <span className="loop-panel-required">*</span>}
-        {hint && <span className="loop-panel-hint">({hint})</span>}
-      </label>
-      {children}
-    </div>
-  );
-}
 
 // ============================================
 // Main Component

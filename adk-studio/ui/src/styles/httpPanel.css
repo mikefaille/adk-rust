@@ -1,72 +1,13 @@
 /**
  * HttpPanel CSS Styles
- * 
- * Styles for the HTTP node configuration panel.
- * Supports both light and dark themes using CSS variables.
- * 
+ *
+ * Node-type-specific overrides for the HTTP node configuration panel.
+ * Common patterns (fields, inputs, toggles, kv-editor, info boxes)
+ * are provided by panel-common.css.
+ *
  * @see Requirements 3.1, 3.2, 3.3, 3.4, 3.5, 12.2
  */
-
-/* ============================================
-   Panel Container
-   ============================================ */
-
-.http-panel {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding: 8px 0;
-}
-
-/* ============================================
-   Collapsible Section
-   ============================================ */
-
-.http-panel-section {
-  border-radius: 6px;
-  overflow: hidden;
-  background: var(--bg-secondary);
-  border: 1px solid var(--border-default);
-}
-
-.http-panel-section-header {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  padding: 10px 12px;
-  background: transparent;
-  border: none;
-  cursor: pointer;
-  text-align: left;
-  color: var(--text-primary);
-  font-size: 12px;
-  font-weight: 600;
-  transition: background-color 0.15s ease;
-}
-
-.http-panel-section-header:hover {
-  background: var(--bg-hover);
-}
-
-.http-panel-section-toggle {
-  font-size: 10px;
-  color: var(--text-muted);
-  width: 12px;
-  flex-shrink: 0;
-}
-
-.http-panel-section-title {
-  flex: 1;
-}
-
-.http-panel-section-content {
-  padding: 8px 12px 12px;
-  border-top: 1px solid var(--border-default);
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
+@import './panel-common.css';
 
 /* ============================================
    HTTP Method Selector
@@ -102,138 +43,12 @@
   border-color: transparent;
 }
 
-/* Method-specific colors */
-.http-method-option.selected.http-method-get {
-  background: #10B981;
-}
+.http-method-option.selected.http-method-get { background: #10B981; }
+.http-method-option.selected.http-method-post { background: #3B82F6; }
+.http-method-option.selected.http-method-put { background: #F59E0B; }
+.http-method-option.selected.http-method-patch { background: #8B5CF6; }
+.http-method-option.selected.http-method-delete { background: #EF4444; }
 
-.http-method-option.selected.http-method-post {
-  background: #3B82F6;
-}
-
-.http-method-option.selected.http-method-put {
-  background: #F59E0B;
-}
-
-.http-method-option.selected.http-method-patch {
-  background: #8B5CF6;
-}
-
-.http-method-option.selected.http-method-delete {
-  background: #EF4444;
-}
-
-/* ============================================
-   Field Styles
-   ============================================ */
-
-.http-panel-field {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.http-panel-label {
-  font-size: 11px;
-  font-weight: 500;
-  color: var(--text-secondary);
-  display: flex;
-  align-items: center;
-  gap: 4px;
-}
-
-.http-panel-required {
-  color: var(--accent-error);
-  font-weight: 600;
-}
-
-.http-panel-hint {
-  font-size: 10px;
-  font-weight: 400;
-  color: var(--text-muted);
-}
-
-.http-panel-tooltip-icon {
-  font-size: 12px;
-  cursor: help;
-  opacity: 0.6;
-  transition: opacity 0.15s ease;
-  margin-left: 2px;
-}
-
-.http-panel-tooltip-icon:hover {
-  opacity: 1;
-}
-
-.http-panel-field-help {
-  font-size: 10px;
-  color: var(--text-muted);
-  margin-top: 2px;
-  line-height: 1.4;
-}
-
-/* ============================================
-   Input Styles
-   ============================================ */
-
-.http-panel-input,
-.http-panel-select,
-.http-panel-textarea {
-  width: 100%;
-  padding: 6px 10px;
-  font-size: 12px;
-  border: 1px solid var(--border-default);
-  border-radius: 4px;
-  background: var(--bg-primary);
-  color: var(--text-primary);
-  transition: border-color 0.15s ease, box-shadow 0.15s ease;
-}
-
-.http-panel-input:focus,
-.http-panel-select:focus,
-.http-panel-textarea:focus {
-  outline: none;
-  border-color: var(--action-http);
-  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.2);
-}
-
-.http-panel-input::placeholder,
-.http-panel-textarea::placeholder {
-  color: var(--text-muted);
-}
-
-.http-panel-input.error,
-.http-panel-textarea.error {
-  border-color: var(--accent-error);
-}
-
-.http-panel-input-mono,
-.http-panel-textarea-mono {
-  font-family: monospace;
-  font-size: 11px;
-}
-
-.http-panel-textarea {
-  resize: vertical;
-  min-height: 80px;
-  font-family: inherit;
-  line-height: 1.5;
-}
-
-.http-panel-select {
-  cursor: pointer;
-  appearance: none;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%236B7280' d='M3 4.5L6 7.5L9 4.5'/%3E%3C/svg%3E");
-  background-repeat: no-repeat;
-  background-position: right 8px center;
-  padding-right: 28px;
-}
-
-.http-panel-error {
-  font-size: 10px;
-  color: var(--accent-error);
-  margin-top: 2px;
-}
 
 /* ============================================
    URL Variables Display
@@ -251,9 +66,7 @@
   font-size: 10px;
 }
 
-.http-panel-url-vars-label {
-  color: var(--text-muted);
-}
+.http-panel-url-vars-label { color: var(--text-muted); }
 
 .http-panel-url-vars-list {
   display: flex;
@@ -305,89 +118,6 @@
 }
 
 /* ============================================
-   Key-Value Editor (Headers)
-   ============================================ */
-
-.http-panel-kv-editor {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.http-panel-kv-row {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.http-panel-kv-key,
-.http-panel-kv-value {
-  flex: 1;
-  padding: 5px 8px;
-  font-size: 11px;
-  border: 1px solid var(--border-default);
-  border-radius: 4px;
-  background: var(--bg-primary);
-  color: var(--text-primary);
-  min-width: 0;
-}
-
-.http-panel-kv-key {
-  font-weight: 500;
-}
-
-.http-panel-kv-key:focus,
-.http-panel-kv-value:focus {
-  outline: none;
-  border-color: var(--action-http);
-}
-
-.http-panel-kv-separator {
-  color: var(--text-muted);
-  font-weight: 600;
-  flex-shrink: 0;
-}
-
-.http-panel-kv-remove {
-  width: 20px;
-  height: 20px;
-  padding: 0;
-  border: none;
-  background: transparent;
-  color: var(--accent-error);
-  font-size: 14px;
-  cursor: pointer;
-  border-radius: 4px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-  transition: background-color 0.15s ease;
-}
-
-.http-panel-kv-remove:hover {
-  background: rgba(229, 62, 62, 0.1);
-}
-
-.http-panel-kv-add {
-  padding: 6px 10px;
-  font-size: 11px;
-  font-weight: 500;
-  border: 1px dashed var(--border-default);
-  border-radius: 4px;
-  background: transparent;
-  color: var(--text-secondary);
-  cursor: pointer;
-  transition: all 0.15s ease;
-}
-
-.http-panel-kv-add:hover {
-  border-color: var(--action-http);
-  color: var(--action-http);
-  background: rgba(59, 130, 246, 0.05);
-}
-
-/* ============================================
    Quick Headers
    ============================================ */
 
@@ -426,107 +156,8 @@
 }
 
 /* ============================================
-   Toggle Switch
+   Dark Theme Overrides (HTTP-specific)
    ============================================ */
-
-.http-panel-toggle {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  cursor: pointer;
-  user-select: none;
-}
-
-.http-panel-toggle input {
-  position: absolute;
-  opacity: 0;
-  width: 0;
-  height: 0;
-}
-
-.http-panel-toggle-slider {
-  position: relative;
-  width: 36px;
-  height: 20px;
-  background: var(--bg-tertiary);
-  border-radius: 10px;
-  transition: background-color 0.2s ease;
-}
-
-.http-panel-toggle-slider::after {
-  content: '';
-  position: absolute;
-  top: 2px;
-  left: 2px;
-  width: 16px;
-  height: 16px;
-  background: white;
-  border-radius: 50%;
-  transition: transform 0.2s ease;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
-}
-
-.http-panel-toggle input:checked + .http-panel-toggle-slider {
-  background: var(--action-http);
-}
-
-.http-panel-toggle input:checked + .http-panel-toggle-slider::after {
-  transform: translateX(16px);
-}
-
-.http-panel-toggle input:focus + .http-panel-toggle-slider {
-  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.2);
-}
-
-.http-panel-toggle-label {
-  font-size: 12px;
-  color: var(--text-secondary);
-}
-
-/* ============================================
-   Warning & Info Boxes
-   ============================================ */
-
-.http-panel-warning {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 8px 10px;
-  background: rgba(245, 158, 11, 0.1);
-  border: 1px solid rgba(245, 158, 11, 0.2);
-  border-radius: 4px;
-  font-size: 11px;
-  color: var(--text-secondary);
-}
-
-.http-panel-info {
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-  padding: 10px 12px;
-  background: rgba(59, 130, 246, 0.1);
-  border: 1px solid rgba(59, 130, 246, 0.2);
-  border-radius: 6px;
-}
-
-.http-panel-info-icon {
-  font-size: 14px;
-  flex-shrink: 0;
-}
-
-.http-panel-info-text {
-  font-size: 11px;
-  color: var(--text-secondary);
-  line-height: 1.4;
-}
-
-/* ============================================
-   Dark Theme Overrides
-   ============================================ */
-
-:root[data-theme="dark"] .http-panel-select {
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%239CA3AF' d='M3 4.5L6 7.5L9 4.5'/%3E%3C/svg%3E");
-}
 
 :root[data-theme="dark"] .http-panel-url-var {
   background: rgba(96, 165, 250, 0.15);
@@ -534,76 +165,34 @@
   color: #60A5FA;
 }
 
-:root[data-theme="dark"] .http-panel-toggle-slider::after {
-  background: #e2e8f0;
-}
-
-:root[data-theme="dark"] .http-panel-warning {
-  background: rgba(251, 191, 36, 0.1);
-  border-color: rgba(251, 191, 36, 0.2);
-}
-
 :root[data-theme="dark"] .http-panel-info {
   background: rgba(96, 165, 250, 0.1);
   border-color: rgba(96, 165, 250, 0.2);
 }
 
-
 /* ============================================
-   Responsive Adjustments
+   Responsive Adjustments (HTTP-specific)
    ============================================ */
 
 @media (max-width: 400px) {
-  .http-panel-section-header {
-    padding: 8px 10px;
-    font-size: 11px;
-  }
-  
-  .http-panel-section-content {
-    padding: 6px 10px 10px;
-    gap: 10px;
-  }
-  
-  .http-method-selector {
-    flex-wrap: wrap;
-  }
-  
+  .http-method-selector { flex-wrap: wrap; }
   .http-method-option {
     flex: 1 1 calc(50% - 2px);
     min-width: 0;
     padding: 5px 6px;
     font-size: 10px;
   }
-  
-  .http-body-type-selector {
-    flex-wrap: wrap;
-  }
-  
+  .http-body-type-selector { flex-wrap: wrap; }
   .http-body-type-option {
     flex: 1 1 calc(50% - 2px);
     min-width: 0;
     padding: 5px 8px;
     font-size: 10px;
   }
-  
-  .http-panel-kv-row {
-    flex-wrap: wrap;
-  }
-  
-  .http-panel-kv-key,
-  .http-panel-kv-value {
-    flex: 1 1 100%;
-  }
-  
-  .http-panel-kv-separator {
-    display: none;
-  }
-  
   .http-panel-quick-headers {
     flex-direction: column;
     align-items: flex-start;
   }
-  
   .http-panel-quick-headers button {
     width: 100%;
     text-align: center;
@@ -611,11 +200,6 @@
 }
 
 @media (max-width: 320px) {
-  .http-method-option {
-    flex: 1 1 100%;
-  }
-  
-  .http-body-type-option {
-    flex: 1 1 100%;
-  }
+  .http-method-option { flex: 1 1 100%; }
+  .http-body-type-option { flex: 1 1 100%; }
 }

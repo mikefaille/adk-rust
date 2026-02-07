@@ -12,8 +12,10 @@
  * @see Requirements 12.2: Properties panel for action node configuration
  */
 
-import React, { useState, useCallback } from 'react';
-import { Tooltip, ACTION_NODE_TOOLTIPS } from '../Overlays/Tooltip';
+import { useCallback } from 'react';
+import { ACTION_NODE_TOOLTIPS } from '../Overlays/Tooltip';
+import { CollapsibleSection } from '../shared/CollapsibleSection';
+import { Field } from '../shared/Field';
 import type { 
   StandardProperties, 
   ErrorMode, 
@@ -28,70 +30,6 @@ import type {
 // ============================================
 // Helper Components
 // ============================================
-
-interface CollapsibleSectionProps {
-  title: string;
-  defaultOpen?: boolean;
-  children: React.ReactNode;
-}
-
-/**
- * Collapsible section with toggle header
- */
-function CollapsibleSection({ title, defaultOpen = false, children }: CollapsibleSectionProps) {
-  const [isOpen, setIsOpen] = useState(defaultOpen);
-  
-  return (
-    <div className="standard-props-section">
-      <button 
-        className="standard-props-section-header"
-        onClick={() => setIsOpen(!isOpen)}
-        type="button"
-      >
-        <span className="standard-props-section-toggle">{isOpen ? '▼' : '▶'}</span>
-        <span className="standard-props-section-title">{title}</span>
-      </button>
-      {isOpen && (
-        <div className="standard-props-section-content">
-          {children}
-        </div>
-      )}
-    </div>
-  );
-}
-
-interface FieldProps {
-  label: string;
-  hint?: string;
-  tooltip?: string;
-  children: React.ReactNode;
-}
-
-/**
- * Field wrapper with label, optional hint, and tooltip
- */
-function Field({ label, hint, tooltip, children }: FieldProps) {
-  const labelContent = (
-    <label className="standard-props-label">
-      {label}
-      {hint && <span className="standard-props-hint">({hint})</span>}
-      {tooltip && <span className="standard-props-tooltip-icon" title={tooltip}>ℹ️</span>}
-    </label>
-  );
-
-  return (
-    <div className="standard-props-field">
-      {tooltip ? (
-        <Tooltip content={tooltip} position="right" delay={300}>
-          {labelContent}
-        </Tooltip>
-      ) : (
-        labelContent
-      )}
-      {children}
-    </div>
-  );
-}
 
 interface SelectProps<T extends string> {
   value: T;

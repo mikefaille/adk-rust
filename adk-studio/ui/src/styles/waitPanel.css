@@ -1,438 +1,52 @@
 /**
  * WaitPanel CSS Styles
- * 
- * Styles for the Wait node configuration panel.
- * Supports both light and dark themes using CSS variables.
- * 
+ *
+ * Node-type-specific overrides for the Wait node configuration panel.
+ * Common patterns are provided by panel-common.css.
+ *
  * @see Requirements 9.1, 9.2, 9.3, 12.2
  */
-
-/* ============================================
-   Panel Container
-   ============================================ */
-
-.wait-panel {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding: 8px 0;
-}
-
-/* ============================================
-   Collapsible Section
-   ============================================ */
-
-.wait-panel-section {
-  border-radius: 6px;
-  overflow: hidden;
-  background: var(--bg-secondary);
-  border: 1px solid var(--border-default);
-}
-
-.wait-panel-section-header {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  padding: 10px 12px;
-  background: transparent;
-  border: none;
-  cursor: pointer;
-  text-align: left;
-  color: var(--text-primary);
-  font-size: 12px;
-  font-weight: 600;
-  transition: background-color 0.15s ease;
-}
-
-.wait-panel-section-header:hover {
-  background: var(--bg-hover);
-}
-
-.wait-panel-section-toggle {
-  font-size: 10px;
-  color: var(--text-muted);
-  width: 12px;
-  flex-shrink: 0;
-}
-
-.wait-panel-section-title {
-  flex: 1;
-}
-
-.wait-panel-section-content {
-  padding: 8px 12px 12px;
-  border-top: 1px solid var(--border-default);
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
+@import './panel-common.css';
 
 /* ============================================
    Wait Type Selector
    ============================================ */
 
-.wait-type-section {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-.wait-type-selector {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
+.wait-type-section { display: flex; flex-direction: column; gap: 12px; }
+.wait-type-selector { display: flex; flex-direction: column; gap: 8px; }
 
 .wait-type-option {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 4px;
-  padding: 12px;
-  border: 2px solid var(--border-default);
-  border-radius: 8px;
-  background: var(--bg-primary);
-  cursor: pointer;
-  transition: all 0.15s ease;
-  text-align: left;
+  display: flex; flex-direction: column; align-items: flex-start; gap: 4px;
+  padding: 12px; border: 2px solid var(--border-default); border-radius: 8px;
+  background: var(--bg-primary); cursor: pointer; transition: all 0.15s ease; text-align: left;
 }
 
-.wait-type-option:hover {
-  border-color: var(--action-wait, #6B7280);
-}
+.wait-type-option:hover { border-color: var(--action-wait, #6B7280); }
+.wait-type-option.selected { border-color: var(--action-wait, #6B7280); background: rgba(107, 114, 128, 0.1); }
+.wait-type-icon { font-size: 18px; }
+.wait-type-label { font-size: 13px; font-weight: 600; color: var(--text-primary); }
+.wait-type-description { font-size: 11px; color: var(--text-muted); }
 
-.wait-type-option.selected {
-  border-color: var(--action-wait, #6B7280);
-  background: rgba(107, 114, 128, 0.1);
-}
+/* Duration Row */
+.wait-duration-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.wait-duration-input { text-align: right; }
 
-.wait-type-icon {
-  font-size: 18px;
-}
+/* Toggle Row */
+.wait-panel-toggle-row { margin-bottom: 8px; }
 
-.wait-type-label {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--text-primary);
-}
+/* Preview Value */
+.wait-panel-preview-value { font-size: 12px; font-weight: 600; color: var(--text-primary); }
 
-.wait-type-description {
-  font-size: 11px;
-  color: var(--text-muted);
+/* Section-specific Styles */
+.wait-fixed-section, .wait-until-section, .wait-webhook-section, .wait-condition-section {
+  display: flex; flex-direction: column; gap: 12px;
 }
 
 /* ============================================
-   Field Styles
+   Dark Theme Overrides (Wait-specific)
    ============================================ */
 
-.wait-panel-field {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.wait-panel-label {
-  font-size: 11px;
-  font-weight: 500;
-  color: var(--text-secondary);
-  display: flex;
-  align-items: center;
-  gap: 4px;
-}
-
-.wait-panel-required {
-  color: var(--accent-error);
-  font-weight: 600;
-}
-
-.wait-panel-hint {
-  font-size: 10px;
-  font-weight: 400;
-  color: var(--text-muted);
-}
-
-.wait-panel-field-help {
-  font-size: 10px;
-  color: var(--text-muted);
-  margin-top: 2px;
-  line-height: 1.4;
-}
-
-/* ============================================
-   Input Styles
-   ============================================ */
-
-.wait-panel-input {
-  width: 100%;
-  padding: 6px 10px;
-  font-size: 12px;
-  border: 1px solid var(--border-default);
-  border-radius: 4px;
-  background: var(--bg-primary);
-  color: var(--text-primary);
-  transition: border-color 0.15s ease, box-shadow 0.15s ease;
-}
-
-.wait-panel-input:focus {
-  outline: none;
-  border-color: var(--action-wait, #6B7280);
-  box-shadow: 0 0 0 2px rgba(107, 114, 128, 0.2);
-}
-
-.wait-panel-input::placeholder {
-  color: var(--text-muted);
-}
-
-.wait-panel-input-mono {
-  font-family: monospace;
-  font-size: 11px;
-}
-
-.wait-panel-textarea {
-  width: 100%;
-  padding: 8px 10px;
-  font-size: 12px;
-  border: 1px solid var(--border-default);
-  border-radius: 4px;
-  background: var(--bg-primary);
-  color: var(--text-primary);
-  resize: vertical;
-  min-height: 60px;
-  transition: border-color 0.15s ease, box-shadow 0.15s ease;
-}
-
-.wait-panel-textarea:focus {
-  outline: none;
-  border-color: var(--action-wait, #6B7280);
-  box-shadow: 0 0 0 2px rgba(107, 114, 128, 0.2);
-}
-
-/* ============================================
-   Select Styles
-   ============================================ */
-
-.wait-panel-select {
-  width: 100%;
-  padding: 6px 10px;
-  font-size: 12px;
-  border: 1px solid var(--border-default);
-  border-radius: 4px;
-  background: var(--bg-primary);
-  color: var(--text-primary);
-  cursor: pointer;
-  transition: border-color 0.15s ease, box-shadow 0.15s ease;
-}
-
-.wait-panel-select:focus {
-  outline: none;
-  border-color: var(--action-wait, #6B7280);
-  box-shadow: 0 0 0 2px rgba(107, 114, 128, 0.2);
-}
-
-/* ============================================
-   Duration Row
-   ============================================ */
-
-.wait-duration-row {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 12px;
-}
-
-.wait-duration-input {
-  text-align: right;
-}
-
-/* ============================================
-   Toggle Switch
-   ============================================ */
-
-.wait-panel-toggle-row {
-  margin-bottom: 8px;
-}
-
-.wait-panel-toggle {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  cursor: pointer;
-  user-select: none;
-}
-
-.wait-panel-toggle input {
-  position: absolute;
-  opacity: 0;
-  width: 0;
-  height: 0;
-}
-
-.wait-panel-toggle-slider {
-  position: relative;
-  width: 36px;
-  height: 20px;
-  background: var(--bg-tertiary);
-  border-radius: 10px;
-  transition: background-color 0.2s ease;
-}
-
-.wait-panel-toggle-slider::after {
-  content: '';
-  position: absolute;
-  top: 2px;
-  left: 2px;
-  width: 16px;
-  height: 16px;
-  background: white;
-  border-radius: 50%;
-  transition: transform 0.2s ease;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
-}
-
-.wait-panel-toggle input:checked + .wait-panel-toggle-slider {
-  background: var(--action-wait, #6B7280);
-}
-
-.wait-panel-toggle input:checked + .wait-panel-toggle-slider::after {
-  transform: translateX(16px);
-}
-
-.wait-panel-toggle input:focus + .wait-panel-toggle-slider {
-  box-shadow: 0 0 0 2px rgba(107, 114, 128, 0.2);
-}
-
-.wait-panel-toggle-label {
-  font-size: 12px;
-  color: var(--text-secondary);
-}
-
-/* ============================================
-   Presets
-   ============================================ */
-
-.wait-panel-presets {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.wait-panel-presets-label {
-  font-size: 10px;
-  color: var(--text-muted);
-}
-
-.wait-panel-presets-buttons {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-
-.wait-panel-presets-buttons button {
-  padding: 4px 10px;
-  font-size: 11px;
-  border: 1px solid var(--border-default);
-  border-radius: 4px;
-  background: var(--bg-primary);
-  color: var(--text-secondary);
-  cursor: pointer;
-  transition: all 0.15s ease;
-}
-
-.wait-panel-presets-buttons button:hover {
-  border-color: var(--action-wait, #6B7280);
-  color: var(--action-wait, #6B7280);
-  background: rgba(107, 114, 128, 0.05);
-}
-
-/* ============================================
-   Preview
-   ============================================ */
-
-.wait-panel-preview {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 12px;
-  background: var(--bg-tertiary);
-  border-radius: 4px;
-}
-
-.wait-panel-preview-label {
-  font-size: 11px;
-  color: var(--text-muted);
-}
-
-.wait-panel-preview-value {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--text-primary);
-}
-
-/* ============================================
-   Info Box
-   ============================================ */
-
-.wait-panel-info {
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-  padding: 10px 12px;
-  background: rgba(107, 114, 128, 0.1);
-  border: 1px solid rgba(107, 114, 128, 0.2);
-  border-radius: 6px;
-}
-
-.wait-panel-info-warning {
-  background: rgba(245, 158, 11, 0.1);
-  border-color: rgba(245, 158, 11, 0.2);
-}
-
-.wait-panel-info-icon {
-  font-size: 14px;
-  flex-shrink: 0;
-}
-
-.wait-panel-info-text {
-  font-size: 11px;
-  color: var(--text-secondary);
-  line-height: 1.4;
-}
-
-/* ============================================
-   Section-specific Styles
-   ============================================ */
-
-.wait-fixed-section,
-.wait-until-section,
-.wait-webhook-section,
-.wait-condition-section {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-/* ============================================
-   Dark Theme Overrides
-   ============================================ */
-
-:root[data-theme="dark"] .wait-type-option.selected {
-  background: rgba(156, 163, 175, 0.15);
-}
-
-:root[data-theme="dark"] .wait-panel-toggle-slider::after {
-  background: #e2e8f0;
-}
-
-:root[data-theme="dark"] .wait-panel-info {
-  background: rgba(156, 163, 175, 0.1);
-  border-color: rgba(156, 163, 175, 0.2);
-}
-
-:root[data-theme="dark"] .wait-panel-info-warning {
-  background: rgba(251, 191, 36, 0.1);
-  border-color: rgba(251, 191, 36, 0.2);
-}
-
-:root[data-theme="dark"] .wait-panel-presets-buttons button:hover {
-  background: rgba(156, 163, 175, 0.1);
-}
+:root[data-theme="dark"] .wait-type-option.selected { background: rgba(156, 163, 175, 0.15); }
+:root[data-theme="dark"] .wait-panel-info { background: rgba(156, 163, 175, 0.1); border-color: rgba(156, 163, 175, 0.2); }
+:root[data-theme="dark"] .wait-panel-info-warning { background: rgba(251, 191, 36, 0.1); border-color: rgba(251, 191, 36, 0.2); }
+:root[data-theme="dark"] .wait-panel-presets-buttons button:hover { background: rgba(156, 163, 175, 0.1); }

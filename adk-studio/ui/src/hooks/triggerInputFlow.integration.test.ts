@@ -114,62 +114,6 @@ function createMockProject(overrides?: Partial<Project>): Project {
   } as Project;
 }
 
-/**
- * Simulate flow phase transitions during input submission.
- * Returns the sequence of flow phases observed.
- */
-function simulateFlowPhaseTransitions(
-  onFlowPhase: (phase: FlowPhase) => void,
-  delayMs: number = 500
-): Promise<FlowPhase[]> {
-  return new Promise((resolve) => {
-    const phases: FlowPhase[] = [];
-    const originalOnFlowPhase = onFlowPhase;
-    
-    // Track phases
-    const trackingOnFlowPhase = (phase: FlowPhase) => {
-      phases.push(phase);
-      originalOnFlowPhase(phase);
-    };
-    
-    // Simulate trigger_input phase
-    trackingOnFlowPhase('trigger_input');
-    
-    // After delay, transition to input phase
-    setTimeout(() => {
-      trackingOnFlowPhase('input');
-      resolve(phases);
-    }, delayMs);
-  });
-}
-
-/**
- * Simulate interrupt and resume cycle.
- */
-function simulateInterruptCycle(
-  mockEventSource: MockEventSource,
-  interruptData: InterruptData
-): void {
-  // Emit interrupt event
-  mockEventSource.emit('interrupt', JSON.stringify({
-    node_id: interruptData.nodeId,
-    message: interruptData.message,
-    data: interruptData.data,
-  }));
-}
-
-/**
- * Simulate resume after user response.
- */
-function simulateResume(
-  mockEventSource: MockEventSource,
-  nodeId: string
-): void {
-  mockEventSource.emit('resume', JSON.stringify({
-    node_id: nodeId,
-  }));
-}
-
 describe('Trigger Input Flow Integration Tests', () => {
   let mockEventSource: MockEventSource | null = null;
   let originalEventSource: typeof EventSource;
@@ -179,7 +123,8 @@ describe('Trigger Input Flow Integration Tests', () => {
     originalEventSource = globalThis.EventSource;
     
     // Mock EventSource
-    (globalThis as unknown as { EventSource: typeof MockEventSource }).EventSource = MockEventSource as unknown as typeof EventSource;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (globalThis as any).EventSource = MockEventSource;
     
     // Reset mock
     mockEventSource = null;
@@ -194,7 +139,8 @@ describe('Trigger Input Flow Integration Tests', () => {
 
   afterEach(() => {
     // Restore original EventSource
-    (globalThis as unknown as { EventSource: typeof EventSource }).EventSource = originalEventSource;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (globalThis as any).EventSource = originalEventSource;
     
     // Close mock if open
     if (mockEventSource) {
@@ -480,7 +426,7 @@ describe('Trigger Input Flow Integration Tests', () => {
         data: { step: 1 },
       });
       expect(currentPhase).toBe('interrupted');
-      expect(currentInterrupt?.nodeId).toBe('review_1');
+      expect((currentInterrupt as InterruptData | null)?.nodeId).toBe('review_1');
       
       // Resume
       handleResume();
@@ -494,7 +440,7 @@ describe('Trigger Input Flow Integration Tests', () => {
         data: { step: 2 },
       });
       expect(currentPhase).toBe('interrupted');
-      expect(currentInterrupt?.nodeId).toBe('review_2');
+      expect((currentInterrupt as InterruptData | null)?.nodeId).toBe('review_2');
       
       // Resume again
       handleResume();
@@ -683,7 +629,7 @@ describe('Trigger Input Flow Integration Tests', () => {
      */
     it('should not animate any edges during idle phase', () => {
       const project = createMockProject();
-      const flowPhase: FlowPhase = 'idle';
+      const flowPhase = 'idle' as FlowPhase;
       const triggerId = 'trigger_1';
       
       // Check that no edges match animation conditions during idle
@@ -730,7 +676,7 @@ describe('Trigger Input Flow Integration Tests', () => {
      */
     it('should not animate edges during interrupted phase', () => {
       const project = createMockProject();
-      const flowPhase: FlowPhase = 'interrupted';
+      const flowPhase = 'interrupted' as FlowPhase;
       const triggerId = 'trigger_1';
       
       // Check that no edges match animation conditions during interrupted

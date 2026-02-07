@@ -8,8 +8,10 @@
  * Requirements: 11.1, 11.2, 11.3, 11.4, 12.2
  */
 
-import React, { useCallback, useState } from 'react';
+import { useCallback, useState } from 'react';
 import { StandardPropertiesPanel } from './StandardPropertiesPanel';
+import { CollapsibleSection } from '../shared/CollapsibleSection';
+import { Field } from '../shared/Field';
 import type { 
   DatabaseNodeConfig, 
   DatabaseType,
@@ -89,58 +91,6 @@ const REDIS_OPERATION_INFO: Record<RedisOperation, { label: string; description:
   lpush: { label: 'LPUSH', description: 'Push to list head' },
   rpop: { label: 'RPOP', description: 'Pop from list tail' },
 };
-
-// ============================================
-// Helper Components
-// ============================================
-
-interface CollapsibleSectionProps {
-  title: string;
-  defaultOpen?: boolean;
-  children: React.ReactNode;
-}
-
-function CollapsibleSection({ title, defaultOpen = true, children }: CollapsibleSectionProps) {
-  const [isOpen, setIsOpen] = useState(defaultOpen);
-  
-  return (
-    <div className="db-panel-section">
-      <button 
-        className="db-panel-section-header"
-        onClick={() => setIsOpen(!isOpen)}
-        type="button"
-      >
-        <span className="db-panel-section-toggle">{isOpen ? '▼' : '▶'}</span>
-        <span className="db-panel-section-title">{title}</span>
-      </button>
-      {isOpen && (
-        <div className="db-panel-section-content">
-          {children}
-        </div>
-      )}
-    </div>
-  );
-}
-
-interface FieldProps {
-  label: string;
-  hint?: string;
-  required?: boolean;
-  children: React.ReactNode;
-}
-
-function Field({ label, hint, required, children }: FieldProps) {
-  return (
-    <div className="db-panel-field">
-      <label className="db-panel-label">
-        {label}
-        {required && <span className="db-panel-required">*</span>}
-        {hint && <span className="db-panel-hint">({hint})</span>}
-      </label>
-      {children}
-    </div>
-  );
-}
 
 // ============================================
 // Main Component

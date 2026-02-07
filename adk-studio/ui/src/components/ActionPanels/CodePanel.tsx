@@ -10,6 +10,8 @@
 
 import React, { useCallback, useState, useRef, useEffect } from 'react';
 import { StandardPropertiesPanel } from './StandardPropertiesPanel';
+import { CollapsibleSection } from '../shared/CollapsibleSection';
+import { Field } from '../shared/Field';
 import type { 
   CodeNodeConfig, 
   CodeLanguage,
@@ -72,58 +74,6 @@ const DEFAULT_SANDBOX: SandboxConfig = {
   memoryLimit: 128,
   timeLimit: 5000,
 };
-
-// ============================================
-// Helper Components
-// ============================================
-
-interface CollapsibleSectionProps {
-  title: string;
-  defaultOpen?: boolean;
-  children: React.ReactNode;
-}
-
-function CollapsibleSection({ title, defaultOpen = true, children }: CollapsibleSectionProps) {
-  const [isOpen, setIsOpen] = useState(defaultOpen);
-  
-  return (
-    <div className="code-panel-section">
-      <button 
-        className="code-panel-section-header"
-        onClick={() => setIsOpen(!isOpen)}
-        type="button"
-      >
-        <span className="code-panel-section-toggle">{isOpen ? '▼' : '▶'}</span>
-        <span className="code-panel-section-title">{title}</span>
-      </button>
-      {isOpen && (
-        <div className="code-panel-section-content">
-          {children}
-        </div>
-      )}
-    </div>
-  );
-}
-
-interface FieldProps {
-  label: string;
-  hint?: string;
-  required?: boolean;
-  children: React.ReactNode;
-}
-
-function Field({ label, hint, required, children }: FieldProps) {
-  return (
-    <div className="code-panel-field">
-      <label className="code-panel-label">
-        {label}
-        {required && <span className="code-panel-required">*</span>}
-        {hint && <span className="code-panel-hint">({hint})</span>}
-      </label>
-      {children}
-    </div>
-  );
-}
 
 // ============================================
 // Main Component

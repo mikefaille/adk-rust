@@ -19,12 +19,9 @@ impl DatabaseSessionService {
         let pool = SqlitePool::connect(database_url).await.map_err(|e| {
             adk_core::AdkError::Session(format!("database connection failed: {}", e))
         })?;
-        sqlx::query("PRAGMA foreign_keys = ON")
-            .execute(&pool)
-            .await
-            .map_err(|e| {
-                adk_core::AdkError::Session(format!("failed to enable sqlite foreign keys: {}", e))
-            })?;
+        sqlx::query("PRAGMA foreign_keys = ON").execute(&pool).await.map_err(|e| {
+            adk_core::AdkError::Session(format!("failed to enable sqlite foreign keys: {}", e))
+        })?;
         Ok(Self { pool })
     }
 
@@ -380,13 +377,12 @@ impl SessionService for DatabaseSessionService {
             .await
             .map_err(|e| adk_core::AdkError::Session(format!("transaction failed: {}", e)))?;
 
-        let session_rows = sqlx::query(
-            "SELECT app_name, user_id, state FROM sessions WHERE session_id = ?",
-        )
-        .bind(session_id)
-        .fetch_all(&mut *tx)
-        .await
-        .map_err(|e| adk_core::AdkError::Session(format!("query failed: {}", e)))?;
+        let session_rows =
+            sqlx::query("SELECT app_name, user_id, state FROM sessions WHERE session_id = ?")
+                .bind(session_id)
+                .fetch_all(&mut *tx)
+                .await
+                .map_err(|e| adk_core::AdkError::Session(format!("query failed: {}", e)))?;
 
         if session_rows.is_empty() {
             return Err(adk_core::AdkError::Session("session not found".into()));
@@ -439,7 +435,8 @@ impl SessionService for DatabaseSessionService {
                 None => HashMap::new(),
             };
 
-        let (app_delta, user_delta, session_delta) = Self::extract_state_deltas(&event.actions.state_delta);
+        let (app_delta, user_delta, session_delta) =
+            Self::extract_state_deltas(&event.actions.state_delta);
 
         let mut new_app_state = app_state.clone();
         new_app_state.extend(app_delta);

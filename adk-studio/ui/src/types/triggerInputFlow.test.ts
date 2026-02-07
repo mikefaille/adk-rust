@@ -306,13 +306,13 @@ describe('Trigger Input Flow Properties', () => {
           };
           
           // Create a minimal project with this trigger
-          const project: Project = {
+          const project = {
             id: 'test-project',
             name: 'Test Project',
             agents: {},
-            workflow: { edges: [] },
+            workflow: { type: 'single' as const, edges: [], conditions: [] },
             actionNodes: { [nodeId]: triggerConfig },
-          };
+          } as unknown as Project;
           
           // Get trigger config
           const result = getTriggerConfig(project);
@@ -579,13 +579,13 @@ describe('Trigger Input Flow Properties', () => {
     });
 
     it('should return null for project without manual trigger', () => {
-      const project: Project = {
+      const project = {
         id: 'test-project',
         name: 'Test Project',
         agents: {},
-        workflow: { edges: [] },
+        workflow: { type: 'single' as const, edges: [], conditions: [] },
         actionNodes: {},
-      };
+      } as unknown as Project;
       
       const result = getTriggerConfig(project);
       expect(result).toBeNull();

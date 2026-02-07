@@ -7,8 +7,10 @@
  * Requirements: 9.1, 9.2, 9.3, 12.2
  */
 
-import React, { useCallback, useState } from 'react';
+import { useCallback, useState } from 'react';
 import { StandardPropertiesPanel } from './StandardPropertiesPanel';
+import { CollapsibleSection } from '../shared/CollapsibleSection';
+import { Field } from '../shared/Field';
 import type { 
   WaitNodeConfig, 
   WaitType, 
@@ -62,58 +64,6 @@ const TIME_UNIT_LABELS: Record<TimeUnit, string> = {
   m: 'Minutes',
   h: 'Hours',
 };
-
-// ============================================
-// Helper Components
-// ============================================
-
-interface CollapsibleSectionProps {
-  title: string;
-  defaultOpen?: boolean;
-  children: React.ReactNode;
-}
-
-function CollapsibleSection({ title, defaultOpen = true, children }: CollapsibleSectionProps) {
-  const [isOpen, setIsOpen] = useState(defaultOpen);
-  
-  return (
-    <div className="wait-panel-section">
-      <button 
-        className="wait-panel-section-header"
-        onClick={() => setIsOpen(!isOpen)}
-        type="button"
-      >
-        <span className="wait-panel-section-toggle">{isOpen ? '▼' : '▶'}</span>
-        <span className="wait-panel-section-title">{title}</span>
-      </button>
-      {isOpen && (
-        <div className="wait-panel-section-content">
-          {children}
-        </div>
-      )}
-    </div>
-  );
-}
-
-interface FieldProps {
-  label: string;
-  hint?: string;
-  required?: boolean;
-  children: React.ReactNode;
-}
-
-function Field({ label, hint, required, children }: FieldProps) {
-  return (
-    <div className="wait-panel-field">
-      <label className="wait-panel-label">
-        {label}
-        {required && <span className="wait-panel-required">*</span>}
-        {hint && <span className="wait-panel-hint">({hint})</span>}
-      </label>
-      {children}
-    </div>
-  );
-}
 
 // ============================================
 // Main Component
