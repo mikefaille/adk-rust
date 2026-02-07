@@ -3,6 +3,7 @@ use axum::{
     extract::Query,
     http::StatusCode,
 };
+use adk_ui::{TOOL_ENVELOPE_VERSION, UI_DEFAULT_PROTOCOL, UI_PROTOCOL_CAPABILITIES};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -202,30 +203,16 @@ fn extract_meta_domain(meta: &Option<Value>) -> Option<String> {
 /// GET /api/ui/capabilities
 pub async fn ui_capabilities() -> Json<UiCapabilities> {
     Json(UiCapabilities {
-        default_protocol: "adk_ui",
-        protocols: vec![
-            UiProtocolCapability {
-                protocol: "adk_ui",
-                versions: vec!["1.0"],
-                features: vec!["legacy_components", "theme", "events"],
-            },
-            UiProtocolCapability {
-                protocol: "a2ui",
-                versions: vec!["0.9"],
-                features: vec!["jsonl", "createSurface", "updateComponents", "updateDataModel"],
-            },
-            UiProtocolCapability {
-                protocol: "ag_ui",
-                versions: vec!["0.1"],
-                features: vec!["run_lifecycle", "custom_events", "event_stream"],
-            },
-            UiProtocolCapability {
-                protocol: "mcp_apps",
-                versions: vec!["sep-1865"],
-                features: vec!["ui_resource_uri", "tool_meta", "html_resource"],
-            },
-        ],
-        tool_envelope_version: "1.0",
+        default_protocol: UI_DEFAULT_PROTOCOL,
+        protocols: UI_PROTOCOL_CAPABILITIES
+            .iter()
+            .map(|spec| UiProtocolCapability {
+                protocol: spec.protocol,
+                versions: spec.versions.to_vec(),
+                features: spec.features.to_vec(),
+            })
+            .collect(),
+        tool_envelope_version: TOOL_ENVELOPE_VERSION,
     })
 }
 

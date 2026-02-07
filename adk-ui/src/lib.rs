@@ -4,6 +4,7 @@ pub mod interop;
 pub mod kit;
 pub mod model;
 pub mod prompts;
+pub mod protocol_capabilities;
 pub mod schema;
 pub mod templates;
 pub mod tools;
@@ -16,6 +17,10 @@ pub use interop::*;
 pub use kit::{KitArtifacts, KitGenerator, KitSpec};
 pub use model::{ToolEnvelope, ToolEnvelopeProtocol};
 pub use prompts::{UI_AGENT_PROMPT, UI_AGENT_PROMPT_SHORT};
+pub use protocol_capabilities::{
+    SUPPORTED_UI_PROTOCOLS, TOOL_ENVELOPE_VERSION, UI_DEFAULT_PROTOCOL, UI_PROTOCOL_CAPABILITIES,
+    UiProtocolCapabilitySpec, normalize_runtime_ui_protocol,
+};
 pub use schema::*;
 pub use templates::{StatItem, TemplateData, UiTemplate, UserData, render_template};
 pub use tools::*;

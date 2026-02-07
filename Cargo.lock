@@ -445,6 +445,7 @@ dependencies = [
  "adk-runner",
  "adk-session",
  "adk-telemetry",
+ "adk-ui",
  "anyhow",
  "async-stream",
  "async-trait",

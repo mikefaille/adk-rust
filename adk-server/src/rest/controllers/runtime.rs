@@ -1,4 +1,5 @@
 use crate::ServerConfig;
+use adk_ui::{SUPPORTED_UI_PROTOCOLS, normalize_runtime_ui_protocol};
 use axum::{
     Json,
     extract::{Path, State},
@@ -16,7 +17,6 @@ fn default_streaming_true() -> bool {
 }
 
 const UI_PROTOCOL_HEADER: &str = "x-adk-ui-protocol";
-const SUPPORTED_UI_PROTOCOLS: [&str; 4] = ["adk_ui", "a2ui", "ag_ui", "mcp_apps"];
 
 #[derive(Clone)]
 pub struct RuntimeController {
@@ -96,11 +96,11 @@ impl UiProfile {
 type RuntimeError = (StatusCode, String);
 
 fn parse_ui_profile(raw: &str) -> Option<UiProfile> {
-    match raw.trim().to_ascii_lowercase().as_str() {
+    match normalize_runtime_ui_protocol(raw)? {
         "adk_ui" => Some(UiProfile::AdkUi),
         "a2ui" => Some(UiProfile::A2ui),
-        "ag_ui" | "ag-ui" => Some(UiProfile::AgUi),
-        "mcp_apps" | "mcp-apps" => Some(UiProfile::McpApps),
+        "ag_ui" => Some(UiProfile::AgUi),
+        "mcp_apps" => Some(UiProfile::McpApps),
         _ => None,
     }
 }

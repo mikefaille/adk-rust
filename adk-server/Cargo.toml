@@ -20,6 +20,7 @@ adk-runner.workspace = true
 adk-session.workspace = true
 adk-artifact.workspace = true
 adk-telemetry.workspace = true
+adk-ui.workspace = true
 tokio.workspace = true
 tokio-stream.workspace = true
 async-trait.workspace = true
