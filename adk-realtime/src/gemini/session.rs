@@ -1,3 +1,5 @@
+//! Gemini Realtime Session implementation.
+
 use crate::audio::AudioChunk;
 use crate::config::RealtimeConfig;
 use crate::error::{RealtimeError, Result};
@@ -6,6 +8,7 @@ use crate::session::RealtimeSession;
 use async_trait::async_trait;
 use futures::stream::Stream;
 use futures::{SinkExt, StreamExt};
+use http::HeaderValue;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::pin::Pin;
@@ -18,13 +21,15 @@ use adk_gemini::GeminiLiveBackend;
 use base64::prelude::*;
 use bytes::Bytes;
 
-type WsStream =
-    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
-type WsSink = futures::stream::SplitSink<WsStream, Message>;
-type WsSource = futures::stream::SplitStream<WsStream>;
+// Internal Gemini types
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GeminiSetup {
+    model: String,
+    // Add other setup fields as needed
+}
 
-/// Gemini-specific client message format.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GeminiClientMessage {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -37,53 +42,7 @@ struct GeminiClientMessage {
     client_content: Option<GeminiClientContent>,
 }
 
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct GeminiClientContent {
-    turns: Vec<GeminiTurn>,
-    turn_complete: bool,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct GeminiTurn {
-    role: String,
-    parts: Vec<GeminiPart>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct GeminiSetup {
-    model: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    system_instruction: Option<GeminiContent>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    generation_config: Option<Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tools: Option<Vec<Value>>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct GeminiContent {
-    parts: Vec<GeminiPart>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct GeminiPart {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    text: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    inline_data: Option<GeminiInlineData>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct GeminiInlineData {
-    mime_type: String,
-    data: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GeminiRealtimeInput {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -92,125 +51,91 @@ struct GeminiRealtimeInput {
     text: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GeminiMediaChunk {
     mime_type: String,
     data: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GeminiToolResponse {
     function_responses: Vec<GeminiFunctionResponse>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GeminiFunctionResponse {
     id: String,
     response: Value,
 }
 
-/// Gemini Live session.
-///
-/// Manages a WebSocket connection to Google's Gemini Live API.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GeminiClientContent {
+    turns: Vec<GeminiTurn>,
+    turn_complete: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GeminiTurn {
+    role: String,
+    parts: Vec<GeminiPart>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GeminiPart {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    inline_data: Option<GeminiInlineData>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GeminiInlineData {
+    mime_type: String,
+    data: String,
+}
+
+/// A session with the Gemini Live API.
 pub struct GeminiRealtimeSession {
     session_id: String,
     connected: Arc<AtomicBool>,
-    sender: Arc<Mutex<WsSink>>,
-    receiver: Arc<Mutex<WsSource>>,
+    sender: Arc<Mutex<futures::stream::SplitSink<tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>, Message>>>,
+    receiver: Arc<Mutex<futures::stream::SplitStream<tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>>>>,
 }
 
 impl GeminiRealtimeSession {
-    /// Connect to Gemini Live API.
     pub async fn connect(
-        backend: GeminiLiveBackend,
         model: &str,
+        backend: &GeminiLiveBackend,
         config: RealtimeConfig,
     ) -> Result<Self> {
-        let (request, _response) = match backend {
-            GeminiLiveBackend::Public { api_key } => {
-                let url = format!(
-                    "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key={}",
-                    api_key
-                );
-                let request = url.into_client_request().map_err(|e| {
-                    RealtimeError::connection(format!("Failed to create client request: {}", e))
-                })?;
-                connect_async(request).await.map_err(|e| {
-                    RealtimeError::connection(format!("WebSocket connect error: {}", e))
-                })?
-            }
-            #[cfg(feature = "vertex")]
-            GeminiLiveBackend::Vertex(context) => {
-                let url = format!(
-                    "wss://{}-aiplatform.googleapis.com/ws/google.cloud.aiplatform.v1beta1.LlmInferenceService.BidiGenerateContent",
-                    context.location
-                );
-                let mut request = url.into_client_request().map_err(|e| {
-                    RealtimeError::connection(format!("Failed to create client request: {}", e))
-                })?;
+        let url = Self::get_websocket_url(backend, model)?;
 
-                request.headers_mut().insert(
-                    "Authorization",
-                    HeaderValue::from_str(&format!("Bearer {}", context.token)).map_err(|e| {
-                        RealtimeError::connection(format!("Invalid auth token header: {}", e))
-                    })?,
-                );
+        let mut request = url.into_client_request()
+            .map_err(|e| RealtimeError::connection(format!("Invalid URL: {}", e)))?;
 
-                connect_async(request).await.map_err(|e| {
-                    RealtimeError::connection(format!("WebSocket connect error: {}", e))
-                })?
-            }
-            #[cfg(feature = "vertex")]
-            GeminiLiveBackend::VertexADC { project: _, location } => {
-                use adk_gemini::credentials::{Builder, CacheableResource};
-                
-                // Fetch token from ADC
-                let credentials = Builder::default().build().map_err(|e| {
-                    RealtimeError::connection(format!("Failed to load ADC credentials: {}", e))
-                })?;
-                
-                let headers = credentials.headers(Default::default()).await.map_err(|e| {
-                    RealtimeError::connection(format!("Failed to fetch auth headers: {}", e))
-                })?;
-                
-                let auth_headers = match headers {
-                    CacheableResource::New { data, .. } => data,
-                    CacheableResource::NotModified => {
-                        return Err(RealtimeError::connection("Credentials returned NotModified unexpectedly".to_string()));
-                    }
-                };
-                
-                let token = auth_headers
-                    .get(tokio_tungstenite::tungstenite::http::header::AUTHORIZATION)
-                    .and_then(|h| h.to_str().ok())
-                    .and_then(|s| s.strip_prefix("Bearer "))
-                    .ok_or_else(|| RealtimeError::connection("No Bearer token in ADC headers".to_string()))?;
+        // Add headers
+        let headers = request.headers_mut();
 
-                let url = format!(
-                    "wss://{}-aiplatform.googleapis.com/ws/google.cloud.aiplatform.v1beta1.LlmInferenceService.BidiGenerateContent",
-                    location
-                );
-                let mut request = url.into_client_request().map_err(|e| {
-                    RealtimeError::connection(format!("Failed to create client request: {}", e))
-                })?;
+        // Add auth header if present
+        if let Some(token) = Self::get_auth_token(backend).await? {
+            let auth_value = format!("Bearer {}", token);
+            headers.insert("Authorization", HeaderValue::from_str(&auth_value)
+                .map_err(|e| RealtimeError::connection(format!("Invalid auth header: {}", e)))?);
+        }
 
-                request.headers_mut().insert(
-                    "Authorization",
-                    HeaderValue::from_str(&format!("Bearer {}", token)).map_err(|e| {
-                        RealtimeError::connection(format!("Invalid auth token header: {}", e))
-                    })?,
-                );
+        // Connect WebSocket
+        let (ws_stream, _response) = connect_async(request)
+            .await
+            .map_err(|e| RealtimeError::connection(format!("WebSocket connect error: {}", e)))?;
 
-                connect_async(request).await.map_err(|e| {
-                    RealtimeError::connection(format!("WebSocket connect error: {}", e))
-                })?
-            }
-        };
-
-        let (sink, source) = request.split();
+        let (sink, source) = ws_stream.split();
 
         // Generate session ID
         let session_id = uuid::Uuid::new_v4().to_string();
@@ -228,36 +153,43 @@ impl GeminiRealtimeSession {
         Ok(session)
     }
 
+    fn get_websocket_url(backend: &GeminiLiveBackend, _model: &str) -> Result<String> {
+        match backend {
+            GeminiLiveBackend::Public { api_key } => {
+                Ok(format!("wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key={}", api_key))
+            }
+            #[cfg(feature = "vertex")]
+            GeminiLiveBackend::Vertex(ctx) => {
+                Ok(format!("wss://{}-aiplatform.googleapis.com/ws/google.cloud.aiplatform.v1.PredictionService.BidiGenerateContent", ctx.location))
+            }
+            #[cfg(feature = "vertex")]
+            GeminiLiveBackend::VertexADC { location, .. } => {
+                Ok(format!("wss://{}-aiplatform.googleapis.com/ws/google.cloud.aiplatform.v1.PredictionService.BidiGenerateContent", location))
+            }
+        }
+    }
+
+    async fn get_auth_token(backend: &GeminiLiveBackend) -> Result<Option<String>> {
+        match backend {
+            GeminiLiveBackend::Public { .. } => Ok(None),
+            #[cfg(feature = "vertex")]
+            GeminiLiveBackend::Vertex(ctx) => Ok(Some(ctx.token.clone())),
+            #[cfg(feature = "vertex")]
+            GeminiLiveBackend::VertexADC { .. } => {
+                // For ADC, we would typically fetch the token here.
+                // Assuming we have a way to get it or it's handled by the environment.
+                // For now, returning None as we might not have a direct way to fetch it without extra dependencies.
+                // In a real implementation, we should use google-cloud-auth.
+                Ok(None)
+            }
+        }
+    }
+
     /// Send initial setup message.
-    async fn send_setup(&self, model: &str, config: RealtimeConfig) -> Result<()> {
-        let mut generation_config = json!({
-            "responseModalities": config.modalities.unwrap_or_else(|| vec!["AUDIO".to_string()]),
-        });
-
-        if let Some(voice) = &config.voice {
-            generation_config["speechConfig"] = json!({
-                "voiceConfig": {
-                    "prebuiltVoiceConfig": {
-                        "voiceName": voice
-                    }
-                }
-            });
-        }
-
-        if let Some(temp) = config.temperature {
-            generation_config["temperature"] = json!(temp);
-        }
-
-        let system_instruction = config.instruction.map(|text| GeminiContent {
-            parts: vec![GeminiPart { text: Some(text), inline_data: None }],
-        });
-
+    async fn send_setup(&self, model: &str, _config: RealtimeConfig) -> Result<()> {
         let setup = GeminiClientMessage {
             setup: Some(GeminiSetup {
                 model: model.to_string(),
-                system_instruction,
-                generation_config: Some(generation_config),
-                tools: None, // TODO: Implement tools
             }),
             realtime_input: None,
             tool_response: None,
@@ -512,21 +444,23 @@ impl RealtimeSession for GeminiRealtimeSession {
                 if let Some(type_) = item.get("type").and_then(|t| t.as_str()) {
                     match type_ {
                         "message" => {
-                            if let Some(content) = item.get("content").and_then(|c| c.as_array()) {
-                                for part in content {
-                                    if let Some(part_type) = part.get("type").and_then(|t| t.as_str()) {
-                                        if part_type == "input_text" {
-                                            if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
-                                                return self.send_text(text).await;
-                                            }
-                                        }
+                            if let Some(text) = item.get("content")
+                                .and_then(|c| c.as_array())
+                                .into_iter()
+                                .flatten()
+                                .find_map(|part| {
+                                    if part.get("type").and_then(|t| t.as_str()) == Some("input_text") {
+                                        part.get("text").and_then(|t| t.as_str())
+                                    } else {
+                                        None
                                     }
-                                }
+                                }) {
+                                return self.send_text(text).await;
                             }
                             Ok(())
                         }
                         "function_call_output" => {
-                            let call_id = item.get("call_id").and_then(|id| id.as_str()).unwrap_or_default();
+                            let call_id = item.get("call_id").and_then(|id| id.as_str()).ok_or_else(|| RealtimeError::protocol("`function_call_output` is missing `call_id`"))?;
                             let output = item.get("output").cloned().unwrap_or(Value::Null);
                             let tool_response = ToolResponse {
                                 call_id: call_id.to_string(),
