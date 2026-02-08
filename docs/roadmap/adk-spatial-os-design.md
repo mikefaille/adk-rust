@@ -40,10 +40,12 @@ Implemented:
 - keyboard-first controls (`Cmd/Ctrl+K`, app focus cycling with `Cmd/Ctrl+[ ]`).
 - draggable windows with focus-to-front and layout snapshot emission.
 - timeline, trust panel, runtime log wiring over SSE.
+- prompt discoverability with shortcut hints and adaptive first-run suggestion chips.
+- per-app handoff allowlists with runtime policy checks and trust-panel policy decision visibility.
 
 Not yet implemented:
 
-- richer command palette UX and discoverability overlays.
+- richer command palette overlays (beyond inline hints/chips) and deeper discoverability flows.
 - advanced policy controls for per-app handoff allowlists.
 
 ## Runtime Architecture

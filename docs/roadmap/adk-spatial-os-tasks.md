@@ -70,12 +70,12 @@ Post-plan scope can now be proposed as Phase 2 extension tasks.
   - [x] E1.3 Add regression test for context restore through AppState wiring.
   - _Requirements: 8, 9_
 
-- [ ] E2. Command palette discoverability pass
-  - [ ] E2.1 Add keyboard hinting and command suggestions.
-  - [ ] E2.2 Add command examples in shell UI for first-run.
+- [x] E2. Command palette discoverability pass
+  - [x] E2.1 Add keyboard hinting and command suggestions.
+  - [x] E2.2 Add command examples in shell UI for first-run.
   - _Requirements: 2, 10_
 
-- [ ] E3. Handoff policy controls
-  - [ ] E3.1 Add per-app handoff allowlist in manifest/runtime.
-  - [ ] E3.2 Surface policy decisions in trust panel.
+- [x] E3. Handoff policy controls
+  - [x] E3.1 Add per-app handoff allowlist in manifest/runtime.
+  - [x] E3.2 Surface policy decisions in trust panel.
   - _Requirements: 5, 6_

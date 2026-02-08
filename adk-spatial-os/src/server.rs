@@ -426,28 +426,9 @@ async fn inbound_event(
         InboundEvent::AppCommand { app_id, command } => {
             if let Some(handoff) = parse_handoff_command(&app_id, &command) {
                 let handoff_id = format!("handoff-{}", uuid::Uuid::new_v4());
-                let pending_handoff = PendingHandoff {
-                    handoff_id: handoff_id.clone(),
-                    request: handoff.clone(),
-                };
-                let _ = state
-                    .sessions
-                    .update_context(&session_id, |ctx| {
-                        ctx.pending_handoff = Some(pending_handoff.clone());
-                        ctx.pending_approval = Some(PendingApproval {
-                            action_id: handoff_id.clone(),
-                            app_id: handoff.from_app.clone(),
-                            title: format!("Allow handoff to {}", handoff.to_app),
-                            rationale: handoff.context_summary.clone(),
-                            risk: RiskTier::Controlled,
-                        });
-                        ctx.audit_log.push(AuditEntry::new(
-                            &handoff_id,
-                            &handoff.from_app,
-                            RiskTier::Controlled,
-                            AuditDecision::Proposed,
-                        ));
-                    })
+                let policy = state
+                    .host
+                    .evaluate_handoff_policy(&handoff.from_app, &handoff.to_app)
                     .await;
 
                 let _ = state
@@ -466,13 +447,83 @@ async fn inbound_event(
                     .sessions
                     .publish(
                         &session_id,
+                        SsePayload::TimelineEntry(timeline::handoff_policy_entry(
+                            &handoff_id,
+                            &handoff.from_app,
+                            &handoff.to_app,
+                            policy.allowed,
+                            &policy.reason,
+                        )),
+                    )
+                    .await;
+
+                if !policy.allowed {
+                    let _ = state
+                        .sessions
+                        .update_context(&session_id, |ctx| {
+                            ctx.pending_handoff = None;
+                            ctx.pending_approval = None;
+                            ctx.audit_log.push(AuditEntry::new(
+                                &handoff_id,
+                                &handoff.from_app,
+                                RiskTier::Controlled,
+                                AuditDecision::Rejected,
+                            ));
+                        })
+                        .await;
+                    let _ = state
+                        .sessions
+                        .publish(
+                            &session_id,
+                            SsePayload::Notification(NotificationPayload {
+                                level: "warn".to_string(),
+                                message: policy.reason,
+                            }),
+                        )
+                        .await;
+                    let server_seq = state.sessions.last_server_seq(&session_id).await;
+                    return Ok(Json(InboundEventAck {
+                        ok: true,
+                        server_seq,
+                        error: None,
+                    }));
+                }
+
+                let pending_handoff = PendingHandoff {
+                    handoff_id: handoff_id.clone(),
+                    request: handoff.clone(),
+                };
+                let _ = state
+                    .sessions
+                    .update_context(&session_id, |ctx| {
+                        ctx.pending_handoff = Some(pending_handoff.clone());
+                        ctx.pending_approval = Some(PendingApproval {
+                            action_id: handoff_id.clone(),
+                            app_id: handoff.from_app.clone(),
+                            title: format!("Allow handoff to {}", handoff.to_app),
+                            rationale: format!("{} ({})", handoff.context_summary, policy.reason),
+                            risk: RiskTier::Controlled,
+                        });
+                        ctx.audit_log.push(AuditEntry::new(
+                            &handoff_id,
+                            &handoff.from_app,
+                            RiskTier::Controlled,
+                            AuditDecision::Proposed,
+                        ));
+                    })
+                    .await;
+
+                let _ = state
+                    .sessions
+                    .publish(
+                        &session_id,
                         SsePayload::ApprovalRequired(ApprovalRequiredPayload {
                             action_id: handoff_id,
                             app_id: handoff.from_app,
                             title: "Cross-app handoff requires approval".to_string(),
                             rationale: format!(
-                                "Transfer context to {}: {}",
-                                handoff.to_app, handoff.context_summary
+                                "Transfer context to {}: {} | Policy: {}",
+                                handoff.to_app, handoff.context_summary, policy.reason
                             ),
                             risk: RiskTier::Controlled,
                         }),

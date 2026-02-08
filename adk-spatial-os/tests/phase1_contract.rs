@@ -491,3 +491,91 @@ async fn handoff_flow_emits_approval_and_can_activate_target_app() {
 
     handle.abort();
 }
+
+#[tokio::test]
+async fn handoff_policy_blocked_route_skips_approval_and_emits_notification() {
+    let (base, handle) = spawn_server().await;
+    let client = reqwest::Client::new();
+
+    let create = client
+        .post(format!("{}/api/os/session", base))
+        .send()
+        .await
+        .expect("session create");
+    let created: serde_json::Value = create.json().await.expect("session json");
+    let session_id = created
+        .get("session_id")
+        .and_then(serde_json::Value::as_str)
+        .expect("session_id")
+        .to_string();
+
+    let mut stream_response = client
+        .get(format!("{}/api/os/stream/{}", base, session_id))
+        .send()
+        .await
+        .expect("stream response");
+
+    let command = client
+        .post(format!("{}/api/os/event/{}", base, session_id))
+        .json(&serde_json::json!({
+            "seq": 1,
+            "event": {
+                "type": "app_command",
+                "app_id": "mail-agent",
+                "command": "handoff calendar-agent | share latest customer impact summary"
+            }
+        }))
+        .send()
+        .await
+        .expect("handoff command response");
+    assert!(command.status().is_success());
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(6);
+    let mut pending = String::new();
+    let mut saw_approval = false;
+    let mut saw_policy_block = false;
+
+    while tokio::time::Instant::now() < deadline {
+        let next = tokio::time::timeout(Duration::from_millis(500), stream_response.chunk()).await;
+        let Ok(chunk_result) = next else {
+            continue;
+        };
+        let Ok(chunk_opt) = chunk_result else {
+            break;
+        };
+        let Some(chunk) = chunk_opt else {
+            break;
+        };
+
+        pending.push_str(&String::from_utf8_lossy(&chunk).replace('\r', ""));
+
+        while let Some(end) = pending.find("\n\n") {
+            let frame = pending[..end].to_string();
+            pending = pending[end + 2..].to_string();
+
+            if frame.contains("event: approval_required") {
+                saw_approval = true;
+            }
+            if frame.contains("event: notification")
+                && frame.to_lowercase().contains("handoff blocked by allowlist")
+            {
+                saw_policy_block = true;
+            }
+        }
+
+        if saw_policy_block {
+            break;
+        }
+    }
+
+    assert!(
+        !saw_approval,
+        "blocked handoff should not emit approval_required"
+    );
+    assert!(
+        saw_policy_block,
+        "expected policy-block notification for unlisted handoff route"
+    );
+
+    handle.abort();
+}

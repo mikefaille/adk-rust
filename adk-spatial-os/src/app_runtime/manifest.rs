@@ -12,6 +12,8 @@ pub struct AppManifest {
     pub capabilities: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub permissions: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub handoff_allowlist: Vec<String>,
     pub default_risk: RiskTier,
 }
 
@@ -24,6 +26,7 @@ pub fn default_manifests() -> Vec<AppManifest> {
             description: "Service health, incidents, and runbook remediation".to_string(),
             capabilities: vec!["ops".to_string(), "incident".to_string(), "remediation".to_string()],
             permissions: vec!["read.telemetry".to_string(), "write.remediation".to_string()],
+            handoff_allowlist: vec!["mail-agent".to_string(), "calendar-agent".to_string()],
             default_risk: RiskTier::Controlled,
         },
         AppManifest {
@@ -33,6 +36,7 @@ pub fn default_manifests() -> Vec<AppManifest> {
             description: "Inbox triage, drafting, and follow-ups".to_string(),
             capabilities: vec!["email".to_string(), "summarize".to_string()],
             permissions: vec!["read.mail".to_string(), "send.mail".to_string()],
+            handoff_allowlist: vec!["ops-center".to_string()],
             default_risk: RiskTier::Controlled,
         },
         AppManifest {
@@ -42,6 +46,7 @@ pub fn default_manifests() -> Vec<AppManifest> {
             description: "Scheduling, conflict resolution, and prep briefs".to_string(),
             capabilities: vec!["calendar".to_string(), "scheduling".to_string()],
             permissions: vec!["read.calendar".to_string(), "write.calendar".to_string()],
+            handoff_allowlist: vec!["ops-center".to_string()],
             default_risk: RiskTier::Safe,
         },
     ]

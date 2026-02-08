@@ -6,6 +6,7 @@ use crate::safety::risk::{RiskTier, classify_prompt_risk};
 
 use super::{
     bridge::{AppExecutionInput, run_app_agent},
+    handoff::HandoffPolicyDecision,
     manifest::{AppManifest, default_manifests},
 };
 
@@ -27,6 +28,7 @@ pub trait AgentAppHost: Send + Sync {
     async fn list_apps(&self) -> Vec<AppManifest>;
     async fn route_prompt(&self, prompt: &str) -> IntentRoute;
     async fn execute_command(&self, app_id: &str, command: &str) -> CommandDispatch;
+    async fn evaluate_handoff_policy(&self, from_app: &str, to_app: &str) -> HandoffPolicyDecision;
 }
 
 #[derive(Debug, Clone)]
@@ -135,6 +137,50 @@ impl AgentAppHost for InMemoryAgentHost {
             summary: output.summary,
         }
     }
+
+    async fn evaluate_handoff_policy(&self, from_app: &str, to_app: &str) -> HandoffPolicyDecision {
+        let source_app = self.apps.iter().find(|app| app.id == from_app);
+        if source_app.is_none() {
+            return HandoffPolicyDecision {
+                allowed: false,
+                reason: format!("handoff blocked by policy: unknown source app `{from_app}`"),
+            };
+        }
+
+        let target_exists = self.apps.iter().any(|app| app.id == to_app);
+        if !target_exists {
+            return HandoffPolicyDecision {
+                allowed: false,
+                reason: format!("handoff blocked by policy: unknown target app `{to_app}`"),
+            };
+        }
+
+        if from_app == to_app {
+            return HandoffPolicyDecision {
+                allowed: true,
+                reason: "handoff allowed by policy: intra-app transfer".to_string(),
+            };
+        }
+
+        let source_app = source_app.expect("checked above");
+        if source_app
+            .handoff_allowlist
+            .iter()
+            .any(|allowed| allowed == to_app)
+        {
+            return HandoffPolicyDecision {
+                allowed: true,
+                reason: format!("handoff allowed by allowlist: {from_app} -> {to_app}"),
+            };
+        }
+
+        HandoffPolicyDecision {
+            allowed: false,
+            reason: format!(
+                "handoff blocked by allowlist: `{to_app}` is not allowed for `{from_app}`"
+            ),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -165,5 +211,25 @@ mod tests {
         let dispatch = host.execute_command("unknown-app", "do something").await;
         assert!(!dispatch.accepted);
         assert!(dispatch.summary.contains("Unknown app"));
+    }
+
+    #[tokio::test]
+    async fn handoff_policy_allows_listed_route() {
+        let host = InMemoryAgentHost::default();
+        let decision = host
+            .evaluate_handoff_policy("ops-center", "mail-agent")
+            .await;
+        assert!(decision.allowed, "expected route to be allowed");
+        assert!(decision.reason.contains("allowlist"));
+    }
+
+    #[tokio::test]
+    async fn handoff_policy_blocks_unlisted_route() {
+        let host = InMemoryAgentHost::default();
+        let decision = host
+            .evaluate_handoff_policy("mail-agent", "calendar-agent")
+            .await;
+        assert!(!decision.allowed, "expected route to be blocked");
+        assert!(decision.reason.contains("blocked"));
     }
 }

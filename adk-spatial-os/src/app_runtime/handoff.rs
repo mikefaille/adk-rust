@@ -14,6 +14,12 @@ pub struct HandoffDecision {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HandoffPolicyDecision {
+    pub allowed: bool,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PendingHandoff {
     pub handoff_id: String,
     pub request: HandoffRequest,

@@ -108,3 +108,24 @@ pub fn handoff_decision_entry(handoff_id: &str, from_app: &str, to_app: &str, al
         .unwrap_or_default(),
     }
 }
+
+pub fn handoff_policy_entry(handoff_id: &str, from_app: &str, to_app: &str, allowed: bool, reason: &str) -> TimelineEntryPayload {
+    TimelineEntryPayload {
+        level: if allowed { "info".to_string() } else { "warn".to_string() },
+        message: if allowed {
+            format!("Handoff policy allows {from_app} -> {to_app}")
+        } else {
+            format!("Handoff policy blocked {from_app} -> {to_app}")
+        },
+        fields: json!({
+            "handoff_id": handoff_id,
+            "from_app": from_app,
+            "to_app": to_app,
+            "policy_allowed": allowed,
+            "policy_reason": reason,
+        })
+        .as_object()
+        .cloned()
+        .unwrap_or_default(),
+    }
+}

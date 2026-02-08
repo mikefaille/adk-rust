@@ -61,7 +61,7 @@
         display: grid;
         grid-template-columns: 290px minmax(0, 1fr);
         gap: 12px;
-        align-items: center;
+        align-items: start;
       }
       .brand h1 {
         margin: 0;
@@ -72,6 +72,10 @@
         margin: 2px 0 0;
         color: var(--muted);
         font-size: 13px;
+      }
+      .prompt-stack {
+        display: grid;
+        gap: 8px;
       }
       .master-prompt {
         display: grid;
@@ -96,6 +100,66 @@
         color: #fff;
         font-weight: 600;
         cursor: pointer;
+      }
+      .master-prompt button:disabled {
+        opacity: 0.72;
+        cursor: wait;
+      }
+      .prompt-hints {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+      }
+      .hint-pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        padding: 4px 8px;
+        border-radius: 999px;
+        border: 1px solid #d8e1f4;
+        background: rgba(255, 255, 255, 0.9);
+        color: #4a5d82;
+        font-size: 11px;
+        letter-spacing: 0.01em;
+      }
+      .suggestion-block {
+        display: grid;
+        gap: 6px;
+      }
+      .suggestion-head {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        color: #5e7092;
+        font-size: 12px;
+        font-weight: 600;
+        letter-spacing: 0.02em;
+      }
+      .suggestion-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+      .prompt-chip {
+        border: 1px solid #d2defa;
+        border-radius: 999px;
+        background: linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(244, 248, 255, 0.95));
+        color: #2e4f8e;
+        padding: 6px 11px;
+        font-size: 12px;
+        font-weight: 600;
+        cursor: pointer;
+        transition: border-color 150ms ease, transform 150ms ease, box-shadow 150ms ease;
+      }
+      .prompt-chip:hover {
+        border-color: rgba(21, 84, 246, 0.56);
+        transform: translateY(-1px);
+        box-shadow: 0 8px 16px rgba(21, 84, 246, 0.16);
+      }
+      .prompt-chip:focus-visible {
+        outline: none;
+        border-color: rgba(21, 84, 246, 0.75);
+        box-shadow: 0 0 0 3px rgba(21, 84, 246, 0.22);
       }
       .master-prompt input:focus-visible,
       .master-prompt button:focus-visible,
@@ -459,6 +523,25 @@
         display: grid;
         gap: 8px;
       }
+      .policy-status {
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        background: rgba(255, 255, 255, 0.9);
+        padding: 8px;
+      }
+      .policy-label {
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        color: var(--muted);
+      }
+      .policy-value {
+        margin-top: 4px;
+        font-size: 13px;
+      }
+      .policy-value.ok { color: var(--success); }
+      .policy-value.warn { color: var(--warn); }
+      .policy-value.neutral { color: var(--muted); }
       .risk-badge {
         display: inline-block;
         border-radius: 999px;
@@ -559,9 +642,22 @@
               <h1>ADK Spatial OS</h1>
               <p>Agent-native desktop shell</p>
             </div>
-            <div class="master-prompt">
-              <input id="prompt" value="Summarize platform health and propose safe mitigation options." />
-              <button id="run">Run</button>
+            <div class="prompt-stack">
+              <div class="master-prompt">
+                <input id="prompt" value="Summarize platform health and propose safe mitigation options." />
+                <button id="run">Run</button>
+              </div>
+              <div class="prompt-hints">
+                <span class="hint-pill">⌘/Ctrl + K focus prompt</span>
+                <span class="hint-pill">Enter run prompt</span>
+                <span class="hint-pill">⌘/Ctrl + [ ] cycle app</span>
+              </div>
+              <div class="suggestion-block">
+                <div class="suggestion-head">
+                  <span id="suggestionTitle">Starter prompts</span>
+                </div>
+                <div id="promptSuggestions" class="suggestion-row"></div>
+              </div>
             </div>
           </div>
           <div class="status-grid">
@@ -590,6 +686,10 @@
             <div class="trust">
               <div id="approvalTitle">No pending approval</div>
               <div id="approvalRisk"></div>
+              <div class="policy-status">
+                <div class="policy-label">Policy Decision</div>
+                <div id="policyDecision" class="policy-value neutral">No policy decision yet</div>
+              </div>
               <div class="actions">
                 <button id="approve" class="approve" disabled>Approve</button>
                 <button id="reject" class="reject" disabled>Reject</button>
@@ -615,6 +715,8 @@
       const sessionEl = document.getElementById('session');
       const promptEl = document.getElementById('prompt');
       const runBtn = document.getElementById('run');
+      const suggestionTitleEl = document.getElementById('suggestionTitle');
+      const promptSuggestionsEl = document.getElementById('promptSuggestions');
       const dockEl = document.getElementById('dock');
       const surfacesEl = document.getElementById('surfaces');
       const stageEl = document.querySelector('.spatial-stage');
@@ -625,6 +727,7 @@
       const logEl = document.getElementById('log');
       const approvalTitleEl = document.getElementById('approvalTitle');
       const approvalRiskEl = document.getElementById('approvalRisk');
+      const policyDecisionEl = document.getElementById('policyDecision');
       const approveBtn = document.getElementById('approve');
       const rejectBtn = document.getElementById('reject');
 
@@ -648,7 +751,30 @@
         if (index === 1) return -0.15;
         return 0.7;
       });
+      const DEFAULT_PROMPT_SUGGESTIONS = [
+        'Summarize platform health and propose safe mitigation options.',
+        'Draft an incident update email for leadership with current risks.',
+        'Prepare a 30-minute cross-team mitigation meeting agenda for today.',
+      ];
+      const APP_PROMPT_SUGGESTIONS = {
+        'ops-center': [
+          'Identify the top two degraded services and suggest lowest-risk remediation.',
+          'Create an incident timeline with owners, impact, and next checkpoints.',
+          'List rollback options with blast-radius estimates and approval requirements.',
+        ],
+        'mail-agent': [
+          'Draft a concise incident update email for customers and legal review.',
+          'Summarize unread operational mail and extract urgent action items.',
+          'Write follow-up responses for open incident threads with clear owners.',
+        ],
+        'calendar-agent': [
+          'Find a 30-minute overlap today for SRE, backend, and support leads.',
+          'Create a mitigation war-room schedule with prep notes and dependencies.',
+          'Re-plan conflicting incident meetings and keep critical attendees intact.',
+        ],
+      };
       let currentActiveApps = [];
+      let hasRunPrompt = false;
 
       function setStatus(value) { statusEl.textContent = value; }
       const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
@@ -744,6 +870,47 @@
         item.className = 'entry';
         item.innerHTML = `<div class="lvl">${level}</div><div class="msg">${message}</div>`;
         timelineEl.prepend(item);
+      }
+
+      function resolvePromptSuggestions() {
+        const focused = currentFocusedApp && APP_PROMPT_SUGGESTIONS[currentFocusedApp]
+          ? APP_PROMPT_SUGGESTIONS[currentFocusedApp]
+          : [];
+        if (focused.length) {
+          return focused.slice(0, 3);
+        }
+
+        const merged = [];
+        for (const appId of currentActiveApps) {
+          const candidates = APP_PROMPT_SUGGESTIONS[appId] || [];
+          for (const suggestion of candidates) {
+            if (!merged.includes(suggestion)) {
+              merged.push(suggestion);
+            }
+            if (merged.length >= 3) {
+              return merged;
+            }
+          }
+        }
+        return merged.length ? merged : DEFAULT_PROMPT_SUGGESTIONS;
+      }
+
+      function renderPromptSuggestions() {
+        if (!promptSuggestionsEl || !suggestionTitleEl) return;
+        suggestionTitleEl.textContent = hasRunPrompt ? 'Suggested next prompts' : 'Starter prompts';
+        const suggestions = resolvePromptSuggestions();
+        promptSuggestionsEl.innerHTML = '';
+        for (const suggestion of suggestions) {
+          const chip = document.createElement('button');
+          chip.type = 'button';
+          chip.className = 'prompt-chip';
+          chip.textContent = suggestion;
+          chip.onclick = () => {
+            promptEl.value = suggestion;
+            focusPromptInput();
+          };
+          promptSuggestionsEl.appendChild(chip);
+        }
       }
 
       function renderDock(activeApps, focusedApp) {
@@ -842,6 +1009,21 @@
         rejectBtn.disabled = false;
       }
 
+      function setPolicyDecision(message, allowed = null) {
+        if (!policyDecisionEl) return;
+        policyDecisionEl.textContent = message || 'No policy decision yet';
+        policyDecisionEl.className = 'policy-value';
+        if (allowed === true) {
+          policyDecisionEl.classList.add('ok');
+          return;
+        }
+        if (allowed === false) {
+          policyDecisionEl.classList.add('warn');
+          return;
+        }
+        policyDecisionEl.classList.add('neutral');
+      }
+
       async function loadApps() {
         const res = await fetch('/api/os/apps');
         const body = await res.json();
@@ -880,6 +1062,7 @@
               renderDock(currentActiveApps, data.focused_app || null);
               focusedEl.textContent = `focused: ${data.focused_app || 'none'}`;
               renderSurfaces();
+              renderPromptSuggestions();
             }
 
             if (payload.kind === 'app_surface_ops') {
@@ -896,6 +1079,11 @@
 
             if (payload.kind === 'timeline_entry') {
               pushTimeline(payload.data.level, payload.data.message);
+              const fields = payload.data.fields || {};
+              if (typeof fields.policy_reason === 'string') {
+                const allowed = fields.policy_allowed === true;
+                setPolicyDecision(fields.policy_reason, allowed);
+              }
             }
 
             if (payload.kind === 'approval_required') {
@@ -905,6 +1093,11 @@
 
             if (payload.kind === 'notification') {
               pushTimeline(payload.data.level, payload.data.message);
+              const message = String(payload.data.message || '');
+              if (message.toLowerCase().includes('policy')) {
+                const allowed = payload.data.level !== 'warn';
+                setPolicyDecision(message, allowed);
+              }
             }
 
             if (payload.kind === 'done') {
@@ -922,14 +1115,29 @@
       }
 
       async function runPrompt(prompt) {
+        const nextPrompt = String(prompt || '').trim();
+        if (!nextPrompt) {
+          pushTimeline('warn', 'Prompt is empty. Enter a request first.');
+          return;
+        }
+        hasRunPrompt = true;
+        renderPromptSuggestions();
         setStatus('running');
-        const res = await fetch(`/api/os/prompt/${sessionId}`, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ prompt }),
-        });
-        const body = await res.json();
-        log('prompt.response', body);
+        runBtn.disabled = true;
+        try {
+          const res = await fetch(`/api/os/prompt/${sessionId}`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ prompt: nextPrompt }),
+          });
+          const body = await res.json();
+          log('prompt.response', body);
+        } catch (error) {
+          setStatus('error');
+          log('prompt.error', { message: String(error) });
+        } finally {
+          runBtn.disabled = false;
+        }
       }
 
       async function sendEvent(event) {
@@ -944,6 +1152,11 @@
       }
 
       runBtn.onclick = () => runPrompt(promptEl.value);
+      promptEl.addEventListener('keydown', (event) => {
+        if (event.key !== 'Enter') return;
+        event.preventDefault();
+        runPrompt(promptEl.value);
+      });
       approveBtn.onclick = async () => {
         if (!pendingApproval) return;
         await sendEvent({
@@ -972,6 +1185,7 @@
         focusedEl.textContent = `focused: ${appId}`;
         renderDock(currentActiveApps, currentFocusedApp);
         syncSurfaceFocusClasses();
+        renderPromptSuggestions();
         if (emit) {
           sendEvent({ type: 'app_focus', app_id: appId });
         }
@@ -1239,6 +1453,8 @@
         try {
           await loadApps();
           await createSession();
+          setPolicyDecision('No policy decision yet', null);
+          renderPromptSuggestions();
           connectStream();
           pushTimeline('info', 'Shell ready. Submit a Master Prompt.');
         } catch (error) {

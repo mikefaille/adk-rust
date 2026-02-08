@@ -23,6 +23,8 @@ Current implementation already includes:
 - Drag/focus/snap/bounds workspace interactions with layout-change emission and restore.
 - Keyboard-first controls (`Cmd/Ctrl+K`, app focus cycling).
 - Capability-scored routing, command dispatch bridge path, and explicit handoff approval flow.
+- Prompt discoverability hints with adaptive first-run suggestion chips.
+- Per-app handoff allowlists with runtime policy enforcement and trust-panel policy decision display.
 - Contract and integration tests for SSE envelope shape, approvals, and workspace layout continuity.
 
 The remaining work is focused on production hardening and deeper runtime behaviors, not on reinventing the baseline architecture.
