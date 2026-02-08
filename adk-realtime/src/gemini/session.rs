@@ -6,7 +6,6 @@ use crate::session::RealtimeSession;
 use async_trait::async_trait;
 use futures::stream::Stream;
 use futures::{SinkExt, StreamExt};
-use http::HeaderValue;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::pin::Pin;
@@ -497,9 +496,61 @@ impl RealtimeSession for GeminiRealtimeSession {
         Ok(())
     }
 
-    async fn send_event(&self, _event: ClientEvent) -> Result<()> {
-        // Gemini uses a different event format
-        Err(RealtimeError::provider("Raw ClientEvent not supported for Gemini"))
+    async fn send_event(&self, event: ClientEvent) -> Result<()> {
+        match event {
+            ClientEvent::AudioDelta { audio, .. } => {
+                let encoded = base64::engine::general_purpose::STANDARD.encode(audio);
+                self.send_audio_base64(&encoded).await
+            }
+            ClientEvent::InputAudioBufferCommit => {
+                self.commit_audio().await
+            }
+            ClientEvent::InputAudioBufferClear => {
+                self.clear_audio().await
+            }
+            ClientEvent::ConversationItemCreate { item } => {
+                if let Some(type_) = item.get("type").and_then(|t| t.as_str()) {
+                    match type_ {
+                        "message" => {
+                            if let Some(content) = item.get("content").and_then(|c| c.as_array()) {
+                                for part in content {
+                                    if let Some(part_type) = part.get("type").and_then(|t| t.as_str()) {
+                                        if part_type == "input_text" {
+                                            if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
+                                                return self.send_text(text).await;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            Ok(())
+                        }
+                        "function_call_output" => {
+                            let call_id = item.get("call_id").and_then(|id| id.as_str()).unwrap_or_default();
+                            let output = item.get("output").cloned().unwrap_or(Value::Null);
+                            let tool_response = ToolResponse {
+                                call_id: call_id.to_string(),
+                                output,
+                            };
+                            self.send_tool_response(tool_response).await
+                        }
+                        _ => Ok(()),
+                    }
+                } else {
+                    Ok(())
+                }
+            }
+            ClientEvent::ResponseCreate { .. } => {
+                self.create_response().await
+            }
+            ClientEvent::ResponseCancel => {
+                self.interrupt().await
+            }
+            ClientEvent::SessionUpdate { .. } => {
+                tracing::warn!("SessionUpdate is not fully supported for GeminiRealtimeSession via send_event");
+                Ok(())
+            }
+        }
     }
 
     async fn next_event(&self) -> Option<Result<ServerEvent>> {
