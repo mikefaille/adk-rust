@@ -74,6 +74,8 @@ examples/
     ├── eval_similarity/     # Response similarity
     └── eval_report/         # Report generation
 
+├── studio_templates/         # 15 ADK Studio workflow templates (JSON)
+│
 ├── mistralrs_*/             # mistral.rs local inference examples
 │   ├── mistralrs_basic/     # Basic text generation
 │   ├── mistralrs_tools/     # Function calling
@@ -591,7 +593,8 @@ Demonstrates: Custom rubrics, weighted criteria.
 | **Graph** | 9 | graph_workflow, graph_react, graph_supervisor, etc. |
 | **Browser** | 5 | browser_basic, browser_agent, browser_interactive, etc. |
 | **Evaluation** | 11 | eval_basic, eval_trajectory, eval_semantic, etc. |
-| **Total** | **64+** | |
+| **Studio Templates** | 15 | customer_onboarding, lead_scoring, incident_response, etc. |
+| **Total** | **79+** | |
 
 ## Parity with Go ADK
 
@@ -623,6 +626,33 @@ ADK-Rust includes additional features not in the Go implementation:
 | **Graph Workflows** | graph_react, graph_supervisor, graph_hitl |
 | **Browser Automation** | browser_agent, browser_interactive |
 | **Agent Evaluation** | eval_trajectory, eval_semantic, eval_rubric |
+| **Studio Templates** | 15 visual workflow templates (customer_onboarding, incident_response, lead_scoring, etc.) |
+
+## ADK Studio Workflow Templates
+
+15 ready-to-use JSON templates for ADK Studio's visual workflow builder. Each combines LLM agents with action nodes (HTTP, Switch, Merge, Database, Transform, Set) to solve real-world automation use cases.
+
+| Template | Use Case |
+|----------|----------|
+| customer_onboarding | Welcome email, data enrichment, CRM update |
+| content_moderation | Classify content, flag violations, auto-respond |
+| daily_standup_digest | Pull Jira + Slack, summarize with LLM |
+| lead_scoring | Score leads, route to sales or nurture |
+| incident_response | Classify severity, page on-call, post status |
+| invoice_processing | Extract data, validate, route for approval |
+| employee_offboarding | Revoke access, checklist, notify teams |
+| bug_triage | Classify bugs, assign teams, create tickets |
+| newsletter_generator | Multi-source fetch, AI curation, send |
+| data_pipeline_monitor | Diagnose ETL failures, auto-retry, alert |
+| contract_reviewer | Extract clauses, flag risks, route to legal |
+| social_media_scheduler | Multi-platform post generation and publishing |
+| expense_report | Receipt extraction, policy compliance, approval |
+| churn_predictor | Usage analysis, churn scoring, retention actions |
+| api_health_dashboard | Parallel endpoint monitoring, diagnosis, alerting |
+
+Import by copying any `.json` file to `~/Library/Application Support/adk-studio/projects/`.
+
+See [studio_templates/README.md](studio_templates/README.md) for details.
 
 ## Example Structure
 
