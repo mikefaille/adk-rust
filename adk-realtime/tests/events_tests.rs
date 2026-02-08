@@ -43,7 +43,7 @@ fn test_tool_response_from_string() {
 fn test_client_event_audio_input_serialization() {
     let event = ClientEvent::AudioDelta { 
         event_id: None,
-        audio: b"base64audio==".to_vec(),
+        audio: b"base64audio==".to_vec().into(),
         format: adk_realtime::AudioFormat::default(),
     };
 

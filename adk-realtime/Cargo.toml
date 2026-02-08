@@ -78,7 +78,7 @@ webrtc = ["dep:rtc", "dep:audiopus", "dep:rand", "dep:getrandom"]
 # Enable Gemini Live API support
 gemini = ["dep:tokio-tungstenite", "dep:adk-gemini", "dep:http"]
 # Enable Vertex AI support
-vertex = ["gemini"]
+vertex = ["gemini", "adk-gemini/vertex"]
 # Enable LiveKit transport support
 livekit = ["dep:livekit", "dep:livekit-api"]
 # Integration with ADK ecosystem
