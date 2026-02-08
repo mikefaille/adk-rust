@@ -20,6 +20,7 @@ impl GeminiModel {
         Ok(Self { client, model_name: model.into(), retry_config: RetryConfig::default() })
     }
 
+    #[cfg(feature = "vertex")]
     pub fn new_google_cloud(
         api_key: impl Into<String>,
         project_id: impl AsRef<str>,
