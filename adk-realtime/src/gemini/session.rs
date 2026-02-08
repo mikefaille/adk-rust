@@ -18,6 +18,7 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 use adk_gemini::GeminiLiveBackend;
 use base64::prelude::*;
 use bytes::Bytes;
+use http::HeaderValue;
 
 type WsStream =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
