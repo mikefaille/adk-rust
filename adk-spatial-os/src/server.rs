@@ -1,4 +1,7 @@
-use std::{collections::HashMap, convert::Infallible, net::SocketAddr, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap, convert::Infallible, net::SocketAddr, path::PathBuf, sync::Arc,
+    time::Duration,
+};
 
 use anyhow::Context;
 use async_stream::stream;
@@ -77,12 +80,30 @@ impl std::fmt::Debug for AppState {
     }
 }
 
-impl Default for AppState {
-    fn default() -> Self {
+impl AppState {
+    pub fn with_state_path(state_path: Option<PathBuf>) -> Self {
+        let sessions = state_path
+            .map(SessionManager::with_persistence_path)
+            .unwrap_or_default();
         Self {
-            sessions: SessionManager::default(),
+            sessions,
             host: Arc::new(InMemoryAgentHost::default()),
         }
+    }
+
+    pub fn from_env() -> Self {
+        let state_path = std::env::var("ADK_SPATIAL_OS_STATE_PATH")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from);
+        Self::with_state_path(state_path)
+    }
+}
+
+impl Default for AppState {
+    fn default() -> Self {
+        Self::with_state_path(None)
     }
 }
 
@@ -120,7 +141,7 @@ pub fn app_router(state: AppState) -> Router {
 }
 
 pub async fn run_server(config: ServerConfig) -> anyhow::Result<()> {
-    let state = AppState::default();
+    let state = AppState::from_env();
     let app = app_router(state);
     let addr: SocketAddr = format!("{}:{}", config.host, config.port)
         .parse()
@@ -691,4 +712,61 @@ async fn inbound_event(
         server_seq,
         error: None,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AppState;
+    use crate::session::AppSurfaceLayout;
+    use uuid::Uuid;
+
+    #[tokio::test]
+    async fn app_state_with_state_path_restores_session_context() {
+        let state_file = std::env::temp_dir().join(format!(
+            "adk-spatial-os-state-app-state-{}.json",
+            Uuid::new_v4()
+        ));
+
+        let initial = AppState::with_state_path(Some(state_file.clone()));
+        let session_id = initial.sessions.create_session().await;
+        let _ = initial
+            .sessions
+            .update_context(&session_id, |ctx| {
+                ctx.focused_app = Some("ops-center".to_string());
+                ctx.active_apps = vec!["ops-center".to_string(), "mail-agent".to_string()];
+                ctx.last_prompt = Some("triage production incident".to_string());
+                ctx.workspace_layout.insert(
+                    "ops-center".to_string(),
+                    AppSurfaceLayout {
+                        x: 188,
+                        y: 132,
+                        w: 560,
+                        h: 340,
+                        z_index: 18,
+                    },
+                );
+            })
+            .await;
+        drop(initial);
+
+        let restored_state = AppState::with_state_path(Some(state_file.clone()));
+        restored_state.sessions.ensure_session(&session_id).await;
+        let restored = restored_state
+            .sessions
+            .get_context(&session_id)
+            .await
+            .expect("restored context");
+        assert_eq!(restored.focused_app.as_deref(), Some("ops-center"));
+        assert_eq!(restored.active_apps.len(), 2);
+        assert_eq!(restored.last_prompt.as_deref(), Some("triage production incident"));
+        let layout = restored
+            .workspace_layout
+            .get("ops-center")
+            .expect("workspace layout restored");
+        assert_eq!(layout.x, 188);
+        assert_eq!(layout.y, 132);
+        assert_eq!(layout.z_index, 18);
+
+        let _ = tokio::fs::remove_file(state_file).await;
+    }
 }

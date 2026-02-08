@@ -43,7 +43,6 @@ Implemented:
 
 Not yet implemented:
 
-- persistent storage backend for shell state across process restarts.
 - richer command palette UX and discoverability overlays.
 - advanced policy controls for per-app handoff allowlists.
 

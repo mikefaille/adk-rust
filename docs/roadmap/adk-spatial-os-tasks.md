@@ -61,3 +61,21 @@
 
 Current active task: `Completed`.
 Post-plan scope can now be proposed as Phase 2 extension tasks.
+
+## Phase 2 Extensions
+
+- [x] E1. Optional persistent session storage backend
+  - [x] E1.1 Wire server startup to read `ADK_SPATIAL_OS_STATE_PATH`.
+  - [x] E1.2 Route AppState session manager through persistence-path constructor.
+  - [x] E1.3 Add regression test for context restore through AppState wiring.
+  - _Requirements: 8, 9_
+
+- [ ] E2. Command palette discoverability pass
+  - [ ] E2.1 Add keyboard hinting and command suggestions.
+  - [ ] E2.2 Add command examples in shell UI for first-run.
+  - _Requirements: 2, 10_
+
+- [ ] E3. Handoff policy controls
+  - [ ] E3.1 Add per-app handoff allowlist in manifest/runtime.
+  - [ ] E3.2 Surface policy decisions in trust panel.
+  - _Requirements: 5, 6_

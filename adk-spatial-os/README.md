@@ -26,6 +26,7 @@ Environment variables:
 
 - `ADK_SPATIAL_OS_HOST` (default `127.0.0.1`)
 - `ADK_SPATIAL_OS_PORT` (default `8199`)
+- `ADK_SPATIAL_OS_STATE_PATH` (optional JSON file path for session/context persistence across restarts)
 
 ## Endpoints
 

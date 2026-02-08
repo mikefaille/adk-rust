@@ -18,6 +18,7 @@ Current implementation already includes:
 - In-memory app catalog and keyword-based prompt routing.
 - Risk classification (`safe`, `controlled`, `dangerous`) and approval gate flow.
 - Session context, timeline events, and basic audit entries.
+- Optional persisted session/context snapshots via `ADK_SPATIAL_OS_STATE_PATH`.
 - Full-width shell UI with spatial workspace depth, spatial sidebar cards, and spatial dock interactions.
 - Drag/focus/snap/bounds workspace interactions with layout-change emission and restore.
 - Keyboard-first controls (`Cmd/Ctrl+K`, app focus cycling).
