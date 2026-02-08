@@ -6,6 +6,7 @@ use crate::session::RealtimeSession;
 use async_trait::async_trait;
 use futures::stream::Stream;
 use futures::{SinkExt, StreamExt};
+#[cfg(feature = "vertex")]
 use http::HeaderValue;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -253,12 +254,30 @@ impl GeminiRealtimeSession {
             parts: vec![GeminiPart { text: Some(text), inline_data: None }],
         });
 
+        let tools = if let Some(config_tools) = config.tools {
+            let function_declarations: Vec<Value> = config_tools
+                .into_iter()
+                .map(|t| {
+                    json!({
+                        "name": t.name,
+                        "description": t.description.unwrap_or_default(),
+                        "parameters": t.parameters.unwrap_or(json!({ "type": "object", "properties": {} }))
+                    })
+                })
+                .collect();
+
+            Some(vec![json!({
+                "functionDeclarations": function_declarations
+            })])
+        } else {
+            None
+        };
         let setup = GeminiClientMessage {
             setup: Some(GeminiSetup {
                 model: model.to_string(),
                 system_instruction,
                 generation_config: Some(generation_config),
-                tools: None, // TODO: Implement tools
+                tools,
             }),
             realtime_input: None,
             tool_response: None,
