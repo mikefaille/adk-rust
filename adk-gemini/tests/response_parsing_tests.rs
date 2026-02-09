@@ -1,4 +1,4 @@
-use adk_gemini::{FinishReason, FunctionCall, GenerationResponse, Model, Part};
+use adk_gemini::{Content, FinishReason, FunctionCall, GenerationResponse, Model, Part, Role};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -22,7 +22,6 @@ fn test_model_deserialization() {
 
 #[test]
 fn test_thought_signature_deserialization() {
-    // Test JSON that includes thoughtSignature like in the provided API response
     let json_response = json!({
         "candidates": [
             {
@@ -54,25 +53,20 @@ fn test_thought_signature_deserialization() {
         "responseId": "CCm8aJjzBaWh1MkP_cLEgQo"
     });
 
-    // Test deserialization
     let response: GenerationResponse = serde_json::from_value(json_response).unwrap();
 
-    // Verify basic structure
     assert_eq!(response.candidates.len(), 1);
     let candidate = &response.candidates[0];
     assert_eq!(candidate.finish_reason, Some(FinishReason::Stop));
 
-    // Check content parts
     let parts = candidate.content.parts.as_ref().unwrap();
     assert_eq!(parts.len(), 1);
 
-    // Verify the part is a function call with thought signature
     match &parts[0] {
         Part::FunctionCall { function_call, thought_signature } => {
             assert_eq!(function_call.name, "get_current_weather");
             assert_eq!(function_call.args["location"], "Kaohsiung Zuoying District");
 
-            // Verify thought signature is present and not empty
             assert!(thought_signature.is_some());
             let signature = thought_signature.as_ref().unwrap();
             assert!(!signature.is_empty());
@@ -81,7 +75,6 @@ fn test_thought_signature_deserialization() {
         _ => panic!("Expected FunctionCall part"),
     }
 
-    // Test the function_calls_with_thoughts method
     let function_calls_with_thoughts = response.function_calls_with_thoughts();
     assert_eq!(function_calls_with_thoughts.len(), 1);
 
@@ -89,7 +82,6 @@ fn test_thought_signature_deserialization() {
     assert_eq!(function_call.name, "get_current_weather");
     assert!(thought_signature.is_some());
 
-    // Test usage metadata with thinking tokens
     assert!(response.usage_metadata.is_some());
     let usage = response.usage_metadata.as_ref().unwrap();
     assert_eq!(usage.thoughts_token_count, Some(164));
@@ -97,7 +89,6 @@ fn test_thought_signature_deserialization() {
 
 #[test]
 fn test_function_call_with_thought_signature() {
-    // Test creating a FunctionCall with thought signature
     let function_call = FunctionCall::with_thought_signature(
         "test_function",
         json!({"param": "value"}),
@@ -108,25 +99,21 @@ fn test_function_call_with_thought_signature() {
     assert_eq!(function_call.args["param"], "value");
     assert_eq!(function_call.thought_signature, Some("test_thought_signature".to_string()));
 
-    // Test serialization
     let serialized = serde_json::to_string(&function_call).unwrap();
     println!("Serialized FunctionCall: {}", serialized);
 
-    // Test deserialization
     let deserialized: FunctionCall = serde_json::from_str(&serialized).unwrap();
     assert_eq!(deserialized, function_call);
 }
 
 #[test]
 fn test_function_call_without_thought_signature() {
-    // Test creating a FunctionCall without thought signature (backward compatibility)
     let function_call = FunctionCall::new("test_function", json!({"param": "value"}));
 
     assert_eq!(function_call.name, "test_function");
     assert_eq!(function_call.args["param"], "value");
     assert_eq!(function_call.thought_signature, None);
 
-    // Test serialization should not include thought_signature field when None
     let serialized = serde_json::to_string(&function_call).unwrap();
     println!("Serialized FunctionCall without thought: {}", serialized);
     assert!(!serialized.contains("thought_signature"));
@@ -134,17 +121,12 @@ fn test_function_call_without_thought_signature() {
 
 #[test]
 fn test_multi_turn_content_structure() {
-    // Test that we can create proper multi-turn content structure for maintaining thought context
-    use adk_gemini::{Content, Part, Role};
-
-    // Simulate a function call with thought signature from first turn
     let function_call = FunctionCall::with_thought_signature(
         "get_weather",
         json!({"location": "Tokyo"}),
         "sample_thought_signature",
     );
 
-    // Create model content with function call and thought signature
     let model_content = Content {
         parts: Some(vec![Part::FunctionCall {
             function_call: function_call.clone(),
@@ -153,15 +135,12 @@ fn test_multi_turn_content_structure() {
         role: Some(Role::Model),
     };
 
-    // Verify structure
     assert!(model_content.parts.is_some());
     assert_eq!(model_content.role, Some(Role::Model));
 
-    // Test serialization of the complete structure first
     let serialized = serde_json::to_string(&model_content).unwrap();
     println!("Serialized multi-turn content: {}", serialized);
 
-    // Verify it contains the thought signature
     assert!(serialized.contains("thoughtSignature"));
     assert!(serialized.contains("sample_thought_signature"));
 
@@ -179,9 +158,6 @@ fn test_multi_turn_content_structure() {
 
 #[test]
 fn test_text_with_thought_signature() {
-    use adk_gemini::GenerationResponse;
-
-    // Test JSON similar to the provided API response
     let json_response = json!({
         "candidates": [
             {
@@ -212,18 +188,14 @@ fn test_text_with_thought_signature() {
         "responseId": "gIC..."
     });
 
-    // Test deserialization
     let response: GenerationResponse = serde_json::from_value(json_response).unwrap();
 
-    // Verify basic structure
     assert_eq!(response.candidates.len(), 1);
     let candidate = &response.candidates[0];
 
-    // Check content parts
     let parts = candidate.content.parts.as_ref().unwrap();
     assert_eq!(parts.len(), 2);
 
-    // Check first part (thought without signature)
     match &parts[0] {
         Part::Text { text, thought, thought_signature } => {
             assert_eq!(*thought, Some(true));
@@ -233,7 +205,6 @@ fn test_text_with_thought_signature() {
         _ => panic!("Expected Text part for first element"),
     }
 
-    // Check second part (text with thought signature)
     match &parts[1] {
         Part::Text { text, thought, thought_signature } => {
             assert_eq!(*thought, None);
@@ -244,7 +215,6 @@ fn test_text_with_thought_signature() {
         _ => panic!("Expected Text part for second element"),
     }
 
-    // Test the new text_with_thoughts method
     let text_with_thoughts = response.text_with_thoughts();
     assert_eq!(text_with_thoughts.len(), 2);
 
@@ -262,8 +232,6 @@ fn test_text_with_thought_signature() {
 
 #[test]
 fn test_content_creation_with_thought_signature() {
-    // Test creating content with thought signature
-    use adk_gemini::Content;
     let content = Content::text_with_thought_signature("Test response", "test_signature_123");
 
     let parts = content.parts.as_ref().unwrap();
@@ -278,7 +246,6 @@ fn test_content_creation_with_thought_signature() {
         _ => panic!("Expected Text part"),
     }
 
-    // Test creating thought content with signature
     let thought_content =
         Content::thought_with_signature("This is my thinking process", "thought_signature_456");
 
@@ -294,13 +261,11 @@ fn test_content_creation_with_thought_signature() {
         _ => panic!("Expected Text part"),
     }
 
-    // Test serialization
     let serialized = serde_json::to_string(&content).unwrap();
     println!("Serialized content with thought signature: {}", serialized);
     assert!(serialized.contains("thoughtSignature"));
     assert!(serialized.contains("test_signature_123"));
 
-    // Test serialization of thought content
     let serialized_thought = serde_json::to_string(&thought_content).unwrap();
     println!("Serialized thought content: {}", serialized_thought);
     assert!(serialized_thought.contains("thoughtSignature"));
