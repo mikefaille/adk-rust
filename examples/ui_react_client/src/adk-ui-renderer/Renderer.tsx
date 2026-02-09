@@ -323,8 +323,8 @@ function ChartRenderer({ component }: { component: Extract<Component, { type: 'c
                         <YAxis label={component.y_label ? { value: component.y_label, angle: -90, position: 'insideLeft' } : undefined} />
                         <Tooltip />
                         {showLegend && <Legend />}
-                        {component.y_keys.map((key) => (
-                            <Bar key={key} dataKey={key} fill={chartColors[0 % chartColors.length]} />
+                        {component.y_keys.map((key, i) => (
+                            <Bar key={key} dataKey={key} fill={chartColors[i % chartColors.length]} />
                         ))}
                     </BarChart>
                 )}
