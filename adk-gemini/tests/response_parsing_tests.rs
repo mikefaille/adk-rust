@@ -1,4 +1,4 @@
-use crate::{FinishReason, FunctionCall, GenerationResponse, Model, Part};
+use adk_gemini::{FinishReason, FunctionCall, GenerationResponse, Model, Part};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -135,7 +135,7 @@ fn test_function_call_without_thought_signature() {
 #[test]
 fn test_multi_turn_content_structure() {
     // Test that we can create proper multi-turn content structure for maintaining thought context
-    use crate::{Content, Part, Role};
+    use adk_gemini::{Content, Part, Role};
 
     // Simulate a function call with thought signature from first turn
     let function_call = FunctionCall::with_thought_signature(
@@ -179,7 +179,7 @@ fn test_multi_turn_content_structure() {
 
 #[test]
 fn test_text_with_thought_signature() {
-    use crate::GenerationResponse;
+    use adk_gemini::GenerationResponse;
 
     // Test JSON similar to the provided API response
     let json_response = json!({
@@ -263,7 +263,7 @@ fn test_text_with_thought_signature() {
 #[test]
 fn test_content_creation_with_thought_signature() {
     // Test creating content with thought signature
-    use crate::Content;
+    use adk_gemini::Content;
     let content = Content::text_with_thought_signature("Test response", "test_signature_123");
 
     let parts = content.parts.as_ref().unwrap();
