@@ -820,4 +820,23 @@ mod tests {
             panic!("Expected validation error, got {:?}", result);
         }
     }
+
+    #[tokio::test]
+    async fn test_builder_thinking_validation_integration() {
+        use crate::Gemini;
+        let client = Gemini::new("api-key").unwrap();
+
+        // Use with_thinking_budget with invalid value
+        let builder = client.generate_content().with_thinking_budget(-2);
+
+        let result = builder.execute().await;
+        assert!(result.is_err());
+
+        // Check if it's a validation error
+        if let Err(crate::client::Error::Validation { source }) = result {
+            assert_eq!(source, ValidationError::InvalidThinkingBudget { value: -2 });
+        } else {
+            panic!("Expected validation error, got {:?}", result);
+        }
+    }
 }
