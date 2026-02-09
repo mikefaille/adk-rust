@@ -207,7 +207,10 @@ pub async fn build_project_stream(
         for file in &generated.files {
             let path = build_dir.join(&file.path);
             if let Some(parent) = path.parent() {
-                let _ = fs::create_dir_all(parent).await;
+                if let Err(e) = fs::create_dir_all(parent).await {
+                    yield Ok(Event::default().event("error").data(e.to_string()));
+                    return;
+                }
             }
             if let Err(e) = fs::write(&path, &file.content).await {
                 yield Ok(Event::default().event("error").data(e.to_string()));
@@ -219,7 +222,10 @@ pub async fn build_project_stream(
 
         // Use shared target directory for faster incremental builds
         let shared_target = std::env::temp_dir().join("adk-studio-builds").join("_shared_target");
-        let _ = fs::create_dir_all(&shared_target).await;
+        if let Err(e) = fs::create_dir_all(&shared_target).await {
+            yield Ok(Event::default().event("error").data(e.to_string()));
+            return;
+        }
 
         let mut child = match Command::new("cargo")
             .arg("build")
@@ -280,7 +286,9 @@ pub async fn build_project(
     for file in &generated.files {
         let path = build_dir.join(&file.path);
         if let Some(parent) = path.parent() {
-            let _ = fs::create_dir_all(parent).await;
+            fs::create_dir_all(parent)
+                .await
+                .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
         }
         fs::write(&path, &file.content)
             .await
@@ -289,7 +297,9 @@ pub async fn build_project(
 
     // Use shared target directory for faster incremental builds
     let shared_target = std::env::temp_dir().join("adk-studio-builds").join("_shared_target");
-    let _ = fs::create_dir_all(&shared_target).await;
+    fs::create_dir_all(&shared_target)
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     // Run cargo build
     let output = tokio::process::Command::new("cargo")
