@@ -9,6 +9,10 @@ import {
     XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer
 } from 'recharts';
 
+/**
+ * --- Constants & Configuration ---
+ */
+
 const IconMap: Record<string, React.ComponentType<any>> = {
     'alert-circle': AlertCircle,
     'check-circle': CheckCircle,
@@ -19,15 +23,182 @@ const IconMap: Record<string, React.ComponentType<any>> = {
     'calendar': Calendar,
 };
 
-const renderPieLabel = ({ name, percent }: { name: string; percent?: number }) =>
-    `${name}: ${((percent ?? 0) * 100).toFixed(0)}%`;
-
 const DEFAULT_CHART_COLORS = ['#3B82F6', '#10B981', '#F59E0B', '#EF4444', '#8B5CF6', '#EC4899', '#06B6D4'];
 
-// --- Specialized Renderers ---
+/**
+ * --- Shared Types ---
+ */
 
-const TextRenderer: React.FC<{ component: Extract<Component, { type: 'text' }> }> = ({ component }) => {
-    // Use Markdown for body text to render formatted content
+interface FormContextValue {
+    onAction?: (event: UiEvent) => void;
+}
+
+const FormContext = createContext<FormContextValue>({});
+
+type InputComponent = Extract<Component, {
+    type: 'text_input' | 'number_input' | 'select' | 'multi_select' | 'switch' | 'date_input' | 'slider' | 'textarea'
+}>;
+
+export interface RendererProps {
+    component: Component;
+    onAction?: (event: UiEvent) => void;
+    /** Theme for this component: 'dark' wraps in dark mode styling */
+    theme?: 'light' | 'dark' | 'system';
+}
+
+/**
+ * --- Formatting Helpers ---
+ */
+
+interface PieLabelProps {
+    name: string;
+    percent?: number;
+}
+
+/**
+ * Pure function for rendering Pie chart labels.
+ * Extracted to a constant to stabilize prop references.
+ */
+const renderPieLabel = ({ name, percent }: PieLabelProps) =>
+    `${name}: ${((percent ?? 0) * 100).toFixed(0)}%`;
+
+/**
+ * --- Main Entry Point ---
+ */
+
+/**
+ * High-level Renderer component that provides theming and action handling context.
+ */
+export function Renderer({ component, onAction, theme }: RendererProps) {
+    const isDark = theme === 'dark';
+    const contextValue = useMemo(() => ({ onAction }), [onAction]);
+
+    return (
+        <FormContext.Provider value={contextValue}>
+            <div className={isDark ? 'dark' : ''}>
+                <ComponentRenderer component={component} />
+            </div>
+        </FormContext.Provider>
+    );
+}
+
+/**
+ * Internal recursive renderer that maps component types to their specialized renderer components.
+ */
+function ComponentRenderer({ component }: { component: Component }) {
+    const { onAction } = useContext(FormContext);
+    const formRef = useRef<HTMLFormElement>(null);
+
+    const handleButtonClick = useCallback((actionId: string) => {
+        if (formRef.current) {
+            const formData = new FormData(formRef.current);
+            const data: Record<string, unknown> = {};
+            formData.forEach((value, key) => {
+                data[key] = value;
+            });
+            onAction?.({ action: 'form_submit', action_id: actionId, data });
+        } else {
+            onAction?.({ action: 'button_click', action_id: actionId });
+        }
+    }, [onAction]);
+
+    const handleToastDismiss = useCallback(() => {
+        onAction?.({ action: 'button_click', action_id: 'toast_dismiss' });
+    }, [onAction]);
+
+    const handleModalClose = useCallback(() => {
+        onAction?.({ action: 'button_click', action_id: 'modal_close' });
+    }, [onAction]);
+
+    switch (component.type) {
+        case 'text':
+            return <TextRenderer component={component} />;
+
+        case 'button':
+            return <ButtonRenderer component={component} onClick={handleButtonClick} />;
+
+        case 'icon': {
+            const Icon = IconMap[component.name] || Info;
+            return <Icon size={component.size || 24} />;
+        }
+
+        case 'alert':
+            return <AlertRenderer component={component} />;
+
+        case 'card':
+            return <CardRenderer component={component} formRef={formRef} onAction={onAction} />;
+
+        case 'stack':
+            return <StackRenderer component={component} />;
+
+        case 'text_input':
+        case 'number_input':
+        case 'select':
+        case 'switch':
+        case 'multi_select':
+        case 'date_input':
+        case 'slider':
+        case 'textarea':
+            return <InputRenderer component={component} />;
+
+        case 'progress':
+            return <ProgressRenderer component={component} />;
+
+        case 'spinner':
+            return <SpinnerRenderer component={component} />;
+
+        case 'skeleton':
+            return <SkeletonRenderer component={component} />;
+
+        case 'toast':
+            return <ToastRenderer component={component} onDismiss={handleToastDismiss} />;
+
+        case 'modal':
+            return <ModalRenderer component={component} onClose={handleModalClose} />;
+
+        case 'grid':
+            return <GridRenderer component={component} />;
+
+        case 'list':
+            return <ListRenderer component={component} />;
+
+        case 'key_value':
+            return <KeyValueRenderer component={component} />;
+
+        case 'tabs':
+            return <TabsRenderer component={component} />;
+
+        case 'table':
+            return <TableRenderer component={component} />;
+
+        case 'chart':
+            return <ChartRenderer component={component} />;
+
+        case 'code_block':
+            return <CodeBlockRenderer component={component} />;
+
+        case 'image':
+            return <ImageRenderer component={component} />;
+
+        case 'badge':
+            return <BadgeRenderer component={component} />;
+
+        case 'divider':
+            return <hr className="my-4 border-gray-200" />;
+
+        case 'container':
+            return <ContainerRenderer component={component} />;
+
+        default:
+            return <div className="text-red-500 text-sm p-2 border border-red-200 rounded">Unknown component: {(component as any).type}</div>;
+    }
+}
+
+/**
+ * --- Specialized Sub-Renderers ---
+ */
+
+function TextRenderer({ component }: { component: Extract<Component, { type: 'text' }> }) {
     if (component.variant === 'body' || !component.variant) {
         return (
             <div className="prose prose-sm dark:prose-invert max-w-none text-gray-700 dark:text-gray-300">
@@ -49,12 +220,12 @@ const TextRenderer: React.FC<{ component: Extract<Component, { type: 'text' }> }
         'text-sm text-gray-500 dark:text-gray-400': component.variant === 'caption',
     });
     return <Tag className={classes}>{component.content}</Tag>;
-};
+}
 
-const ButtonRenderer: React.FC<{
+function ButtonRenderer({ component, onClick }: {
     component: Extract<Component, { type: 'button' }>;
     onClick: (actionId: string) => void;
-}> = ({ component, onClick }) => {
+}) {
     const btnClasses = clsx('px-4 py-2 rounded font-medium transition-colors', {
         'bg-blue-600 text-white hover:bg-blue-700': component.variant === 'primary' || !component.variant,
         'bg-gray-200 text-gray-800 hover:bg-gray-300': component.variant === 'secondary',
@@ -73,9 +244,9 @@ const ButtonRenderer: React.FC<{
             {component.label}
         </button>
     );
-};
+}
 
-const AlertRenderer: React.FC<{ component: Extract<Component, { type: 'alert' }> }> = ({ component }) => {
+function AlertRenderer({ component }: { component: Extract<Component, { type: 'alert' }> }) {
     const alertClasses = clsx('p-4 rounded-md border mb-4 flex items-start gap-3', {
         'bg-blue-50 border-blue-200 text-blue-800': component.variant === 'info' || !component.variant,
         'bg-green-50 border-green-200 text-green-800': component.variant === 'success',
@@ -94,9 +265,9 @@ const AlertRenderer: React.FC<{ component: Extract<Component, { type: 'alert' }>
             </div>
         </div>
     );
-};
+}
 
-const ChartRenderer: React.FC<{ component: Extract<Component, { type: 'chart' }> }> = ({ component }) => {
+function ChartRenderer({ component }: { component: Extract<Component, { type: 'chart' }> }) {
     const chartColors = component.colors || DEFAULT_CHART_COLORS;
     const chartKind = component.kind || 'bar';
     const showLegend = component.show_legend !== false;
@@ -160,19 +331,21 @@ const ChartRenderer: React.FC<{ component: Extract<Component, { type: 'chart' }>
             </ResponsiveContainer>
         </div>
     );
-};
+}
 
-const ImageRenderer: React.FC<{ component: Extract<Component, { type: 'image' }> }> = ({ component }) => (
-    <div className="mb-4">
-        <img
-            src={component.src}
-            alt={component.alt || ''}
-            className="max-w-full h-auto rounded-lg"
-        />
-    </div>
-);
+function ImageRenderer({ component }: { component: Extract<Component, { type: 'image' }> }) {
+    return (
+        <div className="mb-4">
+            <img
+                src={component.src}
+                alt={component.alt || ''}
+                className="max-w-full h-auto rounded-lg"
+            />
+        </div>
+    );
+}
 
-const BadgeRenderer: React.FC<{ component: Extract<Component, { type: 'badge' }> }> = ({ component }) => {
+function BadgeRenderer({ component }: { component: Extract<Component, { type: 'badge' }> }) {
     const badgeClasses = clsx('inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium', {
         'bg-gray-100 text-gray-800': component.variant === 'default' || !component.variant,
         'bg-blue-100 text-blue-800': component.variant === 'info',
@@ -183,19 +356,21 @@ const BadgeRenderer: React.FC<{ component: Extract<Component, { type: 'badge' }>
         'bg-transparent border border-gray-300 text-gray-700': component.variant === 'outline',
     });
     return <span className={badgeClasses}>{component.label}</span>;
-};
+}
 
-const CodeBlockRenderer: React.FC<{ component: Extract<Component, { type: 'code_block' }> }> = ({ component }) => (
-    <div className="mb-4">
-        <pre className="bg-gray-900 text-gray-100 p-4 rounded-lg overflow-x-auto text-sm">
-            <code>{component.code}</code>
-        </pre>
-    </div>
-);
+function CodeBlockRenderer({ component }: { component: Extract<Component, { type: 'code_block' }> }) {
+    return (
+        <div className="mb-4">
+            <pre className="bg-gray-900 text-gray-100 p-4 rounded-lg overflow-x-auto text-sm">
+                <code>{component.code}</code>
+            </pre>
+        </div>
+    );
+}
 
-const InputRenderer: React.FC<{ component: Component }> = ({ component }) => {
+function InputRenderer({ component }: { component: InputComponent }) {
     switch (component.type) {
-        case 'text_input':
+        case 'text_input': {
             const inputType = component.input_type || 'text';
             return (
                 <div className="mb-3">
@@ -215,6 +390,7 @@ const InputRenderer: React.FC<{ component: Component }> = ({ component }) => {
                     )}
                 </div>
             );
+        }
         case 'number_input':
             return (
                 <div className="mb-3">
@@ -334,42 +510,9 @@ const InputRenderer: React.FC<{ component: Component }> = ({ component }) => {
         default:
             return null;
     }
-};
-
-// Context for form handling
-interface FormContextValue {
-    onAction?: (event: UiEvent) => void;
 }
 
-const FormContext = createContext<FormContextValue>({});
-
-interface RendererProps {
-    component: Component;
-    onAction?: (event: UiEvent) => void;
-    /** Theme for this component: 'dark' wraps in dark mode styling */
-    theme?: 'light' | 'dark' | 'system';
-}
-
-export const Renderer: React.FC<RendererProps> = ({ component, onAction, theme }) => {
-    // Apply dark class wrapper when theme is explicitly 'dark'
-    const isDark = theme === 'dark';
-
-    const contextValue = useMemo(() => ({ onAction }), [onAction]);
-
-    return (
-        <FormContext.Provider value={contextValue}>
-            <div className={isDark ? 'dark' : ''}>
-                <ComponentRenderer component={component} />
-            </div>
-        </FormContext.Provider>
-    );
-};
-
-interface TableRendererProps {
-    component: Extract<Component, { type: 'table' }>;
-}
-
-const TableRenderer: React.FC<TableRendererProps> = ({ component }) => {
+function TableRenderer({ component }: { component: Extract<Component, { type: 'table' }> }) {
     const [sortColumn, setSortColumn] = useState<string | null>(null);
     const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('asc');
     const [currentPage, setCurrentPage] = useState(0);
@@ -469,13 +612,9 @@ const TableRenderer: React.FC<TableRendererProps> = ({ component }) => {
             )}
         </div>
     );
-};
-
-interface TabsRendererProps {
-    component: Extract<Component, { type: 'tabs' }>;
 }
 
-const TabsRenderer: React.FC<TabsRendererProps> = ({ component }) => {
+function TabsRenderer({ component }: { component: Extract<Component, { type: 'tabs' }> }) {
     const [activeTab, setActiveTab] = useState(0);
 
     const handleTabChange = useCallback((index: number) => {
@@ -507,9 +646,9 @@ const TabsRenderer: React.FC<TabsRendererProps> = ({ component }) => {
             </div>
         </div>
     );
-};
+}
 
-const SpinnerRenderer: React.FC<{ component: Extract<Component, { type: 'spinner' }> }> = ({ component }) => {
+function SpinnerRenderer({ component }: { component: Extract<Component, { type: 'spinner' }> }) {
     const spinnerSizes = {
         small: 'w-4 h-4',
         medium: 'w-8 h-8',
@@ -521,65 +660,74 @@ const SpinnerRenderer: React.FC<{ component: Extract<Component, { type: 'spinner
             {component.label && <span className="text-gray-600 dark:text-gray-400">{component.label}</span>}
         </div>
     );
-};
+}
 
-const SkeletonRenderer: React.FC<{ component: Extract<Component, { type: 'skeleton' }> }> = ({ component }) => (
-    <div
-        className={clsx('animate-pulse bg-gray-200 dark:bg-gray-700', {
-            'h-4 rounded': component.variant === 'text' || !component.variant,
-            'rounded-full aspect-square': component.variant === 'circle',
-            'rounded': component.variant === 'rectangle',
-        })}
-        style={{ width: component.width || '100%', height: component.height }}
-    />
-);
+function SkeletonRenderer({ component }: { component: Extract<Component, { type: 'skeleton' }> }) {
+    return (
+        <div
+            className={clsx('animate-pulse bg-gray-200 dark:bg-gray-700', {
+                'h-4 rounded': component.variant === 'text' || !component.variant,
+                'rounded-full aspect-square': component.variant === 'circle',
+                'rounded': component.variant === 'rectangle',
+            })}
+            style={{ width: component.width || '100%', height: component.height }}
+        />
+    );
+}
 
-const GridRenderer: React.FC<{ component: Extract<Component, { type: 'grid' }> }> = ({ component }) => (
-    <div
-        className="grid gap-4 mb-4"
-        style={{ gridTemplateColumns: `repeat(${component.columns || 2}, 1fr)` }}
-    >
-        {component.children.map((child, i) => <ComponentRenderer key={i} component={child} />)}
-    </div>
-);
-
-const ListRenderer: React.FC<{ component: Extract<Component, { type: 'list' }> }> = ({ component }) => (
-    <ul className="space-y-2 mb-4 list-disc list-inside">
-        {component.items.map((item, i) => (
-            <li key={i} className="text-gray-700">{item}</li>
-        ))}
-    </ul>
-);
-
-const KeyValueRenderer: React.FC<{ component: Extract<Component, { type: 'key_value' }> }> = ({ component }) => (
-    <dl className="grid grid-cols-2 gap-x-4 gap-y-2 mb-4">
-        {component.pairs.map((pair, i) => (
-            <React.Fragment key={i}>
-                <dt className="font-medium text-gray-700">{pair.key}:</dt>
-                <dd className="text-gray-900">{pair.value}</dd>
-            </React.Fragment>
-        ))}
-    </dl>
-);
-
-const ProgressRenderer: React.FC<{ component: Extract<Component, { type: 'progress' }> }> = ({ component }) => (
-    <div className="mb-3">
-        {component.label && <div className="text-sm text-gray-600 mb-1">{component.label}</div>}
-        <div className="w-full bg-gray-200 rounded-full h-2.5">
-            <div
-                className="bg-blue-600 h-2.5 rounded-full transition-all"
-                style={{ width: `${component.value}%` }}
-            />
+function GridRenderer({ component }: { component: Extract<Component, { type: 'grid' }> }) {
+    return (
+        <div
+            className="grid gap-4 mb-4"
+            style={{ gridTemplateColumns: `repeat(${component.columns || 2}, 1fr)` }}
+        >
+            {component.children.map((child, i) => <ComponentRenderer key={i} component={child} />)}
         </div>
-    </div>
-);
+    );
+}
 
-const CardRenderer: React.FC<{
+function ListRenderer({ component }: { component: Extract<Component, { type: 'list' }> }) {
+    return (
+        <ul className="space-y-2 mb-4 list-disc list-inside">
+            {component.items.map((item, i) => (
+                <li key={i} className="text-gray-700">{item}</li>
+            ))}
+        </ul>
+    );
+}
+
+function KeyValueRenderer({ component }: { component: Extract<Component, { type: 'key_value' }> }) {
+    return (
+        <dl className="grid grid-cols-2 gap-x-4 gap-y-2 mb-4">
+            {component.pairs.map((pair, i) => (
+                <React.Fragment key={i}>
+                    <dt className="font-medium text-gray-700">{pair.key}:</dt>
+                    <dd className="text-gray-900">{pair.value}</dd>
+                </React.Fragment>
+            ))}
+        </dl>
+    );
+}
+
+function ProgressRenderer({ component }: { component: Extract<Component, { type: 'progress' }> }) {
+    return (
+        <div className="mb-3">
+            {component.label && <div className="text-sm text-gray-600 mb-1">{component.label}</div>}
+            <div className="w-full bg-gray-200 rounded-full h-2.5">
+                <div
+                    className="bg-blue-600 h-2.5 rounded-full transition-all"
+                    style={{ width: `${component.value}%` }}
+                />
+            </div>
+        </div>
+    );
+}
+
+function CardRenderer({ component, formRef, onAction }: {
     component: Extract<Component, { type: 'card' }>;
     formRef: React.RefObject<HTMLFormElement>;
     onAction?: (event: UiEvent) => void;
-}> = ({ component, formRef, onAction }) => {
-    // Cards with inputs become forms
+}) {
     const hasInputs = component.content.some(c =>
         c.type === 'text_input' || c.type === 'number_input' || c.type === 'select' || c.type === 'switch' || c.type === 'textarea'
     );
@@ -591,7 +739,6 @@ const CardRenderer: React.FC<{
         formData.forEach((value, key) => {
             data[key] = value;
         });
-        // Find submit button action_id
         const submitBtn = [...component.content, ...(component.footer || [])].find(
             c => c.type === 'button'
         ) as { type: 'button'; action_id: string } | undefined;
@@ -630,9 +777,9 @@ const CardRenderer: React.FC<{
             {cardContent}
         </div>
     );
-};
+}
 
-const StackRenderer: React.FC<{ component: Extract<Component, { type: 'stack' }> }> = ({ component }) => {
+function StackRenderer({ component }: { component: Extract<Component, { type: 'stack' }> }) {
     const stackClasses = clsx('flex', {
         'flex-col': component.direction === 'vertical',
         'flex-row': component.direction === 'horizontal',
@@ -642,12 +789,12 @@ const StackRenderer: React.FC<{ component: Extract<Component, { type: 'stack' }>
             {component.children.map((child, i) => <ComponentRenderer key={i} component={child} />)}
         </div>
     );
-};
+}
 
-const ToastRenderer: React.FC<{
+function ToastRenderer({ component, onDismiss }: {
     component: Extract<Component, { type: 'toast' }>;
     onDismiss: () => void;
-}> = ({ component, onDismiss }) => {
+}) {
     const toastClasses = clsx('fixed bottom-4 right-4 p-4 rounded-lg shadow-lg flex items-center gap-3 z-50', {
         'bg-blue-50 border border-blue-200 text-blue-800': component.variant === 'info' || !component.variant,
         'bg-green-50 border border-green-200 text-green-800': component.variant === 'success',
@@ -671,12 +818,12 @@ const ToastRenderer: React.FC<{
             )}
         </div>
     );
-};
+}
 
-const ModalRenderer: React.FC<{
+function ModalRenderer({ component, onClose }: {
     component: Extract<Component, { type: 'modal' }>;
     onClose: () => void;
-}> = ({ component, onClose }) => {
+}) {
     const modalSizes = {
         small: 'max-w-sm',
         medium: 'max-w-lg',
@@ -708,121 +855,12 @@ const ModalRenderer: React.FC<{
             </div>
         </div>
     );
-};
+}
 
-const ContainerRenderer: React.FC<{ component: Extract<Component, { type: 'container' }> }> = ({ component }) => (
-    <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-        {component.children.map((child, i) => <ComponentRenderer key={i} component={child} />)}
-    </div>
-);
-
-const ComponentRenderer: React.FC<{ component: Component }> = ({ component }) => {
-    const { onAction } = useContext(FormContext);
-    const formRef = useRef<HTMLFormElement>(null);
-
-    const handleButtonClick = useCallback((actionId: string) => {
-        // Check if button is inside a form (for submit)
-        if (formRef.current) {
-            // Collect all form data
-            const formData = new FormData(formRef.current);
-            const data: Record<string, unknown> = {};
-            formData.forEach((value, key) => {
-                data[key] = value;
-            });
-            onAction?.({ action: 'form_submit', action_id: actionId, data });
-        } else {
-            onAction?.({ action: 'button_click', action_id: actionId });
-        }
-    }, [onAction]);
-
-    const handleToastDismiss = useCallback(() => {
-        onAction?.({ action: 'button_click', action_id: 'toast_dismiss' });
-    }, [onAction]);
-
-    const handleModalClose = useCallback(() => {
-        onAction?.({ action: 'button_click', action_id: 'modal_close' });
-    }, [onAction]);
-
-    switch (component.type) {
-        case 'text':
-            return <TextRenderer component={component} />;
-
-        case 'button':
-            return <ButtonRenderer component={component} onClick={handleButtonClick} />;
-
-        case 'icon': {
-            const Icon = IconMap[component.name] || Info;
-            return <Icon size={component.size || 24} />;
-        }
-
-        case 'alert':
-            return <AlertRenderer component={component} />;
-
-        case 'card':
-            return <CardRenderer component={component} formRef={formRef} onAction={onAction} />;
-
-        case 'stack':
-            return <StackRenderer component={component} />;
-
-        case 'text_input':
-        case 'number_input':
-        case 'select':
-        case 'switch':
-        case 'multi_select':
-        case 'date_input':
-        case 'slider':
-        case 'textarea':
-            return <InputRenderer component={component} />;
-
-        case 'progress':
-            return <ProgressRenderer component={component} />;
-
-        case 'spinner':
-            return <SpinnerRenderer component={component} />;
-
-        case 'skeleton':
-            return <SkeletonRenderer component={component} />;
-
-        case 'toast':
-            return <ToastRenderer component={component} onDismiss={handleToastDismiss} />;
-
-        case 'modal':
-            return <ModalRenderer component={component} onClose={handleModalClose} />;
-
-        case 'grid':
-            return <GridRenderer component={component} />;
-
-        case 'list':
-            return <ListRenderer component={component} />;
-
-        case 'key_value':
-            return <KeyValueRenderer component={component} />;
-
-        case 'tabs':
-            return <TabsRenderer component={component} />;
-
-        case 'table':
-            return <TableRenderer component={component} />;
-
-        case 'chart':
-            return <ChartRenderer component={component} />;
-
-        case 'code_block':
-            return <CodeBlockRenderer component={component} />;
-
-        case 'image':
-            return <ImageRenderer component={component} />;
-
-        case 'badge':
-            return <BadgeRenderer component={component} />;
-
-        case 'divider':
-            return <hr className="my-4 border-gray-200" />;
-
-        case 'container':
-            return <ContainerRenderer component={component} />;
-
-        default:
-            return <div className="text-red-500 text-sm p-2 border border-red-200 rounded">Unknown component: {(component as any).type}</div>;
-    }
-};
+function ContainerRenderer({ component }: { component: Extract<Component, { type: 'container' }> }) {
+    return (
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+            {component.children.map((child, i) => <ComponentRenderer key={i} component={child} />)}
+        </div>
+    );
+}
