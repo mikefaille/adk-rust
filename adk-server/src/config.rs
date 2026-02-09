@@ -143,6 +143,10 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
+    const DEFAULT_MAX_BODY_SIZE: usize = 10 * 1024 * 1024;
+    const PROD_TIMEOUT: u64 = 30;
+    const DEV_TIMEOUT: u64 = 60;
+
     fn create_mocks() -> (Arc<SingleAgentLoader>, Arc<InMemorySessionService>) {
         let agent = CustomAgent::builder("test-agent")
             .handler(|_| async { Ok(Box::pin(futures::stream::empty()) as adk_core::EventStream) })
@@ -157,18 +161,20 @@ mod tests {
     fn test_security_config_constructors() {
         let default = SecurityConfig::default();
         assert_eq!(default.allowed_origins.len(), 0);
-        assert_eq!(default.max_body_size, 10 * 1024 * 1024);
-        assert_eq!(default.request_timeout, Duration::from_secs(30));
+        assert_eq!(default.max_body_size, DEFAULT_MAX_BODY_SIZE);
+        assert_eq!(default.request_timeout, Duration::from_secs(PROD_TIMEOUT));
         assert!(!default.expose_error_details);
 
         let dev = SecurityConfig::development();
         assert_eq!(dev.allowed_origins.len(), 0);
-        assert_eq!(dev.request_timeout, Duration::from_secs(60));
+        assert_eq!(dev.max_body_size, DEFAULT_MAX_BODY_SIZE);
+        assert_eq!(dev.request_timeout, Duration::from_secs(DEV_TIMEOUT));
         assert!(dev.expose_error_details);
 
         let prod = SecurityConfig::production(vec!["https://example.com".to_string()]);
         assert_eq!(prod.allowed_origins, vec!["https://example.com"]);
-        assert_eq!(prod.request_timeout, Duration::from_secs(30));
+        assert_eq!(prod.max_body_size, DEFAULT_MAX_BODY_SIZE);
+        assert_eq!(prod.request_timeout, Duration::from_secs(PROD_TIMEOUT));
         assert!(!prod.expose_error_details);
     }
 
