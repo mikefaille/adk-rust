@@ -339,4 +339,45 @@ mod tests {
         assert!(!event.is_final_response());
         assert!(event.has_trailing_code_execution_result());
     }
+    #[test]
+    fn test_is_final_response_with_non_trailing_code_execution_result() {
+        let mut event = Event::new("inv-123");
+        event.llm_response.content = Some(crate::Content {
+            role: "model".to_string(),
+            parts: vec![
+                crate::Part::CodeExecutionResult {
+                    code_execution_result: crate::types::CodeExecutionResultData {
+                        outcome: "ok".to_string(),
+                        output: "result".to_string(),
+                    },
+                },
+                crate::Part::Text { text: "Here is the result.".to_string() },
+            ],
+        });
+
+        // Has non-trailing code execution result -> final (model processed it)
+        assert!(event.is_final_response());
+        assert!(!event.has_trailing_code_execution_result());
+    }
+
+    #[test]
+    fn test_is_final_response_with_mixed_content() {
+        let mut event = Event::new("inv-123");
+        event.llm_response.content = Some(crate::Content {
+            role: "model".to_string(),
+            parts: vec![
+                crate::Part::Text { text: "I will calculate this.".to_string() },
+                crate::Part::CodeExecutionResult {
+                    code_execution_result: crate::types::CodeExecutionResultData {
+                        outcome: "ok".to_string(),
+                        output: "result".to_string(),
+                    },
+                },
+            ],
+        });
+
+        // Has trailing code execution result -> NOT final (model should analyze result)
+        assert!(!event.is_final_response());
+        assert!(event.has_trailing_code_execution_result());
+    }
 }
