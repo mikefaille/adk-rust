@@ -132,6 +132,7 @@ impl GeminiRealtimeSession {
         config: RealtimeConfig,
     ) -> Result<Self> {
         let (request, _response) = match backend {
+            #[cfg(feature = "studio")]
             GeminiLiveBackend::Public { api_key } => {
                 let url = format!(
                     "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key={}",
@@ -143,7 +144,9 @@ impl GeminiRealtimeSession {
                 connect_async(request).await.map_err(|e| {
                     RealtimeError::connection(format!("WebSocket connect error: {}", e))
                 })?
-            }
+            },
+            #[cfg(not(feature = "studio"))]
+            GeminiLiveBackend::Public { .. } => unreachable!("Studio backend not enabled"),
             #[cfg(feature = "vertex")]
             GeminiLiveBackend::Vertex(context) => {
                 let url = format!(

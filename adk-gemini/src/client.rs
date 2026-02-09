@@ -452,7 +452,6 @@ impl GeminiClient {
         } else {
             request
         };
-
         tracing::debug!("request built successfully");
         let response = request.send().await.context(PerformRequestNewSnafu)?;
         tracing::debug!("response received successfully");
@@ -460,12 +459,14 @@ impl GeminiClient {
         tracing::debug!("response ok");
         deserializer(response).await
     }
-
     fn rest_client(&self, _operation: &'static str) -> Result<&RestClient, Error> {
         match &self.backend {
+            #[cfg(feature = "studio")]
             GeminiBackend::Rest(rest) => Ok(rest),
             #[cfg(feature = "vertex")]
             GeminiBackend::Vertex(_) => GoogleCloudUnsupportedSnafu { operation: _operation }.fail(),
+            #[cfg(not(feature = "studio"))]
+            GeminiBackend::Rest(_) => unreachable!("Rest backend not enabled"),
         }
     }
 
@@ -473,10 +474,12 @@ impl GeminiClient {
     fn vertex_client(&self, operation: &'static str) -> Result<&VertexClient, Error> {
         match &self.backend {
             GeminiBackend::Vertex(vertex) => Ok(vertex),
+            #[cfg(feature = "studio")]
             GeminiBackend::Rest(_) => GoogleCloudUnsupportedSnafu { operation }.fail(),
+            #[cfg(not(feature = "studio"))]
+            GeminiBackend::Rest(_) => unreachable!("Rest backend not enabled"),
         }
     }
-
     /// Perform a GET request and deserialize the JSON response.
     ///
     /// This is a convenience wrapper around [`perform_request`](Self::perform_request).
@@ -485,10 +488,6 @@ impl GeminiClient {
         self.perform_request(|c| c.get(url), async |r| r.json().await.context(DecodeResponseSnafu))
             .await
     }
-
-    /// Perform a POST request with JSON body and deserialize the JSON response.
-    ///
-    /// This is a convenience wrapper around [`perform_request`](Self::perform_request).
     #[tracing::instrument(skip(self, body), fields(request.type = "post", request.url = %url))]
     async fn post_json<Req: serde::Serialize, Res: serde::de::DeserializeOwned>(
         &self,
@@ -501,7 +500,6 @@ impl GeminiClient {
         )
         .await
     }
-
     /// Generate content
     #[instrument(skip_all, fields(
         model,
@@ -509,11 +507,6 @@ impl GeminiClient {
         tools.present = request.tools.is_some(),
         system.instruction.present = request.system_instruction.is_some(),
         cached.content.present = request.cached_content.is_some(),
-        usage.prompt_tokens,
-        usage.candidates_tokens,
-        usage.thoughts_tokens,
-        usage.cached_content_tokens,
-        usage.total_tokens,
     ), ret(level = Level::TRACE), err)]
     pub(crate) async fn generate_content_raw(
         &self,
