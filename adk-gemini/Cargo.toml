@@ -17,7 +17,6 @@ build = false
 autolib = false
 autobins = false
 autoexamples = false
-autotests = false
 autobenches = false
 description = "Rust client for Google Gemini API"
 readme = "README.md"
@@ -177,10 +176,6 @@ path = "examples/streaming.rs"
 [[example]]
 name = "structured_response"
 path = "examples/structured_response.rs"
-
-[[example]]
-name = "test_api"
-path = "examples/test_api.rs"
 
 [[example]]
 name = "text_thought_signature_example"
