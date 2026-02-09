@@ -146,6 +146,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "clap",
+ "proc-macro2",
  "proptest",
  "pulldown-cmark",
  "quote",
@@ -9168,6 +9169,15 @@ dependencies = [
  "anyhow",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "temp_test_span"
+version = "0.2.1"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.111",
 ]
 
 [[package]]
