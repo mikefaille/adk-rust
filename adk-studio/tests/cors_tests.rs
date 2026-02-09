@@ -1,12 +1,10 @@
-use adk_studio::{AppState, FileStorage, api_routes};
+use adk_studio::{AppState, FileStorage, api_routes, build_cors_layer};
 use axum::{
     Router,
     body::Body,
     http::{Request, StatusCode, header},
 };
-use std::path::PathBuf;
 use tower::ServiceExt;
-use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 
 #[tokio::test]
 async fn test_cors_origins() {
@@ -15,24 +13,7 @@ async fn test_cors_origins() {
     let storage = FileStorage::new(temp_dir.clone()).await.unwrap();
     let state = AppState::new(storage);
 
-    let cors = CorsLayer::new()
-        .allow_origin(AllowOrigin::predicate(|origin, _| {
-            let origin_str = origin.to_str().unwrap_or("");
-            origin_str.starts_with("http://localhost:")
-                || origin_str.starts_with("https://localhost:")
-                || origin_str == "http://localhost"
-                || origin_str == "https://localhost"
-                || origin_str.starts_with("http://127.0.0.1:")
-                || origin_str.starts_with("https://127.0.0.1:")
-                || origin_str == "http://127.0.0.1"
-                || origin_str == "https://127.0.0.1"
-                || origin_str.starts_with("http://[::1]:")
-                || origin_str.starts_with("https://[::1]:")
-                || origin_str == "http://[::1]"
-                || origin_str == "https://[::1]"
-        }))
-        .allow_methods(Any)
-        .allow_headers(Any);
+    let cors = build_cors_layer();
 
     let app = Router::new().nest("/api", api_routes()).layer(cors).with_state(state);
 
