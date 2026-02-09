@@ -539,14 +539,14 @@ impl std::fmt::Debug for GeminiRealtimeSession {
 }
 
 fn convert_tools(tools: Option<Vec<ToolDefinition>>) -> Option<Vec<Value>> {
-    tools.map(|t_vec| {
+    tools.filter(|t| !t.is_empty()).map(|t_vec| {
         let function_declarations: Vec<Value> = t_vec
             .into_iter()
             .map(|t| {
                 json!({
                     "name": t.name,
                     "description": t.description.unwrap_or_default(),
-                    "parameters": t.parameters.unwrap_or(json!({ "type": "object", "properties": {} }))
+                    "parameters": t.parameters.unwrap_or_else(|| json!({ "type": "object", "properties": {} }))
                 })
             })
             .collect();
@@ -605,6 +605,11 @@ mod tests {
     #[test]
     fn test_convert_tools_none() {
         let result = convert_tools(None);
+        assert!(result.is_none());
+    }
+    #[test]
+    fn test_convert_tools_empty() {
+        let result = convert_tools(Some(vec![]));
         assert!(result.is_none());
     }
 }
