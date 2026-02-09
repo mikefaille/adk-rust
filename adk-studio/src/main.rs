@@ -1,11 +1,8 @@
-use adk_studio::{AppState, FileStorage, api_routes, embedded};
+use adk_studio::{AppState, FileStorage, api_routes, build_cors_layer, embedded};
 use axum::{Router, extract::Path as AxumPath, routing::get};
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use tower_http::{
-    cors::{AllowOrigin, Any, CorsLayer},
-    services::{ServeDir, ServeFile},
-};
+use tower_http::services::{ServeDir, ServeFile};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 /// Handler for serving embedded static files
@@ -61,26 +58,7 @@ async fn main() -> anyhow::Result<()> {
     let storage = FileStorage::new(projects_dir.clone()).await?;
     let state = AppState::new(storage);
 
-    // Restrict CORS to localhost to prevent drive-by attacks from malicious websites.
-    // This ensures only the local studio UI can access the API.
-    let cors = CorsLayer::new()
-        .allow_origin(AllowOrigin::predicate(|origin, _| {
-            let origin_str = origin.to_str().unwrap_or("");
-            origin_str.starts_with("http://localhost:")
-                || origin_str.starts_with("https://localhost:")
-                || origin_str == "http://localhost"
-                || origin_str == "https://localhost"
-                || origin_str.starts_with("http://127.0.0.1:")
-                || origin_str.starts_with("https://127.0.0.1:")
-                || origin_str == "http://127.0.0.1"
-                || origin_str == "https://127.0.0.1"
-                || origin_str.starts_with("http://[::1]:")
-                || origin_str.starts_with("https://[::1]:")
-                || origin_str == "http://[::1]"
-                || origin_str == "https://[::1]"
-        }))
-        .allow_methods(Any)
-        .allow_headers(Any);
+    let cors = build_cors_layer();
 
     let mut app = Router::new().nest("/api", api_routes()).layer(cors).with_state(state);
 

@@ -9,5 +9,5 @@ pub mod server;
 pub mod storage;
 
 pub use schema::{AgentSchema, ProjectSchema, ToolSchema, WorkflowSchema};
-pub use server::{AppState, api_routes};
+pub use server::{AppState, api_routes, build_cors_layer};
 pub use storage::FileStorage;
