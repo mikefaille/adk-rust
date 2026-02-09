@@ -750,25 +750,18 @@ mod tests {
 
     #[test]
     fn test_thinking_config_validation() {
+        // Valid cases
+        assert!(ThinkingConfig::try_new(None, None).is_ok());
         assert!(ThinkingConfig::try_new(Some(-1), Some(true)).is_ok());
         assert!(ThinkingConfig::try_new(Some(0), Some(false)).is_ok());
+        assert!(ThinkingConfig::try_new(Some(1), None).is_ok());
         assert!(ThinkingConfig::try_new(Some(100), None).is_ok());
+        assert!(ThinkingConfig::try_new(Some(128), None).is_ok());
 
-
+        // Invalid case
         let err = ThinkingConfig::try_new(Some(-2), None).unwrap_err();
         assert_eq!(err, ValidationError::InvalidThinkingBudget { value: -2 });
     }
-    #[test]
-    fn test_thinking_config_edge_cases() {
-        // Valid edge cases
-        assert!(ThinkingConfig::try_new(None, None).is_ok());
-        assert!(ThinkingConfig::try_new(Some(1), None).is_ok());
-        assert!(ThinkingConfig::try_new(Some(128), None).is_ok());
-
-        // Invalid budget < -1
-        assert!(ThinkingConfig::try_new(Some(-2), None).is_err());
-    }
-
 
     #[test]
     fn test_generation_config_validation() {
