@@ -485,10 +485,8 @@ impl ThinkingConfig {
 
     /// Validate the thinking configuration parameters
     pub fn validate(&self) -> Result<(), ValidationError> {
-        if let Some(budget) = self.thinking_budget {
-            if budget < -1 {
-                return Err(ValidationError::InvalidThinkingBudget { value: budget });
-            }
+        if let Some(budget) = self.thinking_budget && budget < -1 {
+            return Err(ValidationError::InvalidThinkingBudget { value: budget });
         }
         Ok(())
     }
@@ -633,33 +631,33 @@ impl GenerationConfig {
 
     /// Validate the generation configuration parameters
     pub fn validate(&self) -> Result<(), ValidationError> {
-        if let Some(t) = self.temperature {
-            if !(0.0..=1.0).contains(&t) {
-                return Err(ValidationError::InvalidTemperature { value: t });
-            }
+        if let Some(t) = self.temperature && !(0.0..=1.0).contains(&t) {
+            return Err(ValidationError::InvalidTemperature { value: t });
         }
-        if let Some(p) = self.top_p {
-            if !(0.0..=1.0).contains(&p) {
-                return Err(ValidationError::InvalidTopP { value: p });
-            }
+        if let Some(p) = self.top_p && !(0.0..=1.0).contains(&p) {
+            return Err(ValidationError::InvalidTopP { value: p });
         }
-        if let Some(k) = self.top_k {
-            if k <= 0 {
-                return Err(ValidationError::InvalidTopK { value: k });
-            }
+        if let Some(k) = self.top_k && k <= 0 {
+            return Err(ValidationError::InvalidTopK { value: k });
         }
-        if let Some(m) = self.max_output_tokens {
-            if m <= 0 {
-                return Err(ValidationError::InvalidMaxOutputTokens { value: m });
-            }
+        if let Some(m) = self.max_output_tokens && m <= 0 {
+            return Err(ValidationError::InvalidMaxOutputTokens { value: m });
         }
-        if let Some(c) = self.candidate_count {
-            if c <= 0 {
-                return Err(ValidationError::InvalidCandidateCount { value: c });
-            }
+        if let Some(c) = self.candidate_count && c <= 0 {
+            return Err(ValidationError::InvalidCandidateCount { value: c });
         }
         if let Some(thinking) = &self.thinking_config {
             thinking.validate()?;
+        }
+        Ok(())
+    }
+}
+
+impl GenerateContentRequest {
+    /// Validate the request parameters
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        if let Some(config) = &self.generation_config {
+            config.validate()?;
         }
         Ok(())
     }
@@ -802,5 +800,24 @@ mod tests {
             None, None, None, None, None, None, None, None, None, None, Some(thinking_config)
         ).unwrap_err();
         assert_eq!(err, ValidationError::InvalidThinkingBudget { value: -5 });
+    }
+
+    #[tokio::test]
+    async fn test_builder_validation_integration() {
+        use crate::Gemini;
+        let client = Gemini::new("api-key").unwrap();
+
+        // Use with_temperature with invalid value
+        let builder = client.generate_content().with_temperature(2.0);
+
+        let result = builder.execute().await;
+        assert!(result.is_err());
+
+        // Check if it's a validation error
+        if let Err(crate::client::Error::Validation { source }) = result {
+            assert_eq!(source, ValidationError::InvalidTemperature { value: 2.0 });
+        } else {
+            panic!("Expected validation error, got {:?}", result);
+        }
     }
 }

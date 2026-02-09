@@ -189,6 +189,11 @@ pub enum Error {
     Io {
         source: std::io::Error,
     },
+
+    #[snafu(display("validation error: {source}"))]
+    Validation {
+        source: crate::generation::ValidationError,
+    },
 }
 
 /// Internal client for making requests to the Gemini API
@@ -514,6 +519,7 @@ impl GeminiClient {
         &self,
         request: GenerateContentRequest,
     ) -> Result<GenerationResponse, Error> {
+        request.validate().context(ValidationSnafu)?;
         let response: GenerationResponse = match &self.backend {
             GeminiBackend::Rest(_) => {
                 let url = self.build_url("generateContent")?;
@@ -552,6 +558,7 @@ impl GeminiClient {
         request: GenerateContentRequest,
     ) -> Result<impl TryStreamExt<Ok = GenerationResponse, Error = Error> + Send + use<>, Error>
     {
+        request.validate().context(ValidationSnafu)?;
         #[cfg(feature = "vertex")]
         if matches!(self.backend, GeminiBackend::Vertex(_)) {
             return GoogleCloudUnsupportedSnafu { operation: "streamGenerateContent" }.fail();
@@ -671,6 +678,7 @@ impl GeminiClient {
         &self,
         request: BatchGenerateContentRequest,
     ) -> Result<BatchGenerateContentResponse, Error> {
+        request.validate().context(ValidationSnafu)?;
         match &self.backend {
             GeminiBackend::Rest(_) => {
                 let url = self.build_url("batchGenerateContent")?;
