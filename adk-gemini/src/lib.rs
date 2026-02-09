@@ -59,8 +59,6 @@ pub mod safety;
 /// Function calling and tool integration
 pub mod tools;
 
-#[cfg(test)]
-mod tests;
 
 // ========== Core Types ==========
 // These are the fundamental types used throughout the API

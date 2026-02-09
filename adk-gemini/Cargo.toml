@@ -17,7 +17,6 @@ build = false
 autolib = false
 autobins = false
 autoexamples = false
-autotests = false
 autobenches = false
 description = "Rust client for Google Gemini API"
 readme = "README.md"
