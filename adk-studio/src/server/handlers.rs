@@ -7,6 +7,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+use tokio::fs;
 
 /// API error response
 #[derive(Serialize)]
@@ -198,7 +199,7 @@ pub async fn build_project_stream(
             project_name = format!("project_{}", project_name);
         }
         let build_dir = std::env::temp_dir().join("adk-studio-builds").join(&project_name);
-        if let Err(e) = std::fs::create_dir_all(&build_dir) {
+        if let Err(e) = fs::create_dir_all(&build_dir).await {
             yield Ok(Event::default().event("error").data(e.to_string()));
             return;
         }
@@ -206,9 +207,12 @@ pub async fn build_project_stream(
         for file in &generated.files {
             let path = build_dir.join(&file.path);
             if let Some(parent) = path.parent() {
-                let _ = std::fs::create_dir_all(parent);
+                if let Err(e) = fs::create_dir_all(parent).await {
+                    yield Ok(Event::default().event("error").data(e.to_string()));
+                    return;
+                }
             }
-            if let Err(e) = std::fs::write(&path, &file.content) {
+            if let Err(e) = fs::write(&path, &file.content).await {
                 yield Ok(Event::default().event("error").data(e.to_string()));
                 return;
             }
@@ -218,7 +222,10 @@ pub async fn build_project_stream(
 
         // Use shared target directory for faster incremental builds
         let shared_target = std::env::temp_dir().join("adk-studio-builds").join("_shared_target");
-        let _ = std::fs::create_dir_all(&shared_target);
+        if let Err(e) = fs::create_dir_all(&shared_target).await {
+            yield Ok(Event::default().event("error").data(e.to_string()));
+            return;
+        }
 
         let mut child = match Command::new("cargo")
             .arg("build")
@@ -272,28 +279,35 @@ pub async fn build_project(
     // Write to temp directory
     let project_name = project.name.to_lowercase().replace(' ', "_");
     let build_dir = std::env::temp_dir().join("adk-studio-builds").join(&project_name);
-    std::fs::create_dir_all(&build_dir)
+    fs::create_dir_all(&build_dir)
+        .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     for file in &generated.files {
         let path = build_dir.join(&file.path);
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).ok();
+            fs::create_dir_all(parent)
+                .await
+                .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
         }
-        std::fs::write(&path, &file.content)
+        fs::write(&path, &file.content)
+            .await
             .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     }
 
     // Use shared target directory for faster incremental builds
     let shared_target = std::env::temp_dir().join("adk-studio-builds").join("_shared_target");
-    let _ = std::fs::create_dir_all(&shared_target);
+    fs::create_dir_all(&shared_target)
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     // Run cargo build
-    let output = std::process::Command::new("cargo")
+    let output = tokio::process::Command::new("cargo")
         .arg("build")
         .env("CARGO_TARGET_DIR", &shared_target)
         .current_dir(&build_dir)
         .output()
+        .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
