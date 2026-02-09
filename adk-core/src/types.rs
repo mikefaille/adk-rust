@@ -6,6 +6,12 @@ pub struct FunctionResponseData {
     pub response: serde_json::Value,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CodeExecutionResultData {
+    pub outcome: String,
+    pub output: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Content {
     pub role: String,
@@ -57,6 +63,10 @@ pub enum Part {
         #[serde(skip_serializing_if = "Option::is_none")]
         id: Option<String>,
     },
+    #[serde(rename_all = "camelCase")]
+    CodeExecutionResult {
+        code_execution_result: CodeExecutionResultData,
+    },
 }
 
 impl Content {
@@ -82,6 +92,21 @@ impl Content {
         file_uri: impl Into<String>,
     ) -> Self {
         self.parts.push(Part::FileData { mime_type: mime_type.into(), file_uri: file_uri.into() });
+        self
+    }
+
+    /// Add a code execution result.
+    pub fn with_code_execution_result(
+        mut self,
+        outcome: impl Into<String>,
+        output: impl Into<String>,
+    ) -> Self {
+        self.parts.push(Part::CodeExecutionResult {
+            code_execution_result: CodeExecutionResultData {
+                outcome: outcome.into(),
+                output: output.into(),
+            },
+        });
         self
     }
 }
@@ -112,6 +137,15 @@ impl Part {
         }
     }
 
+    /// Returns the code execution result data if this is a CodeExecutionResult part
+    pub fn code_execution_result(&self) -> Option<&CodeExecutionResultData> {
+        if let Self::CodeExecutionResult { code_execution_result } = self {
+            Some(code_execution_result)
+        } else {
+            None
+        }
+    }
+
     /// Returns true if this part contains media (image, audio, video)
     pub fn is_media(&self) -> bool {
         matches!(self, Part::InlineData { .. } | Part::FileData { .. })
@@ -130,6 +164,19 @@ impl Part {
     /// Create a new file data part from URI
     pub fn file_data(mime_type: impl Into<String>, file_uri: impl Into<String>) -> Self {
         Part::FileData { mime_type: mime_type.into(), file_uri: file_uri.into() }
+    }
+
+    /// Create a new code execution result part
+    pub fn code_execution_result_part(
+        outcome: impl Into<String>,
+        output: impl Into<String>,
+    ) -> Self {
+        Part::CodeExecutionResult {
+            code_execution_result: CodeExecutionResultData {
+                outcome: outcome.into(),
+                output: output.into(),
+            },
+        }
     }
 }
 
@@ -171,6 +218,36 @@ mod tests {
         let part = Part::Text { text: "test".to_string() };
         let json = serde_json::to_string(&part).unwrap();
         assert!(json.contains("test"));
+
+        let fc = Part::FunctionCall {
+            name: "test_func".to_string(),
+            args: serde_json::json!({"arg": 1}),
+            id: Some("call_1".to_string()),
+        };
+        let json_fc = serde_json::to_string(&fc).unwrap();
+        assert!(json_fc.contains("test_func"));
+
+        let fr = Part::FunctionResponse {
+            function_response: FunctionResponseData {
+                name: "test_func".to_string(),
+                response: serde_json::json!({"res": "ok"}),
+            },
+            id: Some("call_1".to_string()),
+        };
+        let json_fr = serde_json::to_string(&fr).unwrap();
+        assert!(json_fr.contains("test_func"));
+    }
+
+    #[test]
+    fn test_code_execution_result_serde() {
+        let cer = Part::code_execution_result_part("OUTCOME_OK", "Hello, World!");
+        let json = serde_json::to_string(&cer).unwrap();
+        assert!(json.contains("codeExecutionResult"));
+        assert!(json.contains("OUTCOME_OK"));
+        assert!(json.contains("Hello, World!"));
+
+        let deserialized: Part = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized, cer);
     }
 
     #[test]

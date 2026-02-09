@@ -149,17 +149,13 @@ impl Event {
     }
 
     /// Returns true if the event has a trailing code execution result.
-    /// Note: CodeExecutionResult is not yet implemented in the Part enum,
-    /// so this always returns false for now.
-    #[allow(clippy::match_like_matches_macro)]
     fn has_trailing_code_execution_result(&self) -> bool {
-        // TODO: Implement when CodeExecutionResult is added to Part enum
-        // if let Some(content) = &self.llm_response.content {
-        //     if let Some(last_part) = content.parts.last() {
-        //         return matches!(last_part, crate::Part::CodeExecutionResult { .. });
-        //     }
-        // }
-        false
+        self.llm_response
+            .content
+            .as_ref()
+            .and_then(|content| content.parts.last())
+            .map(|part| matches!(part, crate::Part::CodeExecutionResult { .. }))
+            .unwrap_or(false)
     }
 
     /// Extracts function call IDs from this event's content.
@@ -331,5 +327,16 @@ mod tests {
         let event = Event::new("inv-123");
         let ids = event.function_call_ids();
         assert!(ids.is_empty());
+    }
+
+    #[test]
+    fn test_is_final_response_with_trailing_code_execution_result() {
+        let mut event = Event::new("inv-123");
+        event.llm_response.content = Some(Content::new("model")
+            .with_code_execution_result("OUTCOME_OK", "result"));
+
+        // Has trailing code execution result -> NOT final (model should analyze result)
+        assert!(!event.is_final_response());
+        assert!(event.has_trailing_code_execution_result());
     }
 }
