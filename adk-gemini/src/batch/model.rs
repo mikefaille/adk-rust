@@ -4,7 +4,7 @@ use time::OffsetDateTime;
 
 use crate::Model;
 use crate::common::serde::*;
-use crate::generation::{GenerateContentRequest, GenerationResponse};
+use crate::generation::{GenerateContentRequest, GenerationResponse, ValidationError};
 
 /// Batch file request line JSON representation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -145,6 +145,13 @@ pub struct BatchGenerateContentRequest {
     pub batch: BatchConfig,
 }
 
+impl BatchGenerateContentRequest {
+    /// Validate the batch request
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        self.batch.validate()
+    }
+}
+
 /// Batch configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -153,6 +160,21 @@ pub struct BatchConfig {
     pub display_name: String,
     /// Input configuration
     pub input_config: InputConfig,
+}
+
+impl BatchConfig {
+    /// Validate the batch configuration
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        match &self.input_config {
+            InputConfig::Requests(container) => {
+                for item in &container.requests {
+                    item.request.validate()?;
+                }
+            }
+            InputConfig::FileName(_) => {}
+        }
+        Ok(())
+    }
 }
 
 /// The state of a batch operation.
