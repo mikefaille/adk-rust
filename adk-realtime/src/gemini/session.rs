@@ -1,11 +1,12 @@
 use crate::audio::AudioChunk;
-use crate::config::RealtimeConfig;
+use crate::config::{RealtimeConfig, ToolDefinition};
 use crate::error::{RealtimeError, Result};
 use crate::events::{ClientEvent, ServerEvent, ToolResponse};
 use crate::session::RealtimeSession;
 use async_trait::async_trait;
 use futures::stream::Stream;
 use futures::{SinkExt, StreamExt};
+#[cfg(feature = "vertex")]
 use http::HeaderValue;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -253,12 +254,14 @@ impl GeminiRealtimeSession {
             parts: vec![GeminiPart { text: Some(text), inline_data: None }],
         });
 
+        let tools = convert_tools(config.tools);
+
         let setup = GeminiClientMessage {
             setup: Some(GeminiSetup {
                 model: model.to_string(),
                 system_instruction,
                 generation_config: Some(generation_config),
-                tools: None, // TODO: Implement tools
+                tools,
             }),
             realtime_input: None,
             tool_response: None,
@@ -532,5 +535,76 @@ impl std::fmt::Debug for GeminiRealtimeSession {
             .field("session_id", &self.session_id)
             .field("connected", &self.connected.load(Ordering::SeqCst))
             .finish()
+    }
+}
+
+fn convert_tools(tools: Option<Vec<ToolDefinition>>) -> Option<Vec<Value>> {
+    tools.map(|t_vec| {
+        let function_declarations: Vec<Value> = t_vec
+            .into_iter()
+            .map(|t| {
+                json!({
+                    "name": t.name,
+                    "description": t.description.unwrap_or_default(),
+                    "parameters": t.parameters.unwrap_or(json!({ "type": "object", "properties": {} }))
+                })
+            })
+            .collect();
+
+        vec![json!({
+            "functionDeclarations": function_declarations
+        })]
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_convert_tools() {
+        let tools = vec![
+            ToolDefinition {
+                name: "get_weather".to_string(),
+                description: Some("Get current weather".to_string()),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "location": { "type": "string" }
+                    }
+                })),
+            },
+            ToolDefinition {
+                name: "no_params".to_string(),
+                description: None,
+                parameters: None,
+            },
+        ];
+
+        let result = convert_tools(Some(tools));
+        assert!(result.is_some());
+
+        let tool_config = &result.unwrap()[0];
+        let decls = tool_config.get("functionDeclarations").unwrap().as_array().unwrap();
+
+        assert_eq!(decls.len(), 2);
+
+        // Check first tool
+        assert_eq!(decls[0]["name"], "get_weather");
+        assert_eq!(decls[0]["description"], "Get current weather");
+        assert!(decls[0]["parameters"].get("properties").is_some());
+
+        // Check second tool defaults
+        assert_eq!(decls[1]["name"], "no_params");
+        assert_eq!(decls[1]["description"], "");
+        assert_eq!(decls[1]["parameters"]["type"], "object");
+        assert!(decls[1]["parameters"]["properties"].as_object().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_convert_tools_none() {
+        let result = convert_tools(None);
+        assert!(result.is_none());
     }
 }
