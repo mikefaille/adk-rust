@@ -92,7 +92,7 @@ fn main() -> anyhow::Result<()> {
     ];
 
     for claims in &test_claims {
-        let user_id = mapper.get_user_id(claims);
+        let _user_id = mapper.get_user_id(claims);
         let roles = mapper.map_to_roles(claims);
         println!("   [user] -> {:?}", roles);
     }
