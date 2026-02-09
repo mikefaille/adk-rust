@@ -47,7 +47,7 @@ bytes = "1"
 # OpenAI realtime types (optional)
 async-openai = { version = "0.27", optional = true, default-features = false, features = ["rustls"] }
 rtc = { version = "0.8.5", optional = true }
-adk-gemini = { workspace = true, optional = true, features = ["studio"] }
+adk-gemini = { workspace = true, optional = true }
 audiopus = { version = "0.3.0-rc.0", optional = true }
 rand = { version = "0.8", optional = true }
 getrandom = { version = "0.2", optional = true }
@@ -77,6 +77,7 @@ openai = ["dep:async-openai", "dep:tokio-tungstenite", "dep:reqwest", "dep:getra
 webrtc = ["dep:rtc", "dep:audiopus", "dep:rand", "dep:getrandom"]
 # Enable Gemini Live API support
 gemini = ["dep:tokio-tungstenite", "dep:adk-gemini", "dep:http"]
+studio = ["gemini", "adk-gemini/studio"]
 # Enable Vertex AI support
 vertex = ["gemini", "adk-gemini/vertex"]
 # Enable LiveKit transport support
@@ -84,4 +85,4 @@ livekit = ["dep:livekit", "dep:livekit-api"]
 # Integration with ADK ecosystem
 adk = []
 # Enable all providers
-full = ["openai", "gemini", "livekit", "adk"]
+full = ["openai", "studio", "vertex", "livekit", "adk"]
