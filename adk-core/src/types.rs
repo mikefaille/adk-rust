@@ -139,9 +139,10 @@ impl Part {
 
     /// Returns the code execution result data if this is a CodeExecutionResult part
     pub fn code_execution_result(&self) -> Option<&CodeExecutionResultData> {
-        match self {
-            Part::CodeExecutionResult { code_execution_result } => Some(code_execution_result),
-            _ => None,
+        if let Self::CodeExecutionResult { code_execution_result } = self {
+            Some(code_execution_result)
+        } else {
+            None
         }
     }
 
@@ -246,13 +247,7 @@ mod tests {
         assert!(json.contains("Hello, World!"));
 
         let deserialized: Part = serde_json::from_str(&json).unwrap();
-        match deserialized {
-            Part::CodeExecutionResult { code_execution_result } => {
-                assert_eq!(code_execution_result.outcome, "OUTCOME_OK");
-                assert_eq!(code_execution_result.output, "Hello, World!");
-            }
-            _ => panic!("Expected CodeExecutionResult"),
-        }
+        assert_eq!(deserialized, cer);
     }
 
     #[test]
