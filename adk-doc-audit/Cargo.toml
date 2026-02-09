@@ -12,6 +12,7 @@ keywords = ["documentation", "audit", "validation", "rust", "adk"]
 categories = ["development-tools", "command-line-utilities"]
 
 [dependencies]
+proc-macro2 = { version = "1.0", features = ["span-locations"] }
 # Core dependencies
 tokio = { workspace = true }
 async-trait = { workspace = true }

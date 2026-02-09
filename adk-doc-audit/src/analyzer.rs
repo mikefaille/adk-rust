@@ -14,6 +14,7 @@ use syn::{
 };
 use tracing::{debug, info, instrument, warn};
 use walkdir::WalkDir;
+use syn::spanned::Spanned;
 
 /// Registry of all crates in the workspace with their public APIs.
 #[derive(Debug, Clone)]
@@ -788,7 +789,7 @@ impl CodeAnalyzer {
             documentation,
             deprecated,
             source_file: file_path.to_path_buf(),
-            line_number: 0, // TODO: Extract actual line number
+            line_number: item_fn.span().start().line,
         }
     }
 
@@ -811,7 +812,7 @@ impl CodeAnalyzer {
             documentation,
             deprecated,
             source_file: file_path.to_path_buf(),
-            line_number: 0,
+            line_number: item_struct.span().start().line,
         }
     }
 
@@ -834,7 +835,7 @@ impl CodeAnalyzer {
             documentation,
             deprecated,
             source_file: file_path.to_path_buf(),
-            line_number: 0,
+            line_number: item_enum.span().start().line,
         }
     }
 
@@ -857,7 +858,7 @@ impl CodeAnalyzer {
             documentation,
             deprecated,
             source_file: file_path.to_path_buf(),
-            line_number: 0,
+            line_number: item_trait.span().start().line,
         }
     }
 
@@ -880,7 +881,7 @@ impl CodeAnalyzer {
             documentation,
             deprecated,
             source_file: file_path.to_path_buf(),
-            line_number: 0,
+            line_number: item_type.span().start().line,
         }
     }
 
@@ -903,7 +904,7 @@ impl CodeAnalyzer {
             documentation,
             deprecated,
             source_file: file_path.to_path_buf(),
-            line_number: 0,
+            line_number: item_const.span().start().line,
         }
     }
 
@@ -926,7 +927,7 @@ impl CodeAnalyzer {
             documentation,
             deprecated,
             source_file: file_path.to_path_buf(),
-            line_number: 0,
+            line_number: item_static.span().start().line,
         }
     }
 
@@ -965,7 +966,7 @@ impl CodeAnalyzer {
                         documentation,
                         deprecated,
                         source_file: file_path.to_path_buf(),
-                        line_number: 0,
+                        line_number: method.span().start().line,
                     });
                 }
             }
