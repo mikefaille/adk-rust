@@ -1,5 +1,6 @@
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
+use snafu::Snafu;
 use time::OffsetDateTime;
 
 use crate::{
@@ -403,6 +404,19 @@ impl GenerationResponse {
     }
 }
 
+#[derive(Debug, Snafu, PartialEq)]
+#[snafu(visibility(pub))]
+pub enum ValidationError {
+    #[snafu(display("temperature must be between 0.0 and 1.0, got {value}"))]
+    InvalidTemperature { value: f32 },
+    #[snafu(display("top_p must be between 0.0 and 1.0, got {value}"))]
+    InvalidTopP { value: f32 },
+    #[snafu(display("max_output_tokens must be greater than 0, got {value}"))]
+    InvalidMaxOutputTokens { value: i32 },
+    #[snafu(display("thinking_budget must be -1 or greater, got {value}"))]
+    InvalidThinkingBudget { value: i32 },
+}
+
 /// Request to generate content
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -455,9 +469,25 @@ pub struct ThinkingConfig {
 }
 
 impl ThinkingConfig {
-    // TODO: Add failable constructor with validation
-    // pub fn new() -> Result<Self, ValidationError> { ... }
-    // Should validate temperature (0.0-1.0), max_tokens (>0), etc.
+    /// Create a new thinking config and validate its parameters
+    pub fn try_new(
+        thinking_budget: Option<i32>,
+        include_thoughts: Option<bool>,
+    ) -> Result<Self, ValidationError> {
+        let config = Self { thinking_budget, include_thoughts };
+        config.validate()?;
+        Ok(config)
+    }
+
+    /// Validate the thinking configuration parameters
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        if let Some(budget) = self.thinking_budget {
+            if budget < -1 {
+                return Err(ValidationError::InvalidThinkingBudget { value: budget });
+            }
+        }
+        Ok(())
+    }
 
     /// Create a new thinking config with default settings
     pub fn new() -> Self {
@@ -564,6 +594,63 @@ pub struct GenerationConfig {
     pub thinking_config: Option<ThinkingConfig>,
 }
 
+impl GenerationConfig {
+    /// Create a new generation config and validate its parameters
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_new(
+        temperature: Option<f32>,
+        top_p: Option<f32>,
+        top_k: Option<i32>,
+        max_output_tokens: Option<i32>,
+        candidate_count: Option<i32>,
+        stop_sequences: Option<Vec<String>>,
+        response_mime_type: Option<String>,
+        response_schema: Option<serde_json::Value>,
+        response_modalities: Option<Vec<String>>,
+        speech_config: Option<SpeechConfig>,
+        thinking_config: Option<ThinkingConfig>,
+    ) -> Result<Self, ValidationError> {
+        let config = Self {
+            temperature,
+            top_p,
+            top_k,
+            max_output_tokens,
+            candidate_count,
+            stop_sequences,
+            response_mime_type,
+            response_schema,
+            response_modalities,
+            speech_config,
+            thinking_config,
+        };
+        config.validate()?;
+        Ok(config)
+    }
+
+    /// Validate the generation configuration parameters
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        if let Some(t) = self.temperature {
+            if !(0.0..=1.0).contains(&t) {
+                return Err(ValidationError::InvalidTemperature { value: t });
+            }
+        }
+        if let Some(p) = self.top_p {
+            if !(0.0..=1.0).contains(&p) {
+                return Err(ValidationError::InvalidTopP { value: p });
+            }
+        }
+        if let Some(m) = self.max_output_tokens {
+            if m <= 0 {
+                return Err(ValidationError::InvalidMaxOutputTokens { value: m });
+            }
+        }
+        if let Some(thinking) = &self.thinking_config {
+            thinking.validate()?;
+        }
+        Ok(())
+    }
+}
+
 /// Configuration for speech generation (text-to-speech)
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -642,5 +729,52 @@ impl SpeakerVoiceConfig {
                 prebuilt_voice_config: Some(PrebuiltVoiceConfig { voice_name: voice_name.into() }),
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_thinking_config_validation() {
+        assert!(ThinkingConfig::try_new(Some(-1), Some(true)).is_ok());
+        assert!(ThinkingConfig::try_new(Some(0), Some(false)).is_ok());
+        assert!(ThinkingConfig::try_new(Some(100), None).is_ok());
+
+        let err = ThinkingConfig::try_new(Some(-2), None).unwrap_err();
+        assert_eq!(err, ValidationError::InvalidThinkingBudget { value: -2 });
+    }
+
+    #[test]
+    fn test_generation_config_validation() {
+        assert!(GenerationConfig::try_new(
+            Some(0.5), Some(0.5), None, Some(100), None, None, None, None, None, None, None
+        ).is_ok());
+
+        // Invalid temperature
+        let err = GenerationConfig::try_new(
+            Some(1.5), None, None, None, None, None, None, None, None, None, None
+        ).unwrap_err();
+        assert_eq!(err, ValidationError::InvalidTemperature { value: 1.5 });
+
+        // Invalid top_p
+        let err = GenerationConfig::try_new(
+            None, Some(-0.1), None, None, None, None, None, None, None, None, None
+        ).unwrap_err();
+        assert_eq!(err, ValidationError::InvalidTopP { value: -0.1 });
+
+        // Invalid max_output_tokens
+        let err = GenerationConfig::try_new(
+            None, None, None, Some(0), None, None, None, None, None, None, None
+        ).unwrap_err();
+        assert_eq!(err, ValidationError::InvalidMaxOutputTokens { value: 0 });
+
+        // Nested validation (thinking_config)
+        let thinking_config = ThinkingConfig { thinking_budget: Some(-5), include_thoughts: None };
+        let err = GenerationConfig::try_new(
+            None, None, None, None, None, None, None, None, None, None, Some(thinking_config)
+        ).unwrap_err();
+        assert_eq!(err, ValidationError::InvalidThinkingBudget { value: -5 });
     }
 }
