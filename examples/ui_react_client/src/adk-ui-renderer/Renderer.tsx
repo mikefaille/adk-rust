@@ -309,8 +309,8 @@ function ChartRenderer({ component }: { component: Extract<Component, { type: 'c
                             outerRadius={100}
                             label={renderPieLabel}
                         >
-                            {component.data.map((_, i) => (
-                                <Cell key={i} fill={chartColors[i % chartColors.length]} />
+                            {component.data.map((dataItem, i) => (
+                                <Cell key={String(dataItem[component.x_key] || i)} fill={chartColors[i % chartColors.length]} />
                             ))}
                         </Pie>
                         <Tooltip />
@@ -323,8 +323,8 @@ function ChartRenderer({ component }: { component: Extract<Component, { type: 'c
                         <YAxis label={component.y_label ? { value: component.y_label, angle: -90, position: 'insideLeft' } : undefined} />
                         <Tooltip />
                         {showLegend && <Legend />}
-                        {component.y_keys.map((key, i) => (
-                            <Bar key={key} dataKey={key} fill={chartColors[i % chartColors.length]} />
+                        {component.y_keys.map((key) => (
+                            <Bar key={key} dataKey={key} fill={chartColors[0 % chartColors.length]} />
                         ))}
                     </BarChart>
                 )}
@@ -423,8 +423,8 @@ function InputRenderer({ component }: { component: InputComponent }) {
                         })}
                     >
                         <option value="">Select...</option>
-                        {component.options.map((opt, i) => (
-                            <option key={i} value={opt.value}>{opt.label}</option>
+                        {component.options.map((opt) => (
+                            <option key={opt.value} value={opt.value}>{opt.label}</option>
                         ))}
                     </select>
                     {component.error && (
@@ -455,8 +455,8 @@ function InputRenderer({ component }: { component: InputComponent }) {
                         size={Math.min(component.options.length, 5)}
                         className="w-full px-3 py-2 border rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
                     >
-                        {component.options.map((opt, i) => (
-                            <option key={i} value={opt.value}>{opt.label}</option>
+                        {component.options.map((opt) => (
+                            <option key={opt.value} value={opt.value}>{opt.label}</option>
                         ))}
                     </select>
                 </div>
@@ -555,9 +555,9 @@ function TableRenderer({ component }: { component: Extract<Component, { type: 't
             <table className={clsx('min-w-full divide-y divide-gray-200 dark:divide-gray-700 border dark:border-gray-700 rounded-lg overflow-hidden')}>
                 <thead className="bg-gray-50 dark:bg-gray-800">
                     <tr>
-                        {component.columns.map((col, i) => (
+                        {component.columns.map((col) => (
                             <th
-                                key={i}
+                                key={col.accessor_key}
                                 onClick={() => handleSort(col.accessor_key)}
                                 className={clsx(
                                     'px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider',
@@ -574,12 +574,12 @@ function TableRenderer({ component }: { component: Extract<Component, { type: 't
                 </thead>
                 <tbody className="bg-white dark:bg-gray-900 divide-y divide-gray-200 dark:divide-gray-700">
                     {paginatedData.map((row, ri) => (
-                        <tr key={ri} className={clsx(
+                        <tr key={String(row.id || ri)} className={clsx(
                             'hover:bg-gray-50 dark:hover:bg-gray-800',
                             component.striped && ri % 2 === 1 && 'bg-gray-50 dark:bg-gray-800/50'
                         )}>
-                            {component.columns.map((col, ci) => (
-                                <td key={ci} className="px-4 py-3 text-sm text-gray-700 dark:text-gray-300">
+                            {component.columns.map((col) => (
+                                <td key={col.accessor_key} className="px-4 py-3 text-sm text-gray-700 dark:text-gray-300">
                                     {String(row[col.accessor_key] ?? '')}
                                 </td>
                             ))}
@@ -627,7 +627,7 @@ function TabsRenderer({ component }: { component: Extract<Component, { type: 'ta
                 <nav className="flex space-x-4">
                     {component.tabs.map((tab, i) => (
                         <button
-                            key={i}
+                            key={tab.label}
                             onClick={() => handleTabChange(i)}
                             className={clsx('px-4 py-2 border-b-2 font-medium text-sm transition-colors', {
                                 'border-blue-600 text-blue-600': activeTab === i,
@@ -641,7 +641,7 @@ function TabsRenderer({ component }: { component: Extract<Component, { type: 'ta
             </div>
             <div className="p-4">
                 {component.tabs[activeTab].content.map((child, i) =>
-                    <ComponentRenderer key={i} component={child} />
+                    <ComponentRenderer key={child.id || i} component={child} />
                 )}
             </div>
         </div>
@@ -681,7 +681,7 @@ function GridRenderer({ component }: { component: Extract<Component, { type: 'gr
             className="grid gap-4 mb-4"
             style={{ gridTemplateColumns: `repeat(${component.columns || 2}, 1fr)` }}
         >
-            {component.children.map((child, i) => <ComponentRenderer key={i} component={child} />)}
+            {component.children.map((child, i) => <ComponentRenderer key={child.id || i} component={child} />)}
         </div>
     );
 }
@@ -699,8 +699,8 @@ function ListRenderer({ component }: { component: Extract<Component, { type: 'li
 function KeyValueRenderer({ component }: { component: Extract<Component, { type: 'key_value' }> }) {
     return (
         <dl className="grid grid-cols-2 gap-x-4 gap-y-2 mb-4">
-            {component.pairs.map((pair, i) => (
-                <React.Fragment key={i}>
+            {component.pairs.map((pair) => (
+                <React.Fragment key={pair.key}>
                     <dt className="font-medium text-gray-700">{pair.key}:</dt>
                     <dd className="text-gray-900">{pair.value}</dd>
                 </React.Fragment>
@@ -758,11 +758,11 @@ function CardRenderer({ component, formRef, onAction }: {
                 </div>
             )}
             <div className="p-4">
-                {component.content.map((child, i) => <ComponentRenderer key={i} component={child} />)}
+                {component.content.map((child, i) => <ComponentRenderer key={child.id || i} component={child} />)}
             </div>
             {component.footer && (
                 <div className="p-4 border-t dark:border-gray-700 bg-gray-50 dark:bg-gray-800 flex gap-2 justify-end">
-                    {component.footer.map((child, i) => <ComponentRenderer key={i} component={child} />)}
+                    {component.footer.map((child, i) => <ComponentRenderer key={child.id || i} component={child} />)}
                 </div>
             )}
         </>
@@ -786,7 +786,7 @@ function StackRenderer({ component }: { component: Extract<Component, { type: 's
     });
     return (
         <div className={stackClasses} style={{ gap: (component.gap || 4) * 4 }}>
-            {component.children.map((child, i) => <ComponentRenderer key={i} component={child} />)}
+            {component.children.map((child, i) => <ComponentRenderer key={child.id || i} component={child} />)}
         </div>
     );
 }
@@ -845,11 +845,11 @@ function ModalRenderer({ component, onClose }: {
                     )}
                 </div>
                 <div className="p-4">
-                    {component.content.map((child, i) => <ComponentRenderer key={i} component={child} />)}
+                    {component.content.map((child, i) => <ComponentRenderer key={child.id || i} component={child} />)}
                 </div>
                 {component.footer && (
                     <div className="p-4 border-t dark:border-gray-700 flex justify-end gap-2">
-                        {component.footer.map((child, i) => <ComponentRenderer key={i} component={child} />)}
+                        {component.footer.map((child, i) => <ComponentRenderer key={child.id || i} component={child} />)}
                     </div>
                 )}
             </div>
@@ -860,7 +860,7 @@ function ModalRenderer({ component, onClose }: {
 function ContainerRenderer({ component }: { component: Extract<Component, { type: 'container' }> }) {
     return (
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-            {component.children.map((child, i) => <ComponentRenderer key={i} component={child} />)}
+            {component.children.map((child, i) => <ComponentRenderer key={child.id || i} component={child} />)}
         </div>
     );
 }
