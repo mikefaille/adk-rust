@@ -440,22 +440,6 @@ Initial release - Published to crates.io.
 - Tokio async runtime
 - Google API key for Gemini
 
-## [Unreleased]
-
-### Added
-- **adk-ui-react**: Extensive architectural refactoring and performance optimization of the `Renderer` component
-  - Deconstructed monolithic renderer into specialized, memoized functional components
-  - Implemented stable unique keys for all mapped collections (Table, Tabs, recursive children)
-  - Added strict TypeScript typing with `Extract` and explicit prop interfaces
-  - Standardized on function declarations for robust recursive rendering
-
-### Fixed
-- **adk-ui-react**: Resolved major React Hooks violations where state was called conditionally
-- **adk-ui-react**: Fixed side-effects in state updaters for better React Strict Mode compatibility
-
-### Changed
-- **adk-ui-react**: Optimized rendering performance using `useMemo` for heavy data processing and `useCallback` for event handlers
-
 [Unreleased]: https://github.com/zavora-ai/adk-rust/compare/v0.2.1...HEAD
 [0.2.1]: https://github.com/zavora-ai/adk-rust/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/zavora-ai/adk-rust/compare/v0.1.9...v0.2.0
