@@ -317,3 +317,6 @@ features = ["env-filter"]
 [[example]]
 name = "verify_vertex"
 path = "examples/verify_vertex.rs"
+
+[dependencies]
+jsonwebtoken = "10.3.0"

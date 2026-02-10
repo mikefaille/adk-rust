@@ -4,7 +4,18 @@ use time::OffsetDateTime;
 
 use crate::Model;
 use crate::common::serde::*;
-use crate::generation::{GenerateContentRequest, GenerationResponse, ValidationError};
+use crate::generation::{GenerateContentRequest, GenerationResponse};
+
+/// Validation error for batch requests
+#[derive(Debug, Snafu)]
+pub enum ValidationError {
+    /// A request in the batch is invalid
+    #[snafu(display("invalid batch request: {message}"))]
+    InvalidRequest {
+        /// Description of the validation failure
+        message: String,
+    },
+}
 
 /// Batch file request line JSON representation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -167,8 +178,10 @@ impl BatchConfig {
     pub fn validate(&self) -> Result<(), ValidationError> {
         match &self.input_config {
             InputConfig::Requests(container) => {
-                for item in &container.requests {
-                    item.request.validate()?;
+                if container.requests.is_empty() {
+                    return Err(ValidationError::InvalidRequest {
+                        message: "batch must contain at least one request".to_string(),
+                    });
                 }
             }
             InputConfig::FileName(_) => {}
