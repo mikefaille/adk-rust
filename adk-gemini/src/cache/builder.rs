@@ -5,7 +5,7 @@ use tracing::instrument;
 use snafu::ResultExt;
 
 use crate::client::GeminiClient;
-use crate::models::Content;
+use crate::types::Content;
 
 use super::handle::*;
 use super::model::*;

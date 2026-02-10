@@ -14,7 +14,7 @@
 //! - **`cache`** - Content caching for reusable contexts
 //! - **`safety`** - Content moderation and safety settings
 //! - **`tools`** - Function calling and tool integration
-//! - **`models`** - Core primitive types shared across modules
+//! - **`types`** - Core primitive types shared across modules
 //! - **`prelude`** - Convenient re-exports of commonly used types
 //!
 //! ## Quick Start
@@ -29,7 +29,7 @@
 //! respective modules.
 
 pub mod client;
-mod models;
+mod types;
 
 /// Convenient re-exports of commonly used types
 pub mod prelude;
@@ -69,18 +69,19 @@ pub use client::Gemini;
 /// Builder for creating a new Gemini client
 pub use client::GeminiBuilder;
 /// Available Gemini models
-pub use models::Model;
+pub use client::Model;
 /// Configuration for Gemini Live backend (Public or Vertex)
-pub use client::GeminiLiveBackend;
+/// Configuration for Gemini Live backend (Public or Vertex)
+pub use types::GeminiLiveBackend;
 /// Context for Vertex AI backend (project_id, location, token)
 #[cfg(feature = "vertex")]
-pub use client::VertexContext;
+pub use types::VertexContext;
 /// Re-export google_cloud_auth credentials for downstream crates (VertexADC)
 #[cfg(feature = "vertex")]
 pub use google_cloud_auth::credentials;
 
 /// Core primitive types for building requests and parsing responses
-pub use models::{Blob, CodeExecutionResultData, Content, Message, Modality, Part, Role};
+pub use types::{Blob, CodeExecutionResultData, Content, Message, Modality, Part, Role};
 
 // ========== Content Generation ==========
 // Types for generating text, images, and audio content

@@ -22,7 +22,7 @@
 //!
 //! #[tokio::main]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
-//!     let backend = GeminiLiveBackend::Public { 
+//!     let backend = GeminiLiveBackend::Studio { 
 //!         api_key: std::env::var("GOOGLE_API_KEY")? 
 //!     };
 //!     

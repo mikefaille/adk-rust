@@ -20,7 +20,7 @@ use adk_gemini::GeminiLiveBackend;
 /// use adk_realtime::RealtimeModel;
 /// use adk_gemini::GeminiLiveBackend;
 ///
-/// let backend = GeminiLiveBackend::Public { api_key: "key".to_string() };
+/// let backend = GeminiLiveBackend::Studio { api_key: "key".to_string() };
 /// let model = GeminiRealtimeModel::new(backend, "models/gemini-2.0-flash-live-preview-04-09");
 /// let session = model.connect(config).await?;
 /// ```
@@ -87,7 +87,7 @@ impl RealtimeModel for GeminiRealtimeModel {
 impl Default for GeminiRealtimeModel {
     fn default() -> Self {
         Self {
-             backend: GeminiLiveBackend::Public { api_key: String::new() },
+             backend: GeminiLiveBackend::Studio { api_key: String::new() },
              model_id: DEFAULT_MODEL.to_string(),
         }
     }

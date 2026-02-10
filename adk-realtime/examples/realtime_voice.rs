@@ -33,7 +33,7 @@ async fn run_realtime_test(api_key: &str) -> Result<(), Box<dyn std::error::Erro
     info!("Initializing Gemini Live connection...");
 
     // 1. Configure the backend (Public API with API Key)
-    let backend = GeminiLiveBackend::Public {
+    let backend = GeminiLiveBackend::Studio {
         api_key: api_key.to_string(),
     };
 

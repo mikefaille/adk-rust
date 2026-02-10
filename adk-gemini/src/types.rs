@@ -324,3 +324,34 @@ impl<'de> Deserialize<'de> for Modality {
         }
     }
 }
+
+/// Vertex AI Context (moved from being internal to Public for shared use)
+#[derive(Debug, Clone)]
+#[cfg(feature = "vertex")]
+pub struct VertexContext {
+    pub project: String,
+    pub location: String,
+    pub token: String, // OAuth token
+}
+
+/// Configuration for Gemini Live backend (Public or Vertex)
+/// This is used by adk-realtime to determine how to connect.
+#[derive(Debug, Clone)]
+pub enum GeminiLiveBackend {
+    /// Public API (Google AI Studio)
+    Studio {
+        /// API Key
+        api_key: String,
+    },
+    /// Vertex AI (Google Cloud) - Pre-authenticated
+    #[cfg(feature = "vertex")]
+    Vertex(VertexContext),
+    /// Vertex AI (Google Cloud) - ADC (Application Default Credentials)
+    #[cfg(feature = "vertex")]
+    VertexADC {
+        /// Google Cloud Project ID
+        project: String,
+        /// Google Cloud Location (e.g., "us-central1")
+        location: String,
+    },
+}

@@ -132,7 +132,7 @@ impl GeminiRealtimeSession {
         config: RealtimeConfig,
     ) -> Result<Self> {
         let (request, _response) = match backend {
-            GeminiLiveBackend::Public { api_key } => {
+            GeminiLiveBackend::Studio { api_key } => {
                 let url = format!(
                     "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key={}",
                     api_key
