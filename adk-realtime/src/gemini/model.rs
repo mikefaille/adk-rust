@@ -33,10 +33,7 @@ pub struct GeminiRealtimeModel {
 impl GeminiRealtimeModel {
     /// Create a new Gemini Live model.
     pub fn new(backend: GeminiLiveBackend, model_id: impl Into<String>) -> Self {
-        Self {
-            backend,
-            model_id: model_id.into(),
-        }
+        Self { backend, model_id: model_id.into() }
     }
 
     /// Create with the default Live model.
@@ -73,12 +70,8 @@ impl RealtimeModel for GeminiRealtimeModel {
     }
 
     async fn connect(&self, config: RealtimeConfig) -> Result<BoxedSession> {
-        let session = GeminiRealtimeSession::connect(
-            self.backend.clone(),
-            &self.model_id,
-            config,
-        )
-        .await?;
+        let session =
+            GeminiRealtimeSession::connect(self.backend.clone(), &self.model_id, config).await?;
 
         Ok(Box::new(session))
     }
@@ -87,8 +80,8 @@ impl RealtimeModel for GeminiRealtimeModel {
 impl Default for GeminiRealtimeModel {
     fn default() -> Self {
         Self {
-             backend: GeminiLiveBackend::Public { api_key: String::new() },
-             model_id: DEFAULT_MODEL.to_string(),
+            backend: GeminiLiveBackend::Public { api_key: String::new() },
+            model_id: DEFAULT_MODEL.to_string(),
         }
     }
 }

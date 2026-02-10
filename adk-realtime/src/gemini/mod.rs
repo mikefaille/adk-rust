@@ -22,8 +22,8 @@
 //!
 //! #[tokio::main]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
-//!     let backend = GeminiLiveBackend::Public { 
-//!         api_key: std::env::var("GOOGLE_API_KEY")? 
+//!     let backend = GeminiLiveBackend::Public {
+//!         api_key: std::env::var("GOOGLE_API_KEY")?
 //!     };
 //!     
 //!     let model = GeminiRealtimeModel::new(

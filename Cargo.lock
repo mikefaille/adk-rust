@@ -6708,6 +6708,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "ralph_autonomous_agent"
+version = "0.2.1"
+dependencies = [
+ "adk-agent",
+ "adk-cli",
+ "adk-core",
+ "adk-model",
+ "adk-runner",
+ "adk-session",
+ "adk-tool",
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "colored",
+ "dotenvy",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "rancor"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

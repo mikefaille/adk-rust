@@ -26,8 +26,8 @@
 
 #![allow(clippy::enum_variant_names)]
 
-use std::fmt::{self, Formatter};
 use serde::{Deserialize, Serialize};
+use std::fmt::{self, Formatter};
 
 /// Role of a message in a conversation
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -323,4 +323,3 @@ impl fmt::Display for Model {
         write!(f, "{}", self.0)
     }
 }
-

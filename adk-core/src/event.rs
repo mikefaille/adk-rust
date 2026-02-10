@@ -332,8 +332,8 @@ mod tests {
     #[test]
     fn test_is_final_response_with_trailing_code_execution_result() {
         let mut event = Event::new("inv-123");
-        event.llm_response.content = Some(Content::new("model")
-            .with_code_execution_result("OUTCOME_OK", "result"));
+        event.llm_response.content =
+            Some(Content::new("model").with_code_execution_result("OUTCOME_OK", "result"));
 
         // Has trailing code execution result -> NOT final (model should analyze result)
         assert!(!event.is_final_response());

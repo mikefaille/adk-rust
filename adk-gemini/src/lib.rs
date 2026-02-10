@@ -58,7 +58,6 @@ pub mod safety;
 /// Function calling and tool integration
 pub mod tools;
 
-
 // ========== Core Types ==========
 // These are the fundamental types used throughout the API
 
@@ -68,8 +67,6 @@ pub use client::Error as ClientError;
 pub use client::Gemini;
 /// Builder for creating a new Gemini client
 pub use client::GeminiBuilder;
-/// Available Gemini models
-pub use models::Model;
 /// Configuration for Gemini Live backend (Public or Vertex)
 pub use client::GeminiLiveBackend;
 /// Context for Vertex AI backend (project_id, location, token)
@@ -78,6 +75,8 @@ pub use client::VertexContext;
 /// Re-export google_cloud_auth credentials for downstream crates (VertexADC)
 #[cfg(feature = "vertex")]
 pub use google_cloud_auth::credentials;
+/// Available Gemini models
+pub use models::Model;
 
 /// Core primitive types for building requests and parsing responses
 pub use models::{Blob, Content, Message, Modality, Part, Role};

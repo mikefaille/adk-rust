@@ -44,6 +44,21 @@ pub fn adk_parts_to_a2a(
 
                 Ok(crate::a2a::Part::Data { data, metadata: Some(metadata) })
             }
+            Part::CodeExecutionResult { code_execution_result } => {
+                let mut data = Map::new();
+                let mut exec_data = Map::new();
+                exec_data.insert(
+                    "outcome".to_string(),
+                    Value::String(code_execution_result.outcome.clone()),
+                );
+                exec_data.insert(
+                    "output".to_string(),
+                    Value::String(code_execution_result.output.clone()),
+                );
+                data.insert("code_execution_result".to_string(), Value::Object(exec_data));
+
+                Ok(crate::a2a::Part::Data { data, metadata: None })
+            }
             Part::FunctionResponse { function_response, id } => {
                 let mut data = Map::new();
                 let mut resp_data = Map::new();

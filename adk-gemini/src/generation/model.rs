@@ -485,7 +485,9 @@ impl ThinkingConfig {
 
     /// Validate the thinking configuration parameters
     pub fn validate(&self) -> Result<(), ValidationError> {
-        if let Some(budget) = self.thinking_budget && budget < -1 {
+        if let Some(budget) = self.thinking_budget
+            && budget < -1
+        {
             return Err(ValidationError::InvalidThinkingBudget { value: budget });
         }
         Ok(())
@@ -631,19 +633,29 @@ impl GenerationConfig {
 
     /// Validate the generation configuration parameters
     pub fn validate(&self) -> Result<(), ValidationError> {
-        if let Some(t) = self.temperature && !(0.0..=1.0).contains(&t) {
+        if let Some(t) = self.temperature
+            && !(0.0..=1.0).contains(&t)
+        {
             return Err(ValidationError::InvalidTemperature { value: t });
         }
-        if let Some(p) = self.top_p && !(0.0..=1.0).contains(&p) {
+        if let Some(p) = self.top_p
+            && !(0.0..=1.0).contains(&p)
+        {
             return Err(ValidationError::InvalidTopP { value: p });
         }
-        if let Some(k) = self.top_k && k <= 0 {
+        if let Some(k) = self.top_k
+            && k <= 0
+        {
             return Err(ValidationError::InvalidTopK { value: k });
         }
-        if let Some(m) = self.max_output_tokens && m <= 0 {
+        if let Some(m) = self.max_output_tokens
+            && m <= 0
+        {
             return Err(ValidationError::InvalidMaxOutputTokens { value: m });
         }
-        if let Some(c) = self.candidate_count && c <= 0 {
+        if let Some(c) = self.candidate_count
+            && c <= 0
+        {
             return Err(ValidationError::InvalidCandidateCount { value: c });
         }
         if let Some(thinking) = &self.thinking_config {
@@ -760,45 +772,124 @@ mod tests {
 
     #[test]
     fn test_generation_config_validation() {
-        assert!(GenerationConfig::try_new(
-            Some(0.5), Some(0.5), Some(40), Some(100), Some(1), None, None, None, None, None, None
-        ).is_ok());
+        assert!(
+            GenerationConfig::try_new(
+                Some(0.5),
+                Some(0.5),
+                Some(40),
+                Some(100),
+                Some(1),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None
+            )
+            .is_ok()
+        );
 
         // Invalid temperature
         let err = GenerationConfig::try_new(
-            Some(1.5), None, None, None, None, None, None, None, None, None, None
-        ).unwrap_err();
+            Some(1.5),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap_err();
         assert_eq!(err, ValidationError::InvalidTemperature { value: 1.5 });
 
         // Invalid top_p
         let err = GenerationConfig::try_new(
-            None, Some(-0.1), None, None, None, None, None, None, None, None, None
-        ).unwrap_err();
+            None,
+            Some(-0.1),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap_err();
         assert_eq!(err, ValidationError::InvalidTopP { value: -0.1 });
 
         // Invalid top_k
         let err = GenerationConfig::try_new(
-            None, None, Some(0), None, None, None, None, None, None, None, None
-        ).unwrap_err();
+            None,
+            None,
+            Some(0),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap_err();
         assert_eq!(err, ValidationError::InvalidTopK { value: 0 });
 
         // Invalid max_output_tokens
         let err = GenerationConfig::try_new(
-            None, None, None, Some(0), None, None, None, None, None, None, None
-        ).unwrap_err();
+            None,
+            None,
+            None,
+            Some(0),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap_err();
         assert_eq!(err, ValidationError::InvalidMaxOutputTokens { value: 0 });
 
         // Invalid candidate_count
         let err = GenerationConfig::try_new(
-            None, None, None, None, Some(-1), None, None, None, None, None, None
-        ).unwrap_err();
+            None,
+            None,
+            None,
+            None,
+            Some(-1),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap_err();
         assert_eq!(err, ValidationError::InvalidCandidateCount { value: -1 });
 
         // Nested validation (thinking_config)
         let thinking_config = ThinkingConfig { thinking_budget: Some(-5), include_thoughts: None };
         let err = GenerationConfig::try_new(
-            None, None, None, None, None, None, None, None, None, None, Some(thinking_config)
-        ).unwrap_err();
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(thinking_config),
+        )
+        .unwrap_err();
         assert_eq!(err, ValidationError::InvalidThinkingBudget { value: -5 });
     }
 

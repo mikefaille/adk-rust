@@ -112,6 +112,9 @@ impl StreamPrinter {
             }
             Part::InlineData { mime_type, data } => self.print_inline_data(mime_type, data.len()),
             Part::FileData { mime_type, file_uri } => self.print_file_data(mime_type, file_uri),
+            Part::CodeExecutionResult { code_execution_result } => {
+                self.print_code_execution_result(code_execution_result)
+            }
         }
     }
 
@@ -185,6 +188,16 @@ impl StreamPrinter {
 
     fn print_inline_data(&self, mime_type: &str, len: usize) {
         print!("\n[inline-data] mime={} bytes={}\n", mime_type, len);
+        let _ = io::stdout().flush();
+    }
+
+    fn print_code_execution_result(&self, result: &adk_core::types::CodeExecutionResultData) {
+        print!(
+            "
+[code-execution] outcome={} output={}
+",
+            result.outcome, result.output
+        );
         let _ = io::stdout().flush();
     }
 

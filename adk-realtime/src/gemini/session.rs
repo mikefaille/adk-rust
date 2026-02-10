@@ -3,7 +3,10 @@ use crate::config::{RealtimeConfig, ToolDefinition};
 use crate::error::{RealtimeError, Result};
 use crate::events::{ClientEvent, ServerEvent, ToolResponse};
 use crate::session::RealtimeSession;
+use adk_gemini::GeminiLiveBackend;
 use async_trait::async_trait;
+use base64::prelude::*;
+use bytes::Bytes;
 use futures::stream::Stream;
 use futures::{SinkExt, StreamExt};
 #[cfg(feature = "vertex")]
@@ -16,9 +19,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::Mutex;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
-use adk_gemini::GeminiLiveBackend;
-use base64::prelude::*;
-use bytes::Bytes;
 
 type WsStream =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
@@ -168,28 +168,32 @@ impl GeminiRealtimeSession {
             #[cfg(feature = "vertex")]
             GeminiLiveBackend::VertexADC { project: _, location } => {
                 use adk_gemini::credentials::{Builder, CacheableResource};
-                
+
                 // Fetch token from ADC
                 let credentials = Builder::default().build().map_err(|e| {
                     RealtimeError::connection(format!("Failed to load ADC credentials: {}", e))
                 })?;
-                
+
                 let headers = credentials.headers(Default::default()).await.map_err(|e| {
                     RealtimeError::connection(format!("Failed to fetch auth headers: {}", e))
                 })?;
-                
+
                 let auth_headers = match headers {
                     CacheableResource::New { data, .. } => data,
                     CacheableResource::NotModified => {
-                        return Err(RealtimeError::connection("Credentials returned NotModified unexpectedly".to_string()));
+                        return Err(RealtimeError::connection(
+                            "Credentials returned NotModified unexpectedly".to_string(),
+                        ));
                     }
                 };
-                
+
                 let token = auth_headers
                     .get(tokio_tungstenite::tungstenite::http::header::AUTHORIZATION)
                     .and_then(|h| h.to_str().ok())
                     .and_then(|s| s.strip_prefix("Bearer "))
-                    .ok_or_else(|| RealtimeError::connection("No Bearer token in ADC headers".to_string()))?;
+                    .ok_or_else(|| {
+                        RealtimeError::connection("No Bearer token in ADC headers".to_string())
+                    })?;
 
                 let url = format!(
                     "wss://{}-aiplatform.googleapis.com/ws/google.cloud.aiplatform.v1beta1.LlmInferenceService.BidiGenerateContent",
@@ -270,7 +274,7 @@ impl GeminiRealtimeSession {
 
         let msg = serde_json::to_string(&setup)
             .map_err(|e| RealtimeError::protocol(format!("Serialize error: {}", e)))?;
-        
+
         tracing::info!(model_id = %model, "Sending setup message");
         tracing::debug!(raw_setup = %msg, "Raw setup message");
         self.send_raw(&setup).await
@@ -301,17 +305,17 @@ impl GeminiRealtimeSession {
                     Ok(event) => Some(Ok(event)),
                     Err(e) => Some(Err(e)),
                 }
-
             }
-            Some(Ok(Message::Binary(bytes))) => {
-                match String::from_utf8(bytes) {
-                    Ok(text) => match self.translate_gemini_event(&text) {
-                        Ok(event) => Some(Ok(event)),
-                        Err(e) => Some(Err(e)),
-                    },
-                    Err(e) => Some(Err(RealtimeError::protocol(format!("Invalid UTF-8 in binary message: {}", e)))),
-                }
-            }
+            Some(Ok(Message::Binary(bytes))) => match String::from_utf8(bytes) {
+                Ok(text) => match self.translate_gemini_event(&text) {
+                    Ok(event) => Some(Ok(event)),
+                    Err(e) => Some(Err(e)),
+                },
+                Err(e) => Some(Err(RealtimeError::protocol(format!(
+                    "Invalid UTF-8 in binary message: {}",
+                    e
+                )))),
+            },
             Some(Ok(Message::Close(_))) => {
                 self.connected.store(false, Ordering::SeqCst);
                 None
@@ -359,7 +363,9 @@ impl GeminiRealtimeSession {
                         // Audio output
                         if let Some(inline_data) = part.get("inlineData") {
                             if let Some(data) = inline_data.get("data").and_then(|d| d.as_str()) {
-                                let decoded = base64::engine::general_purpose::STANDARD.decode(data).unwrap_or_default();
+                                let decoded = base64::engine::general_purpose::STANDARD
+                                    .decode(data)
+                                    .unwrap_or_default();
                                 return Ok(ServerEvent::AudioDelta {
                                     event_id: uuid::Uuid::new_v4().to_string(),
                                     response_id: String::new(),
@@ -449,10 +455,7 @@ impl RealtimeSession for GeminiRealtimeSession {
             client_content: Some(GeminiClientContent {
                 turns: vec![GeminiTurn {
                     role: "user".to_string(),
-                    parts: vec![GeminiPart {
-                        text: Some(text.to_string()),
-                        inline_data: None,
-                    }],
+                    parts: vec![GeminiPart { text: Some(text.to_string()), inline_data: None }],
                 }],
                 turn_complete: true,
             }),
@@ -575,11 +578,7 @@ mod tests {
                     }
                 })),
             },
-            ToolDefinition {
-                name: "no_params".to_string(),
-                description: None,
-                parameters: None,
-            },
+            ToolDefinition { name: "no_params".to_string(), description: None, parameters: None },
         ];
 
         let result = convert_tools(Some(tools));

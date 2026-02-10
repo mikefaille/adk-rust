@@ -25,9 +25,7 @@ use reqwest::{
 
 use serde_json::json;
 use snafu::{OptionExt, ResultExt, Snafu};
-use std::{
-    sync::{Arc, LazyLock},
-};
+use std::sync::{Arc, LazyLock};
 use tracing::{Level, Span, instrument};
 use url::Url;
 
@@ -444,7 +442,9 @@ impl GeminiClient {
                 google_cloud_auth::credentials::CacheableResource::NotModified => {
                     return Err(Error::BadResponse {
                         code: 500,
-                        description: Some("Credentials returned NotModified without prior fetch".to_string()),
+                        description: Some(
+                            "Credentials returned NotModified without prior fetch".to_string(),
+                        ),
                     });
                 }
             };
@@ -470,7 +470,9 @@ impl GeminiClient {
             #[cfg(feature = "studio")]
             GeminiBackend::Rest(rest) => Ok(rest),
             #[cfg(feature = "vertex")]
-            GeminiBackend::Vertex(_) => GoogleCloudUnsupportedSnafu { operation: _operation }.fail(),
+            GeminiBackend::Vertex(_) => {
+                GoogleCloudUnsupportedSnafu { operation: _operation }.fail()
+            }
         }
     }
 
@@ -822,11 +824,10 @@ impl GeminiClient {
             #[cfg(feature = "studio")]
             GeminiBackend::Rest(rest) => rest.base_url.clone(),
             #[cfg(feature = "vertex")]
-            GeminiBackend::Vertex(vertex) => Url::parse(&format!(
-                "https://{}-aiplatform.googleapis.com",
-                vertex.location
-            ))
-            .context(UrlParseSnafu)?,
+            GeminiBackend::Vertex(vertex) => {
+                Url::parse(&format!("https://{}-aiplatform.googleapis.com", vertex.location))
+                    .context(UrlParseSnafu)?
+            }
         };
 
         let url = base_url
@@ -886,7 +887,8 @@ impl GeminiClient {
                 struct UploadResponse {
                     file: File,
                 }
-                let upload_response: UploadResponse = r.json().await.context(DecodeResponseSnafu)?;
+                let upload_response: UploadResponse =
+                    r.json().await.context(DecodeResponseSnafu)?;
                 Ok(upload_response.file)
             },
         )
@@ -1190,7 +1192,7 @@ impl GeminiBuilder {
         let credentials = google_cloud_auth::credentials::Builder::default()
             .build()
             .context(GoogleCloudAuthSnafu)?;
-        
+
         Ok(Self {
             model: Model::default(),
             client_builder: ClientBuilder::default(),
@@ -1332,7 +1334,12 @@ impl Gemini {
         project_id: P,
         location: L,
     ) -> Result<Self, Error> {
-        Self::with_google_cloud_model(api_key, project_id, location, Model::from(Model::GEMINI_2_5_PRO))
+        Self::with_google_cloud_model(
+            api_key,
+            project_id,
+            location,
+            Model::from(Model::GEMINI_2_5_PRO),
+        )
     }
 
     /// Create a new client using Vertex AI (Google Cloud) endpoints.
