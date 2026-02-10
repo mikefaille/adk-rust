@@ -29,6 +29,7 @@
 //! respective modules.
 
 pub mod client;
+pub mod backend;
 mod types;
 
 /// Convenient re-exports of commonly used types
