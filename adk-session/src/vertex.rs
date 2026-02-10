@@ -107,6 +107,23 @@ impl VertexAiSessionService {
         self.endpoint.trim_end_matches('/')
     }
 
+    /// Build a URL from the endpoint base, ensuring HTTPS for non-localhost endpoints.
+    /// This prevents cleartext transmission of sensitive session data.
+    fn build_url(&self, path: &str) -> Result<String> {
+        let base = self.endpoint_base();
+        let url = format!("{}/{}", base, path);
+        // Verify the constructed URL uses HTTPS (except localhost for testing)
+        if !url.starts_with("https://")
+            && !url.starts_with("http://127.0.0.1")
+            && !url.starts_with("http://localhost")
+        {
+            return Err(Self::session_error(
+                "Vertex AI endpoint must use HTTPS for secure transmission of session data",
+            ));
+        }
+        Ok(url)
+    }
+
     fn resolve_reasoning_engine_id(&self, app_name: &str) -> Result<String> {
         if let Some(reasoning_engine) = &self.reasoning_engine {
             if reasoning_engine.trim().is_empty() {
@@ -280,7 +297,7 @@ impl VertexAiSessionService {
     }
 
     async fn fetch_session(&self, session_name: &str) -> Result<Option<VertexSessionPayload>> {
-        let url = format!("{}/{}/{}", self.endpoint_base(), SESSION_API_VERSION, session_name);
+        let url = self.build_url(&format!("{}/{}", SESSION_API_VERSION, session_name))?;
         let request = self.apply_auth(self.http_client.get(url)).await?;
         let value = match self.send_value_allow_not_found(request).await? {
             Some(value) => value,
@@ -299,12 +316,11 @@ impl VertexAiSessionService {
         let mut page_token: Option<String> = None;
 
         loop {
-            let url = format!(
-                "{}/{}/{}/events",
-                self.endpoint_base(),
+            let url = self.build_url(&format!(
+                "{}/{}/events",
                 SESSION_API_VERSION,
                 session_name,
-            );
+            ))?;
 
             let mut request = self.http_client.get(url);
             if let Some(token) = page_token.as_ref().filter(|token| !token.is_empty()) {
@@ -352,7 +368,7 @@ impl SessionService for VertexAiSessionService {
 
         let sanitized_state = sanitize_state_map(req.state);
         let parent = self.session_parent(&req.app_name)?;
-        let url = format!("{}/{}/{}/sessions", self.endpoint_base(), SESSION_API_VERSION, parent,);
+        let url = self.build_url(&format!("{}/{}/sessions", SESSION_API_VERSION, parent))?;
 
         let body = VertexCreateSessionRequest {
             session: VertexCreateSession {
@@ -443,7 +459,7 @@ impl SessionService for VertexAiSessionService {
 
         loop {
             let url =
-                format!("{}/{}/{}/sessions", self.endpoint_base(), SESSION_API_VERSION, parent,);
+                self.build_url(&format!("{}/{}/sessions", SESSION_API_VERSION, parent))?;
             let mut request = self.http_client.get(url);
 
             if !req.user_id.trim().is_empty() {
@@ -513,7 +529,7 @@ impl SessionService for VertexAiSessionService {
         }
 
         let session_name = self.session_name_from_app(&req.app_name, &req.session_id)?;
-        let url = format!("{}/{}/{}", self.endpoint_base(), SESSION_API_VERSION, session_name);
+        let url = self.build_url(&format!("{}/{}", SESSION_API_VERSION, session_name))?;
 
         let request = self.apply_auth(self.http_client.delete(url)).await?;
         let _ = self.send_value_allow_not_found(request).await?;
@@ -531,12 +547,11 @@ impl SessionService for VertexAiSessionService {
         event.actions.state_delta = sanitize_state_map(event.actions.state_delta);
 
         let session_name = self.resolve_session_name_for_append(session_id)?;
-        let url = format!(
-            "{}/{}/{}:appendEvent",
-            self.endpoint_base(),
+        let url = self.build_url(&format!(
+            "{}/{}:appendEvent",
             SESSION_API_VERSION,
             session_name,
-        );
+        ))?;
 
         let body = build_append_event_payload(&event);
 
