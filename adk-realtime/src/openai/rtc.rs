@@ -1,50 +1,49 @@
 use crate::audio::AudioFormat;
+use crate::config::RealtimeConfig;
 use crate::error::{RealtimeError, Result};
 use crate::events::{ClientEvent, ServerEvent};
 use crate::model::RealtimeModel;
-use crate::session::{RealtimeSession, BoxedSession};
-use crate::config::RealtimeConfig;
+use crate::session::{BoxedSession, RealtimeSession};
 use async_trait::async_trait;
+use bytes::{BufMut, Bytes, BytesMut};
 use std::sync::Arc;
-use tokio::sync::{Mutex, mpsc};
-use tokio::net::UdpSocket;
 use std::time::Instant;
-use tracing::{info, error, warn};
-use bytes::{Bytes, BytesMut, BufMut};
+use tokio::net::UdpSocket;
+use tokio::sync::{Mutex, mpsc};
+use tracing::{error, info, warn};
 
+use rand::Rng;
+use rtc::data_channel::RTCDataChannelId;
 /// OpenAI Realtime API WebRTC implementation.
-/// 
+///
 /// This module provides a production-grade WebRTC implementation for OpenAI's Realtime API
 /// using the `rtc` crate (Sans-IO). It handles signaling, media packetization,
 /// and low-latency audio streaming with strict RFC compliance.
-
 // IMPORTS FROM 'rtc' CRATE (webrtc-rs/rtc v0.8.5)
 use rtc::peer_connection::RTCPeerConnection;
 use rtc::peer_connection::configuration::{RTCConfigurationBuilder, media_engine::MediaEngine};
-use rtc::peer_connection::event::{RTCPeerConnectionEvent, RTCDataChannelEvent};
+use rtc::peer_connection::event::{RTCDataChannelEvent, RTCPeerConnectionEvent};
 use rtc::peer_connection::message::RTCMessage;
 use rtc::peer_connection::sdp::RTCSessionDescription;
 use rtc::peer_connection::state::{RTCIceGatheringState, RTCPeerConnectionState};
-use rtc::rtp_transceiver::rtp_sender::RtpCodecKind;
-use rtc::rtp_transceiver::RTCRtpSenderId;
 use rtc::peer_connection::transport::{CandidateConfig, CandidateHostConfig, RTCIceCandidate};
-use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
-use rtc::sansio::Protocol;
-use rtc::rtp::packet::Packet;
 use rtc::rtp::header::Header;
-use rtc::data_channel::RTCDataChannelId;
-use rand::Rng; // For SSRC generation
+use rtc::rtp::packet::Packet;
+use rtc::rtp_transceiver::RTCRtpSenderId;
+use rtc::rtp_transceiver::rtp_sender::RtpCodecKind;
+use rtc::sansio::Protocol;
+use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol}; // For SSRC generation
 
 const OPENAI_BASE_URL: &str = "https://api.openai.com/v1/realtime";
 // Input is 24kHz PCM16. 20ms = 480 samples.
 // 480 samples * 2 bytes = 960 bytes per chunk.
-const PCM_BYTES_PER_FRAME: usize = 960; 
+const PCM_BYTES_PER_FRAME: usize = 960;
 
 /// WebRTC Opus always uses a 48kHz clock (RFC 7587), regardless of input sample rate.
 const RTP_CLOCK_RATE: u32 = 48000;
 const FRAME_DURATION_MS: u32 = 20;
 
-/// RTP timestamp increment for each 20ms frame. 
+/// RTP timestamp increment for each 20ms frame.
 /// (48,000Hz * 20ms) / 1000 = 960.
 const RTP_TIMESTAMP_INCREMENT: u32 = (RTP_CLOCK_RATE * FRAME_DURATION_MS) / 1000;
 
@@ -61,43 +60,54 @@ impl OpenAiWebRtcModel {
 
 #[async_trait]
 impl RealtimeModel for OpenAiWebRtcModel {
-    fn provider(&self) -> &str { "openai" }
-    fn model_id(&self) -> &str { &self.model_id }
+    fn provider(&self) -> &str {
+        "openai"
+    }
+    fn model_id(&self) -> &str {
+        &self.model_id
+    }
     // Note: We accept pcm16_24khz input, but we will encode to Opus 48kHz for the wire
-    fn supported_input_formats(&self) -> Vec<AudioFormat> { vec![AudioFormat::pcm16_24khz()] }
-    fn supported_output_formats(&self) -> Vec<AudioFormat> { vec![AudioFormat::pcm16_24khz()] }
-    fn available_voices(&self) -> Vec<&str> { vec!["alloy", "echo", "shimmer"] }
+    fn supported_input_formats(&self) -> Vec<AudioFormat> {
+        vec![AudioFormat::pcm16_24khz()]
+    }
+    fn supported_output_formats(&self) -> Vec<AudioFormat> {
+        vec![AudioFormat::pcm16_24khz()]
+    }
+    fn available_voices(&self) -> Vec<&str> {
+        vec!["alloy", "echo", "shimmer"]
+    }
 
     async fn connect(&self, _config: RealtimeConfig) -> Result<BoxedSession> {
         let (tx, rx_cmd) = mpsc::channel(100);
         let (event_tx, rx_event) = mpsc::channel(100);
         let (close_tx, close_rx) = mpsc::channel(1);
 
-        let socket = UdpSocket::bind("0.0.0.0:0").await
+        let socket = UdpSocket::bind("0.0.0.0:0")
+            .await
             .map_err(|e| RealtimeError::connection(e.to_string()))?;
-        let local_addr = socket.local_addr()
-            .map_err(|e| RealtimeError::connection(e.to_string()))?;
+        let local_addr =
+            socket.local_addr().map_err(|e| RealtimeError::connection(e.to_string()))?;
 
         let mut me = MediaEngine::default();
         me.register_default_codecs().map_err(|e| RealtimeError::connection(e.to_string()))?;
-        let mut pc = RTCPeerConnection::new(
-            RTCConfigurationBuilder::new()
-                .with_media_engine(me)
-                .build()
-        ).map_err(|e| RealtimeError::connection(e.to_string()))?;
+        let mut pc =
+            RTCPeerConnection::new(RTCConfigurationBuilder::new().with_media_engine(me).build())
+                .map_err(|e| RealtimeError::connection(e.to_string()))?;
 
         // 2. Add Audio Transceiver
-        let _transceiver_id = pc.add_transceiver_from_kind(RtpCodecKind::Audio, None)
+        let _transceiver_id = pc
+            .add_transceiver_from_kind(RtpCodecKind::Audio, None)
             .map_err(|e| RealtimeError::connection(e.to_string()))?;
-        
+
         // Polling pc might help populate senders
         let _ = pc.poll_timeout();
-        
+
         let sender_id = pc.get_senders().next();
 
         // 3. Create Data Channel "oai-events"
         // OpenAI requires this exact label.
-        let dc = pc.create_data_channel("oai-events", None)
+        let dc = pc
+            .create_data_channel("oai-events", None)
             .map_err(|e| RealtimeError::connection(e.to_string()))?;
         let dc_id = dc.id();
 
@@ -122,13 +132,18 @@ impl RealtimeModel for OpenAiWebRtcModel {
             ..Default::default()
         }
         .new_candidate_host()
-        .map_err(|e| RealtimeError::connection(format!("Failed to create host candidate: {}", e)))?;
+        .map_err(|e| {
+            RealtimeError::connection(format!("Failed to create host candidate: {}", e))
+        })?;
 
-        let local_candidate_init = RTCIceCandidate::from(&candidate_config).to_json()
-            .map_err(|e| RealtimeError::connection(format!("Failed to convert candidate to JSON: {}", e)))?;
+        let local_candidate_init =
+            RTCIceCandidate::from(&candidate_config).to_json().map_err(|e| {
+                RealtimeError::connection(format!("Failed to convert candidate to JSON: {}", e))
+            })?;
 
-        pc.add_local_candidate(local_candidate_init)
-            .map_err(|e| RealtimeError::connection(format!("Failed to add local candidate: {}", e)))?;
+        pc.add_local_candidate(local_candidate_init).map_err(|e| {
+            RealtimeError::connection(format!("Failed to add local candidate: {}", e))
+        })?;
 
         // 4.5 Spin the loop until Gathering is Complete
         // Since rtc is sans-IO, we must drive the state machine to generate candidates.
@@ -169,34 +184,27 @@ impl RealtimeModel for OpenAiWebRtcModel {
         }
 
         // Retrieve the UPDATED SDP with candidates
-        let final_offer = pc.local_description()
-            .ok_or_else(|| RealtimeError::connection("Failed to get local description after gathering"))?;
-        
+        let final_offer = pc.local_description().ok_or_else(|| {
+            RealtimeError::connection("Failed to get local description after gathering")
+        })?;
+
         info!("Final SDP with candidates: {}", final_offer.sdp);
 
         // 5. Signaling
-        let answer_sdp = exchange_sdp(&self.model_id, &self.api_key, final_offer.sdp.clone()).await?;
-        pc.set_remote_description(RTCSessionDescription::answer(answer_sdp)
-            .map_err(|e| RealtimeError::connection(e.to_string()))?)
-            .map_err(|e| RealtimeError::connection(e.to_string()))?;
+        let answer_sdp =
+            exchange_sdp(&self.model_id, &self.api_key, final_offer.sdp.clone()).await?;
+        pc.set_remote_description(
+            RTCSessionDescription::answer(answer_sdp)
+                .map_err(|e| RealtimeError::connection(e.to_string()))?,
+        )
+        .map_err(|e| RealtimeError::connection(e.to_string()))?;
 
         // 6. Start the Sans-IO Loop
         tokio::spawn(run_pc_loop(
-            pc, 
-            socket, 
-            local_addr, 
-            sender_id,
-            dc_id,
-            rx_cmd, 
-            event_tx, 
-            close_rx
+            pc, socket, local_addr, sender_id, dc_id, rx_cmd, event_tx, close_rx,
         ));
 
-        Ok(Box::new(WebRtcSession {
-            tx,
-            receiver: Arc::new(Mutex::new(rx_event)),
-            close_tx,
-        }))
+        Ok(Box::new(WebRtcSession { tx, receiver: Arc::new(Mutex::new(rx_event)), close_tx }))
     }
 }
 
@@ -211,28 +219,29 @@ async fn run_pc_loop(
     mut close_rx: mpsc::Receiver<()>,
 ) {
     let socket = Arc::new(socket);
-    
+
     // 1. Pre-allocated Buffers (Zero-alloc hot path)
-    let mut net_buf = vec![0u8; 2000]; 
+    let mut net_buf = vec![0u8; 2000];
     let mut pcm_buffer = BytesMut::with_capacity(4096);
     let mut encoding_buffer = vec![0u8; 1024]; // Reusable Opus buffer
-    
+
     // 2. State Flags
     let mut dc_connected = false;
     let mut pending_dc_messages: Vec<String> = Vec::with_capacity(50);
-    
+
     // 3. RTP State (Stable SSRC)
     // We pick ONE SSRC and stick to it. This prevents decoder resets on the server.
     // OpenAI uses SSRC latching, so it will accept whatever we send first.
-    let stable_ssrc: u32 = rand::thread_rng().r#gen(); 
+    let stable_ssrc: u32 = rand::thread_rng().r#gen();
     let mut timestamp = 0u32;
     let mut sequence_number = 0u16;
-    
+
     let encoder = audiopus::coder::Encoder::new(
         audiopus::SampleRate::Hz24000,
         audiopus::Channels::Mono,
         audiopus::Application::Voip,
-    ).expect("Opus encoder init failed");
+    )
+    .expect("Opus encoder init failed");
 
     info!("WebRTC Loop Started. Audio SSRC: {}", stable_ssrc);
 
@@ -242,18 +251,22 @@ async fn run_pc_loop(
         let sleep_fut = async {
             if let Some(to) = timeout {
                 let now = Instant::now();
-                if to > now { tokio::time::sleep(to - now).await; }
-            } else { std::future::pending::<()>().await; }
+                if to > now {
+                    tokio::time::sleep(to - now).await;
+                }
+            } else {
+                std::future::pending::<()>().await;
+            }
         };
 
         tokio::select! {
             biased; // Poll network/timers first, then app commands
 
             // A. Timer Handling
-            _ = sleep_fut => { 
-                let _ = pc.handle_timeout(Instant::now()); 
+            _ = sleep_fut => {
+                let _ = pc.handle_timeout(Instant::now());
             }
-            
+
             // B. Network Ingress (UDP -> PC)
             res = socket.recv_from(&mut net_buf) => {
                 if let Ok((n, addr)) = res {
@@ -280,7 +293,7 @@ async fn run_pc_loop(
                         // Chunk 20ms frames (960 bytes @ 24kHz PCM16)
                         while pcm_buffer.len() >= PCM_BYTES_PER_FRAME {
                             let frame_bytes = pcm_buffer.split_to(PCM_BYTES_PER_FRAME);
-                            
+
                             // Convert bytes to i16 for Opus
                             let pcm_samples: Vec<i16> = frame_bytes.chunks_exact(2)
                                 .map(|c| i16::from_le_bytes([c[0], c[1]]))
@@ -307,11 +320,11 @@ async fn run_pc_loop(
                                             },
                                             payload: Bytes::copy_from_slice(&encoding_buffer[..len]),
                                         };
-                                        
+
                                         if let Err(e) = sender.write_rtp(packet) {
                                             warn!("RTP Write Error: {:?}", e);
                                         }
-                                        
+
                                         sequence_number = sequence_number.wrapping_add(1);
                                         timestamp = timestamp.wrapping_add(RTP_TIMESTAMP_INCREMENT);
                                     }
@@ -340,7 +353,7 @@ async fn run_pc_loop(
                             }
                         }
                     }
-                    
+
                     // -- Added missing handlers for other event types to ensure complete coverage --
                      Some(ClientEvent::InputAudioBufferCommit) => {
                          let msg = serde_json::to_string(&ClientEvent::InputAudioBufferCommit).unwrap_or_default();
@@ -375,7 +388,7 @@ async fn run_pc_loop(
                              } else if pending_dc_messages.len() < 50 { pending_dc_messages.push(msg); }
                          }
                      }
-                    
+
                     Some(_) => {}
                     None => break,
                 }
@@ -401,15 +414,18 @@ async fn run_pc_loop(
                 error!("UDP Send failure: {}", e);
             }
         }
-        
+
         // F. Event Polling (State Changes)
         while let Some(evt) = pc.poll_event() {
-             match evt {
+            match evt {
                 RTCPeerConnectionEvent::OnDataChannel(RTCDataChannelEvent::OnOpen(id)) => {
                     if id == dc_id {
-                        info!("OpenAI Data Channel Established - Flushing {} items", pending_dc_messages.len());
+                        info!(
+                            "OpenAI Data Channel Established - Flushing {} items",
+                            pending_dc_messages.len()
+                        );
                         dc_connected = true;
-                        
+
                         // FLUSH QUEUE
                         if let Some(mut dc) = pc.data_channel(dc_id) {
                             for msg in pending_dc_messages.drain(..) {
@@ -422,28 +438,34 @@ async fn run_pc_loop(
                 }
                 RTCPeerConnectionEvent::OnConnectionStateChangeEvent(state) => {
                     info!("Peer Connection State: {:?}", state);
-                    if state == RTCPeerConnectionState::Failed || state == RTCPeerConnectionState::Closed {
+                    if state == RTCPeerConnectionState::Failed
+                        || state == RTCPeerConnectionState::Closed
+                    {
                         error!("Connection failed or closed. Exiting loop.");
                         return; // Exit the task
                     }
                 }
                 _ => {}
-             }
+            }
         }
     }
     let _ = pc.close();
 }
 
 async fn exchange_sdp(model_id: &str, api_key: &str, offer_sdp: String) -> Result<String> {
-    let client = reqwest::Client::builder().use_rustls_tls().build()
+    let client = reqwest::Client::builder()
+        .use_rustls_tls()
+        .build()
         .map_err(|e| RealtimeError::connection(e.to_string()))?;
-    
+
     let url = format!("{}?model={}", OPENAI_BASE_URL, model_id);
-    let res = client.post(&url)
+    let res = client
+        .post(&url)
         .header("Authorization", format!("Bearer {}", api_key))
         .header("Content-Type", "application/sdp")
         .body(offer_sdp)
-        .send().await
+        .send()
+        .await
         .map_err(|e| RealtimeError::connection(e.to_string()))?;
 
     if !res.status().is_success() {
@@ -461,16 +483,30 @@ pub struct WebRtcSession {
 
 #[async_trait]
 impl RealtimeSession for WebRtcSession {
-    fn session_id(&self) -> &str { "webrtc-session" }
-    fn is_connected(&self) -> bool { true }
+    fn session_id(&self) -> &str {
+        "webrtc-session"
+    }
+    fn is_connected(&self) -> bool {
+        true
+    }
     async fn send_audio(&self, audio: &crate::audio::AudioChunk) -> Result<()> {
-        self.send_event(ClientEvent::AudioDelta { event_id: None, audio: Bytes::from(audio.data.clone()), format: audio.format.clone() }).await
+        self.send_event(ClientEvent::AudioDelta {
+            event_id: None,
+            audio: Bytes::from(audio.data.clone()),
+            format: audio.format.clone(),
+        })
+        .await
     }
     async fn send_audio_base64(&self, audio_b64: &str) -> Result<()> {
         use base64::Engine;
-        let audio = base64::engine::general_purpose::STANDARD.decode(audio_b64)
+        let audio = base64::engine::general_purpose::STANDARD
+            .decode(audio_b64)
             .map_err(|e| RealtimeError::connection(e.to_string()))?;
-        self.send_audio(&crate::audio::AudioChunk { data: audio, format: AudioFormat::pcm16_24khz() }).await
+        self.send_audio(&crate::audio::AudioChunk {
+            data: audio,
+            format: AudioFormat::pcm16_24khz(),
+        })
+        .await
     }
     async fn send_text(&self, text: &str) -> Result<()> {
         self.send_event(ClientEvent::ConversationItemCreate {
@@ -482,11 +518,15 @@ impl RealtimeSession for WebRtcSession {
             item: serde_json::json!({ "type": "function_call_output", "call_id": res.call_id, "output": res.output }),
         }).await
     }
-    async fn commit_audio(&self) -> Result<()> { 
-        self.send_event(ClientEvent::InputAudioBufferCommit).await 
+    async fn commit_audio(&self) -> Result<()> {
+        self.send_event(ClientEvent::InputAudioBufferCommit).await
     }
-    async fn clear_audio(&self) -> Result<()> { self.send_event(ClientEvent::InputAudioBufferClear).await }
-    async fn create_response(&self) -> Result<()> { self.send_event(ClientEvent::ResponseCreate { config: None }).await }
+    async fn clear_audio(&self) -> Result<()> {
+        self.send_event(ClientEvent::InputAudioBufferClear).await
+    }
+    async fn create_response(&self) -> Result<()> {
+        self.send_event(ClientEvent::ResponseCreate { config: None }).await
+    }
     async fn interrupt(&self) -> Result<()> {
         self.send_event(ClientEvent::ResponseCancel).await?;
         self.send_event(ClientEvent::InputAudioBufferClear).await
@@ -497,7 +537,9 @@ impl RealtimeSession for WebRtcSession {
     async fn next_event(&self) -> Option<Result<ServerEvent>> {
         self.receiver.lock().await.recv().await
     }
-    fn events(&self) -> std::pin::Pin<Box<dyn futures::Stream<Item = Result<ServerEvent>> + Send + '_>> {
+    fn events(
+        &self,
+    ) -> std::pin::Pin<Box<dyn futures::Stream<Item = Result<ServerEvent>> + Send + '_>> {
         let receiver = self.receiver.clone();
         Box::pin(async_stream::try_stream! {
             loop {
@@ -510,5 +552,8 @@ impl RealtimeSession for WebRtcSession {
             }
         })
     }
-    async fn close(&self) -> Result<()> { let _ = self.close_tx.send(()).await; Ok(()) }
+    async fn close(&self) -> Result<()> {
+        let _ = self.close_tx.send(()).await;
+        Ok(())
+    }
 }

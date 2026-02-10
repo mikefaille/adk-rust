@@ -33,12 +33,11 @@ async fn run_realtime_test(api_key: &str) -> Result<(), Box<dyn std::error::Erro
     info!("Initializing Gemini Live connection...");
 
     // 1. Configure the backend (Public API with API Key)
-    let backend = GeminiLiveBackend::Studio {
-        api_key: api_key.to_string(),
-    };
+    let backend = GeminiLiveBackend::Studio { api_key: api_key.to_string() };
 
     // 2. Create the realtime model
-    let model = GeminiRealtimeModel::new(backend, "models/gemini-2.5-flash-native-audio-preview-12-2025");
+    let model =
+        GeminiRealtimeModel::new(backend, "models/gemini-2.5-flash-native-audio-preview-12-2025");
     info!(model_id = model.model_id(), provider = model.provider(), "Model configured");
 
     // 3. Build config with system instruction
@@ -134,10 +133,7 @@ async fn run_realtime_test(api_key: &str) -> Result<(), Box<dyn std::error::Erro
     info!("========================================");
     info!("📊 VERIFICATION SUMMARY");
     info!("========================================");
-    info!(
-        audio_chunks = audio_chunks_received,
-        "Total audio chunks received (TTS output)"
-    );
+    info!(audio_chunks = audio_chunks_received, "Total audio chunks received (TTS output)");
     if !text_received.is_empty() {
         info!(text = %text_received, "Text response");
     }

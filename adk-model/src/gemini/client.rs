@@ -109,8 +109,6 @@ impl GeminiModel {
         &self.retry_config
     }
 
-
-
     fn convert_response(resp: &adk_gemini::GenerationResponse) -> Result<LlmResponse> {
         let mut converted_parts: Vec<Part> = Vec::new();
 
