@@ -41,7 +41,7 @@ fn test_tool_response_from_string() {
 
 #[test]
 fn test_client_event_audio_input_serialization() {
-    let event = ClientEvent::AudioDelta { 
+    let event = ClientEvent::AudioDelta {
         event_id: None,
         audio: b"base64audio==".to_vec().into(),
         format: adk_realtime::AudioFormat::default(),
@@ -89,7 +89,10 @@ fn test_server_event_audio_delta_deserialization() {
     match event {
         ServerEvent::AudioDelta { event_id, delta, item_id, .. } => {
             assert_eq!(event_id, "evt_123");
-            assert_eq!(delta, base64::engine::general_purpose::STANDARD.decode("YmFzZTY0YXVkaW8=").unwrap());
+            assert_eq!(
+                delta,
+                base64::engine::general_purpose::STANDARD.decode("YmFzZTY0YXVkaW8=").unwrap()
+            );
             assert_eq!(item_id, "item_789");
         }
         _ => panic!("Expected AudioDelta event"),

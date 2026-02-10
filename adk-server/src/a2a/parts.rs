@@ -59,8 +59,14 @@ pub fn adk_parts_to_a2a(
             Part::CodeExecutionResult { code_execution_result } => {
                 let mut data = Map::new();
                 let mut code_data = Map::new();
-                code_data.insert("outcome".to_string(), Value::String(code_execution_result.outcome.clone()));
-                code_data.insert("output".to_string(), Value::String(code_execution_result.output.clone()));
+                code_data.insert(
+                    "outcome".to_string(),
+                    Value::String(code_execution_result.outcome.clone()),
+                );
+                code_data.insert(
+                    "output".to_string(),
+                    Value::String(code_execution_result.output.clone()),
+                );
                 data.insert("code_execution_result".to_string(), Value::Object(code_data));
 
                 Ok(crate::a2a::Part::Data { data, metadata: None })
@@ -115,10 +121,18 @@ pub fn a2a_parts_to_adk(parts: &[crate::a2a::Part]) -> Result<Vec<Part>> {
                         id,
                     })
                 } else if let Some(code) = data.get("code_execution_result") {
-                    let outcome = code.get("outcome").and_then(|v| v.as_str()).unwrap_or_default().to_string();
-                    let output = code.get("output").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+                    let outcome = code
+                        .get("outcome")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    let output =
+                        code.get("output").and_then(|v| v.as_str()).unwrap_or_default().to_string();
                     Ok(Part::CodeExecutionResult {
-                        code_execution_result: adk_core::CodeExecutionResultData { outcome, output },
+                        code_execution_result: adk_core::CodeExecutionResultData {
+                            outcome,
+                            output,
+                        },
                     })
                 } else {
                     Err(adk_core::AdkError::Agent("Unknown data part format".to_string()))

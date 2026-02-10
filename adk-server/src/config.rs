@@ -134,12 +134,12 @@ impl ServerConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use futures;
     use adk_agent::CustomAgent;
+    use adk_artifact::InMemoryArtifactService;
     use adk_core::SingleAgentLoader;
     use adk_session::InMemorySessionService;
-    use adk_artifact::InMemoryArtifactService;
     use adk_telemetry::AdkSpanExporter;
+    use futures;
     use std::sync::Arc;
     use std::time::Duration;
 

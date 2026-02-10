@@ -211,7 +211,7 @@ pub fn content_to_message(content: &Content) -> Message {
                     .push(serde_json::to_string(&function_response.response).unwrap_or_default());
             }
             Part::CodeExecutionResult { .. } => {} // Skip for now
-            _ => {} // Skip other part types
+            _ => {}                                // Skip other part types
         }
     }
 
