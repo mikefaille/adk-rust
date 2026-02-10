@@ -126,12 +126,46 @@ pub async fn delete_session(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// Maximum number of state entries accepted in a create-session request body.
+/// Prevents uncontrolled allocation from user-provided input.
+const MAX_STATE_ENTRIES: usize = 1_000;
+
+/// Maximum number of events accepted in a create-session request body.
+const MAX_BODY_EVENTS: usize = 10_000;
+
+fn deserialize_bounded_state<'de, D>(
+    deserializer: D,
+) -> Result<std::collections::HashMap<String, serde_json::Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let full: std::collections::HashMap<String, serde_json::Value> =
+        serde::Deserialize::deserialize(deserializer)?;
+    if full.len() <= MAX_STATE_ENTRIES {
+        Ok(full)
+    } else {
+        Ok(full.into_iter().take(MAX_STATE_ENTRIES).collect())
+    }
+}
+
+fn deserialize_bounded_events<'de, D>(deserializer: D) -> Result<Vec<serde_json::Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let full: Vec<serde_json::Value> = serde::Deserialize::deserialize(deserializer)?;
+    if full.len() <= MAX_BODY_EVENTS {
+        Ok(full)
+    } else {
+        Ok(full.into_iter().take(MAX_BODY_EVENTS).collect())
+    }
+}
+
 /// Request body for creating session (optional, can be empty)
 #[derive(Serialize, Deserialize, Default)]
 pub struct CreateSessionBodyRequest {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_bounded_state")]
     pub state: std::collections::HashMap<String, serde_json::Value>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_bounded_events")]
     pub events: Vec<serde_json::Value>,
 }
 
@@ -154,22 +188,23 @@ pub async fn create_session_from_path(
 ) -> Result<Json<SessionResponse>, StatusCode> {
     let session_id = params.session_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
-    // Cap initial state entries to prevent uncontrolled allocation from user input
-    const MAX_STATE_ENTRIES: usize = 1_000;
-    let state: std::collections::HashMap<String, serde_json::Value> = body
-        .map(|b| b.state.clone())
-        .unwrap_or_default()
-        .into_iter()
-        .take(MAX_STATE_ENTRIES)
-        .collect();
-
     let session = controller
         .session_service
         .create(adk_session::CreateRequest {
             app_name: params.app_name.clone(),
             user_id: params.user_id.clone(),
             session_id: Some(session_id),
-            state,
+            state: match body {
+                Some(b) => {
+                    let s = b.0.state;
+                    if s.len() > MAX_STATE_ENTRIES {
+                        s.into_iter().take(MAX_STATE_ENTRIES).collect()
+                    } else {
+                        s
+                    }
+                }
+                None => std::collections::HashMap::new(),
+            },
         })
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
