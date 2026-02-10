@@ -481,6 +481,7 @@ version = "0.2.1"
 dependencies = [
  "adk-agent",
  "adk-core",
+ "adk-gemini",
  "adk-graph",
  "adk-model",
  "adk-runner",

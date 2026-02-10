@@ -15,6 +15,11 @@ categories = ["development-tools", "gui"]
 name = "adk-studio"
 path = "src/main.rs"
 
+[features]
+default = []
+vertex = ["dep:adk-gemini", "adk-gemini/vertex"]
+full = ["vertex"]
+
 [dependencies]
 # ADK crates
 adk-core.workspace = true
@@ -24,6 +29,7 @@ adk-tool.workspace = true
 adk-runner.workspace = true
 adk-session.workspace = true
 adk-graph.workspace = true
+adk-gemini = { workspace = true, optional = true }
 
 # Async
 tokio.workspace = true

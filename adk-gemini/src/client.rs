@@ -1,3 +1,5 @@
+#[cfg(feature = "vertex")]
+use crate::vertex::VertexContext;
 use crate::{
     batch::{BatchBuilder, BatchHandle},
     cache::{CacheBuilder, CachedContentHandle},
@@ -263,17 +265,7 @@ pub enum GeminiLiveBackend {
     },
 }
 
-/// Context for Vertex AI authentication.
-#[cfg(feature = "vertex")]
-#[derive(Debug, Clone)]
-pub struct VertexContext {
-    /// Google Cloud Project ID.
-    pub project: String,
-    /// GCP Location (e.g., "us-central1").
-    pub location: String,
-    /// OAuth2 Access Token.
-    pub token: String,
-}
+
 
 pub struct GeminiClient {
     pub model: Model,
