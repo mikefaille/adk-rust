@@ -13,25 +13,15 @@ This example provides a polished, enterprise-ready React frontend for ADK agents
 
 ![MUI Client Interface](screenshot_placeholder.png)
 
-## Getting Started
-
-### Prerequisites
-
-- Node.js (v18+)
-- npm or pnpm
-
-### Installation
+## Quick Start
 
 ```bash
+# Start the UI server (in adk-rust root)
+GOOGLE_API_KEY=... cargo run --example ui_server
+
+# In another terminal, start this client
 cd examples/ui_react_client_mui
 npm install
-```
-
-### Running the Client
-
-Start the development server:
-
-```bash
 npm run dev
 ```
 
@@ -46,3 +36,45 @@ cp .env.example .env
 ```
 
 Ensure your ADK agent backend is running and accessible (default: `http://localhost:8080`).
+
+## What This Does
+
+This client connects to the ADK UI server via SSE and renders UI components that agents generate through `render_*` tool calls:
+
+- **Forms** - User input with text fields, selects, switches, etc.
+- **Cards** - Information display with action buttons
+- **Alerts** - Success, warning, error, and info notifications
+- **Tables** - Tabular data display
+- **Charts** - Bar, line, area, and pie charts
+- **Progress** - Step-by-step task progress
+- **Layouts** - Dashboard-style multi-section views
+
+## Architecture
+
+```
+┌─────────────────┐     SSE      ┌──────────────┐
+│  React Client   │◄────────────│  ui_server   │
+│   (Vite)        │             │  (Rust)      │
+│                 │────POST────►│              │
+└─────────────────┘  /api/run   └──────────────┘
+         │                              │
+         ▼                              ▼
+   Renderer.tsx                  LlmAgent + UiToolset
+```
+
+## Key Files
+
+- `src/adk-ui-renderer/types.ts` - TypeScript types matching Rust schema
+- `src/adk-ui-renderer/Renderer.tsx` - Component renderer (23 components)
+- `src/App.tsx` - Main app with SSE connection
+
+## Customization
+
+The renderer uses Material UI (MUI) and Tailwind CSS. Modify `Renderer.tsx` or the theme configuration to customize styling or add new component types.
+
+## Production Build
+
+```bash
+npm run build
+# Output in dist/
+```
