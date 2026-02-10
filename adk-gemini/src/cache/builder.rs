@@ -4,7 +4,7 @@ use tracing::instrument;
 
 use snafu::ResultExt;
 
-use crate::client::GeminiClient;
+use crate::{Model, GeminiClient};
 use crate::types::Content;
 
 use super::handle::*;
@@ -118,7 +118,7 @@ impl CacheBuilder {
         system_instruction.present = self.system_instruction.is_some(),
     ))]
     pub async fn execute(self) -> Result<CachedContentHandle, Error> {
-        let model = self.client.model();
+        let model = Model::from(self.client.model().to_string());
         let expiration = self.expiration.ok_or(Error::MissingExpiration)?;
 
         let cached_content = CreateCachedContentRequest {

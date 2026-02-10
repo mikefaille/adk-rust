@@ -906,7 +906,8 @@ mod tests {
 
         // Check if it's a validation error
         if let Err(crate::error::Error::Validation { source }) = result {
-            assert_eq!(source, ValidationError::InvalidTemperature { value: 2.0 });
+            let err = source.downcast_ref::<ValidationError>().expect("Not a ValidationError");
+            assert_eq!(err, &ValidationError::InvalidTemperature { value: 2.0 });
         } else {
             panic!("Expected validation error, got {:?}", result);
         }
@@ -925,7 +926,8 @@ mod tests {
 
         // Check if it's a validation error
         if let Err(crate::error::Error::Validation { source }) = result {
-            assert_eq!(source, ValidationError::InvalidThinkingBudget { value: -2 });
+            let err = source.downcast_ref::<ValidationError>().expect("Not a ValidationError");
+            assert_eq!(err, &ValidationError::InvalidThinkingBudget { value: -2 });
         } else {
             panic!("Expected validation error, got {:?}", result);
         }

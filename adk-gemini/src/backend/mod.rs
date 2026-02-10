@@ -1,132 +1,123 @@
-use async_trait::async_trait;
-use futures::stream::BoxStream;
-use mime::Mime;
-
-use crate::batch::model::{
-    BatchGenerateContentRequest, BatchGenerateContentResponse, BatchOperation,
-    ListBatchesResponse,
-};
-use crate::cache::model::{
-    CacheExpirationRequest, CachedContent, CreateCachedContentRequest,
-    ListCachedContentsResponse,
-};
-use crate::error::Error;
-use crate::embedding::{
-    BatchContentEmbeddingResponse, BatchEmbedContentsRequest, ContentEmbeddingResponse,
-    EmbedContentRequest,
-};
-use crate::files::model::{File, ListFilesResponse};
-use crate::generation::{GenerateContentRequest, GenerationResponse};
-
+pub mod studio;
 #[cfg(feature = "vertex")]
 pub mod vertex;
 
-pub mod studio;
+use crate::{
+    batch::model::{BatchGenerateContentRequest, BatchOperation, ListBatchesResponse},
+    cache::model::{CachedContent, CreateCachedContentRequest, ListCachedContentsResponse, CacheExpirationRequest},
+    embedding::model::{
+        BatchContentEmbeddingResponse, BatchEmbedContentsRequest, ContentEmbeddingResponse, EmbedContentRequest,
+    },
+    files::model::{File, ListFilesResponse},
+    generation::model::{GenerateContentRequest, GenerationResponse},
+    error::Error,
+};
+use async_trait::async_trait;
+use futures::Stream;
+use std::pin::Pin;
 
-/// The unified contract that both Studio and Vertex must fulfill.
+pub type BackendStream<T> = Pin<Box<dyn Stream<Item = Result<T, Error>> + Send>>;
+
+/// Trait defining the interface for Gemini backends (Studio vs Vertex).
 /// This ensures calling code never needs to know which backend is active.
 #[async_trait]
 pub trait GeminiBackend: Send + Sync + std::fmt::Debug {
     /// Get the model name associated with this backend
     fn model(&self) -> &str;
 
-    /// Generate content (unary)
-    async fn generate_content(
-        &self,
-        req: GenerateContentRequest,
-    ) -> Result<GenerationResponse, Error>;
+    /// Generate content (text, images, etc.)
+    async fn generate_content(&self, req: GenerateContentRequest) -> Result<GenerationResponse, Error>;
 
-    /// Generate content (streaming)
-    /// Returns a type-erased stream so implementations can use different libraries (reqwest vs tonic)
-    async fn stream_generate_content(
-        &self,
-        req: GenerateContentRequest,
-    ) -> Result<BoxStream<'static, Result<GenerationResponse, Error>>, Error>;
+    /// Generate content with streaming response
+    async fn generate_content_stream(&self, req: GenerateContentRequest) -> Result<BackendStream<GenerationResponse>, Error>;
 
     /// Count tokens
     async fn count_tokens(&self, req: GenerateContentRequest) -> Result<u32, Error>;
 
-    /// Embed content
-    async fn embed_content(
-        &self,
-        req: EmbedContentRequest,
-    ) -> Result<ContentEmbeddingResponse, Error>;
+    /// Generate text embeddings
+    async fn embed_content(&self, req: EmbedContentRequest) -> Result<ContentEmbeddingResponse, Error>;
 
-    /// Batch embed content
-    async fn batch_embed_content(
-        &self,
-        req: BatchEmbedContentsRequest,
-    ) -> Result<BatchContentEmbeddingResponse, Error>;
+    /// Generate batch text embeddings
+    async fn batch_embed_contents(&self, req: BatchEmbedContentsRequest) -> Result<BatchContentEmbeddingResponse, Error>;
 
-    /// Create cached content
-    async fn create_cached_content(
-        &self,
-        req: CreateCachedContentRequest,
-    ) -> Result<CachedContent, Error>;
+    // --- Batch Operations ---
 
-    /// Get cached content
-    async fn get_cached_content(&self, name: &str) -> Result<CachedContent, Error>;
+    /// Create a batch prediction job
+    async fn create_batch(&self, _req: BatchGenerateContentRequest) -> Result<BatchOperation, Error> {
+        Err(Error::GoogleCloudUnsupported { operation: "createBatch" })
+    }
 
-    /// List cached contents
-    async fn list_cached_contents(
-        &self,
-        page_size: Option<i32>,
-        page_token: Option<String>,
-    ) -> Result<ListCachedContentsResponse, Error>;
+    /// Get a batch prediction job
+    async fn get_batch(&self, _name: &str) -> Result<BatchOperation, Error> {
+        Err(Error::GoogleCloudUnsupported { operation: "getBatch" })
+    }
 
-    /// Update cached content
-    async fn update_cached_content(
-        &self,
-        name: &str,
-        expiration: CacheExpirationRequest,
-    ) -> Result<CachedContent, Error>;
+    /// List batch prediction jobs
+    async fn list_batches(&self, _page_size: Option<u32>, _page_token: Option<String>) -> Result<ListBatchesResponse, Error> {
+        Err(Error::GoogleCloudUnsupported { operation: "listBatches" })
+    }
 
-    /// Delete cached content
-    async fn delete_cached_content(&self, name: &str) -> Result<(), Error>;
+    /// Cancel a batch prediction job
+    async fn cancel_batch(&self, _name: &str) -> Result<(), Error> {
+        Err(Error::GoogleCloudUnsupported { operation: "cancelBatch" })
+    }
 
-    /// Create batch operation (Generation)
-    async fn create_batch(
-        &self,
-        req: BatchGenerateContentRequest,
-    ) -> Result<BatchGenerateContentResponse, Error>;
+    /// Delete a batch prediction job
+    async fn delete_batch(&self, _name: &str) -> Result<(), Error> {
+        Err(Error::GoogleCloudUnsupported { operation: "deleteBatch" })
+    }
 
-    /// Get batch operation
-    async fn get_batch(&self, name: &str) -> Result<BatchOperation, Error>;
+    // --- File Operations ---
 
-    /// List batch operations
-    async fn list_batches(
-        &self,
-        page_size: Option<u32>,
-        page_token: Option<String>,
-    ) -> Result<ListBatchesResponse, Error>;
+    /// Upload a file
+    async fn upload_file(&self, _display_name: Option<String>, _bytes: Vec<u8>, _mime_type: mime::Mime) -> Result<File, Error> {
+         Err(Error::GoogleCloudUnsupported { operation: "uploadFile" })
+    }
 
-    /// Cancel batch operation
-    async fn cancel_batch(&self, name: &str) -> Result<(), Error>;
+    /// Get a file (metadata)
+    async fn get_file(&self, _name: &str) -> Result<File, Error> {
+        Err(Error::GoogleCloudUnsupported { operation: "getFile" })
+    }
 
-    /// Delete batch operation
-    async fn delete_batch(&self, name: &str) -> Result<(), Error>;
-
-    /// Upload file
-    async fn upload_file(
-        &self,
-        display_name: Option<String>,
-        file_bytes: Vec<u8>,
-        mime_type: Mime,
-    ) -> Result<File, Error>;
-
-    /// Get file
-    async fn get_file(&self, name: &str) -> Result<File, Error>;
+    /// Download a file (content)
+    async fn download_file(&self, _name: &str) -> Result<Vec<u8>, Error> {
+        Err(Error::GoogleCloudUnsupported { operation: "downloadFile" })
+    }
 
     /// List files
-    async fn list_files(
-        &self,
-        page_size: Option<u32>,
-        page_token: Option<String>,
-    ) -> Result<ListFilesResponse, Error>;
+    async fn list_files(&self, _page_size: Option<u32>, _page_token: Option<String>) -> Result<ListFilesResponse, Error> {
+        Err(Error::GoogleCloudUnsupported { operation: "listFiles" })
+    }
 
-    /// Delete file
-    async fn delete_file(&self, name: &str) -> Result<(), Error>;
+    /// Delete a file
+    async fn delete_file(&self, _name: &str) -> Result<(), Error> {
+        Err(Error::GoogleCloudUnsupported { operation: "deleteFile" })
+    }
 
-    /// Download file (returns raw bytes)
-    async fn download_file(&self, name: &str) -> Result<Vec<u8>, Error>;
+    // --- Cache Operations ---
+
+    /// Create cached content
+    async fn create_cached_content(&self, _req: CreateCachedContentRequest) -> Result<CachedContent, Error> {
+        Err(Error::GoogleCloudUnsupported { operation: "createCachedContent" })
+    }
+
+    /// Get cached content
+    async fn get_cached_content(&self, _name: &str) -> Result<CachedContent, Error> {
+        Err(Error::GoogleCloudUnsupported { operation: "getCachedContent" })
+    }
+
+    /// List cached contents
+    async fn list_cached_contents(&self, _page_size: Option<i32>, _page_token: Option<String>) -> Result<ListCachedContentsResponse, Error> {
+        Err(Error::GoogleCloudUnsupported { operation: "listCachedContents" })
+    }
+
+    /// Update cached content expiration
+    async fn update_cached_content(&self, _name: &str, _req: CacheExpirationRequest) -> Result<CachedContent, Error> {
+        Err(Error::GoogleCloudUnsupported { operation: "updateCachedContent" })
+    }
+
+    /// Delete cached content
+    async fn delete_cached_content(&self, _name: &str) -> Result<(), Error> {
+        Err(Error::GoogleCloudUnsupported { operation: "deleteCachedContent" })
+    }
 }

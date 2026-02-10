@@ -1,14 +1,12 @@
 use futures::stream::BoxStream;
-use futures::{Stream, StreamExt, TryStreamExt};
+use futures::Stream;
 use mime::Mime;
-use reqwest::Url;
 use std::sync::Arc;
 
 use crate::backend::GeminiBackend;
 use crate::batch::{BatchBuilder, BatchHandle};
 use crate::builder::GeminiBuilder;
 use crate::cache::{CacheBuilder, CachedContentHandle};
-use crate::common::Model;
 use crate::embedding::{
     BatchContentEmbeddingResponse, BatchEmbedContentsRequest, ContentEmbeddingResponse,
     EmbedBuilder, EmbedContentRequest,
@@ -16,35 +14,35 @@ use crate::embedding::{
 use crate::error::Error;
 use crate::files::{
     handle::FileHandle,
-    model::{File, ListFilesResponse},
+    model::File,
 };
 use crate::generation::{ContentBuilder, GenerateContentRequest, GenerationResponse};
 
 #[cfg(feature = "vertex")]
 pub use crate::backend::vertex::extract_service_account_project_id;
-#[cfg(feature = "vertex")]
-use crate::types::VertexContext;
 
 /// The main entry point for interacting with the Gemini API.
 ///
 /// This client provides a high-level interface for generating content, managing files,
 /// and working with other Gemini resources. It supports both the Google AI Studio API
 /// and Vertex AI (Google Cloud).
+///
+/// The client uses an internal backend implementation (Studio vs Vertex) to handle
+/// the specifics of each API.
 #[derive(Clone, Debug)]
 pub struct GeminiClient {
-    backend: Arc<Box<dyn GeminiBackend>>,
+    backend: Arc<dyn GeminiBackend>,
 }
 
 impl GeminiClient {
     /// Internal constructor used by the Builder
-    pub fn new(backend: Box<dyn GeminiBackend>) -> Self {
-        Self {
-            backend: Arc::new(backend),
-        }
+    pub fn new(backend: Arc<dyn GeminiBackend>) -> Self {
+        Self { backend }
     }
 
-    pub fn model(&self) -> Model {
-        self.backend.model().to_string().into()
+    /// Returns the model name used by this client.
+    pub fn model(&self) -> &str {
+        self.backend.model()
     }
 
     /// Create a new client with the given API key.
@@ -54,113 +52,14 @@ impl GeminiClient {
             .expect("failed to build default client")
     }
 
-    /// Create a new client with custom base URL
-    pub fn with_model_and_base_url<K: Into<String>, M: Into<Model>>(
-        api_key: K,
-        model: M,
-        base_url: Url,
-    ) -> Result<Self, Error> {
-        GeminiBuilder::new(api_key)
-            .with_model(model)
-            .with_base_url(base_url)
-            .build()
-    }
+    // --- Content Generation ---
 
-    /// Create a new client using Vertex AI (Google Cloud) endpoints.
-    #[cfg(feature = "vertex")]
-    pub fn with_google_cloud<K: Into<String>, P: Into<String>, L: Into<String>, M: Into<Model>>(
-        api_key: K,
-        project_id: P,
-        location: L,
-        model: M,
-    ) -> Result<Self, Error> {
-        GeminiBuilder::new(api_key)
-            .with_model(model)
-            .with_google_cloud(project_id, location)
-            .build()
-    }
-
-    /// Create a new client using Vertex AI (Google Cloud) endpoints with Application Default Credentials (ADC).
-    #[cfg(feature = "vertex")]
-    pub fn with_google_cloud_adc<P: Into<String>, L: Into<String>>(
-        project_id: P,
-        location: L,
-    ) -> Result<Self, Error> {
-        Self::with_google_cloud_adc_model(project_id, location, Model::default())
-    }
-
-    /// Create a new client using Vertex AI (Google Cloud) endpoints and a specific model with ADC.
-    #[cfg(feature = "vertex")]
-    pub fn with_google_cloud_adc_model<P: Into<String>, L: Into<String>, M: Into<Model>>(
-        project_id: P,
-        location: L,
-        model: M,
-    ) -> Result<Self, Error> {
-        GeminiBuilder::new_without_api_key()
-            .with_model(model)
-            .with_google_cloud(project_id, location)
-            .with_google_cloud_adc()?
-            .build()
-    }
-
-    /// Create a new client using Vertex AI (Google Cloud) endpoints and Workload Identity Federation JSON.
-    #[cfg(feature = "vertex")]
-    pub fn with_google_cloud_wif_json<P: Into<String>, L: Into<String>, M: Into<Model>>(
-        wif_json: &str,
-        project_id: P,
-        location: L,
-        model: M,
-    ) -> Result<Self, Error> {
-        GeminiBuilder::new_without_api_key()
-            .with_model(model)
-            .with_google_cloud(project_id, location)
-            .with_google_cloud_wif_json(wif_json)?
-            .build()
-    }
-
-    /// Create a new client using a service account JSON key.
-    #[cfg(feature = "vertex")]
-    pub fn with_service_account_json(service_account_json: &str) -> Result<Self, Error> {
-        Self::with_service_account_json_model(service_account_json, Model::default())
-    }
-
-    /// Create a new client using a service account JSON key and a specific model.
-    #[cfg(feature = "vertex")]
-    pub fn with_service_account_json_model<M: Into<Model>>(
-        service_account_json: &str,
-        model: M,
-    ) -> Result<Self, Error> {
-        let project_id = extract_service_account_project_id(service_account_json)?;
-        GeminiBuilder::new_without_api_key()
-            .with_model(model)
-            .with_service_account_json(service_account_json)?
-            .with_google_cloud(project_id, "us-central1")
-            .build()
-    }
-
-    /// Create a new client using Vertex AI (Google Cloud) endpoints and a service account JSON key.
-    #[cfg(feature = "vertex")]
-    pub fn with_google_cloud_service_account_json<M: Into<Model>>(
-        service_account_json: &str,
-        project_id: &str,
-        location: &str,
-        model: M,
-    ) -> Result<Self, Error> {
-        GeminiBuilder::new_without_api_key()
-            .with_model(model)
-            .with_service_account_json(service_account_json)?
-            .with_google_cloud(project_id, location)
-            .build()
-    }
-
-    // --- Public API ---
-
-    /// Start building a content generation request
+    /// Start building a content generation request using a fluent API.
     pub fn generate_content(&self) -> ContentBuilder {
         ContentBuilder::new(Arc::new(self.clone()))
     }
 
-    /// Generate content (raw request)
+    /// Generate content (unary).
     pub(crate) async fn generate_content_raw(
         &self,
         req: GenerateContentRequest,
@@ -168,25 +67,27 @@ impl GeminiClient {
         self.backend.generate_content(req).await
     }
 
-    /// Generate content (streaming)
+    /// Generate content (streaming).
     pub(crate) async fn generate_content_stream(
         &self,
         req: GenerateContentRequest,
     ) -> Result<BoxStream<'static, Result<GenerationResponse, Error>>, Error> {
-        self.backend.stream_generate_content(req).await
+        self.backend.generate_content_stream(req).await
     }
 
-    /// Count tokens
+    /// Count tokens for a given request.
     pub async fn count_tokens(&self, req: GenerateContentRequest) -> Result<u32, Error> {
         self.backend.count_tokens(req).await
     }
 
-    /// Start building a content embedding request
+    // --- Text Embeddings ---
+
+    /// Start building a text embedding request using a fluent API.
     pub fn embed_content(&self) -> EmbedBuilder {
         EmbedBuilder::new(Arc::new(self.clone()))
     }
 
-    /// Embed content (raw)
+    /// Embed content (raw).
     pub(crate) async fn embed_content_raw(
         &self,
         req: EmbedContentRequest,
@@ -194,33 +95,39 @@ impl GeminiClient {
         self.backend.embed_content(req).await
     }
 
-    /// Batch Embed content
+    /// Batch embed content.
     pub(crate) async fn embed_content_batch(
         &self,
         req: BatchEmbedContentsRequest,
     ) -> Result<BatchContentEmbeddingResponse, Error> {
-        self.backend.batch_embed_content(req).await
+        self.backend.batch_embed_contents(req).await
     }
 
-    /// Start building a batch content generation request
+    // --- Batch Operations ---
+
+    /// Start building a batch generation request using a fluent API.
     pub fn batch_generate_content(&self) -> BatchBuilder {
         BatchBuilder::new(Arc::new(self.clone()))
     }
 
-    /// Batch generate content (raw)
+    /// Create a batch generation operation (raw).
     pub(crate) async fn batch_generate_content_raw(
         &self,
         req: crate::batch::model::BatchGenerateContentRequest,
-    ) -> Result<crate::batch::model::BatchGenerateContentResponse, Error> {
-         self.backend.create_batch(req).await
+    ) -> Result<crate::batch::model::BatchOperation, Error> {
+        self.backend.create_batch(req).await
     }
 
-    /// Get a handle to a batch operation by its name.
+    /// Get a handle to an existing batch operation.
     pub fn get_batch(&self, name: &str) -> BatchHandle {
         BatchHandle::new(name.to_string(), Arc::new(self.clone()))
     }
 
-    pub(crate) async fn get_batch_operation(&self, name: &str) -> Result<crate::batch::model::BatchOperation, Error> {
+    /// Get details of a batch operation.
+    pub(crate) async fn get_batch_operation(
+        &self,
+        name: &str,
+    ) -> Result<crate::batch::model::BatchOperation, Error> {
         self.backend.get_batch(name).await
     }
 
@@ -239,7 +146,7 @@ impl GeminiClient {
                     .await?;
 
                 for operation in response.operations {
-                    yield operation;
+                    yield operation as crate::batch::model::BatchOperation;
                 }
 
                 if let Some(next_page_token) = response.next_page_token {
@@ -259,28 +166,44 @@ impl GeminiClient {
         self.backend.delete_batch(name).await
     }
 
-    /// Create cached content with a fluent API.
+    // --- Content Caching ---
+
+    /// Start building a cached content request using a fluent API.
     pub fn create_cache(&self) -> CacheBuilder {
         CacheBuilder::new(Arc::new(self.clone()))
     }
 
-    /// Get a handle to cached content by its name.
+    /// Get a handle to existing cached content.
     pub fn get_cached_content(&self, name: &str) -> CachedContentHandle {
         CachedContentHandle::new(name.to_string(), Arc::new(self.clone()))
     }
 
-    pub(crate) async fn create_cached_content_raw(&self, req: crate::cache::model::CreateCachedContentRequest) -> Result<crate::cache::model::CachedContent, Error> {
+    /// Create cached content (raw).
+    pub(crate) async fn create_cached_content_raw(
+        &self,
+        req: crate::cache::model::CreateCachedContentRequest,
+    ) -> Result<crate::cache::model::CachedContent, Error> {
         self.backend.create_cached_content(req).await
     }
 
-    pub(crate) async fn get_cached_content_raw(&self, name: &str) -> Result<crate::cache::model::CachedContent, Error> {
+    /// Get details of cached content.
+    pub(crate) async fn get_cached_content_raw(
+        &self,
+        name: &str,
+    ) -> Result<crate::cache::model::CachedContent, Error> {
         self.backend.get_cached_content(name).await
     }
 
-    pub(crate) async fn update_cached_content(&self, name: &str, expiration: crate::cache::model::CacheExpirationRequest) -> Result<crate::cache::model::CachedContent, Error> {
+    /// Update cached content expiration.
+    pub(crate) async fn update_cached_content(
+        &self,
+        name: &str,
+        expiration: crate::cache::model::CacheExpirationRequest,
+    ) -> Result<crate::cache::model::CachedContent, Error> {
         self.backend.update_cached_content(name, expiration).await
     }
 
+    /// Delete cached content.
     pub(crate) async fn delete_cached_content(&self, name: &str) -> Result<(), Error> {
         self.backend.delete_cached_content(name).await
     }
@@ -300,7 +223,7 @@ impl GeminiClient {
                     .await?;
 
                 for cached_content in response.cached_contents {
-                    yield cached_content;
+                    yield cached_content as crate::cache::model::CachedContentSummary;
                 }
 
                 if let Some(next_page_token) = response.next_page_token {
@@ -312,25 +235,35 @@ impl GeminiClient {
         }
     }
 
-    /// Start building a file resource
+    // --- File Management ---
+
+    /// Start building a file upload request using a fluent API.
     pub fn create_file<B: Into<Vec<u8>>>(&self, bytes: B) -> crate::files::builder::FileBuilder {
         crate::files::builder::FileBuilder::new(Arc::new(self.clone()), bytes)
     }
 
-    /// Get a handle to a file by its name.
+    /// Get a handle to an existing file.
     pub async fn get_file(&self, name: &str) -> Result<FileHandle, Error> {
         let file = self.backend.get_file(name).await?;
         Ok(FileHandle::new(Arc::new(self.clone()), file))
     }
 
-    pub(crate) async fn upload_file(&self, display_name: Option<String>, file_bytes: Vec<u8>, mime_type: Mime) -> Result<File, Error> {
+    /// Upload a file (raw).
+    pub(crate) async fn upload_file(
+        &self,
+        display_name: Option<String>,
+        file_bytes: Vec<u8>,
+        mime_type: Mime,
+    ) -> Result<File, Error> {
         self.backend.upload_file(display_name, file_bytes, mime_type).await
     }
 
+    /// Delete a file.
     pub(crate) async fn delete_file(&self, name: &str) -> Result<(), Error> {
         self.backend.delete_file(name).await
     }
 
+    /// Download a file (returns raw bytes).
     pub(crate) async fn download_file(&self, name: &str) -> Result<Vec<u8>, Error> {
         self.backend.download_file(name).await
     }
@@ -351,7 +284,7 @@ impl GeminiClient {
                     .await?;
 
                 for file in response.files {
-                    yield FileHandle::new(client.clone(), file);
+                    yield FileHandle::new(client.clone(), file) as FileHandle;
                 }
 
                 if let Some(next_page_token) = response.next_page_token {
@@ -361,5 +294,42 @@ impl GeminiClient {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+#[cfg(feature = "vertex")]
+mod client_tests {
+    use super::{Error, extract_service_account_project_id};
+
+    #[test]
+    fn extract_service_account_project_id_reads_project_id() {
+        let json = r#"{
+            "type": "service_account",
+            "project_id": "test-project-123",
+            "private_key_id": "key-id"
+        }"#;
+
+        let project_id = extract_service_account_project_id(json).expect("project id should parse");
+        assert_eq!(project_id, "test-project-123");
+    }
+
+    #[test]
+    fn extract_service_account_project_id_missing_field_errors() {
+        let json = r#"{
+            "type": "service_account",
+            "private_key_id": "key-id"
+        }"#;
+
+        let err =
+            extract_service_account_project_id(json).expect_err("missing project_id should fail");
+        assert!(matches!(err, Error::MissingGoogleCloudProjectId));
+    }
+
+    #[test]
+    fn extract_service_account_project_id_invalid_json_errors() {
+        let err =
+            extract_service_account_project_id("not-json").expect_err("invalid json should fail");
+        assert!(matches!(err, Error::GoogleCloudCredentialParse { .. }));
     }
 }

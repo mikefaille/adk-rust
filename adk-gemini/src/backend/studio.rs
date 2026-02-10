@@ -1,27 +1,23 @@
 use async_trait::async_trait;
 use eventsource_stream::Eventsource;
-use futures::{stream::BoxStream, StreamExt, TryStreamExt};
+use futures::{TryStreamExt};
 use jsonwebtoken::{EncodingKey, Header};
 use mime::Mime;
 use reqwest::{
     header::{HeaderMap, HeaderName, HeaderValue},
-    Client, ClientBuilder, Response,
+    Client, Response,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use snafu::{OptionExt, ResultExt};
+use snafu::{ResultExt};
 use std::{
     sync::{Arc, LazyLock},
-    time::Duration,
 };
 use tokio::sync::Mutex;
-use tracing::{instrument, Level, Span};
 use url::Url;
 
-use crate::backend::GeminiBackend;
-use crate::batch::model::{
-    BatchGenerateContentRequest, BatchGenerateContentResponse, BatchOperation, ListBatchesResponse,
-};
+use crate::backend::{GeminiBackend, BackendStream};
+use crate::batch::model::{BatchGenerateContentRequest, BatchOperation, ListBatchesResponse};
 use crate::cache::model::{
     CacheExpirationRequest, CachedContent, CreateCachedContentRequest, ListCachedContentsResponse,
 };
@@ -30,9 +26,13 @@ use crate::embedding::{
     BatchContentEmbeddingResponse, BatchEmbedContentsRequest, ContentEmbeddingResponse,
     EmbedContentRequest,
 };
-use crate::error::*;
+use crate::error::{
+    DecodeResponseSnafu, Error, BadResponseSnafu,
+    ConstructUrlSnafu, InvalidApiKeySnafu, PerformRequestNewSnafu,
+    UrlParseSnafu, ServiceAccountJwtSnafu,
+};
 use crate::files::model::{File, ListFilesResponse};
-use crate::generation::{GenerateContentRequest, GenerationResponse};
+use crate::generation::model::{GenerateContentRequest, GenerationResponse};
 
 static DEFAULT_BASE_URL: LazyLock<Url> = LazyLock::new(|| {
     Url::parse("https://generativelanguage.googleapis.com/v1beta/")
@@ -136,10 +136,20 @@ impl ServiceAccountTokenSource {
             .await
             .map_err(|e| Error::ServiceAccountToken { source: e, url: url.clone() })?;
 
-        let response = StudioBackend::check_response(response).await?;
+        let response = check_response(response).await?;
         let token: TokenResponse = response.json().await.context(DecodeResponseSnafu)?;
         let expires_at = time::OffsetDateTime::now_utc().unix_timestamp() + token.expires_in;
         Ok(CachedToken { access_token: token.access_token, expires_at })
+    }
+}
+
+async fn check_response(response: Response) -> Result<Response, Error> {
+    let status = response.status();
+    if !status.is_success() {
+        let description = response.text().await.ok();
+        BadResponseSnafu { code: status.as_u16(), description }.fail()
+    } else {
+        Ok(response)
     }
 }
 
@@ -147,15 +157,17 @@ impl ServiceAccountTokenSource {
 pub struct StudioBackend {
     pub http_client: Client,
     pub base_url: Url,
-    pub model: String,
+    pub model: Model,
     pub auth: AuthConfig,
 }
 
 impl StudioBackend {
     pub fn new(
         api_key: String,
-        model: impl Into<Model>,
+        base_url: Option<Url>,
+        model: Model,
     ) -> Result<Self, Error> {
+        let base_url = base_url.unwrap_or_else(|| DEFAULT_BASE_URL.clone());
         let headers = HeaderMap::from_iter([(
             HeaderName::from_static("x-goog-api-key"),
             HeaderValue::from_str(&api_key).context(InvalidApiKeySnafu)?,
@@ -168,8 +180,8 @@ impl StudioBackend {
 
         Ok(Self {
             http_client,
-            base_url: DEFAULT_BASE_URL.clone(),
-            model: model.into().as_str().to_string(),
+            base_url,
+            model,
             auth: AuthConfig::ApiKey(api_key),
         })
     }
@@ -183,18 +195,8 @@ impl StudioBackend {
         Self {
             http_client,
             base_url,
-            model: model.as_str().to_string(),
+            model,
             auth,
-        }
-    }
-
-    async fn check_response(response: Response) -> Result<Response, Error> {
-        let status = response.status();
-        if !status.is_success() {
-            let description = response.text().await.ok();
-            BadResponseSnafu { code: status.as_u16(), description }.fail()
-        } else {
-            Ok(response)
         }
     }
 
@@ -216,7 +218,7 @@ impl StudioBackend {
         }
 
         let response = request.send().await.map_err(|e| Error::PerformRequestNew { source: e })?;
-        let response = Self::check_response(response).await?;
+        let response = check_response(response).await?;
         deserialize(response).await
     }
 
@@ -237,8 +239,12 @@ impl StudioBackend {
     }
 
     fn build_url(&self, endpoint: &str) -> Result<Url, Error> {
-        let suffix = format!("{}:{endpoint}", self.model);
+        let suffix = format!("models/{}:{}", self.model.as_str().trim_start_matches("models/"), endpoint);
         self.build_url_with_suffix(&suffix)
+    }
+
+    fn build_url_global(&self, endpoint: &str) -> Result<Url, Error> {
+        self.build_url_with_suffix(endpoint)
     }
 
     fn build_files_url(&self, name: Option<&str>) -> Result<Url, Error> {
@@ -258,11 +264,6 @@ impl StudioBackend {
                 }
             })
             .unwrap_or_else(|| "cachedContents".to_string());
-        self.build_url_with_suffix(&suffix)
-    }
-
-    fn build_batch_url(&self, name: &str, action: Option<&str>) -> Result<Url, Error> {
-        let suffix = action.map(|a| format!("{name}:{a}")).unwrap_or_else(|| name.to_string());
         self.build_url_with_suffix(&suffix)
     }
 
@@ -305,7 +306,7 @@ impl StudioBackend {
 #[async_trait]
 impl GeminiBackend for StudioBackend {
     fn model(&self) -> &str {
-        &self.model
+        self.model.as_str()
     }
 
     async fn generate_content(
@@ -316,16 +317,12 @@ impl GeminiBackend for StudioBackend {
         self.post_json(url, &req).await
     }
 
-    async fn stream_generate_content(
+    async fn generate_content_stream(
         &self,
         req: GenerateContentRequest,
-    ) -> Result<BoxStream<'static, Result<GenerationResponse, Error>>, Error> {
+    ) -> Result<BackendStream<GenerationResponse>, Error> {
         let mut url = self.build_url("streamGenerateContent")?;
         url.query_pairs_mut().append_pair("alt", "sse");
-
-        // We can't use perform_request easily here because we need to return a stream that might not be fully read yet.
-        // But perform_request awaits response.
-        // We need to ensure we add bearer token if needed.
 
         let mut request = self.http_client.post(url).json(&req);
         if let AuthConfig::ServiceAccount(sa) = &self.auth {
@@ -334,28 +331,29 @@ impl GeminiBackend for StudioBackend {
         }
 
         let response = request.send().await.map_err(|e| Error::PerformRequestNew { source: e })?;
-        let response = Self::check_response(response).await?;
+        let response = check_response(response).await?;
 
         let stream = response.bytes_stream();
 
-        Ok(stream
+        let stream = stream
             .eventsource()
-            .map(|event| event.context(BadPartSnafu))
-            .map_ok(|event| {
-                serde_json::from_str::<GenerationResponse>(&event.data).context(DeserializeSnafu)
-            })
-            .map(|r| r.flatten())
-            .boxed())
+            .map_err(|e| Error::BadPart { source: e })
+            .and_then(|event| async move {
+                serde_json::from_str::<GenerationResponse>(&event.data).map_err(|e| Error::Deserialize { source: e })
+            });
+
+        Ok(Box::pin(stream))
     }
 
     async fn count_tokens(&self, req: GenerateContentRequest) -> Result<u32, Error> {
+        let url = self.build_url("countTokens")?;
         #[derive(Deserialize)]
         struct CountTokensResponse {
+            #[serde(rename = "totalTokens")]
             total_tokens: u32,
         }
-        let url = self.build_url("countTokens")?;
-        let res: CountTokensResponse = self.post_json(url, &req).await?;
-        Ok(res.total_tokens)
+        let response: CountTokensResponse = self.post_json(url, &req).await?;
+        Ok(response.total_tokens)
     }
 
     async fn embed_content(
@@ -366,7 +364,7 @@ impl GeminiBackend for StudioBackend {
         self.post_json(url, &req).await
     }
 
-    async fn batch_embed_content(
+    async fn batch_embed_contents(
         &self,
         req: BatchEmbedContentsRequest,
     ) -> Result<BatchContentEmbeddingResponse, Error> {
@@ -408,6 +406,9 @@ impl GeminiBackend for StudioBackend {
         expiration: CacheExpirationRequest,
     ) -> Result<CachedContent, Error> {
         let url = self.build_cache_url(Some(name))?;
+        // For Studio, update uses PATCH. PR #29 used `patch_json`.
+        // I'll use the logic from HEAD but with the unified POST/PATCH helpers if possible.
+        // Actually, the HEAD version had a custom update_payload.
         let update_payload = match expiration {
             CacheExpirationRequest::Ttl { ttl } => json!({ "ttl": ttl }),
             CacheExpirationRequest::ExpireTime { expire_time } => {
@@ -429,13 +430,13 @@ impl GeminiBackend for StudioBackend {
     async fn create_batch(
         &self,
         req: BatchGenerateContentRequest,
-    ) -> Result<BatchGenerateContentResponse, Error> {
+    ) -> Result<BatchOperation, Error> {
         let url = self.build_url("batchGenerateContent")?;
         self.post_json(url, &req).await
     }
 
     async fn get_batch(&self, name: &str) -> Result<BatchOperation, Error> {
-        let suffix = if name.contains(':') { name.to_string() } else { format!("batches/{}", name) };
+        let suffix = if name.contains('/') { name.to_string() } else { format!("batches/{}", name) };
         let url = self.build_url_with_suffix(&suffix)?;
         self.get_json(url).await
     }

@@ -4,8 +4,7 @@ use std::sync::{Arc, LazyLock};
 
 use crate::backend::studio::{AuthConfig, ServiceAccountKey, ServiceAccountTokenSource, StudioBackend};
 #[cfg(feature = "vertex")]
-use crate::backend::vertex::{GoogleCloudConfig, VertexBackend};
-use crate::backend::GeminiBackend;
+use crate::backend::vertex::{GoogleCloudAuth, GoogleCloudConfig, VertexBackend};
 use crate::client::GeminiClient;
 use crate::common::Model;
 use crate::error::*;
@@ -84,7 +83,7 @@ impl GeminiBuilder {
     /// Configures the client to use a service account JSON key for authentication.
     pub fn with_service_account_json(mut self, service_account_json: &str) -> Result<Self, Error> {
          // Validate JSON
-         let _ = serde_json::from_str::<serde_json::Value>(service_account_json).context(GoogleCloudCredentialParseSnafu)?;
+         let _ = serde_json::from_str::<serde_json::Value>(service_account_json).context(ServiceAccountKeyParseSnafu)?;
 
          // Store for later decision
          self.service_account_json = Some(service_account_json.to_string());
@@ -165,14 +164,16 @@ impl GeminiBuilder {
                  return Err(Error::Configuration { message: "Vertex AI requires authentication (Service Account or ADC)".to_string() });
             };
 
+            let endpoint = format!("https://{}-aiplatform.googleapis.com", config.location);
             let backend = VertexBackend::new(
+                endpoint,
                 config.project_id,
                 config.location,
+                GoogleCloudAuth::Credentials(credentials),
                 self.model.clone(),
-                credentials
             )?;
 
-            return Ok(GeminiClient::new(Box::new(backend)));
+            return Ok(GeminiClient::new(Arc::new(backend)));
         }
 
         // 2. Otherwise, use Studio
@@ -203,6 +204,6 @@ impl GeminiBuilder {
             auth
         );
 
-        Ok(GeminiClient::new(Box::new(backend)))
+        Ok(GeminiClient::new(Arc::new(backend)))
     }
 }

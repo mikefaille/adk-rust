@@ -2,7 +2,7 @@
 #
 # When uploading crates to the registry Cargo will automatically
 # "normalize" Cargo.toml files for maximal compatibility
-# with all versions of Cargo and also rewrite `path` dependencies
+# with all versions of Cargo and also rewrite path dependencies
 # to registry (e.g., crates.io) dependencies.
 #
 # If you are reading this file be aware that the original Cargo.toml
@@ -229,7 +229,7 @@ version = "^0.3"
 
 [dependencies.google-cloud-aiplatform-v1]
 version = "1.5.0"
-features = ["prediction-service"]
+features = ["prediction-service", "job-service", "gen-ai-cache-service", "model-service", "dataset-service", "llm-utility-service"]
 optional = true
 
 [dependencies.google-cloud-auth]
