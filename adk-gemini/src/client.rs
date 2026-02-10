@@ -525,10 +525,8 @@ impl GeminiBuilder {
                   },
               };
 
-              let credentials = google_cloud_auth.credentials()?;
               let endpoint = config.endpoint();
-
-              let backend = Box::new(VertexBackend::new(endpoint, credentials, model.clone())?);
+              let backend = Box::new(VertexBackend::new(endpoint, config.project_id.clone(), config.location.clone(), google_cloud_auth, model.clone())?);
               return Ok(Gemini {
                   client: Arc::new(GeminiClient::new(model, backend)),
               });
