@@ -235,6 +235,7 @@ struct VertexClient {
 
 #[derive(Debug)]
 enum GeminiBackend {
+    #[cfg(feature = "studio")]
     Rest(RestClient),
     #[cfg(feature = "vertex")]
     Vertex(VertexClient),
@@ -244,6 +245,7 @@ enum GeminiBackend {
 #[derive(Debug, Clone)]
 pub enum GeminiLiveBackend {
     /// Public API using an API key.
+    #[cfg(feature = "studio")]
     Public {
         /// The Google AI Studio API key.
         api_key: String,
@@ -280,6 +282,7 @@ pub struct GeminiClient {
 
 impl GeminiClient {
     /// Create a new client with custom base URL
+    #[cfg(feature = "studio")]
     fn with_base_url<M: Into<Model>>(
         client_builder: ClientBuilder,
         model: M,
@@ -421,6 +424,7 @@ impl GeminiClient {
         deserializer: D,
     ) -> Result<T, Error> {
         let client = match &self.backend {
+            #[cfg(feature = "studio")]
             GeminiBackend::Rest(rest) => &rest.http_client,
             #[cfg(feature = "vertex")]
             GeminiBackend::Vertex(vertex) => &vertex.http_client,
@@ -463,6 +467,7 @@ impl GeminiClient {
 
     fn rest_client(&self, _operation: &'static str) -> Result<&RestClient, Error> {
         match &self.backend {
+            #[cfg(feature = "studio")]
             GeminiBackend::Rest(rest) => Ok(rest),
             #[cfg(feature = "vertex")]
             GeminiBackend::Vertex(_) => GoogleCloudUnsupportedSnafu { operation: _operation }.fail(),
@@ -473,6 +478,7 @@ impl GeminiClient {
     fn vertex_client(&self, operation: &'static str) -> Result<&VertexClient, Error> {
         match &self.backend {
             GeminiBackend::Vertex(vertex) => Ok(vertex),
+            #[cfg(feature = "studio")]
             GeminiBackend::Rest(_) => GoogleCloudUnsupportedSnafu { operation }.fail(),
         }
     }
@@ -521,6 +527,7 @@ impl GeminiClient {
     ) -> Result<GenerationResponse, Error> {
         request.validate().context(ValidationSnafu)?;
         let response: GenerationResponse = match &self.backend {
+            #[cfg(feature = "studio")]
             GeminiBackend::Rest(_) => {
                 let url = self.build_url("generateContent")?;
                 self.post_json(url, &request).await?
@@ -642,6 +649,7 @@ impl GeminiClient {
         request: EmbedContentRequest,
     ) -> Result<ContentEmbeddingResponse, Error> {
         match &self.backend {
+            #[cfg(feature = "studio")]
             GeminiBackend::Rest(_) => {
                 let url = self.build_url("embedContent")?;
                 self.post_json(url, &request).await
@@ -658,6 +666,7 @@ impl GeminiClient {
         request: BatchEmbedContentsRequest,
     ) -> Result<BatchContentEmbeddingResponse, Error> {
         match &self.backend {
+            #[cfg(feature = "studio")]
             GeminiBackend::Rest(_) => {
                 let url = self.build_url("batchEmbedContents")?;
                 self.post_json(url, &request).await
@@ -680,6 +689,7 @@ impl GeminiClient {
     ) -> Result<BatchGenerateContentResponse, Error> {
         request.validate().context(ValidationSnafu)?;
         match &self.backend {
+            #[cfg(feature = "studio")]
             GeminiBackend::Rest(_) => {
                 let url = self.build_url("batchGenerateContent")?;
                 self.post_json(url, &request).await
@@ -700,6 +710,7 @@ impl GeminiClient {
         name: &str,
     ) -> Result<T, Error> {
         match &self.backend {
+            #[cfg(feature = "studio")]
             GeminiBackend::Rest(_) => {
                 let url = self.build_batch_url(name, None)?;
                 self.get_json(url).await
@@ -771,6 +782,7 @@ impl GeminiClient {
     ))]
     pub(crate) async fn cancel_batch_operation(&self, name: &str) -> Result<(), Error> {
         match &self.backend {
+            #[cfg(feature = "studio")]
             GeminiBackend::Rest(_) => {
                 let url = self.build_batch_url(name, Some("cancel"))?;
                 self.perform_request(|c| c.post(url).json(&json!({})), async |_r| Ok(())).await
@@ -788,6 +800,7 @@ impl GeminiClient {
     ))]
     pub(crate) async fn delete_batch_operation(&self, name: &str) -> Result<(), Error> {
         match &self.backend {
+            #[cfg(feature = "studio")]
             GeminiBackend::Rest(_) => {
                 let url = self.build_batch_url(name, None)?;
                 self.perform_request(|c| c.delete(url), async |_r| Ok(())).await
@@ -806,6 +819,7 @@ impl GeminiClient {
         mime_type: Mime,
     ) -> Result<Url, Error> {
         let base_url = match &self.backend {
+            #[cfg(feature = "studio")]
             GeminiBackend::Rest(rest) => rest.base_url.clone(),
             #[cfg(feature = "vertex")]
             GeminiBackend::Vertex(vertex) => Url::parse(&format!(
@@ -1241,18 +1255,25 @@ impl GeminiBuilder {
             });
         }
 
-        let api_key = self.api_key.ok_or(Error::MissingApiKey)?;
-        if api_key.is_empty() {
-            return MissingApiKeySnafu.fail();
+        #[cfg(feature = "studio")]
+        {
+            let api_key = self.api_key.ok_or(Error::MissingApiKey)?;
+            if api_key.is_empty() {
+                return MissingApiKeySnafu.fail();
+            }
+            Ok(Gemini {
+                client: Arc::new(GeminiClient::with_base_url(
+                    self.client_builder,
+                    self.model,
+                    self.base_url,
+                    api_key,
+                )?),
+            })
         }
-        Ok(Gemini {
-            client: Arc::new(GeminiClient::with_base_url(
-                self.client_builder,
-                self.model,
-                self.base_url,
-                api_key,
-            )?),
-        })
+        #[cfg(not(feature = "studio"))]
+        {
+            GoogleCloudUnsupportedSnafu { operation: "initialization_without_studio" }.fail()
+        }
     }
 }
 
@@ -1264,26 +1285,31 @@ pub struct Gemini {
 
 impl Gemini {
     /// Create a new client with the specified API key
+    #[cfg(feature = "studio")]
     pub fn new<K: AsRef<str>>(api_key: K) -> Result<Self, Error> {
         Self::with_model(api_key, Model::default())
     }
 
     /// Create a new client for the Gemini Pro model
+    #[cfg(feature = "studio")]
     pub fn pro<K: AsRef<str>>(api_key: K) -> Result<Self, Error> {
         Self::with_model(api_key, Model::from(Model::GEMINI_2_5_PRO))
     }
 
     /// Create a new client with the specified API key and model
+    #[cfg(feature = "studio")]
     pub fn with_model<K: AsRef<str>, M: Into<Model>>(api_key: K, model: M) -> Result<Self, Error> {
         Self::with_model_and_base_url(api_key, model, DEFAULT_BASE_URL.clone())
     }
 
     /// Create a new client with the specified API key using the v1 (stable) API.
+    #[cfg(feature = "studio")]
     pub fn with_v1<K: AsRef<str>>(api_key: K) -> Result<Self, Error> {
         Self::with_model_and_base_url(api_key, Model::default(), V1_BASE_URL.clone())
     }
 
     /// Create a new client with the specified API key and model using the v1 (stable) API.
+    #[cfg(feature = "studio")]
     pub fn with_model_v1<K: AsRef<str>, M: Into<Model>>(
         api_key: K,
         model: M,
@@ -1292,6 +1318,7 @@ impl Gemini {
     }
 
     /// Create a new client with custom base URL
+    #[cfg(feature = "studio")]
     pub fn with_base_url<K: AsRef<str>>(api_key: K, base_url: Url) -> Result<Self, Error> {
         Self::with_model_and_base_url(api_key, Model::default(), base_url)
     }
@@ -1412,6 +1439,7 @@ impl Gemini {
     }
 
     /// Create a new client with the specified API key, model, and base URL
+    #[cfg(feature = "studio")]
     pub fn with_model_and_base_url<K: AsRef<str>, M: Into<Model>>(
         api_key: K,
         model: M,
