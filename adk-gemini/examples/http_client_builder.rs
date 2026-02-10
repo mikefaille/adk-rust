@@ -44,7 +44,7 @@ async fn do_main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create Gemini client using the custom HTTP client and builder pattern
     let client = GeminiBuilder::new(api_key)
-        .with_model(Model::new(Model::GEMINI_2_5_FLASH))
+        .with_model(Model::Gemini25Flash)
         .with_http_client(http_client_builder)
         .with_base_url("https://generativelanguage.googleapis.com/v1beta/".parse()?)
         .build()?;
