@@ -1,59 +1,29 @@
-# ADK UI React Client
+# MUI Client (Enterprise/Themed)
 
-React frontend for rendering dynamic UI components from ADK agents.
+This is an alternative frontend client for ADK UI examples, built with **React** and **Material UI (MUI)**. It provides a polished, enterprise-grade interface for interacting with ADK agents.
 
-## Quick Start
+## Features
 
-```bash
-# Start the UI server (in adk-rust root)
-GOOGLE_API_KEY=... cargo run --example ui_server
+*   **Material Design**: Uses MUI components for a consistent and professional look.
+*   **Themed**: Supports light/dark mode (configured in `App.tsx`).
+*   **Multi-Agent Support**: Connects to various backend examples (UI Demo, Support, Appointments, etc.).
 
-# In another terminal, start this client
-cd examples/ui_react_client
-npm install
-npm run dev
-```
+## Setup & Running
 
-Open http://localhost:5173 to interact with the agent.
+1.  Install dependencies:
+    ```bash
+    npm install
+    ```
 
-## What This Does
+2.  Start the development server:
+    ```bash
+    npm run dev
+    ```
 
-This client connects to the ADK UI server via SSE and renders UI components that agents generate through `render_*` tool calls:
+    The application will be available at [http://localhost:3001](http://localhost:3001).
 
-- **Forms** - User input with text fields, selects, switches, etc.
-- **Cards** - Information display with action buttons
-- **Alerts** - Success, warning, error, and info notifications
-- **Tables** - Tabular data display
-- **Charts** - Bar, line, area, and pie charts
-- **Progress** - Step-by-step task progress
-- **Layouts** - Dashboard-style multi-section views
+## Configuration
 
-## Architecture
+The client connects to backend services defined in `src/App.tsx`. You can configure the API URL via `.env` file (see `.env.example`).
 
-```
-┌─────────────────┐     SSE      ┌──────────────┐
-│  React Client   │◄────────────│  ui_server   │
-│   (Vite)        │             │  (Rust)      │
-│                 │────POST────►│              │
-└─────────────────┘  /api/run   └──────────────┘
-         │                              │
-         ▼                              ▼
-   Renderer.tsx                  LlmAgent + UiToolset
-```
-
-## Key Files
-
-- `src/adk-ui-renderer/types.ts` - TypeScript types matching Rust schema
-- `src/adk-ui-renderer/Renderer.tsx` - Component renderer (23 components)
-- `src/App.tsx` - Main app with SSE connection
-
-## Customization
-
-The renderer uses Tailwind CSS. Modify `Renderer.tsx` to customize styling or add new component types.
-
-## Production Build
-
-```bash
-npm run build
-# Output in dist/
-```
+![Screenshot](path/to/screenshot.png)
