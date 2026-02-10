@@ -279,12 +279,16 @@ pub enum Error {
         source: serde_json::Error,
     },
     #[snafu(display("I/O error during file operations"))]
+    Validation {
+        source: crate::generation::model::ValidationError,
+    },
     Io {
         source: std::io::Error,
     },
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 enum AuthConfig {
     ApiKey(String),
     ServiceAccount(ServiceAccountTokenSource),
@@ -311,6 +315,7 @@ struct ServiceAccountTokenSource {
 }
 
 impl ServiceAccountTokenSource {
+    #[allow(dead_code)]
     fn new(key: ServiceAccountKey) -> Self {
         Self {
             key,
@@ -587,7 +592,7 @@ impl GeminiClient {
         deserializer(response).await
     }
 
-    fn rest_client(&self, operation: &'static str) -> Result<&RestClient, Error> {
+    fn rest_client(&self, _operation: &'static str) -> Result<&RestClient, Error> {
         match &self.backend {
             GeminiBackend::Rest(rest) => Ok(rest),
             #[cfg(feature = "vertex")]
@@ -800,7 +805,7 @@ impl GeminiClient {
     }
 
     #[cfg(feature = "vertex")]
-    fn is_vertex_transport_error_message(message: &str) -> bool {
+    pub(crate) fn is_vertex_transport_error_message(message: &str) -> bool {
         let normalized = message.to_ascii_lowercase();
         normalized.contains("transport reports an error")
             || normalized.contains("http2 error")
@@ -1827,6 +1832,8 @@ impl Gemini {
 }
 
 #[cfg(test)]
+#[cfg(test)]
+#[cfg(all(test, feature = "vertex"))]
 mod client_tests {
     use super::{Error, GeminiClient, extract_service_account_project_id};
 
