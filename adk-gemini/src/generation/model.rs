@@ -896,7 +896,7 @@ mod tests {
     #[tokio::test]
     async fn test_builder_validation_integration() {
         use crate::Gemini;
-        let client = Gemini::new("api-key").unwrap();
+        let client = Gemini::new_with_api_key("api-key");
 
         // Use with_temperature with invalid value
         let builder = client.generate_content().with_temperature(2.0);
@@ -905,7 +905,7 @@ mod tests {
         assert!(result.is_err());
 
         // Check if it's a validation error
-        if let Err(crate::client::Error::Validation { source }) = result {
+        if let Err(crate::error::Error::Validation { source }) = result {
             assert_eq!(source, ValidationError::InvalidTemperature { value: 2.0 });
         } else {
             panic!("Expected validation error, got {:?}", result);
@@ -915,7 +915,7 @@ mod tests {
     #[tokio::test]
     async fn test_builder_thinking_validation_integration() {
         use crate::Gemini;
-        let client = Gemini::new("api-key").unwrap();
+        let client = Gemini::new_with_api_key("api-key");
 
         // Use with_thinking_budget with invalid value
         let builder = client.generate_content().with_thinking_budget(-2);
@@ -924,7 +924,7 @@ mod tests {
         assert!(result.is_err());
 
         // Check if it's a validation error
-        if let Err(crate::client::Error::Validation { source }) = result {
+        if let Err(crate::error::Error::Validation { source }) = result {
             assert_eq!(source, ValidationError::InvalidThinkingBudget { value: -2 });
         } else {
             panic!("Expected validation error, got {:?}", result);
