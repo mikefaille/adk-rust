@@ -218,6 +218,19 @@ impl StudioBackend {
             .await
             .context(DecodeResponseSnafu)
     }
+
+    // Helper for PATCH (update)
+    async fn patch_json<Req: serde::Serialize, Res: serde::de::DeserializeOwned>(
+        &self,
+        url: Url,
+        json: &Req,
+    ) -> Result<Res, Error> {
+        let response: Response = self.perform_request(|c| c.patch(url).json(json), async |r| check_response(r).await)
+            .await?;
+        response.json::<Res>()
+            .await
+            .context(DecodeResponseSnafu)
+    }
 }
 
 async fn check_response(response: Response) -> Result<Response, Error> {
@@ -261,11 +274,85 @@ impl GeminiBackend for StudioBackend {
         self.post_json(url, &req).await
     }
 
-    async fn batch_embed_contents(&self, req: crate::embedding::model::BatchEmbedContentsRequest) -> Result<crate::embedding::model::BatchContentEmbeddingResponse, Error> {
+    async fn batch_embed_contents(&self, req: BatchEmbedContentsRequest) -> Result<BatchContentEmbeddingResponse, Error> {
          let url = self.build_url("batchEmbedContents")?;
          self.post_json(url, &req).await
     }
 
+    // Batch Operations
+    async fn create_batch(&self, req: BatchGenerateContentRequest) -> Result<BatchOperation, Error> {
+        // models/{model}:batchGenerateContent is likely correct for "create batch prediction job" in Rest API
+        // if using Gemini API.
+        // Or it might be `v1beta/batchGenerateContent`?
+        // Checking `client.rs` in memory, it used `build_url("batchGenerateContent")`.
+        // `build_url` appends `models/{model}:...`
+        // So `models/{model}:batchGenerateContent`.
+        let url = self.build_url("batchGenerateContent")?;
+        self.post_json(url, &req).await
+    }
+
+    // Cache Operations
+    async fn create_cached_content(&self, req: CreateCachedContentRequest) -> Result<CachedContent, Error> {
+        let url = self.build_url_global("cachedContents")?;
+        self.post_json(url, &req).await
+    }
+
+    async fn get_cached_content(&self, name: &str) -> Result<CachedContent, Error> {
+        // name is likely "cachedContents/..." or just ID.
+        // Usually full resource name.
+        // If it starts with "cachedContents", use it directly.
+        let url = if name.starts_with("cachedContents") {
+             self.build_url_global(name)?
+        } else {
+             self.build_url_global(&format!("cachedContents/{}", name))?
+        };
+
+        let response: Response = self.perform_request(|c| c.get(url), async |r| check_response(r).await)
+            .await?;
+        response.json::<CachedContent>()
+            .await
+            .context(DecodeResponseSnafu)
+    }
+
+    async fn list_cached_contents(&self, page_size: Option<i32>, page_token: Option<String>) -> Result<ListCachedContentsResponse, Error> {
+        let mut url = self.build_url_global("cachedContents")?;
+        if let Some(ps) = page_size {
+            url.query_pairs_mut().append_pair("pageSize", &ps.to_string());
+        }
+        if let Some(pt) = &page_token {
+            url.query_pairs_mut().append_pair("pageToken", pt);
+        }
+
+        let response: Response = self.perform_request(|c| c.get(url), async |r| check_response(r).await)
+            .await?;
+        response.json::<ListCachedContentsResponse>()
+            .await
+            .context(DecodeResponseSnafu)
+    }
+
+    async fn update_cached_content(&self, name: &str, req: CacheExpirationRequest) -> Result<CachedContent, Error> {
+        let url = if name.starts_with("cachedContents") {
+             self.build_url_global(name)?
+        } else {
+             self.build_url_global(&format!("cachedContents/{}", name))?
+        };
+
+        self.patch_json(url, &req).await
+    }
+
+    async fn delete_cached_content(&self, name: &str) -> Result<(), Error> {
+        let url = if name.starts_with("cachedContents") {
+             self.build_url_global(name)?
+        } else {
+             self.build_url_global(&format!("cachedContents/{}", name))?
+        };
+
+        self.perform_request(|c| c.delete(url), async |r| check_response(r).await)
+            .await?;
+        Ok(())
+    }
+
+    // File Operations
     async fn list_files(&self, page_size: Option<u32>, page_token: Option<String>) -> Result<ListFilesResponse, Error> {
         let mut url = self.build_url_global("files")?;
         if let Some(ps) = page_size {
