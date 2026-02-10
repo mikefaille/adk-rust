@@ -43,7 +43,7 @@ async fn do_main() -> Result<(), Box<dyn std::error::Error>> {
     let client_flash_lite = Gemini::with_model(api_key.clone(), Model::Gemini25FlashLite)?;
     info!("created client with Gemini 2.5 Flash Lite using Model enum");
 
-    let client_embedding = Gemini::with_model(api_key.clone(), Model::Gemini25Flash)?;
+    let client_embedding = Gemini::with_model(api_key.clone(), Model::Custom("models/gemini-embedding-001".to_string()))?;
     info!("created client with Gemini Embedding 001 model using Model enum");
 
     // 4. Using custom model strings for specific versions or preview models
