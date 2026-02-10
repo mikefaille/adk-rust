@@ -40,6 +40,7 @@ impl GeminiModel {
         Ok(Self { client, model_name, retry_config: RetryConfig::default() })
     }
 
+    #[cfg(feature = "vertex")]
     pub fn new_google_cloud_service_account(
         service_account_json: &str,
         project_id: impl AsRef<str>,
@@ -58,6 +59,7 @@ impl GeminiModel {
         Ok(Self { client, model_name, retry_config: RetryConfig::default() })
     }
 
+    #[cfg(feature = "vertex")]
     pub fn new_google_cloud_adc(
         project_id: impl AsRef<str>,
         location: impl AsRef<str>,
@@ -74,6 +76,7 @@ impl GeminiModel {
         Ok(Self { client, model_name, retry_config: RetryConfig::default() })
     }
 
+    #[cfg(feature = "vertex")]
     pub fn new_google_cloud_wif(
         wif_json: &str,
         project_id: impl AsRef<str>,
@@ -106,79 +109,7 @@ impl GeminiModel {
         &self.retry_config
     }
 
-    #[cfg(feature = "vertex")]
-    pub fn new_google_cloud(
-        api_key: impl Into<String>,
-        project_id: impl AsRef<str>,
-        location: impl AsRef<str>,
-        model: impl Into<String>,
-    ) -> Result<Self> {
-        let model_name = model.into();
-        let client = Gemini::with_google_cloud_model(
-            api_key.into(),
-            project_id,
-            location,
-            model_name.clone(),
-        )
-        .map_err(|e| adk_core::AdkError::Model(e.to_string()))?;
 
-        Ok(Self { client, model_name })
-    }
-
-    #[cfg(feature = "vertex")]
-    pub fn new_google_cloud_service_account(
-        service_account_json: &str,
-        project_id: impl AsRef<str>,
-        location: impl AsRef<str>,
-        model: impl Into<String>,
-    ) -> Result<Self> {
-        let model_name = model.into();
-        let client = Gemini::with_google_cloud_service_account_json(
-            service_account_json,
-            project_id.as_ref(),
-            location.as_ref(),
-            model_name.clone(),
-        )
-        .map_err(|e| adk_core::AdkError::Model(e.to_string()))?;
-
-        Ok(Self { client, model_name })
-    }
-
-    #[cfg(feature = "vertex")]
-    pub fn new_google_cloud_adc(
-        project_id: impl AsRef<str>,
-        location: impl AsRef<str>,
-        model: impl Into<String>,
-    ) -> Result<Self> {
-        let model_name = model.into();
-        let client = Gemini::with_google_cloud_adc_model(
-            project_id.as_ref(),
-            location.as_ref(),
-            model_name.clone(),
-        )
-        .map_err(|e| adk_core::AdkError::Model(e.to_string()))?;
-
-        Ok(Self { client, model_name })
-    }
-
-    #[cfg(feature = "vertex")]
-    pub fn new_google_cloud_wif(
-        wif_json: &str,
-        project_id: impl AsRef<str>,
-        location: impl AsRef<str>,
-        model: impl Into<String>,
-    ) -> Result<Self> {
-        let model_name = model.into();
-        let client = Gemini::with_google_cloud_wif_json(
-            wif_json,
-            project_id.as_ref(),
-            location.as_ref(),
-            model_name.clone(),
-        )
-        .map_err(|e| adk_core::AdkError::Model(e.to_string()))?;
-
-        Ok(Self { client, model_name })
-    }
 
     fn convert_response(resp: &adk_gemini::GenerationResponse) -> Result<LlmResponse> {
         let mut converted_parts: Vec<Part> = Vec::new();

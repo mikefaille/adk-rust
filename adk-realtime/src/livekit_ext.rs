@@ -77,11 +77,11 @@ impl<T: EventHandler> EventHandler for LiveKitEventHandler<T> {
 }
 
 /// Bridge a LiveKit RemoteAudioTrack to a RealtimeRunner.
-pub fn bridge_input(track: RemoteAudioTrack, runner: Arc<RealtimeRunner>) {
+pub fn bridge_input(track: RemoteAudioTrack, runner: Arc<RealtimeRunner>, sample_rate: u32, channels: u32) {
     tokio::spawn(async move {
         // Note: LiveKit 0.7+ infers sample rate from the track
-        // While Gemini expects 24kHz, we cannot enforce it here.
-        let mut reader = NativeAudioStream::new(track.rtc_track(), 24000, 1);
+        // While Gemini expects 24kHz, we enforce it here with resampling/conversion by NativeAudioStream
+        let mut reader = NativeAudioStream::new(track.rtc_track(), sample_rate as i32, channels as i32);
         while let Some(frame) = reader.next().await {
             // Convert i16 samples to bytes (LE)
             let bytes = bytemuck::cast_slice::<i16, u8>(&frame.data);
