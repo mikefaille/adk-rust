@@ -230,6 +230,7 @@ struct VertexClient {
 
 #[derive(Debug)]
 enum GeminiBackend {
+    #[cfg(feature = "studio")]
     Rest(RestClient),
     #[cfg(feature = "vertex")]
     Vertex(VertexClient),
@@ -239,6 +240,7 @@ enum GeminiBackend {
 #[derive(Debug, Clone)]
 pub enum GeminiLiveBackend {
     /// Public API using an API key.
+    #[cfg(feature = "studio")]
     Public {
         /// The Google AI Studio API key.
         api_key: String,
@@ -460,29 +462,27 @@ impl GeminiClient {
             GeminiBackend::Rest(rest) => Ok(rest),
             #[cfg(feature = "vertex")]
             GeminiBackend::Vertex(_) => GoogleCloudUnsupportedSnafu { operation: _operation }.fail(),
-            #[cfg(not(feature = "studio"))]
-            GeminiBackend::Rest(_) => unreachable!("Rest backend not enabled"),
         }
     }
 
     #[cfg(feature = "vertex")]
     fn vertex_client(&self, operation: &'static str) -> Result<&VertexClient, Error> {
         match &self.backend {
+            #[cfg(feature = "vertex")]
             GeminiBackend::Vertex(vertex) => Ok(vertex),
             #[cfg(feature = "studio")]
             GeminiBackend::Rest(_) => GoogleCloudUnsupportedSnafu { operation }.fail(),
-            #[cfg(not(feature = "studio"))]
-            GeminiBackend::Rest(_) => unreachable!("Rest backend not enabled"),
         }
     }
+
     /// Perform a GET request and deserialize the JSON response.
-    ///
-    /// This is a convenience wrapper around [`perform_request`](Self::perform_request).
     #[tracing::instrument(skip(self), fields(request.type = "get", request.url = %url))]
     async fn get_json<T: serde::de::DeserializeOwned>(&self, url: Url) -> Result<T, Error> {
         self.perform_request(|c| c.get(url), async |r| r.json().await.context(DecodeResponseSnafu))
             .await
     }
+
+    /// Perform a POST request with JSON body and deserialize the JSON response.
     #[tracing::instrument(skip(self, body), fields(request.type = "post", request.url = %url))]
     async fn post_json<Req: serde::Serialize, Res: serde::de::DeserializeOwned>(
         &self,
@@ -495,6 +495,7 @@ impl GeminiClient {
         )
         .await
     }
+
     /// Generate content
     #[instrument(skip_all, fields(
         model,
@@ -508,6 +509,7 @@ impl GeminiClient {
         request: GenerateContentRequest,
     ) -> Result<GenerationResponse, Error> {
         let response: GenerationResponse = match &self.backend {
+            #[cfg(feature = "studio")]
             GeminiBackend::Rest(_) => {
                 let url = self.build_url("generateContent")?;
                 self.post_json(url, &request).await?
@@ -515,7 +517,6 @@ impl GeminiClient {
             #[cfg(feature = "vertex")]
             GeminiBackend::Vertex(_) => self.generate_content_vertex(request).await?,
         };
-
         // Record usage metadata
         if let Some(usage) = &response.usage_metadata {
             #[rustfmt::skip]
@@ -528,10 +529,8 @@ impl GeminiClient {
 
             tracing::debug!("generation usage evaluated");
         }
-
         Ok(response)
     }
-
     /// Generate content with streaming
     #[instrument(skip_all, fields(
         model,

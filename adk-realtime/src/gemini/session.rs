@@ -144,8 +144,6 @@ impl GeminiRealtimeSession {
                     RealtimeError::connection(format!("WebSocket connect error: {}", e))
                 })?
             },
-            #[cfg(not(feature = "studio"))]
-            GeminiLiveBackend::Public { .. } => unreachable!("Studio backend not enabled"),
             #[cfg(feature = "vertex")]
             GeminiLiveBackend::Vertex(context) => {
                 let url = format!(
@@ -212,6 +210,7 @@ impl GeminiRealtimeSession {
                     RealtimeError::connection(format!("WebSocket connect error: {}", e))
                 })?
             }
+            _ => return Err(RealtimeError::config("Unsupported backend variant for current features")),
         };
 
         let (sink, source) = request.split();
