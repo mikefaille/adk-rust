@@ -8,10 +8,16 @@ async fn main() {
     #[cfg(feature = "vertex")]
     {
         // Explain how authentication works for VertexADC
-        println!("This example demonstrates the configuration for Vertex AI using Application Default Credentials (ADC).");
-        println!("Authentication is handled automatically by the Google Cloud libraries using the environment:");
+        println!(
+            "This example demonstrates the configuration for Vertex AI using Application Default Credentials (ADC)."
+        );
+        println!(
+            "Authentication is handled automatically by the Google Cloud libraries using the environment:"
+        );
         println!("1. Checks for GOOGLE_APPLICATION_CREDENTIALS environment variable.");
-        println!("2. Checks for user credentials set up via 'gcloud auth application-default login'.");
+        println!(
+            "2. Checks for user credentials set up via 'gcloud auth application-default login'."
+        );
         println!("3. Checks for metadata server (if running on GCP).");
         println!("");
 

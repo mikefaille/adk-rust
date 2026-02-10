@@ -285,6 +285,7 @@ pub enum Error {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 enum AuthConfig {
     ApiKey(String),
     ServiceAccount(ServiceAccountTokenSource),
@@ -310,6 +311,7 @@ struct ServiceAccountTokenSource {
     cached: Arc<Mutex<Option<CachedToken>>>,
 }
 
+#[allow(dead_code)]
 impl ServiceAccountTokenSource {
     fn new(key: ServiceAccountKey) -> Self {
         Self {
@@ -319,6 +321,7 @@ impl ServiceAccountTokenSource {
         }
     }
 
+#[allow(clippy::collapsible_if)]
     async fn access_token(&self, http_client: &Client) -> Result<String, Error> {
         let now = time::OffsetDateTime::now_utc().unix_timestamp();
         {
@@ -357,8 +360,8 @@ impl ServiceAccountTokenSource {
             iat: now,
             exp,
         };
-        let encoding_key =
-            EncodingKey::from_rsa_pem(self.key.private_key.as_bytes()).context(ServiceAccountJwtSnafu)?;
+        let encoding_key = EncodingKey::from_rsa_pem(self.key.private_key.as_bytes())
+            .context(ServiceAccountJwtSnafu)?;
         jsonwebtoken::encode(&Header::new(jsonwebtoken::Algorithm::RS256), &claims, &encoding_key)
             .context(ServiceAccountJwtSnafu)
     }
@@ -382,8 +385,7 @@ impl ServiceAccountTokenSource {
             .map_err(|e| Error::ServiceAccountToken { source: e, url: url.clone() })?;
 
         let response = GeminiClient::check_response(response).await?;
-        let token: TokenResponse =
-            response.json().await.context(DecodeResponseSnafu)?;
+        let token: TokenResponse = response.json().await.context(DecodeResponseSnafu)?;
         let expires_at = time::OffsetDateTime::now_utc().unix_timestamp() + token.expires_in;
         Ok(CachedToken { access_token: token.access_token, expires_at })
     }
@@ -423,8 +425,6 @@ pub struct VertexClient {
     credentials: Credentials,
     endpoint: String,
 }
-
-
 
 #[derive(Debug)]
 enum GeminiBackend {
@@ -587,6 +587,7 @@ impl GeminiClient {
         deserializer(response).await
     }
 
+#[allow(unused_variables)]
     fn rest_client(&self, operation: &'static str) -> Result<&RestClient, Error> {
         match &self.backend {
             GeminiBackend::Rest(rest) => Ok(rest),
@@ -1491,8 +1492,9 @@ impl GeminiBuilder {
         if let Some(config) = &self.google_cloud {
             #[cfg(feature = "vertex")]
             {
-                let model =
-                    Model::Custom(self.model.vertex_model_path(&config.project_id, &config.location));
+                let model = Model::Custom(
+                    self.model.vertex_model_path(&config.project_id, &config.location),
+                );
                 let google_cloud_auth = match self.google_cloud_auth {
                     Some(auth) => auth,
                     None => match self.api_key {

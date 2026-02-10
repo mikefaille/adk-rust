@@ -1,20 +1,21 @@
-use crate::runner::{EventHandler, RealtimeRunner};
+#![cfg(feature = "livekit")]
 use crate::error::Result;
+use crate::runner::{EventHandler, RealtimeRunner};
 use async_trait::async_trait;
-use base64::{engine::general_purpose::STANDARD, Engine as _};
-use livekit::webrtc::audio_source::native::NativeAudioSource;
-use livekit::webrtc::audio_frame::AudioFrame;
+use base64::{Engine as _, engine::general_purpose::STANDARD};
+use futures::StreamExt;
 use livekit::prelude::RemoteAudioTrack;
+use livekit::webrtc::audio_frame::AudioFrame;
+use livekit::webrtc::audio_source::native::NativeAudioSource;
 use livekit::webrtc::audio_stream::native::NativeAudioStream;
 use std::sync::Arc;
-use futures::StreamExt;
 
 /// LiveKit Integration for Realtime AI Agents.
-/// 
-/// This module provides a provider-agnostic bridge between LiveKit's WebRTC transport 
-/// and the `adk-realtime` facade. It works with any model that implements the 
+///
+/// This module provides a provider-agnostic bridge between LiveKit's WebRTC transport
+/// and the `adk-realtime` facade. It works with any model that implements the
 /// `RealtimeModel` trait (e.g., Gemini or OpenAI).
-/// 
+///
 /// The bridge handles bidirectional audio by:
 /// 1. Subscribing to remote audio tracks and feeding them to the AI (`bridge_input`).
 /// 2. Pushing AI-generated audio back to a LiveKit room via a `NativeAudioSource` (`LiveKitEventHandler`).
@@ -36,17 +37,20 @@ impl<T: EventHandler> EventHandler for LiveKitEventHandler<T> {
     async fn on_audio(&self, audio: &[u8], item_id: &str) -> Result<()> {
         // 1. Convert bytes to i16 (assuming PCM16 LE)
         let i16_samples = bytemuck::cast_slice::<u8, i16>(audio).to_vec();
-        
+
         // 2. Push to LiveKit source
         // Gemini is 24kHz mono
         let num_samples = i16_samples.len();
-        self.source.capture_frame(&AudioFrame {
-            data: i16_samples.into(),
-            sample_rate: 24000,
-            num_channels: 1,
-            samples_per_channel: num_samples as u32,
-        }).await.map_err(|e| crate::error::RealtimeError::audio(e.to_string()))?;
-        
+        self.source
+            .capture_frame(&AudioFrame {
+                data: i16_samples.into(),
+                sample_rate: 24000,
+                num_channels: 1,
+                samples_per_channel: num_samples as u32,
+            })
+            .await
+            .map_err(|e| crate::error::RealtimeError::audio(e.to_string()))?;
+
         // 3. Delegate to inner
         self.inner.on_audio(audio, item_id).await
     }
@@ -85,7 +89,7 @@ pub fn bridge_input(track: RemoteAudioTrack, runner: Arc<RealtimeRunner>) {
         while let Some(frame) = reader.next().await {
             // Convert i16 samples to bytes (LE)
             let bytes = bytemuck::cast_slice::<i16, u8>(&frame.data);
-            
+
             let b64 = STANDARD.encode(bytes);
             if let Err(e) = runner.send_audio(&b64).await {
                 tracing::error!("Failed to send audio to runner: {}", e);

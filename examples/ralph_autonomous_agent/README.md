@@ -12,6 +12,21 @@ This example demonstrates a production-ready autonomous agent built with ADK-Rus
 - Supports multiple LLM providers (OpenAI, Anthropic, Gemini)
 - Provides comprehensive logging and progress tracking
 
+## Why Autonomous Architecture?
+
+Unlike the standard `ralph` example which uses a single agent loop, this autonomous agent implementation uses a specialized **Loop-Worker** pattern:
+
+1.  **Separation of Concerns**:
+    -   **Loop Agent (Manager)**: Focuses purely on orchestration, planning, and task delegation. It maintains the high-level context of the PRD and progress.
+    -   **Worker Agent (Executor)**: Focuses on executing specific, scoped tasks (coding, testing, git operations). It does not need to know the entire project history.
+
+2.  **Context Management**:
+    -   By splitting responsibilities, we avoid filling the context window with execution details in the planning phase, and vice-versa.
+    -   The Worker Agent is ephemeral or reset between tasks, ensuring a clean state for each new objective.
+
+3.  **Scalability**:
+    -   This pattern allows for multiple specialized Worker Agents (e.g., a "Test Worker", a "Docs Worker") to be orchestrated by a single Loop Agent.
+
 ## Architecture
 
 Ralph follows a clean separation of concerns:

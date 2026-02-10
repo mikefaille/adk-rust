@@ -1,3 +1,6 @@
+#![allow(dead_code)]
+#![allow(unused_imports)]
+#![allow(clippy::new_without_default)]
 //! # Ralph Autonomous Agent Library
 //!
 //! This module contains the core components for the Ralph autonomous agent system.
@@ -15,8 +18,8 @@ pub use config::*;
 pub use error::*;
 
 // Re-export commonly used ADK types
-pub use adk_core::{Agent, Llm, LlmRequest, LlmResponse, Tool, ToolContext};
 pub use adk_agent::{LlmAgent, LoopAgent};
+pub use adk_core::{Agent, Llm, LlmRequest, LlmResponse, Tool, ToolContext};
 
 /// Main Ralph system that orchestrates the autonomous development workflow.
 pub struct RalphSystem {
@@ -32,7 +35,7 @@ impl RalphSystem {
         // This will be implemented in later tasks
         Ok(Self { config })
     }
-    
+
     /// Run the autonomous development workflow.
     pub async fn run(&self) -> Result<()> {
         // TODO: Implement the main execution loop

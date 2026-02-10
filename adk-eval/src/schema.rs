@@ -159,7 +159,9 @@ impl ContentData {
                 Part::Text { text } => {
                     content = content.with_text(text);
                 }
-                Part::FunctionCall { .. } | Part::FunctionResponse { .. } | Part::CodeExecutionResult { .. } => {
+                Part::FunctionCall { .. }
+                | Part::FunctionResponse { .. }
+                | Part::CodeExecutionResult { .. } => {
                     // Function calls/responses and code execution are handled separately in the evaluation
                     // The Content type doesn't have direct methods for these
                 }

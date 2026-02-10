@@ -10,9 +10,9 @@
 //! cargo run --example openai_webrtc --features webrtc,openai
 //! ```
 
-use adk_realtime::openai::OpenAiWebRtcModel;
 use adk_realtime::config::RealtimeConfig;
 use adk_realtime::model::RealtimeModel;
+use adk_realtime::openai::OpenAiWebRtcModel;
 
 use std::process::ExitCode;
 use tracing::{error, info};
@@ -27,8 +27,7 @@ async fn run_webrtc_test(api_key: &str) -> Result<(), Box<dyn std::error::Error>
     info!(model_id = model.model_id(), provider = model.provider(), "Model configured");
 
     // 2. Build config
-    let config = RealtimeConfig::default()
-        .with_instruction("You are a helpful assistant.");
+    let config = RealtimeConfig::default().with_instruction("You are a helpful assistant.");
 
     // 3. Connect (Stubbed)
     info!("Connecting to OpenAI Realtime API (WebRTC)...");
@@ -62,7 +61,7 @@ async fn run_webrtc_test(api_key: &str) -> Result<(), Box<dyn std::error::Error>
                 match maybe_event {
                     Some(Ok(event)) => {
                         info!("Event processed");
-                        
+
                         match event {
                             adk_realtime::ServerEvent::AudioDelta { delta, .. } => {
                                 info!("🔊 Audio Delta ({} bytes)", delta.len());
@@ -98,9 +97,7 @@ async fn run_webrtc_test(api_key: &str) -> Result<(), Box<dyn std::error::Error>
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    tracing_subscriber::fmt()
-        .with_env_filter("info")
-        .init();
+    tracing_subscriber::fmt().with_env_filter("info").init();
 
     let api_key = match std::env::var("OPENAI_API_KEY") {
         Ok(key) => key,

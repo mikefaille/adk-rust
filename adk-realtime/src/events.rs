@@ -3,9 +3,9 @@
 //! These events follow a unified model inspired by the OpenAI Agents SDK,
 //! abstracting over provider-specific event formats.
 
+use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use base64::Engine;
 
 use bytes::Bytes;
 
@@ -25,7 +25,10 @@ pub enum ClientEvent {
     AudioDelta {
         #[serde(skip_serializing_if = "Option::is_none")]
         event_id: Option<String>,
-        #[serde(serialize_with = "serialize_audio_delta", deserialize_with = "deserialize_audio_delta")]
+        #[serde(
+            serialize_with = "serialize_audio_delta",
+            deserialize_with = "deserialize_audio_delta"
+        )]
         audio: Bytes,
         #[serde(skip)]
         format: crate::audio::AudioFormat,
@@ -65,9 +68,8 @@ where
     D: serde::Deserializer<'de>,
 {
     let s = String::deserialize(deserializer)?;
-    let decoded = base64::engine::general_purpose::STANDARD
-        .decode(&s)
-        .map_err(serde::de::Error::custom)?;
+    let decoded =
+        base64::engine::general_purpose::STANDARD.decode(&s).map_err(serde::de::Error::custom)?;
     Ok(Bytes::from(decoded))
 }
 
@@ -285,7 +287,10 @@ pub enum ServerEvent {
         /// Content index.
         content_index: u32,
         /// Audio data (bytes).
-        #[serde(serialize_with = "serialize_audio_delta", deserialize_with = "deserialize_audio_delta")]
+        #[serde(
+            serialize_with = "serialize_audio_delta",
+            deserialize_with = "deserialize_audio_delta"
+        )]
         delta: Bytes,
     },
 
@@ -485,6 +490,3 @@ impl ToolResponse {
         Self { call_id: call_id.into(), output: Value::String(output.into()) }
     }
 }
-
-
-

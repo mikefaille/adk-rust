@@ -8,13 +8,13 @@ use crate::error::{AuditError, Result};
 use crate::parser::{ApiItemType, ApiReference};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use syn::spanned::Spanned;
 use syn::{
     Attribute, Expr, Item, ItemConst, ItemEnum, ItemFn, ItemImpl, ItemStatic, ItemStruct,
     ItemTrait, ItemType, Lit, Meta, Visibility,
 };
 use tracing::{debug, info, instrument, warn};
 use walkdir::WalkDir;
-use syn::spanned::Spanned;
 
 /// Registry of all crates in the workspace with their public APIs.
 #[derive(Debug, Clone)]

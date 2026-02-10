@@ -4,6 +4,7 @@ use adk_core::{
     LlmResponseStream, Part, Result, UsageMetadata,
 };
 use adk_gemini::Gemini;
+use adk_core::types::CodeExecutionResultData;
 use async_trait::async_trait;
 
 pub struct GeminiModel {
@@ -39,6 +40,7 @@ impl GeminiModel {
         Ok(Self { client, model_name, retry_config: RetryConfig::default() })
     }
 
+#[cfg(feature = "vertex")]
     pub fn new_google_cloud_service_account(
         service_account_json: &str,
         project_id: impl AsRef<str>,
@@ -57,6 +59,7 @@ impl GeminiModel {
         Ok(Self { client, model_name, retry_config: RetryConfig::default() })
     }
 
+#[cfg(feature = "vertex")]
     pub fn new_google_cloud_adc(
         project_id: impl AsRef<str>,
         location: impl AsRef<str>,
@@ -73,6 +76,7 @@ impl GeminiModel {
         Ok(Self { client, model_name, retry_config: RetryConfig::default() })
     }
 
+#[cfg(feature = "vertex")]
     pub fn new_google_cloud_wif(
         wif_json: &str,
         project_id: impl AsRef<str>,
@@ -125,6 +129,7 @@ impl GeminiModel {
     }
 
     #[cfg(feature = "vertex")]
+#[cfg(feature = "vertex")]
     pub fn new_google_cloud_service_account(
         service_account_json: &str,
         project_id: impl AsRef<str>,
@@ -144,6 +149,7 @@ impl GeminiModel {
     }
 
     #[cfg(feature = "vertex")]
+#[cfg(feature = "vertex")]
     pub fn new_google_cloud_adc(
         project_id: impl AsRef<str>,
         location: impl AsRef<str>,
@@ -161,6 +167,7 @@ impl GeminiModel {
     }
 
     #[cfg(feature = "vertex")]
+#[cfg(feature = "vertex")]
     pub fn new_google_cloud_wif(
         wif_json: &str,
         project_id: impl AsRef<str>,
@@ -210,7 +217,7 @@ impl GeminiModel {
                     }
                     adk_gemini::Part::CodeExecutionResult { code_execution_result } => {
                         converted_parts.push(Part::CodeExecutionResult {
-                            code_execution_result: adk_core::CodeExecutionResultData {
+                            code_execution_result: CodeExecutionResultData {
                                 outcome: code_execution_result.outcome.clone(),
                                 output: code_execution_result.output.clone(),
                             },
