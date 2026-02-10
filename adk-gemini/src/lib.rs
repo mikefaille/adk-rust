@@ -28,7 +28,11 @@
 //! For more specialized types, import them directly from the crate root or their
 //! respective modules.
 
+pub mod backend;
+pub mod builder;
 pub mod client;
+pub mod common;
+pub mod error;
 mod types;
 
 /// Convenient re-exports of commonly used types
@@ -39,9 +43,6 @@ pub mod batch;
 
 /// Content caching for reusable contexts and system instructions
 pub mod cache;
-
-/// Common utilities and serialization helpers
-pub mod common;
 
 /// Text embedding generation for semantic analysis
 pub mod embedding;
@@ -62,17 +63,18 @@ pub mod tools;
 // These are the fundamental types used throughout the API
 
 /// The main client error type
-pub use client::Error as ClientError;
+pub use error::Error as ClientError;
 /// The main Gemini API client
-pub use client::Gemini;
+pub use client::GeminiClient as Gemini;
+/// The main Gemini API client (as GeminiClient)
+pub use client::GeminiClient;
 /// Builder for creating a new Gemini client
-pub use client::GeminiBuilder;
+pub use builder::GeminiBuilder;
 /// Available Gemini models
-pub use client::Model;
+pub use common::Model;
 /// Re-export google_cloud_auth credentials for downstream crates (VertexADC)
 #[cfg(feature = "vertex")]
 pub use google_cloud_auth::credentials;
-/// Configuration for Gemini Live backend (Public or Vertex)
 /// Configuration for Gemini Live backend (Public or Vertex)
 pub use types::GeminiLiveBackend;
 /// Context for Vertex AI backend (project_id, location, token)
