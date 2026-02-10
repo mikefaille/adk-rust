@@ -73,6 +73,22 @@ pub enum Part {
         #[serde(rename = "functionResponse")]
         function_response: super::tools::FunctionResponse,
     },
+    /// Code execution result (from Gemini code execution)
+    CodeExecutionResult {
+        /// The code execution result details
+        #[serde(rename = "codeExecutionResult")]
+        code_execution_result: CodeExecutionResultData,
+    },
+}
+
+/// Result from code execution in Gemini
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CodeExecutionResultData {
+    /// Outcome of the execution (e.g. "OUTCOME_OK", "OUTCOME_DEADLINE_EXCEEDED")
+    pub outcome: String,
+    /// Output from the execution
+    pub output: String,
 }
 
 /// Blob for a message part

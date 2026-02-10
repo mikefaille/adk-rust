@@ -208,6 +208,14 @@ impl GeminiModel {
                             id: None,
                         });
                     }
+                    adk_gemini::Part::CodeExecutionResult { code_execution_result } => {
+                        converted_parts.push(Part::CodeExecutionResult {
+                            code_execution_result: adk_core::CodeExecutionResultData {
+                                outcome: code_execution_result.outcome.clone(),
+                                output: code_execution_result.output.clone(),
+                            },
+                        });
+                    }
                     _ => {}
                 }
             }
@@ -325,6 +333,14 @@ impl GeminiModel {
                                     },
                                 });
                             }
+                            Part::CodeExecutionResult { code_execution_result } => {
+                                gemini_parts.push(adk_gemini::Part::CodeExecutionResult {
+                                    code_execution_result: adk_gemini::CodeExecutionResultData {
+                                        outcome: code_execution_result.outcome.clone(),
+                                        output: code_execution_result.output.clone(),
+                                    },
+                                });
+                            }
                             _ => {}
                         }
                     }
@@ -359,6 +375,14 @@ impl GeminiModel {
                                         thought_signature: None,
                                     },
                                     thought_signature: None,
+                                });
+                            }
+                            Part::CodeExecutionResult { code_execution_result } => {
+                                gemini_parts.push(adk_gemini::Part::CodeExecutionResult {
+                                    code_execution_result: adk_gemini::CodeExecutionResultData {
+                                        outcome: code_execution_result.outcome.clone(),
+                                        output: code_execution_result.output.clone(),
+                                    },
                                 });
                             }
                             _ => {}
