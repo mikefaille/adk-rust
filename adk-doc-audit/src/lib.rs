@@ -74,7 +74,7 @@ pub use analyzer::{
 pub use cli::{AuditCli, AuditCommand, CliOutputFormat, CliSeverity};
 pub use config::{AuditConfig, AuditConfigBuilder, IssueSeverity, OutputFormat};
 pub use error::{AuditError, Result};
-pub use orchestrator::AuditOrchestrator;
+pub use orchestrator::{AuditOrchestrator};
 pub use parser::{
     ApiItemType, ApiReference, CodeExample, DocumentationParser, FeatureMention, InternalLink,
     ParsedDocument, VersionReference, VersionType,
