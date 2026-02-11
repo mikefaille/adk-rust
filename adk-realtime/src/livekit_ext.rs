@@ -80,7 +80,22 @@ impl<T: EventHandler> EventHandler for LiveKitEventHandler<T> {
     }
 }
 
+/// Helper to bridge a LiveKit RemoteAudioTrack to a RealtimeRunner for Gemini.
+///
+/// This wrapper ensures the audio is resampled to 16kHz mono as required by Gemini Live.
+pub fn bridge_gemini_input(track: RemoteAudioTrack, runner: Arc<RealtimeRunner>) {
+    bridge_input(track, runner, 16000, 1);
+}
+
 /// Bridge a LiveKit RemoteAudioTrack to a RealtimeRunner.
+///
+/// Spawns a background task that reads audio frames from the track, converts them
+/// to the specified sample rate/channels, and sends them to the runner.
+///
+/// # Note
+///
+/// If connecting to Gemini Live, you MUST use `sample_rate: 16000` and `channels: 1`
+/// or use the `bridge_gemini_input` helper.
 pub fn bridge_input(
     track: RemoteAudioTrack,
     runner: Arc<RealtimeRunner>,
@@ -88,10 +103,10 @@ pub fn bridge_input(
     channels: u32,
 ) {
     tokio::spawn(async move {
-        // Note: LiveKit 0.7+ infers sample rate from the track
-        // While Gemini expects 24kHz, we enforce it here with resampling/conversion by NativeAudioStream
+        // Create a NativeAudioStream which handles resampling if needed.
         let mut reader =
             NativeAudioStream::new(track.rtc_track(), sample_rate as i32, channels as i32);
+
         while let Some(frame) = reader.next().await {
             // Convert i16 samples to bytes (LE)
             let bytes = bytemuck::cast_slice::<i16, u8>(&frame.data);
