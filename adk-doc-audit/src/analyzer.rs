@@ -1177,4 +1177,27 @@ features = ["derive"]
         assert!(dep2.optional);
         assert_eq!(dep2.features, vec!["derive"]);
     }
+    #[tokio::test]
+    async fn test_line_number_extraction() {
+        let temp_dir = TempDir::new().unwrap();
+        let src_dir = temp_dir.path().join("src");
+        fs::create_dir_all(&src_dir).unwrap();
+
+        // Create a dummy file with a function at a specific line
+        let file_path = src_dir.join("lib.rs");
+        let content = r#"
+// Line 2
+// Line 3
+pub fn test_function() {}
+"#;
+        fs::write(&file_path, content).unwrap();
+
+        let analyzer = CodeAnalyzer::new(temp_dir.path().to_path_buf());
+        // analyze_rust_file is async
+        let apis = analyzer.analyze_rust_file(&file_path, "test_crate").await.unwrap();
+
+        assert_eq!(apis.len(), 1);
+        assert_eq!(apis[0].path, "test_crate::test_function");
+        assert_eq!(apis[0].line_number, 4);
+    }
 }
