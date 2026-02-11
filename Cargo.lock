@@ -6058,6 +6058,7 @@ dependencies = [
  "adk-core",
  "adk-model",
  "async-trait",
+ "proptest",
  "serde",
  "serde_json",
  "tokio",

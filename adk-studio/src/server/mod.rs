@@ -17,3 +17,5 @@ pub use runner::{ActionError, ActionNodeEvent, ActionResult, WorkflowExecutor};
 pub use scheduler::{ScheduledJobInfo, get_project_schedules, start_scheduler, stop_scheduler};
 pub use sse::cleanup_stale_sessions;
 pub use state::AppState;
+pub mod cors;
+pub use cors::build_cors_layer;

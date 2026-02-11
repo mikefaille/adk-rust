@@ -32,8 +32,8 @@ full = [
     "graph",
     "ui",
     "doc-audit",
-    "realtime",
-    "livekit"
+    "realtime"
+    # "livekit" - Disabled to avoid system dependency issues
 ]
 
 # CLI launcher support

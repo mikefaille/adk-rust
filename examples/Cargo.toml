@@ -117,10 +117,12 @@ path = "roadmap_gemini_compat/main.rs"
 [[example]]
 name = "roadmap_vertex_auth"
 path = "roadmap_vertex_auth/main.rs"
+required-features = ["vertex"]
 
 [[example]]
 name = "roadmap_gemini_sdk"
 path = "roadmap_gemini_sdk/main.rs"
+required-features = ["vertex"]
 
 [[example]]
 name = "roadmap_retry_matrix"
@@ -547,6 +549,7 @@ required-features = ["sso"]
 
 [features]
 default = []
+vertex = ["adk-gemini/vertex"]
 openai = ["adk-model/openai"]
 http-transport = ["adk-tool/http-transport"]
 anthropic = ["adk-model/anthropic"]
