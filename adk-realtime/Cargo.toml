@@ -69,6 +69,10 @@ required-features = ["gemini"]
 name = "openai_webrtc"
 required-features = ["openai", "webrtc"]
 
+[[example]]
+name = "livekit_gemini"
+required-features = ["livekit", "gemini"]
+
 [features]
 default = []
 # Enable OpenAI Realtime API support
