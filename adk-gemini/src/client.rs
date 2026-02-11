@@ -64,6 +64,8 @@ impl GeminiClient {
         &self,
         req: GenerateContentRequest,
     ) -> Result<GenerationResponse, Error> {
+        req.validate()
+            .map_err(|e| Error::Validation { source: Box::new(e) })?;
         self.backend.generate_content(req).await
     }
 
@@ -72,6 +74,8 @@ impl GeminiClient {
         &self,
         req: GenerateContentRequest,
     ) -> Result<BoxStream<'static, Result<GenerationResponse, Error>>, Error> {
+        req.validate()
+            .map_err(|e| Error::Validation { source: Box::new(e) })?;
         self.backend.generate_content_stream(req).await
     }
 
