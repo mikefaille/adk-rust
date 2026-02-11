@@ -65,6 +65,7 @@ pub struct VertexBackend {
     project: String,
     location: String,
     model: Model,
+    full_model_name: String,
 }
 
 impl VertexBackend {
@@ -78,7 +79,17 @@ impl VertexBackend {
         let (prediction, job, cache, credentials) =
             build_vertex_prediction_service(endpoint.clone(), auth)?;
 
+        let s = model.as_str();
+        let full_model_name = if s.starts_with("projects/") || s.starts_with("publishers/") {
+            s.to_string()
+        } else {
+            let name = s.trim_start_matches("models/");
+            format!("projects/{}/locations/{}/publishers/google/models/{}", project, location, name)
+        };
+
+
         Ok(Self {
+            full_model_name,
             prediction,
             job,
             cache,
@@ -104,7 +115,7 @@ impl VertexBackend {
         let url = Url::parse(&format!(
             "{}/v1/{}:generateContent",
             self.endpoint.trim_end_matches('/'),
-            self.model
+            self.full_model_name
         ))
         .context(UrlParseSnafu)?;
 
@@ -166,10 +177,12 @@ impl GeminiBackend for VertexBackend {
         &self,
         req: GenerateContentRequest,
     ) -> Result<GenerationResponse, Error> {
-        let vertex_req: google_cloud_aiplatform_v1::model::GenerateContentRequest =
+        let mut vertex_req: google_cloud_aiplatform_v1::model::GenerateContentRequest =
             self.convert_request(&req)?;
+        vertex_req.model = self.full_model_name.clone();
 
-        let vertex_req_clone = self.convert_request(&req)?;
+        let mut vertex_req_clone: google_cloud_aiplatform_v1::model::GenerateContentRequest = self.convert_request(&req)?;
+        vertex_req_clone.model = self.full_model_name.clone();
 
         match self
             .prediction
@@ -200,7 +213,7 @@ impl GeminiBackend for VertexBackend {
         let mut url = Url::parse(&format!(
             "{}/v1/{}:streamGenerateContent",
             self.endpoint.trim_end_matches('/'),
-            self.model
+            self.full_model_name
         ))
         .context(UrlParseSnafu)?;
 
@@ -219,8 +232,9 @@ impl GeminiBackend for VertexBackend {
         };
 
         // We use convert_request to get a JSON value we can send, or pass req directly if reqwest handles serialization
-        let vertex_req: google_cloud_aiplatform_v1::model::GenerateContentRequest = self.convert_request(&req)?;
+        let mut vertex_req: google_cloud_aiplatform_v1::model::GenerateContentRequest = self.convert_request(&req)?;
 
+        vertex_req.model = self.full_model_name.clone();
         let response = Client::new()
             .post(url.clone())
             .headers(auth_headers)
@@ -258,7 +272,7 @@ impl GeminiBackend for VertexBackend {
             serde_json::from_value(content_value).context(GoogleCloudRequestDeserializeSnafu)?;
 
         let mut vertex_request =
-            google_cloud_aiplatform_v1::model::EmbedContentRequest::new().set_content(content);
+            google_cloud_aiplatform_v1::model::EmbedContentRequest::new().set_content(content).set_model(self.full_model_name.clone());
 
         if let Some(title) = request.title.clone() {
             vertex_request = vertex_request.set_title(title);
@@ -277,7 +291,7 @@ impl GeminiBackend for VertexBackend {
         let url = Url::parse(&format!(
             "{}/v1/{}:embedContent",
             self.endpoint.trim_end_matches('/'),
-            self.model
+            self.full_model_name
         ))
         .context(UrlParseSnafu)?;
 

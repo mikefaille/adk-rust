@@ -34,7 +34,7 @@ repository = "https://github.com/zavora-ai/adk-rust"
 [features]
 default = ["studio"]
 studio = []
-vertex = ["dep:google-cloud-aiplatform-v1", "dep:google-cloud-auth", "dep:google-cloud-gax"]
+vertex = ["dep:google-cloud-aiplatform-v1", "dep:google-cloud-auth", "dep:google-cloud-gax", "dep:tonic"]
 
 
 [lib]
@@ -315,4 +315,5 @@ name = "verify_vertex"
 path = "examples/verify_vertex.rs"
 
 [dependencies]
+tonic = { version = "0.14", optional = true }
 jsonwebtoken = "10.3.0"

@@ -1,6 +1,8 @@
 use eventsource_stream::EventStreamError;
 use reqwest::header::InvalidHeaderValue;
 use snafu::Snafu;
+#[cfg(feature = "vertex")]
+use tonic::Status;
 use url::Url;
 
 #[derive(Debug, Snafu)]
@@ -96,6 +98,12 @@ pub enum Error {
         source: google_cloud_aiplatform_v1::Error,
     },
 
+    #[cfg(feature = "vertex")]
+    #[snafu(display("gRPC status error: {source}"))]
+    GrpcStatus {
+        source: Status,
+    },
+
     #[snafu(display("failed to serialize google cloud request"))]
     GoogleCloudRequestSerialize {
         source: serde_json::Error,
@@ -188,4 +196,11 @@ pub enum Error {
         display_name: String,
         chars: usize,
     },
+}
+
+#[cfg(feature = "vertex")]
+impl From<Status> for Error {
+    fn from(s: Status) -> Self {
+        Error::GrpcStatus { source: s }
+    }
 }
