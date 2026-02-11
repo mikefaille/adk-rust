@@ -997,15 +997,6 @@ impl CodeAnalyzer {
         attrs.iter().any(|attr| attr.path().is_ident("deprecated"))
     }
 
-    /// Suggest similar crate names when a crate is not found.
-    #[allow(dead_code)]
-    fn suggest_similar_crate_names(&self, target: &str, registry: &CrateRegistry) -> String {
-        Self::suggest_similar_crate_names_static(
-            target,
-            &registry.crates.keys().cloned().collect::<Vec<_>>(),
-        )
-    }
-
     /// Static version of suggest_similar_crate_names to avoid borrow checker issues.
     fn suggest_similar_crate_names_static(target: &str, available_crates: &[String]) -> String {
         let mut suggestions = Vec::new();
@@ -1021,12 +1012,6 @@ impl CodeAnalyzer {
         } else {
             format!("Did you mean: {}?", suggestions.join(", "))
         }
-    }
-
-    /// Suggest similar API names when an API is not found.
-    #[allow(dead_code)]
-    fn suggest_similar_api_names(&self, target: &str, crate_info: &CrateInfo) -> String {
-        Self::suggest_similar_api_names_static(target, &crate_info.public_apis)
     }
 
     /// Static version of suggest_similar_api_names to avoid borrow checker issues.
