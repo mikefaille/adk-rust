@@ -1,5 +1,5 @@
 use adk_gemini::{
-    GenerationResponse,Gemini, Model};
+    Gemini, Model};
 use display_error_chain::DisplayErrorChain;
 use std::process::ExitCode;
 use std::time::Duration;

@@ -13,8 +13,8 @@
 ///
 /// Thought signatures are encrypted representations of the model's internal
 /// thought process that help maintain context across conversation turns.
-use adk_gemini::{
-    GenerationResponse,
+use adk_gemini::{GenerationResponse,
+
     FunctionCallingMode, FunctionDeclaration, FunctionResponse, Gemini, ThinkingConfig, Tool,
 };
 use display_error_chain::DisplayErrorChain;

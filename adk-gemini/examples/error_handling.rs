@@ -1,7 +1,7 @@
 use std::process::ExitCode;
 
 use adk_gemini::{
-    GenerationResponse,ClientError, Gemini, Model, TaskType};
+    ClientError, Gemini, Model, TaskType};
 use display_error_chain::DisplayErrorChain;
 use tracing::{error, info};
 

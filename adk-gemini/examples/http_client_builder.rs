@@ -1,5 +1,5 @@
 use adk_gemini::{
-    GenerationResponse,GeminiBuilder, Model};
+    GeminiBuilder, Model};
 use display_error_chain::DisplayErrorChain;
 use reqwest::ClientBuilder;
 use std::env;

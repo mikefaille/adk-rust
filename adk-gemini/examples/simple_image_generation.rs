@@ -1,5 +1,5 @@
-use adk_gemini::{
-    GenerationResponse,Gemini, GenerationConfig};
+use adk_gemini::{GenerationResponse,
+    Gemini, GenerationConfig};
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use display_error_chain::DisplayErrorChain;
 use std::env;

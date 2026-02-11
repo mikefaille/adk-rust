@@ -7,7 +7,7 @@
 //! 4. Canceling the batch when CTRL-C is pressed
 //! 5. Properly handling the result
 
-use adk_gemini::{Batch, BatchHandleError, BatchStatus, Gemini, GenerationResponse, Message};
+use adk_gemini::{Batch, BatchHandleError, BatchStatus, Gemini, Message};
 use display_error_chain::DisplayErrorChain;
 use std::process::ExitCode;
 use std::{env, sync::Arc, time::Duration};

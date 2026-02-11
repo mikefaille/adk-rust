@@ -1,5 +1,5 @@
 use adk_gemini::{
-    GenerationResponse,
+
     Content, FunctionCallingMode, FunctionDeclaration, Gemini, GenerationConfig, Message, Role,
 };
 use display_error_chain::DisplayErrorChain;

@@ -1,5 +1,5 @@
-use adk_gemini::{
-    GenerationResponse,FunctionDeclaration, Gemini, ThinkingConfig};
+use adk_gemini::{GenerationResponse,
+    FunctionDeclaration, Gemini, ThinkingConfig};
 use display_error_chain::DisplayErrorChain;
 use futures::TryStreamExt;
 use schemars::JsonSchema;

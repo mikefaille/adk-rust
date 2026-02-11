@@ -1,4 +1,4 @@
-use adk_gemini::{Content, GenerationResponse, Part};
+use adk_gemini::{GenerationResponse, Content, Part};
 /// Example demonstrating text responses with thoughtSignature support
 ///
 /// This example shows how to handle text responses that include thought signatures,

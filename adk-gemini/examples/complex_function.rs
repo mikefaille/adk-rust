@@ -1,7 +1,7 @@
 use std::{collections::VecDeque, env};
 
-use adk_gemini::{
-    GenerationResponse,
+use adk_gemini::{GenerationResponse,
+
     Content, FunctionCall, FunctionCallingMode, FunctionDeclaration, FunctionResponse, Gemini,
     Part, Role, ThinkingConfig,
 };
