@@ -599,8 +599,8 @@ dotenvy = "0.15"
 rmcp = { version = "0.14", features = ["client", "transport-child-process"] }
 rustyline = "15"
 image = "0.25"
-clap = { version = "4.0", features = ["derive"] }
+clap = { version = "4.5", features = ["derive"] }
 
 [dev-dependencies]
-proptest = "1.0"
+proptest = "1.10"
 tokio-test = "0.4"

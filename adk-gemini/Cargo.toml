@@ -222,22 +222,22 @@ version = "0.22"
 version = "0.2"
 
 [dependencies.futures]
-version = "^0.3.1"
+version = "^0.3.31"
 
 [dependencies.futures-util]
 version = "^0.3"
 
 [dependencies.google-cloud-aiplatform-v1]
-version = "1.5.0"
+version = "1.6.0"
 features = ["prediction-service", "job-service", "gen-ai-cache-service", "model-service", "dataset-service", "llm-utility-service"]
 optional = true
 
 [dependencies.google-cloud-auth]
-version = "1.4.0"
+version = "1.5.0"
 optional = true
 
 [dependencies.google-cloud-gax]
-version = "1.5.0"
+version = "1.6.0"
 optional = true
 
 [dependencies.mime]
@@ -247,7 +247,7 @@ version = "0.3"
 version = "2.0"
 
 [dependencies.reqwest]
-version = "^0.12.15"
+version = "^0.12.28"
 features = [
     "charset",
     "h2",
@@ -260,7 +260,7 @@ features = [
 default-features = false
 
 [dependencies.schemars]
-version = "1.0"
+version = "1.2"
 
 [dependencies.serde]
 version = "^1.0"
@@ -293,21 +293,21 @@ version = "1"
 features = ["io-util", "rt-multi-thread", "sync"]
 
 [dependencies.tracing]
-version = "0.1.41"
+version = "0.1.44"
 
 [dependencies.url]
-version = "^2.4"
+version = "^2.5"
 features = ["serde"]
 
 [dev-dependencies.display-error-chain]
 version = "0.2"
 
 [dev-dependencies.tokio]
-version = "^1.47"
+version = "^1.49"
 features = ["full"]
 
 [dev-dependencies.tracing-subscriber]
-version = "0.3.20"
+version = "0.3.22"
 features = ["env-filter"]
 
 [[example]]

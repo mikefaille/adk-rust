@@ -1,4 +1,5 @@
-use adk_gemini::{FunctionCallingMode, FunctionDeclaration, Gemini, ThinkingConfig, Tool};
+use adk_gemini::{
+    GenerationResponse,FunctionCallingMode, FunctionDeclaration, Gemini, ThinkingConfig, Tool};
 use display_error_chain::DisplayErrorChain;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

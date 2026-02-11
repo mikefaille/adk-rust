@@ -28,6 +28,10 @@
 //! For more specialized types, import them directly from the crate root or their
 //! respective modules.
 
+// Internal macro module — must be declared before any module that uses it
+#[macro_use]
+mod macros;
+
 pub mod backend;
 pub mod builder;
 pub mod client;

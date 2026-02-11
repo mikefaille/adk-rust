@@ -1,7 +1,8 @@
 // Please put your sample video at examples/sample.mp4
 // This example sends the mp4 video content to Gemini API and asks AI to describe the video.
 
-use adk_gemini::{Content, Gemini};
+use adk_gemini::{
+    GenerationResponse,Content, Gemini};
 use base64::{Engine as _, engine::general_purpose};
 use display_error_chain::DisplayErrorChain;
 use std::env;

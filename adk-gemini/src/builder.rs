@@ -144,7 +144,7 @@ impl GeminiBuilder {
                 self.model.clone(),
             )?;
 
-            return Ok(GeminiClient::new(Arc::new(backend)));
+            return Ok(GeminiClient::with_backend(Arc::new(backend)));
         }
 
         // 2. Otherwise, use StudioBackend
@@ -179,6 +179,6 @@ impl GeminiBuilder {
             auth_config
         );
 
-        Ok(GeminiClient::new(Arc::new(backend)))
+        Ok(GeminiClient::with_backend(Arc::new(backend)))
     }
 }

@@ -26,7 +26,7 @@
 
 #![allow(clippy::enum_variant_names)]
 
-use serde::{Deserialize, Serialize, de};
+use serde::{Deserialize, Serialize};
 
 /// Role of a message in a conversation
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -262,67 +262,26 @@ impl Message {
     }
 }
 
-/// Content modality type - specifies the format of model output
-#[derive(Debug, Clone, Serialize, PartialEq)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-pub enum Modality {
-    /// Default value.
-    ModalityUnspecified,
-    /// Indicates the model should return text.
-    Text,
-    /// Indicates the model should return images.
-    Image,
-    /// Indicates the model should return audio.
-    Audio,
-    /// Indicates the model should return video.
-    Video,
-    /// Indicates document content (PDFs, etc.)
-    Document,
-    /// Unknown or future modality types
-    Unknown,
-}
 
-impl Modality {
-    fn from_wire_str(value: &str) -> Self {
-        match value {
-            "MODALITY_UNSPECIFIED" => Self::ModalityUnspecified,
-            "TEXT" => Self::Text,
-            "IMAGE" => Self::Image,
-            "AUDIO" => Self::Audio,
-            "VIDEO" => Self::Video,
-            "DOCUMENT" => Self::Document,
-            _ => Self::Unknown,
-        }
+hybrid_enum! {
+    /// Content modality type — specifies the format of model output
+    pub enum Modality {
+        /// Default value.
+        ModalityUnspecified => ("MODALITY_UNSPECIFIED", 0),
+        /// Indicates the model should return text.
+        Text                => ("TEXT", 1),
+        /// Indicates the model should return images.
+        Image               => ("IMAGE", 2),
+        /// Indicates the model should return video.
+        Video               => ("VIDEO", 3),
+        /// Indicates the model should return audio.
+        Audio               => ("AUDIO", 4),
+        /// Indicates document content (PDFs, etc.)
+        Document            => ("DOCUMENT", 5),
+        /// Unknown or future modality types.
+        Unknown             => ("UNKNOWN", 99),
     }
-
-    fn from_wire_number(value: i64) -> Self {
-        match value {
-            0 => Self::ModalityUnspecified,
-            1 => Self::Text,
-            2 => Self::Image,
-            3 => Self::Video,
-            4 => Self::Audio,
-            5 => Self::Document,
-            _ => Self::Unknown,
-        }
-    }
-}
-
-impl<'de> Deserialize<'de> for Modality {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let value = serde_json::Value::deserialize(deserializer)?;
-        match value {
-            serde_json::Value::String(s) => Ok(Self::from_wire_str(&s)),
-            serde_json::Value::Number(n) => n
-                .as_i64()
-                .map(Self::from_wire_number)
-                .ok_or_else(|| de::Error::custom("modality must be an integer-compatible number")),
-            _ => Err(de::Error::custom("modality must be a string or integer")),
-        }
-    }
+    fallback: Unknown
 }
 
 /// Vertex AI Context (moved from being internal to Public for shared use)

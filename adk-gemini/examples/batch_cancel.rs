@@ -7,7 +7,7 @@
 //! 4. Canceling the batch when CTRL-C is pressed
 //! 5. Properly handling the result
 
-use adk_gemini::{Batch, BatchHandleError, BatchStatus, Gemini, Message};
+use adk_gemini::{Batch, BatchHandleError, BatchStatus, Gemini, GenerationResponse, Message};
 use display_error_chain::DisplayErrorChain;
 use std::process::ExitCode;
 use std::{env, sync::Arc, time::Duration};
@@ -88,7 +88,7 @@ async fn do_main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Build and start the batch
-    let batch = batch_generate_content.execute().await?;
+    let batch: Batch = batch_generate_content.execute().await?;
     info!(batch_name = batch.name(), "batch created successfully");
     info!("press ctrl-c to cancel the batch operation");
 

@@ -11,7 +11,8 @@
 //! cargo run --package gemini-rust --example batch_generate
 //! ```
 
-use adk_gemini::{Batch, BatchHandleError, BatchStatus, Gemini, Message};
+use adk_gemini::{
+    GenerationResponse,Batch, BatchHandleError, BatchStatus, Gemini, Message};
 use display_error_chain::DisplayErrorChain;
 use std::process::ExitCode;
 use std::time::Duration;
@@ -86,7 +87,7 @@ async fn do_main() -> Result<(), Box<dyn std::error::Error>> {
         .build();
 
     // Create the batch request
-    let batch = gemini
+    let batch: Batch = gemini
         .batch_generate_content()
         .with_request(request1)
         .with_request(request2)

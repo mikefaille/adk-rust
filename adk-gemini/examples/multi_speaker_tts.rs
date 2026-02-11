@@ -1,4 +1,5 @@
-use adk_gemini::{Gemini, GenerationConfig, Part, SpeakerVoiceConfig, SpeechConfig};
+use adk_gemini::{
+    GenerationResponse,Gemini, GenerationConfig, Part, SpeakerVoiceConfig, SpeechConfig};
 use base64::{Engine as _, engine::general_purpose};
 use display_error_chain::DisplayErrorChain;
 use std::fs::File;

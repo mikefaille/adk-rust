@@ -49,7 +49,7 @@
 //!
 //! #[tokio::main]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
-//!     let client = Gemini::new_with_api_key(std::env::var("GEMINI_API_KEY")?)?;
+//!     let client = Gemini::new_with_api_key(std::env::var("GEMINI_API_KEY")?);
 //!     let request = client.generate_content().with_user_message("Why is the sky blue?").build();
 //!     let batch = client.batch_generate_content().with_request(request).execute().await?;
 //!

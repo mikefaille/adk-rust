@@ -1,4 +1,4 @@
-use adk_gemini::{Gemini, Model};
+use adk_gemini::{Gemini, GenerationResponse, Model};
 use display_error_chain::DisplayErrorChain;
 use std::env;
 use std::process::ExitCode;
@@ -41,11 +41,11 @@ async fn do_main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 3. Using enum variants for predefined models
     let client_flash_lite =
-        Gemini::with_model(api_key.clone(), Model::new(Model::GEMINI_2_5_FLASH_LITE))?;
+        Gemini::with_model(api_key.clone(), Model::Gemini25FlashLite)?;
     info!("created client with Gemini 2.5 Flash Lite using Model enum");
 
     let client_embedding =
-        Gemini::with_model(api_key.clone(), Model::new(Model::GEMINI_EMBEDDING_001))?;
+        Gemini::with_model(api_key.clone(), Model::GeminiEmbedding001)?;
     info!("created client with Gemini Embedding 001 model using Model enum");
 
     // 4. Using custom model strings for specific versions or preview models
@@ -53,18 +53,17 @@ async fn do_main() -> Result<(), Box<dyn std::error::Error>> {
         Gemini::with_model(api_key.clone(), "models/gemini-2.5-flash-image-preview".to_string())?;
     info!("created client with custom model string for image generation");
 
-    // 5. Using Model::new for any other model
+    // 5. Using Model::Custom for any other model
     let client_custom_enum = Gemini::with_model(
         api_key.clone(),
-        Model::new("models/gemini-2.5-flash-preview-tts".to_string()),
+        Model::Custom("models/gemini-2.5-flash-preview-tts".to_string()),
     )?;
     info!("created client with Model::Custom for text-to-speech model");
 
     // Test with the default model
     let test_message = "Hello! Can you tell me which model you are?";
 
-    let response =
-        client_default.generate_content().with_user_message(test_message).execute().await?;
+    let response: GenerationResponse = client_default.generate_content().with_user_message(test_message).execute().await?;
 
     info!(
         model = "default (Gemini 2.5 Flash)",
@@ -73,8 +72,7 @@ async fn do_main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // Test with Pro model for comparison
-    let response_pro =
-        client_pro.generate_content().with_user_message(test_message).execute().await?;
+    let response_pro: GenerationResponse = client_pro.generate_content().with_user_message(test_message).execute().await?;
 
     info!(
         model = "Gemini 2.5 Pro",

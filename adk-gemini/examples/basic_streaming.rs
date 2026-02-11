@@ -1,3 +1,4 @@
+use adk_gemini::GenerationResponse;
 use adk_gemini::Gemini;
 use display_error_chain::DisplayErrorChain;
 use futures::TryStreamExt;

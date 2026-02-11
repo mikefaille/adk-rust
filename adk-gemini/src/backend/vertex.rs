@@ -11,7 +11,8 @@ use crate::{
         EmbedContentRequest,
     },
     error::{
-        BadPartSnafu, BadResponseSnafu, DecodeResponseSnafu, Error, GoogleCloudAuthSnafu,
+        BadResponseSnafu, DecodeResponseSnafu,
+        Error, GoogleCloudAuthSnafu,
         GoogleCloudClientBuildSnafu, GoogleCloudCredentialHeadersSnafu,
         GoogleCloudCredentialHeadersUnavailableSnafu, GoogleCloudCredentialParseSnafu,
         GoogleCloudRequestDeserializeSnafu, GoogleCloudRequestSerializeSnafu,
@@ -22,15 +23,15 @@ use crate::{
     generation::model::{GenerateContentRequest, GenerationResponse},
 };
 use async_trait::async_trait;
-use futures::{StreamExt, TryStreamExt};
+use futures::TryStreamExt;
 use google_cloud_aiplatform_v1::client::{
     GenAiCacheService, JobService, PredictionService,
 };
 use google_cloud_auth::credentials::{self, Credentials};
 use reqwest::{Client, Response};
-use serde_json::json;
+
 use snafu::ResultExt;
-use std::sync::Arc;
+
 use url::Url;
 use eventsource_stream::Eventsource;
 

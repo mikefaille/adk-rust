@@ -12,6 +12,7 @@ use crate::embedding::{
     EmbedBuilder, EmbedContentRequest,
 };
 use crate::error::Error;
+use crate::Model;
 use crate::files::{
     handle::FileHandle,
     model::File,
@@ -36,21 +37,56 @@ pub struct GeminiClient {
 
 impl GeminiClient {
     /// Internal constructor used by the Builder
-    pub fn new(backend: Arc<dyn GeminiBackend>) -> Self {
+    pub fn with_backend(backend: Arc<dyn GeminiBackend>) -> Self {
         Self { backend }
     }
+
+    /// Create a new client with the given API key.
+    ///
+    /// This uses the default model and base URL.
+    pub fn new(key: impl Into<String>) -> Result<Self, Error> {
+        GeminiBuilder::new(key).build()
+    }
+
+    /// Create a new client with the given API key and model.
+    pub fn with_model(key: impl Into<String>, model: impl Into<String>) -> Result<Self, Error> {
+        GeminiBuilder::new(key).with_model(model.into()).build()
+    }
+
 
     /// Returns the model name used by this client.
     pub fn model(&self) -> &str {
         self.backend.model()
     }
 
-    /// Create a new client with the given API key.
+    /// Create a new client with the given API key. (Alias for backward compatibility)
     pub fn new_with_api_key(key: impl Into<String>) -> Self {
-        GeminiBuilder::new(key)
-            .build()
-            .expect("failed to build default client")
+        Self::new(key).expect("failed to build default client")
     }
+
+    /// Create a new client using the Gemini 2.5 Pro model.
+    pub fn pro(key: impl Into<String>) -> Result<Self, Error> {
+        GeminiBuilder::new(key).with_model(Model::Gemini25Pro).build()
+    }
+
+    /// Create a new client using the Gemini 2.5 Flash model.
+    pub fn flash(key: impl Into<String>) -> Result<Self, Error> {
+        GeminiBuilder::new(key).with_model(Model::Gemini25Flash).build()
+    }
+
+    /// Create a new client with the given API key, model, and base URL.
+    pub fn with_model_and_base_url(
+        key: impl Into<String>,
+        model: impl Into<String>,
+        base_url: reqwest::Url,
+    ) -> Result<Self, Error> {
+        GeminiBuilder::new(key)
+            .with_model(model.into())
+            .with_base_url(base_url)
+            .build()
+    }
+
+
 
     // --- Content Generation ---
 
