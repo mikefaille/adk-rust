@@ -1,3 +1,18 @@
+//! # Studio Server
+//!
+//! The backend server implementation for ADK Studio.
+//!
+//! This module provides the HTTP API, WebSocket endpoints, and background services
+//! that power the Studio environment.
+//!
+//! ## Key Components
+//!
+//! - **`AppState`**: Shared state managed by the server (projects, builds, sessions).
+//! - **`WorkflowExecutor`**: Orchestrates the execution of agent workflows.
+//! - **`GraphRunner`**: Manages the runtime state of visual graphs.
+//! - **`Scheduler`**: Background task scheduler for periodic jobs.
+//! - **`SSE`**: Server-Sent Events for real-time updates to the UI.
+
 pub mod events;
 pub mod graph_runner;
 mod handlers;

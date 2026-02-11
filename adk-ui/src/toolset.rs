@@ -35,7 +35,7 @@ pub struct UiToolset {
 }
 
 impl UiToolset {
-    /// Create a new UiToolset with all tools enabled
+    /// Create a new UiToolset with all tools enabled.
     pub fn new() -> Self {
         Self {
             include_screen: true,
@@ -54,7 +54,9 @@ impl UiToolset {
         }
     }
 
-    /// Create a toolset with only form rendering
+    /// Create a toolset with only form rendering capabilities enabled.
+    ///
+    /// Useful for agents that only need to collect structured data via forms.
     pub fn forms_only() -> Self {
         Self {
             include_screen: false,
@@ -73,85 +75,85 @@ impl UiToolset {
         }
     }
 
-    /// Disable form rendering
+    /// Disable form rendering capabilities.
     pub fn without_form(mut self) -> Self {
         self.include_form = false;
         self
     }
 
-    /// Disable screen rendering
+    /// Disable screen rendering capabilities.
     pub fn without_screen(mut self) -> Self {
         self.include_screen = false;
         self
     }
 
-    /// Disable page rendering
+    /// Disable page rendering capabilities.
     pub fn without_page(mut self) -> Self {
         self.include_page = false;
         self
     }
 
-    /// Disable kit rendering
+    /// Disable kit generation/rendering capabilities.
     pub fn without_kit(mut self) -> Self {
         self.include_kit = false;
         self
     }
 
-    /// Disable card rendering
+    /// Disable card rendering capabilities.
     pub fn without_card(mut self) -> Self {
         self.include_card = false;
         self
     }
 
-    /// Disable alert rendering
+    /// Disable alert rendering capabilities.
     pub fn without_alert(mut self) -> Self {
         self.include_alert = false;
         self
     }
 
-    /// Disable confirm rendering
+    /// Disable confirmation dialog rendering capabilities.
     pub fn without_confirm(mut self) -> Self {
         self.include_confirm = false;
         self
     }
 
-    /// Disable table rendering
+    /// Disable table rendering capabilities.
     pub fn without_table(mut self) -> Self {
         self.include_table = false;
         self
     }
 
-    /// Disable chart rendering
+    /// Disable chart rendering capabilities.
     pub fn without_chart(mut self) -> Self {
         self.include_chart = false;
         self
     }
 
-    /// Disable layout rendering
+    /// Disable layout rendering capabilities.
     pub fn without_layout(mut self) -> Self {
         self.include_layout = false;
         self
     }
 
-    /// Disable progress rendering
+    /// Disable progress indicator rendering capabilities.
     pub fn without_progress(mut self) -> Self {
         self.include_progress = false;
         self
     }
 
-    /// Disable modal rendering
+    /// Disable modal rendering capabilities.
     pub fn without_modal(mut self) -> Self {
         self.include_modal = false;
         self
     }
 
-    /// Disable toast rendering
+    /// Disable toast notification rendering capabilities.
     pub fn without_toast(mut self) -> Self {
         self.include_toast = false;
         self
     }
 
-    /// Get all tools as a Vec for use with LlmAgentBuilder
+    /// Get all tools as a Vec for use with `LlmAgentBuilder`.
     pub fn all_tools() -> Vec<Arc<dyn Tool>> {
         vec![
             Arc::new(RenderScreenTool::new()) as Arc<dyn Tool>,

@@ -1,3 +1,47 @@
+//! # adk-ui
+//!
+//! UI components and tools for ADK-Rust agents.
+//!
+//! ## Overview
+//!
+//! The `adk-ui` crate provides a comprehensive set of tools for agents to render rich UI components
+//! in compatible clients (like ADK Studio or custom frontends). It allows agents to go beyond simple text
+//! responses and present structured data, forms, charts, and interactive elements.
+//!
+//! ## Key Features
+//!
+//! - **UI Toolset**: A collection of tools (`UiToolset`) that agents can use to render UI components.
+//! - **Component Library**: Support for various UI components including:
+//!   - Forms and inputs
+//!   - Data tables and charts
+//!   - Cards and layouts
+//!   - Alerts, confirmations, and modals
+//!   - Progress indicators and toasts
+//! - **Kit Generation**: Tools for generating consistent UI kits and design systems (`kit` module).
+//! - **Templating**: Utilities for rendering UI templates with data.
+//!
+//! ## Quick Start
+//!
+//! To add UI capabilities to your agent, use the `UiToolset`:
+//!
+//! ```rust,no_run
+//! use adk_ui::UiToolset;
+//! // Assuming you have an agent builder available
+//! // let mut builder = AgentBuilder::new("my-agent");
+//!
+//! // Add all UI tools to the agent
+//! // builder.with_toolset(UiToolset::new());
+//! ```
+//!
+//! You can also selectively enable specific UI capabilities:
+//!
+//! ```rust,no_run
+//! use adk_ui::UiToolset;
+//!
+//! // Create a toolset with only form rendering capabilities
+//! let tools = UiToolset::forms_only();
+//! ```
+
 pub mod a2ui;
 pub mod catalog_registry;
 pub mod interop;

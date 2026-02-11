@@ -25,6 +25,31 @@
 //! use adk_gemini::prelude::*;
 //! ```
 //!
+//! ## Usage Example
+//!
+//! Generating text with a specific model:
+//!
+//! ```rust,no_run
+//! use adk_gemini::prelude::*;
+//!
+//! #[tokio::main]
+//! async fn main() -> Result<(), Box<dyn std::error::Error>> {
+//!     // Initialize the client (automatically uses GOOGLE_API_KEY environment variable)
+//!     let client = Gemini::new(GeminiLiveBackend::Public, None);
+//!
+//!     // Create a content generation request
+//!     let response = client
+//!         .generate_content("gemini-1.5-pro")
+//!         .content(ContentBuilder::user("Explain quantum computing in one sentence.").build())
+//!         .execute()
+//!         .await?;
+//!
+//!     println!("Response: {}", response.text().unwrap_or("No text generated"));
+//!
+//!     Ok(())
+//! }
+//! ```
+//!
 //! For more specialized types, import them directly from the crate root or their
 //! respective modules.
 

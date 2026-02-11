@@ -33,7 +33,7 @@
 //! - **Voice Activity Detection**: Server-side VAD for natural conversations
 //! - **Tool Calling**: Real-time function execution during voice sessions
 //!
-//! ## Example - Using RealtimeAgent (Recommended)
+//! ## Example - Using RealtimeAgent with OpenAI (Recommended)
 //!
 //! ```rust,ignore
 //! use adk_realtime::{RealtimeAgent, openai::OpenAIRealtimeModel};
@@ -55,6 +55,32 @@
 //!     let runner = Runner::new(Arc::new(agent));
 //!     runner.run(session, content).await?;
 //!
+//!     Ok(())
+//! }
+//! ```
+//!
+//! ## Example - Using Gemini Live
+//!
+//! ```rust,ignore
+//! use adk_realtime::{RealtimeAgent, gemini::GeminiRealtimeModel};
+//! use adk_runner::Runner;
+//!
+//! #[tokio::main]
+//! async fn main() -> Result<(), Box<dyn std::error::Error>> {
+//!     // Gemini Live configuration
+//!     let model = GeminiRealtimeModel::new(
+//!         "gemini-2.0-flash-exp",
+//!         adk_gemini::GeminiLiveBackend::Public
+//!     );
+//!
+//!     let agent = RealtimeAgent::builder("gemini_voice")
+//!         .model(std::sync::Arc::new(model))
+//!         .instruction("You are a helpful assistant.")
+//!         .voice("Puck")
+//!         .build()?;
+//!
+//!     let runner = Runner::new(Arc::new(agent));
+//!     // runner.run(...).await?;
 //!     Ok(())
 //! }
 //! ```
