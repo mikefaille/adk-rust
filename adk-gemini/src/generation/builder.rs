@@ -339,6 +339,6 @@ impl ContentBuilder {
     {
         let client = self.client.clone();
         let request = self.build();
-        client.generate_content_stream(request).await
+        client.stream_generate_content(request).await
     }
 }

@@ -29,7 +29,7 @@ pub trait GeminiBackend: Send + Sync + std::fmt::Debug {
     async fn generate_content(&self, req: GenerateContentRequest) -> Result<GenerationResponse, Error>;
 
     /// Generate content with streaming response
-    async fn generate_content_stream(&self, req: GenerateContentRequest) -> Result<BackendStream<GenerationResponse>, Error>;
+    async fn stream_generate_content(&self, req: GenerateContentRequest) -> Result<BackendStream<GenerationResponse>, Error>;
 
     /// Count tokens
     async fn count_tokens(&self, req: GenerateContentRequest) -> Result<u32, Error>;

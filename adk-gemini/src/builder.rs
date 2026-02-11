@@ -1,6 +1,6 @@
 use reqwest::{ClientBuilder, Url};
 use snafu::ResultExt;
-use std::sync::{Arc, LazyLock};
+use std::sync::LazyLock;
 
 use crate::backend::studio::{AuthConfig, ServiceAccountKey, ServiceAccountTokenSource, StudioBackend};
 #[cfg(feature = "vertex")]
@@ -58,8 +58,20 @@ impl GeminiBuilder {
         }
     }
 
+    /// Sets the API key.
+    pub fn api_key(mut self, key: impl Into<String>) -> Self {
+        self.api_key = Some(key.into());
+        self
+    }
+
     /// Sets the model for the client.
     pub fn with_model(mut self, model: impl Into<Model>) -> Self {
+        self.model = model.into();
+        self
+    }
+
+    /// Alias for with_model to match some user patterns
+    pub fn model(mut self, model: impl Into<Model>) -> Self {
         self.model = model.into();
         self
     }
@@ -82,12 +94,8 @@ impl GeminiBuilder {
 
     /// Configures the client to use a service account JSON key for authentication.
     pub fn with_service_account_json(mut self, service_account_json: &str) -> Result<Self, Error> {
-         // Validate JSON
          let _ = serde_json::from_str::<serde_json::Value>(service_account_json).context(ServiceAccountKeyParseSnafu)?;
-
-         // Store for later decision
          self.service_account_json = Some(service_account_json.to_string());
-
          #[cfg(feature = "vertex")]
          {
              let value = serde_json::from_str(service_account_json).context(GoogleCloudCredentialParseSnafu)?;
@@ -96,7 +104,6 @@ impl GeminiBuilder {
                 .context(GoogleCloudAuthSnafu)?;
              self.google_cloud_auth = Some(credentials);
          }
-
          Ok(self)
     }
 
@@ -114,36 +121,24 @@ impl GeminiBuilder {
         self
     }
 
+    /// Alias for with_google_cloud to match user request
+    #[cfg(feature = "vertex")]
+    pub fn vertex_auth(mut self, project: impl Into<String>, location: impl Into<String>) -> Self {
+        self.google_cloud = Some(GoogleCloudConfig {
+            project_id: project.into(),
+            location: location.into(),
+        });
+        self
+    }
+
     /// Configures the client to use Vertex AI with ADC.
     #[cfg(feature = "vertex")]
-    pub fn with_google_cloud_adc(mut self) -> Result<Self, Error> {
-        // FIXME: Resolve ADC builder import issue.
-        // For now, we return error if ADC is requested but cannot be built.
-        // Or we try to use default if available.
-
-        // This fails to compile:
-        // google_cloud_auth::credentials::application_default_credentials::Builder::new()
-
-        return Err(Error::Configuration { message: "Vertex AI ADC not fully implemented in this refactor version".to_string() });
-
-        /*
-        let credentials = tokio::task::block_in_place(|| {
-            futures::executor::block_on(async {
-                google_cloud_auth::credentials::application_default_credentials::Builder::new()
-                    .build()
-                    .await
-            })
-        })
-        .context(GoogleCloudAuthSnafu)?;
-
-        self.google_cloud_auth = Some(credentials);
-        Ok(self)
-        */
+    pub fn with_google_cloud_adc(self) -> Result<Self, Error> {
+         return Err(Error::Configuration { message: "Vertex AI ADC not fully implemented in this refactor version".to_string() });
     }
 
     #[cfg(feature = "vertex")]
-    pub fn with_google_cloud_wif_json(mut self, wif_json: &str) -> Result<Self, Error> {
-         // WIF implementation omitted for brevity/compatibility in this refactor
+    pub fn with_google_cloud_wif_json(self, _wif_json: &str) -> Result<Self, Error> {
          Err(Error::Configuration { message: "WIF not supported in this refactor yet".to_string() })
     }
 
@@ -170,10 +165,11 @@ impl GeminiBuilder {
                 config.project_id,
                 config.location,
                 GoogleCloudAuth::Credentials(credentials),
-                self.model.clone(),
+                self.model.to_string(),
             )?;
 
-            return Ok(GeminiClient::new(Arc::new(backend)));
+            // Use Box::new instead of Arc::new
+            return Ok(GeminiClient::new(Box::new(backend)));
         }
 
         // 2. Otherwise, use Studio
@@ -204,6 +200,7 @@ impl GeminiBuilder {
             auth
         );
 
-        Ok(GeminiClient::new(Arc::new(backend)))
+        // Use Box::new instead of Arc::new
+        Ok(GeminiClient::new(Box::new(backend)))
     }
 }

@@ -243,6 +243,7 @@ impl StudioBackend {
         self.build_url_with_suffix(&suffix)
     }
 
+    #[allow(dead_code)]
     fn build_url_global(&self, endpoint: &str) -> Result<Url, Error> {
         self.build_url_with_suffix(endpoint)
     }
@@ -317,7 +318,7 @@ impl GeminiBackend for StudioBackend {
         self.post_json(url, &req).await
     }
 
-    async fn generate_content_stream(
+    async fn stream_generate_content(
         &self,
         req: GenerateContentRequest,
     ) -> Result<BackendStream<GenerationResponse>, Error> {

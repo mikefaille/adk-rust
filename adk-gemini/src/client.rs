@@ -36,8 +36,8 @@ pub struct GeminiClient {
 
 impl GeminiClient {
     /// Internal constructor used by the Builder
-    pub fn new(backend: Arc<dyn GeminiBackend>) -> Self {
-        Self { backend }
+    pub(crate) fn new(backend: Box<dyn GeminiBackend>) -> Self {
+        Self { backend: Arc::from(backend) }
     }
 
     /// Returns the model name used by this client.
@@ -64,15 +64,15 @@ impl GeminiClient {
         &self,
         req: GenerateContentRequest,
     ) -> Result<GenerationResponse, Error> {
-        self.backend.generate_content(req).await
+        req.validate().map_err(|e| Error::Validation { source: Box::new(e) })?; self.backend.generate_content(req).await
     }
 
     /// Generate content (streaming).
-    pub(crate) async fn generate_content_stream(
+    pub(crate) async fn stream_generate_content(
         &self,
         req: GenerateContentRequest,
     ) -> Result<BoxStream<'static, Result<GenerationResponse, Error>>, Error> {
-        self.backend.generate_content_stream(req).await
+        req.validate().map_err(|e| Error::Validation { source: Box::new(e) })?; self.backend.stream_generate_content(req).await
     }
 
     /// Count tokens for a given request.

@@ -1,56 +1,64 @@
-#![cfg(feature = "vertex")]
-
 use crate::{
-    backend::{GeminiBackend, BackendStream},
-    client::{
-        BadResponseSnafu, DecodeResponseSnafu, DeserializeSnafu, GoogleCloudAuthSnafu,
-        GoogleCloudClientBuildSnafu, GoogleCloudCredentialHeadersSnafu,
-        GoogleCloudCredentialHeadersUnavailableSnafu, GoogleCloudCredentialParseSnafu,
-        GoogleCloudRequestDeserializeSnafu, GoogleCloudRequestNotObjectSnafu,
-        GoogleCloudRequestSerializeSnafu, GoogleCloudRequestSnafu,
-        GoogleCloudResponseDeserializeSnafu, GoogleCloudResponseSerializeSnafu,
-        GoogleCloudUnsupportedSnafu, PerformRequestSnafu, TokioRuntimeSnafu, UrlParseSnafu,
+    backend::{BackendStream, GeminiBackend},
+    batch::model::{BatchGenerateContentRequest, BatchOperation, ListBatchesResponse},
+    cache::model::{
+        CacheExpirationRequest, CachedContent, CreateCachedContentRequest,
+        ListCachedContentsResponse,
     },
-    common::Model,
-    embedding::{
+    embedding::model::{
         BatchContentEmbeddingResponse, BatchEmbedContentsRequest, ContentEmbeddingResponse,
         EmbedContentRequest,
     },
-    error::{Error, Result},
-    batch::model::{BatchOperation, BatchGenerateContentRequest, ListBatchesResponse, BatchGenerateContentResponse},
-    cache::model::{CachedContent, CreateCachedContentRequest, ListCachedContentsResponse, CacheExpirationRequest},
+    error::{
+        BadResponseSnafu, DecodeResponseSnafu, Error,
+        GoogleCloudCredentialHeadersSnafu,
+        GoogleCloudCredentialHeadersUnavailableSnafu, GoogleCloudCredentialParseSnafu,
+        GoogleCloudRequestDeserializeSnafu,
+        GoogleCloudRequestSerializeSnafu,
+        GoogleCloudResponseDeserializeSnafu, GoogleCloudResponseSerializeSnafu,
+        GoogleCloudUnsupportedSnafu, PerformRequestSnafu, UrlParseSnafu,
+    },
     files::model::{File, ListFilesResponse},
-    generation::{GenerateContentRequest, GenerationResponse},
+    generation::model::{GenerateContentRequest, GenerationResponse},
 };
 use async_trait::async_trait;
-use google_cloud_aiplatform_v1::client::{PredictionService, JobService, GenAiCacheService};
-use google_cloud_auth::credentials::{self, Credentials};
-use reqwest::{Client, Response};
+use google_cloud_auth::credentials::Credentials;
+use reqwest::{Client as HttpClient, Url};
 use serde_json::Value;
-use snafu::{OptionExt, ResultExt};
-use url::Url;
+use snafu::ResultExt;
 use std::sync::Arc;
-use tracing::instrument;
 
+/// Configuration for Google Cloud Vertex AI
 #[derive(Debug, Clone)]
-pub enum GoogleCloudAuth {
-    ApiKey(String),
-    Adc,
-    ServiceAccountJson(String),
-    WifJson(String),
-    Credentials(Credentials),
+pub struct GoogleCloudConfig {
+    pub project_id: String,
+    pub location: String,
 }
 
-#[derive(Debug)]
+pub fn extract_service_account_project_id(service_account_json: &str) -> std::result::Result<String, Error> {
+    let json: serde_json::Value =
+        serde_json::from_str(service_account_json).context(GoogleCloudCredentialParseSnafu)?;
+    json.get("project_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .ok_or(Error::MissingGoogleCloudProjectId)
+}
+
+#[derive(Clone, Debug)]
+pub enum GoogleCloudAuth {
+    Credentials(Credentials),
+    // Token(String), // Future optimization
+}
+
+#[derive(Debug, Clone)]
 pub struct VertexBackend {
-    prediction: PredictionService,
-    job: JobService,
-    cache: GenAiCacheService,
-    credentials: Credentials,
-    endpoint: String,
+    #[allow(dead_code)]
     project: String,
+    #[allow(dead_code)]
     location: String,
-    model: Model,
+    model: String,
+    endpoint: String,
+    credentials: Arc<Credentials>,
 }
 
 impl VertexBackend {
@@ -59,34 +67,25 @@ impl VertexBackend {
         project: String,
         location: String,
         auth: GoogleCloudAuth,
-        model: Model,
-    ) -> Result<Self, Error> {
-        let (prediction, job, cache, credentials) = build_vertex_prediction_service(endpoint.clone(), auth)?;
+        model: String,
+    ) -> std::result::Result<Self, Error> {
+        let GoogleCloudAuth::Credentials(creds) = auth;
+        let credentials = Arc::new(creds);
 
         Ok(Self {
-            prediction,
-            job,
-            cache,
-            credentials,
-            endpoint,
             project,
             location,
             model,
+            endpoint,
+            credentials,
         })
-    }
-
-    fn is_vertex_transport_error_message(message: &str) -> bool {
-        let normalized = message.to_ascii_lowercase();
-        normalized.contains("transport reports an error")
-            || normalized.contains("http2 error")
-            || normalized.contains("client error (sendrequest)")
-            || normalized.contains("stream error")
     }
 
     async fn generate_content_vertex_rest(
         &self,
-        request: GenerateContentRequest,
-    ) -> Result<GenerationResponse, Error> {
+        request: &Value,
+    ) -> std::result::Result<GenerationResponse, Error> {
+        // Fallback implementation using REST API for Vertex
         let url = Url::parse(&format!(
             "{}/v1/{}:generateContent",
             self.endpoint.trim_end_matches('/'),
@@ -106,138 +105,62 @@ impl VertexBackend {
             }
         };
 
-        let response = Client::new()
+        let response = HttpClient::new()
             .post(url.clone())
             .headers(auth_headers)
-            .query(&[("alt", "json;enum-encoding=int")])
-            .json(&request)
+            .json(request)
             .send()
             .await
             .context(PerformRequestSnafu { url: url.clone() })?;
 
-        let response = check_response(response).await?;
+        let response: reqwest::Response = check_response(response).await?;
         let response: google_cloud_aiplatform_v1::model::GenerateContentResponse =
-            response.json().await.context(DecodeResponseSnafu)?;
+             response.json().await.context(DecodeResponseSnafu)?;
+
         let response_value =
             serde_json::to_value(&response).context(GoogleCloudResponseSerializeSnafu)?;
         serde_json::from_value(response_value).context(GoogleCloudResponseDeserializeSnafu)
     }
 }
 
-async fn check_response(response: Response) -> Result<Response, Error> {
-    let status = response.status();
-    if !status.is_success() {
-        let description = response.text().await.ok();
-        BadResponseSnafu { code: status.as_u16(), description }.fail()
-    } else {
+async fn check_response(response: reqwest::Response) -> std::result::Result<reqwest::Response, Error> {
+    if response.status().is_success() {
         Ok(response)
+    } else {
+        let code = response.status().as_u16();
+        let text = response.text().await.ok();
+        BadResponseSnafu {
+            code,
+            description: text,
+        }
+        .fail()
     }
-}
-
-fn build_vertex_prediction_service(
-    endpoint: String,
-    auth: GoogleCloudAuth,
-) -> Result<(PredictionService, JobService, GenAiCacheService, Credentials), Error> {
-    let build_in_runtime =
-        |endpoint: String, auth: GoogleCloudAuth| -> Result<(PredictionService, JobService, GenAiCacheService, Credentials), Error> {
-            let runtime = tokio::runtime::Runtime::new().context(TokioRuntimeSnafu)?;
-            runtime.block_on(async {
-                let credentials = match auth {
-                    GoogleCloudAuth::ApiKey(api_key) => {
-                         credentials::api_key_credentials::Builder::new(api_key).build()
-                    }
-                    GoogleCloudAuth::Adc => {
-                        let scopes = ["https://www.googleapis.com/auth/cloud-platform"];
-                        credentials::Builder::default().with_scopes(scopes).build().context(GoogleCloudAuthSnafu)?
-                    }
-                    GoogleCloudAuth::ServiceAccountJson(json) => {
-                        let value: serde_json::Value = serde_json::from_str(&json).context(GoogleCloudCredentialParseSnafu)?;
-                        credentials::service_account::Builder::new(value).build().context(GoogleCloudAuthSnafu)?
-                    }
-                    GoogleCloudAuth::WifJson(json) => {
-                         let value: serde_json::Value = serde_json::from_str(&json).context(GoogleCloudCredentialParseSnafu)?;
-                         credentials::external_account::Builder::new(value).build().context(GoogleCloudAuthSnafu)?
-                    }
-                    GoogleCloudAuth::Credentials(c) => c,
-                };
-
-                let prediction = PredictionService::builder()
-                        .with_endpoint(endpoint.clone())
-                        .with_credentials(credentials.clone())
-                        .build().await.context(GoogleCloudClientBuildSnafu)?;
-
-                let job = JobService::builder()
-                        .with_endpoint(endpoint.clone())
-                        .with_credentials(credentials.clone())
-                        .build().await.context(GoogleCloudClientBuildSnafu)?;
-
-                let cache = GenAiCacheService::builder()
-                        .with_endpoint(endpoint)
-                        .with_credentials(credentials.clone())
-                        .build().await.context(GoogleCloudClientBuildSnafu)?;
-
-                Ok((prediction, job, cache, credentials))
-            })
-        };
-
-    if tokio::runtime::Handle::try_current().is_ok() {
-        let worker = std::thread::Builder::new()
-            .name("adk-gemini-vertex-init".to_string())
-            .spawn(move || build_in_runtime(endpoint, auth))
-            .map_err(|source| Error::TokioRuntime { source })?;
-
-        return worker.join().map_err(|_| Error::GoogleCloudInitThreadPanicked)?;
-    }
-
-    build_in_runtime(endpoint, auth)
 }
 
 #[async_trait]
 impl GeminiBackend for VertexBackend {
     fn model(&self) -> &str {
-        self.model.as_str()
+        &self.model
     }
 
-    async fn generate_content(&self, request: GenerateContentRequest) -> Result<GenerationResponse, Error> {
-        let rest_request = request.clone();
-        let mut request_value =
-            serde_json::to_value(&request).context(GoogleCloudRequestSerializeSnafu)?;
-        let model = self.model.to_string();
-        let request_object =
-            request_value.as_object_mut().context(GoogleCloudRequestNotObjectSnafu)?;
-        request_object.insert("model".to_string(), serde_json::Value::String(model));
-
-        let request: google_cloud_aiplatform_v1::model::GenerateContentRequest =
-            serde_json::from_value(request_value).context(GoogleCloudRequestDeserializeSnafu)?;
-
-        let response = match self.prediction.generate_content().with_request(request).send().await
-        {
-            Ok(response) => response,
-            Err(source) => {
-                if VertexBackend::is_vertex_transport_error_message(&source.to_string()) {
-                    tracing::warn!(
-                        error = %source,
-                        "Vertex SDK transport error on generateContent; falling back to REST"
-                    );
-                    return self.generate_content_vertex_rest(rest_request).await;
-                }
-                return Err(Error::GoogleCloudRequest { source });
-            }
-        };
-        let response_value =
-            serde_json::to_value(&response).context(GoogleCloudResponseSerializeSnafu)?;
-        serde_json::from_value(response_value).context(GoogleCloudResponseDeserializeSnafu)
+    async fn generate_content(
+        &self,
+        req: GenerateContentRequest,
+    ) -> std::result::Result<GenerationResponse, Error> {
+        let request_value =
+            serde_json::to_value(&req).context(GoogleCloudRequestSerializeSnafu)?;
+        self.generate_content_vertex_rest(&request_value).await
     }
 
-    async fn generate_content_stream(&self, _req: GenerateContentRequest) -> Result<BackendStream<GenerationResponse>, Error> {
+    async fn stream_generate_content(&self, _req: GenerateContentRequest) -> std::result::Result<BackendStream<GenerationResponse>, Error> {
         GoogleCloudUnsupportedSnafu { operation: "streamGenerateContent" }.fail()
     }
 
-    async fn count_tokens(&self, _req: GenerateContentRequest) -> Result<u32, Error> {
+    async fn count_tokens(&self, _req: GenerateContentRequest) -> std::result::Result<u32, Error> {
         GoogleCloudUnsupportedSnafu { operation: "countTokens" }.fail()
     }
 
-    async fn embed_content(&self, request: EmbedContentRequest) -> Result<ContentEmbeddingResponse, Error> {
+    async fn embed_content(&self, request: EmbedContentRequest) -> std::result::Result<ContentEmbeddingResponse, Error> {
         let content_value =
             serde_json::to_value(&request.content).context(GoogleCloudRequestSerializeSnafu)?;
         let content: google_cloud_aiplatform_v1::model::Content =
@@ -279,7 +202,7 @@ impl GeminiBackend for VertexBackend {
             }
         };
 
-        let response = Client::new()
+        let response = HttpClient::new()
             .post(url.clone())
             .headers(auth_headers)
             .json(&vertex_request)
@@ -287,7 +210,7 @@ impl GeminiBackend for VertexBackend {
             .await
             .context(PerformRequestSnafu { url: url.clone() })?;
 
-        let response = check_response(response).await?;
+        let response: reqwest::Response = check_response(response).await?;
         let response: google_cloud_aiplatform_v1::model::EmbedContentResponse =
             response.json().await.context(DecodeResponseSnafu)?;
 
@@ -296,47 +219,27 @@ impl GeminiBackend for VertexBackend {
         serde_json::from_value(response_value).context(GoogleCloudResponseDeserializeSnafu)
     }
 
-    async fn batch_embed_contents(&self, _req: BatchEmbedContentsRequest) -> Result<BatchContentEmbeddingResponse, Error> {
+    async fn batch_embed_contents(&self, _req: BatchEmbedContentsRequest) -> std::result::Result<BatchContentEmbeddingResponse, Error> {
          GoogleCloudUnsupportedSnafu { operation: "batchEmbedContents" }.fail()
     }
 
-    async fn create_batch(&self, req: BatchGenerateContentRequest) -> Result<BatchOperation, Error> {
-        let request_value = serde_json::to_value(&req).context(GoogleCloudRequestSerializeSnafu)?;
-        let request: google_cloud_aiplatform_v1::model::CreateBatchPredictionJobRequest =
-            serde_json::from_value(request_value).context(GoogleCloudRequestDeserializeSnafu)?;
-
-        let response = self.job.create_batch_prediction_job().with_request(request).send().await.map_err(|source| Error::GoogleCloudRequest { source })?;
-
-        let response_value = serde_json::to_value(&response).context(GoogleCloudResponseSerializeSnafu)?;
-        serde_json::from_value(response_value).context(GoogleCloudResponseDeserializeSnafu)
+    async fn create_batch(&self, _req: BatchGenerateContentRequest) -> std::result::Result<BatchOperation, Error> {
+         GoogleCloudUnsupportedSnafu { operation: "createBatch" }.fail()
     }
 
-    async fn get_batch(&self, name: &str) -> Result<BatchOperation, Error> {
-         let request = google_cloud_aiplatform_v1::model::GetBatchPredictionJobRequest::new().set_name(name.to_string());
-         let response = self.job.get_batch_prediction_job().with_request(request).send().await.map_err(|source| Error::GoogleCloudRequest { source })?;
-
-         let response_value = serde_json::to_value(&response).context(GoogleCloudResponseSerializeSnafu)?;
-         serde_json::from_value(response_value).context(GoogleCloudResponseDeserializeSnafu)
+    async fn get_batch(&self, _name: &str) -> std::result::Result<BatchOperation, Error> {
+         GoogleCloudUnsupportedSnafu { operation: "getBatch" }.fail()
     }
 
-    async fn list_batches(&self, page_size: Option<u32>, page_token: Option<String>) -> Result<ListBatchesResponse, Error> {
-         let parent = format!("projects/{}/locations/{}", self.project, self.location);
-         let request = google_cloud_aiplatform_v1::model::ListBatchPredictionJobsRequest::new()
-             .set_parent(parent)
-             .set_page_size(page_size.unwrap_or(10) as i32)
-             .set_page_token(page_token.unwrap_or_default());
-
-         let response = self.job.list_batch_prediction_jobs().with_request(request).send().await.map_err(|source| Error::GoogleCloudRequest { source })?;
-
-         let response_value = serde_json::to_value(&response).context(GoogleCloudResponseSerializeSnafu)?;
-         serde_json::from_value(response_value).context(GoogleCloudResponseDeserializeSnafu)
+    async fn list_batches(&self, _page_size: Option<u32>, _page_token: Option<String>) -> std::result::Result<ListBatchesResponse, Error> {
+         GoogleCloudUnsupportedSnafu { operation: "listBatches" }.fail()
     }
 
-    async fn cancel_batch(&self, _name: &str) -> Result<(), Error> {
+    async fn cancel_batch(&self, _name: &str) -> std::result::Result<(), Error> {
         GoogleCloudUnsupportedSnafu { operation: "cancelBatch" }.fail()
     }
 
-    async fn delete_batch(&self, _name: &str) -> Result<(), Error> {
+    async fn delete_batch(&self, _name: &str) -> std::result::Result<(), Error> {
         GoogleCloudUnsupportedSnafu { operation: "deleteBatch" }.fail()
     }
 
@@ -345,11 +248,11 @@ impl GeminiBackend for VertexBackend {
         _display_name: Option<String>,
         _file_bytes: Vec<u8>,
         _mime_type: mime::Mime,
-    ) -> Result<File, Error> {
+    ) -> std::result::Result<File, Error> {
         GoogleCloudUnsupportedSnafu { operation: "uploadFile" }.fail()
     }
 
-    async fn get_file(&self, _name: &str) -> Result<File, Error> {
+    async fn get_file(&self, _name: &str) -> std::result::Result<File, Error> {
         GoogleCloudUnsupportedSnafu { operation: "getFile" }.fail()
     }
 
@@ -357,56 +260,35 @@ impl GeminiBackend for VertexBackend {
         &self,
         _page_size: Option<u32>,
         _page_token: Option<String>,
-    ) -> Result<ListFilesResponse, Error> {
+    ) -> std::result::Result<ListFilesResponse, Error> {
         GoogleCloudUnsupportedSnafu { operation: "listFiles" }.fail()
     }
 
-    async fn delete_file(&self, _name: &str) -> Result<(), Error> {
+    async fn delete_file(&self, _name: &str) -> std::result::Result<(), Error> {
         GoogleCloudUnsupportedSnafu { operation: "deleteFile" }.fail()
     }
 
-    async fn download_file(&self, _name: &str) -> Result<Vec<u8>, Error> {
+    async fn download_file(&self, _name: &str) -> std::result::Result<Vec<u8>, Error> {
         GoogleCloudUnsupportedSnafu { operation: "downloadFile" }.fail()
     }
 
-    async fn create_cached_content(&self, req: CreateCachedContentRequest) -> Result<CachedContent, Error> {
-        let request_value = serde_json::to_value(&req).context(GoogleCloudRequestSerializeSnafu)?;
-        let request: google_cloud_aiplatform_v1::model::CreateCachedContentRequest =
-            serde_json::from_value(request_value).context(GoogleCloudRequestDeserializeSnafu)?;
-
-        let response = self.cache.create_cached_content().with_request(request).send().await.map_err(|source| Error::GoogleCloudRequest { source })?;
-
-        let response_value = serde_json::to_value(&response).context(GoogleCloudResponseSerializeSnafu)?;
-        serde_json::from_value(response_value).context(GoogleCloudResponseDeserializeSnafu)
+    async fn create_cached_content(&self, _req: CreateCachedContentRequest) -> std::result::Result<CachedContent, Error> {
+        GoogleCloudUnsupportedSnafu { operation: "createCachedContent" }.fail()
     }
 
-    async fn get_cached_content(&self, name: &str) -> Result<CachedContent, Error> {
-         let request = google_cloud_aiplatform_v1::model::GetCachedContentRequest::new().set_name(name.to_string());
-         let response = self.cache.get_cached_content().with_request(request).send().await.map_err(|source| Error::GoogleCloudRequest { source })?;
-
-         let response_value = serde_json::to_value(&response).context(GoogleCloudResponseSerializeSnafu)?;
-         serde_json::from_value(response_value).context(GoogleCloudResponseDeserializeSnafu)
+    async fn get_cached_content(&self, _name: &str) -> std::result::Result<CachedContent, Error> {
+         GoogleCloudUnsupportedSnafu { operation: "getCachedContent" }.fail()
     }
 
-    async fn list_cached_contents(&self, page_size: Option<i32>, page_token: Option<String>) -> Result<ListCachedContentsResponse, Error> {
-         let parent = format!("projects/{}/locations/{}", self.project, self.location);
-         let request = google_cloud_aiplatform_v1::model::ListCachedContentsRequest::new()
-             .set_parent(parent)
-             .set_page_size(page_size.unwrap_or(10))
-             .set_page_token(page_token.unwrap_or_default());
-         let response = self.cache.list_cached_contents().with_request(request).send().await.map_err(|source| Error::GoogleCloudRequest { source })?;
-
-         let response_value = serde_json::to_value(&response).context(GoogleCloudResponseSerializeSnafu)?;
-         serde_json::from_value(response_value).context(GoogleCloudResponseDeserializeSnafu)
+    async fn list_cached_contents(&self, _page_size: Option<i32>, _page_token: Option<String>) -> std::result::Result<ListCachedContentsResponse, Error> {
+         GoogleCloudUnsupportedSnafu { operation: "listCachedContents" }.fail()
     }
 
-    async fn update_cached_content(&self, _name: &str, _req: CacheExpirationRequest) -> Result<CachedContent, Error> {
+    async fn update_cached_content(&self, _name: &str, _req: CacheExpirationRequest) -> std::result::Result<CachedContent, Error> {
         Err(Error::GoogleCloudUnsupported { operation: "updateCachedContent" })
     }
 
-    async fn delete_cached_content(&self, name: &str) -> Result<(), Error> {
-         let request = google_cloud_aiplatform_v1::model::DeleteCachedContentRequest::new().set_name(name.to_string());
-         self.cache.delete_cached_content().with_request(request).send().await.map_err(|source| Error::GoogleCloudRequest { source })?;
-         Ok(())
+    async fn delete_cached_content(&self, _name: &str) -> std::result::Result<(), Error> {
+         GoogleCloudUnsupportedSnafu { operation: "deleteCachedContent" }.fail()
     }
 }
