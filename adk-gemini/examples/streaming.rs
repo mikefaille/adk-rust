@@ -1,4 +1,4 @@
-use adk_gemini::{Gemini, GenerationResponse};
+use adk_gemini::{GenerationResponse, Gemini};
 use display_error_chain::DisplayErrorChain;
 use futures_util::TryStreamExt;
 use std::env;

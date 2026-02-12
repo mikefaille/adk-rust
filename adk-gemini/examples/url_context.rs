@@ -49,8 +49,8 @@ making the content available to the model for analysis and response generation.
 - [`google_search.rs`](google_search.rs) - Google Search tool integration
 */
 
-use adk_gemini::{
-    GenerationResponse,Gemini, Tool};
+use adk_gemini::{GenerationResponse,
+    Gemini, Tool};
 use display_error_chain::DisplayErrorChain;
 use std::env;
 use std::process::ExitCode;

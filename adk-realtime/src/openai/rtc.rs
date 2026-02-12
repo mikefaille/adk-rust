@@ -389,7 +389,6 @@ async fn run_pc_loop(
                          }
                      }
 
-                    Some(_) => {}
                     None => break,
                 }
             }

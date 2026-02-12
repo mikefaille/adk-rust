@@ -243,9 +243,6 @@ impl StudioBackend {
         self.build_url_with_suffix(&suffix)
     }
 
-    fn build_url_global(&self, endpoint: &str) -> Result<Url, Error> {
-        self.build_url_with_suffix(endpoint)
-    }
 
     fn build_files_url(&self, name: Option<&str>) -> Result<Url, Error> {
         let suffix = name

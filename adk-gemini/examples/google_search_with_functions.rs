@@ -1,6 +1,6 @@
 use adk_gemini::tools::Behavior;
-use adk_gemini::{
-    GenerationResponse,
+use adk_gemini::{GenerationResponse,
+
     Content, FunctionCall, FunctionCallingMode, FunctionDeclaration, Gemini, Message, Role, Tool,
 };
 use display_error_chain::DisplayErrorChain;

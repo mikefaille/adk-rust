@@ -1,4 +1,4 @@
-use adk_gemini::{Content, FunctionCallingMode, FunctionDeclaration, Gemini, GenerationResponse, Part};
+use adk_gemini::{GenerationResponse, Content, FunctionCallingMode, FunctionDeclaration, Gemini, Part};
 use display_error_chain::DisplayErrorChain;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

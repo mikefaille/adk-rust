@@ -1,4 +1,4 @@
-use adk_gemini::{Gemini, GenerationConfig, GenerationResponse, ThinkingConfig};
+use adk_gemini::{GenerationResponse, Gemini, GenerationConfig, ThinkingConfig};
 use display_error_chain::DisplayErrorChain;
 use std::env;
 use std::process::ExitCode;

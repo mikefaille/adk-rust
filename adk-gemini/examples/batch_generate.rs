@@ -12,7 +12,7 @@
 //! ```
 
 use adk_gemini::{
-    GenerationResponse,Batch, BatchHandleError, BatchStatus, Gemini, Message};
+    Batch, BatchHandleError, BatchStatus, Gemini, Message};
 use display_error_chain::DisplayErrorChain;
 use std::process::ExitCode;
 use std::time::Duration;

@@ -1,5 +1,5 @@
-use adk_gemini::{
-    GenerationResponse,Gemini, GenerationConfig};
+use adk_gemini::{GenerationResponse,
+    Gemini, GenerationConfig};
 use display_error_chain::DisplayErrorChain;
 use std::env;
 use std::process::ExitCode;
