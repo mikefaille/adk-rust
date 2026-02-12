@@ -96,4 +96,3 @@ mistral-rs-ref/
 node_modules/
 
 # Audio
-*.pcm
