@@ -33,7 +33,7 @@ full = [
     "ui",
     "doc-audit",
     "realtime"
-    # "livekit" - Disabled to avoid system dependency issues
+    # "livekit" - TODO: Re-enable livekit feature once system dependencies (glib, libwebrtc) are available in the build environment.
 ]
 
 # CLI launcher support
