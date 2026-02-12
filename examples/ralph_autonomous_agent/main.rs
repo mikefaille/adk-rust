@@ -1,3 +1,4 @@
+#![allow(unused)]
 //! Ralph Autonomous Agent - Main Entry Point
 //!
 //! A fully native ADK-Rust autonomous agent that continuously executes development tasks
