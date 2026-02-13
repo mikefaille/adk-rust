@@ -93,6 +93,9 @@ pub mod openai;
 #[cfg(feature = "gemini")]
 pub mod gemini;
 
+#[cfg(feature = "gemini")]
+pub use adk_gemini;
+
 #[cfg(feature = "livekit")]
 pub mod livekit_ext;
 

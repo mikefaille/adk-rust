@@ -10,7 +10,7 @@
 //!   ROADMAP_RUN_EMBED=1 (default) to also run embedContent
 //!   ROADMAP_PROMPT
 
-use adk_gemini::{Gemini, Model, TaskType};
+use adk_gemini::{Gemini, GeminiBuilder, Model, TaskType};
 use anyhow::{Context, Result, bail};
 use std::{env, fs};
 
@@ -61,82 +61,101 @@ fn read_json_value(json_var: &str, path_var: &str) -> Result<String> {
     fs::read_to_string(&path).with_context(|| format!("failed to read {}", path))
 }
 
-fn build_generate_client(mode: SdkMode, model: String) -> Result<Gemini> {
+fn build_generate_client(mode: SdkMode, model_str: String) -> Result<Gemini> {
     let location = cloud_location();
+    let model = Model::from(model_str);
     match mode {
         SdkMode::V1ApiKey => {
             let Some(api_key) = google_api_key() else {
                 bail!("set GOOGLE_API_KEY (or GEMINI_API_KEY) for ROADMAP_SDK_MODE=v1_api_key");
             };
-            Ok(Gemini::with_model_v1(api_key, model)?)
+            Ok(GeminiBuilder::new(api_key).with_model(model).build()?)
         }
         SdkMode::VertexApiKey => {
             let Some(api_key) = google_api_key() else {
                 bail!("set GOOGLE_API_KEY (or GEMINI_API_KEY) for ROADMAP_SDK_MODE=vertex_api_key");
             };
             let project_id = project_id()?;
-            Ok(Gemini::with_google_cloud_model(api_key, project_id, location, model)?)
+            Ok(GeminiBuilder::new(api_key)
+                .with_google_cloud(&project_id, &location)
+                .with_model(model)
+                .build()?)
         }
         SdkMode::VertexAdc => {
             let project_id = project_id()?;
-            Ok(Gemini::with_google_cloud_adc_model(project_id, location, model)?)
+            Ok(GeminiBuilder::new_without_api_key()
+                .with_google_cloud_adc()?
+                .with_google_cloud(&project_id, &location)
+                .with_model(model)
+                .build()?)
         }
         SdkMode::VertexServiceAccount => {
             let service_account_json =
                 read_json_value("GOOGLE_SERVICE_ACCOUNT_JSON", "GOOGLE_SERVICE_ACCOUNT_PATH")?;
-            // This helper infers project_id from service account JSON and defaults location.
-            Ok(Gemini::with_service_account_json_model(&service_account_json, model)?)
+            Ok(GeminiBuilder::new_without_api_key()
+                .with_service_account_json(&service_account_json)?
+                // Note: we still need project/location for Vertex
+                .with_google_cloud(&project_id()?, &location)
+                .with_model(model)
+                .build()?)
         }
         SdkMode::VertexWif => {
             let wif_json = read_json_value("GOOGLE_WIF_JSON", "GOOGLE_WIF_PATH")?;
             let project_id = project_id()?;
-            Ok(Gemini::with_google_cloud_wif_json(&wif_json, project_id, location, model)?)
+            Ok(GeminiBuilder::new_without_api_key()
+                .with_google_cloud_wif_json(&wif_json)?
+                .with_google_cloud(&project_id, &location)
+                .with_model(model)
+                .build()?)
         }
     }
 }
 
 fn build_embedding_client(mode: SdkMode) -> Result<Gemini> {
     let location = cloud_location();
+    let model = Model::TextEmbedding004;
     match mode {
         SdkMode::V1ApiKey => {
             let Some(api_key) = google_api_key() else {
                 bail!("set GOOGLE_API_KEY (or GEMINI_API_KEY) for ROADMAP_SDK_MODE=v1_api_key");
             };
-            Ok(Gemini::with_model_v1(api_key, Model::TextEmbedding004)?)
+            Ok(GeminiBuilder::new(api_key).with_model(model).build()?)
         }
         SdkMode::VertexApiKey => {
             let Some(api_key) = google_api_key() else {
                 bail!("set GOOGLE_API_KEY (or GEMINI_API_KEY) for ROADMAP_SDK_MODE=vertex_api_key");
             };
             let project_id = project_id()?;
-            Ok(Gemini::with_google_cloud_model(
-                api_key,
-                project_id,
-                location,
-                Model::TextEmbedding004,
-            )?)
+            Ok(GeminiBuilder::new(api_key)
+                .with_google_cloud(&project_id, &location)
+                .with_model(model)
+                .build()?)
         }
         SdkMode::VertexAdc => {
             let project_id = project_id()?;
-            Ok(Gemini::with_google_cloud_adc_model(project_id, location, Model::TextEmbedding004)?)
+            Ok(GeminiBuilder::new_without_api_key()
+                .with_google_cloud_adc()?
+                .with_google_cloud(&project_id, &location)
+                .with_model(model)
+                .build()?)
         }
         SdkMode::VertexServiceAccount => {
             let service_account_json =
                 read_json_value("GOOGLE_SERVICE_ACCOUNT_JSON", "GOOGLE_SERVICE_ACCOUNT_PATH")?;
-            Ok(Gemini::with_service_account_json_model(
-                &service_account_json,
-                Model::TextEmbedding004,
-            )?)
+            Ok(GeminiBuilder::new_without_api_key()
+                .with_service_account_json(&service_account_json)?
+                .with_google_cloud(&project_id()?, &location)
+                .with_model(model)
+                .build()?)
         }
         SdkMode::VertexWif => {
             let wif_json = read_json_value("GOOGLE_WIF_JSON", "GOOGLE_WIF_PATH")?;
             let project_id = project_id()?;
-            Ok(Gemini::with_google_cloud_wif_json(
-                &wif_json,
-                project_id,
-                location,
-                Model::TextEmbedding004,
-            )?)
+            Ok(GeminiBuilder::new_without_api_key()
+                .with_google_cloud_wif_json(&wif_json)?
+                .with_google_cloud(&project_id, &location)
+                .with_model(model)
+                .build()?)
         }
     }
 }

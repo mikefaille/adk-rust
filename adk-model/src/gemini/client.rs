@@ -3,7 +3,7 @@ use adk_core::{
     CitationMetadata, CitationSource, Content, FinishReason, Llm, LlmRequest, LlmResponse,
     LlmResponseStream, Part, Result, UsageMetadata,
 };
-use adk_gemini::Gemini;
+use adk_gemini::{Gemini, GeminiBuilder};
 use async_trait::async_trait;
 
 pub struct GeminiModel {
@@ -28,13 +28,11 @@ impl GeminiModel {
         model: impl Into<String>,
     ) -> Result<Self> {
         let model_name = model.into();
-        let client = Gemini::with_google_cloud_model(
-            api_key.into(),
-            project_id,
-            location,
-            model_name.clone(),
-        )
-        .map_err(|e| adk_core::AdkError::Model(e.to_string()))?;
+        let client = GeminiBuilder::new(api_key)
+            .with_google_cloud(project_id.as_ref(), location.as_ref())
+            .with_model(adk_gemini::Model::from(model_name.clone()))
+            .build()
+            .map_err(|e: adk_gemini::error::Error| adk_core::AdkError::Model(e.to_string()))?;
 
         Ok(Self { client, model_name, retry_config: RetryConfig::default() })
     }
@@ -47,13 +45,13 @@ impl GeminiModel {
         model: impl Into<String>,
     ) -> Result<Self> {
         let model_name = model.into();
-        let client = Gemini::with_google_cloud_service_account_json(
-            service_account_json,
-            project_id.as_ref(),
-            location.as_ref(),
-            model_name.clone(),
-        )
-        .map_err(|e| adk_core::AdkError::Model(e.to_string()))?;
+        let client = GeminiBuilder::new_without_api_key()
+            .with_service_account_json(service_account_json)
+            .map_err(|e: adk_gemini::error::Error| adk_core::AdkError::Model(e.to_string()))?
+            .with_google_cloud(project_id.as_ref(), location.as_ref())
+            .with_model(adk_gemini::Model::from(model_name.clone()))
+            .build()
+            .map_err(|e: adk_gemini::error::Error| adk_core::AdkError::Model(e.to_string()))?;
 
         Ok(Self { client, model_name, retry_config: RetryConfig::default() })
     }
@@ -65,12 +63,13 @@ impl GeminiModel {
         model: impl Into<String>,
     ) -> Result<Self> {
         let model_name = model.into();
-        let client = Gemini::with_google_cloud_adc_model(
-            project_id.as_ref(),
-            location.as_ref(),
-            model_name.clone(),
-        )
-        .map_err(|e| adk_core::AdkError::Model(e.to_string()))?;
+        let client = GeminiBuilder::new_without_api_key()
+            .with_google_cloud_adc()
+            .map_err(|e: adk_gemini::error::Error| adk_core::AdkError::Model(e.to_string()))?
+            .with_google_cloud(project_id.as_ref(), location.as_ref())
+            .with_model(adk_gemini::Model::from(model_name.clone()))
+            .build()
+            .map_err(|e: adk_gemini::error::Error| adk_core::AdkError::Model(e.to_string()))?;
 
         Ok(Self { client, model_name, retry_config: RetryConfig::default() })
     }
@@ -83,13 +82,13 @@ impl GeminiModel {
         model: impl Into<String>,
     ) -> Result<Self> {
         let model_name = model.into();
-        let client = Gemini::with_google_cloud_wif_json(
-            wif_json,
-            project_id.as_ref(),
-            location.as_ref(),
-            model_name.clone(),
-        )
-        .map_err(|e| adk_core::AdkError::Model(e.to_string()))?;
+        let client = GeminiBuilder::new_without_api_key()
+            .with_google_cloud_wif_json(wif_json)
+            .map_err(|e: adk_gemini::error::Error| adk_core::AdkError::Model(e.to_string()))?
+            .with_google_cloud(project_id.as_ref(), location.as_ref())
+            .with_model(adk_gemini::Model::from(model_name.clone()))
+            .build()
+            .map_err(|e: adk_gemini::error::Error| adk_core::AdkError::Model(e.to_string()))?;
 
         Ok(Self { client, model_name, retry_config: RetryConfig::default() })
     }

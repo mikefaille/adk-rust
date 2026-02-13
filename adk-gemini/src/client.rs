@@ -49,8 +49,8 @@ impl GeminiClient {
     }
 
     /// Create a new client with the given API key and model.
-    pub fn with_model(key: impl Into<String>, model: impl Into<String>) -> Result<Self, Error> {
-        GeminiBuilder::new(key).with_model(model.into()).build()
+    pub fn with_model(key: impl Into<String>, model: impl Into<Model>) -> Result<Self, Error> {
+        GeminiBuilder::new(key).with_model(model).build()
     }
 
 
@@ -66,22 +66,22 @@ impl GeminiClient {
 
     /// Create a new client using the Gemini 2.5 Pro model.
     pub fn pro(key: impl Into<String>) -> Result<Self, Error> {
-        GeminiBuilder::new(key).with_model(Model::Gemini25Pro).build()
+        GeminiBuilder::new(key).with_model(crate::common::Model::Gemini25Pro).build()
     }
 
     /// Create a new client using the Gemini 2.5 Flash model.
     pub fn flash(key: impl Into<String>) -> Result<Self, Error> {
-        GeminiBuilder::new(key).with_model(Model::Gemini25Flash).build()
+        GeminiBuilder::new(key).with_model(crate::common::Model::Gemini25Flash).build()
     }
 
     /// Create a new client with the given API key, model, and base URL.
     pub fn with_model_and_base_url(
         key: impl Into<String>,
-        model: impl Into<String>,
+        model: impl Into<Model>,
         base_url: reqwest::Url,
     ) -> Result<Self, Error> {
         GeminiBuilder::new(key)
-            .with_model(model.into())
+            .with_model(model)
             .with_base_url(base_url)
             .build()
     }

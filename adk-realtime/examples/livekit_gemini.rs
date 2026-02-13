@@ -10,12 +10,14 @@
 //! - Set `GOOGLE_API_KEY` for Gemini.
 //! - Run with: `cargo run --example livekit_gemini --features "livekit gemini"`
 
-use adk_gemini::GeminiLiveBackend;
 use adk_realtime::gemini::GeminiRealtimeModel;
 use adk_realtime::livekit::{bridge_gemini_input, LiveKitEventHandler};
 use adk_realtime::{RealtimeConfig, RealtimeRunner};
 use livekit::prelude::*;
 use livekit::webrtc::audio_source::native::NativeAudioSource;
+use livekit::webrtc::prelude::RtcAudioSource;
+use livekit::options::TrackPublishOptions;
+use livekit_api::access_token;
 use std::env;
 use std::sync::Arc;
 use tokio::signal;
@@ -30,36 +32,46 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let api_secret = env::var("LIVEKIT_API_SECRET").expect("LIVEKIT_API_SECRET required");
     let google_key = env::var("GOOGLE_API_KEY").expect("GOOGLE_API_KEY required");
 
-    // 2. Connect to LiveKit
+    // 2. Generate a token for LiveKit
+    let token = access_token::AccessToken::with_api_key(&api_key, &api_secret)
+        .with_identity("gemini-agent")
+        .with_name("Gemini Agent")
+        .with_grants(access_token::VideoGrants {
+            room_join: true,
+            room: "default-room".to_string(),
+            ..Default::default()
+        })
+        .to_jwt()?;
+
+    // 3. Connect to LiveKit
     println!("Connecting to LiveKit: {}", livekit_url);
+    let mut room_opts = RoomOptions::default();
+    room_opts.auto_subscribe = true;
+    room_opts.adaptive_stream = false;
+    room_opts.dynacast = false;
+
     let (room, mut events) = Room::connect(
         &livekit_url,
-        &api_key,
-        &api_secret,
-        RoomOptions {
-            auto_subscribe: true,
-            adaptive_stream: false,
-            dynacast: false,
-            ..Default::default()
-        },
+        &token,
+        room_opts,
     )
     .await?;
     println!("Connected to room: {}", room.name());
 
-    // 3. Create a local audio track for the agent's voice
+    // 4. Create a local audio track for the agent's voice
     let source = NativeAudioSource::new(
-        livekit::webrtc::audio_source::native::AudioSourceOptions::default(),
+        livekit::webrtc::audio_source::AudioSourceOptions::default(),
         48000,
         1,
+        1000,
     );
     let track = LocalAudioTrack::create_audio_track("agent_voice", RtcAudioSource::Native(source.clone()));
     room.local_participant().publish_track(LocalTrack::Audio(track), TrackPublishOptions::default())
         .await?;
 
-    // 4. Initialize Gemini Realtime Runner
-    let backend = GeminiLiveBackend::Studio { api_key: google_key };
+    // 5. Initialize Gemini Realtime Runner
+    let backend = adk_realtime::adk_gemini::GeminiLiveBackend::Studio { api_key: google_key };
     let model = GeminiRealtimeModel::new(backend, "models/gemini-live-2.5-flash-native-audio");
-
     // Create event handler that pipes Gemini audio to LiveKit
     // We pass a NoOp inner handler for events we don't need to log/process further
     struct LogEventHandler;

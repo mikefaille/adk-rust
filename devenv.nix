@@ -5,7 +5,9 @@
     pkgs.git
     pkgs.glib
     pkgs.pkg-config
-    pkgs.openssl
+    pkgs.libva
+    pkgs.libva.dev
+    pkgs.alsa-lib
   ];
 
   languages.rust.enable = true;
