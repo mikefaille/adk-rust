@@ -5,7 +5,7 @@ use axum::{Router, extract::Path as AxumPath, routing::get};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use tower_http::{
-    cors::{Any, CorsLayer},
+    cors::{AllowOrigin, Any, CorsLayer},
     services::{ServeDir, ServeFile},
 };
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -79,7 +79,24 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    let cors = CorsLayer::new().allow_origin(Any).allow_methods(Any).allow_headers(Any);
+    // Restrict CORS to localhost origins to prevent drive-by attacks
+    // while allowing local development and usage.
+    let cors = CorsLayer::new()
+        .allow_origin(AllowOrigin::predicate(|origin, _| {
+            let origin_str = origin.to_str().unwrap_or("");
+            if let Some(rest) =
+                origin_str.strip_prefix("http://").or_else(|| origin_str.strip_prefix("https://"))
+            {
+                const ALLOWED_HOSTS: &[&str] = &["localhost", "127.0.0.1", "[::1]"];
+                ALLOWED_HOSTS
+                    .iter()
+                    .any(|host| rest == *host || rest.starts_with(&format!("{}:", host)))
+            } else {
+                false
+            }
+        }))
+        .allow_methods(Any)
+        .allow_headers(Any);
 
     let mut app = Router::new().nest("/api", api_routes()).layer(cors).with_state(state);
 
