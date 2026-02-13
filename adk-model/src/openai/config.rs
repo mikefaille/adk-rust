@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 pub struct OpenAIConfig {
     /// OpenAI API key.
     pub api_key: String,
-    /// Model name (e.g., "gpt-4o", "gpt-4o-mini", "gpt-4-turbo").
+    /// Model name (e.g., "gpt-5-mini", "gpt-4-turbo").
     pub model: String,
     /// Optional organization ID.
     #[serde(skip_serializing_if = "Option::is_none")]

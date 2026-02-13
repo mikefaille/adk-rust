@@ -27,7 +27,7 @@ async fn main() -> ExitCode {
 async fn do_main() -> Result<(), Box<dyn std::error::Error>> {
     let api_key = env::var("GEMINI_API_KEY")?;
 
-    // Create client with the default model (gemini-2.0-flash)
+    // Create client with the default model (gemini-2.5-flash)
     let client = Gemini::new(api_key).expect("unable to create Gemini API client");
 
     info!("sending request to gemini api");

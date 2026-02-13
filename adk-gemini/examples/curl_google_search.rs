@@ -31,7 +31,7 @@ async fn do_main() -> Result<(), Box<dyn std::error::Error>> {
     info!("starting curl equivalent with google search tool example");
 
     // This is equivalent to the curl example:
-    // curl "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=$GEMINI_API_KEY" \
+    // curl "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=$GEMINI_API_KEY" \
     //   -H "Content-Type: application/json" \
     //   -d '{
     //       "contents": [

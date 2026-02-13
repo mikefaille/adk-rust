@@ -53,7 +53,7 @@ fn detect_provider(model: &str) -> &'static str {
 fn collect_providers(project: &ProjectSchema) -> std::collections::HashSet<&'static str> {
     let mut providers = std::collections::HashSet::new();
     for agent in project.agents.values() {
-        let model = agent.model.as_deref().unwrap_or("gemini-2.0-flash");
+        let model = agent.model.as_deref().unwrap_or("gemini-2.5-flash");
         providers.insert(detect_provider(model));
     }
     // If project has a default_provider set, include it
@@ -1108,7 +1108,7 @@ fn generate_main_rs(project: &ProjectSchema) -> String {
 
 fn generate_router_node(id: &str, agent: &AgentSchema) -> String {
     let mut code = String::new();
-    let model = agent.model.as_deref().unwrap_or("gemini-2.0-flash");
+    let model = agent.model.as_deref().unwrap_or("gemini-2.5-flash");
 
     code.push_str(&format!("    // Router: {}\n", id));
     code.push_str(&format!("    let {}_llm = Arc::new(\n", id));
@@ -1184,7 +1184,7 @@ fn generate_llm_node_v2(
     is_parallel_branch: bool,
 ) -> String {
     let mut code = String::new();
-    let model = agent.model.as_deref().unwrap_or("gemini-2.0-flash");
+    let model = agent.model.as_deref().unwrap_or("gemini-2.5-flash");
 
     code.push_str(&format!("    // Agent: {}\n", id));
 
@@ -1511,7 +1511,7 @@ fn generate_container_node(id: &str, agent: &AgentSchema, project: &ProjectSchem
     // Generate sub-agents first
     for sub_id in &agent.sub_agents {
         if let Some(sub) = project.agents.get(sub_id) {
-            let model = sub.model.as_deref().unwrap_or("gemini-2.0-flash");
+            let model = sub.model.as_deref().unwrap_or("gemini-2.5-flash");
             let has_tools = !sub.tools.is_empty();
             let has_instruction = !sub.instruction.is_empty();
             let mut_kw = if has_tools || has_instruction { "mut " } else { "" };

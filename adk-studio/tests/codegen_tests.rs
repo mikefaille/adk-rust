@@ -47,7 +47,7 @@ fn project_with_workflow(
 fn llm_agent(instruction: &str) -> AgentSchema {
     AgentSchema {
         agent_type: AgentType::Llm,
-        model: Some("gemini-2.0-flash".to_string()),
+        model: Some("gemini-2.5-flash".to_string()),
         instruction: instruction.to_string(),
         tools: vec![],
         sub_agents: vec![],
@@ -86,7 +86,7 @@ fn llm_agent_includes_model() {
     agents.insert("assistant".to_string(), llm_agent("Test."));
 
     let code = get_main_rs(&project("test", agents));
-    assert!(code.contains("gemini-2.0-flash"));
+    assert!(code.contains("gemini-2.5-flash"));
 }
 
 #[test]
@@ -364,7 +364,7 @@ fn router_agent_generates_classifier() {
         "router".to_string(),
         AgentSchema {
             agent_type: AgentType::Router,
-            model: Some("gemini-2.0-flash".to_string()),
+            model: Some("gemini-2.5-flash".to_string()),
             instruction: "Classify the request.".to_string(),
             tools: vec![],
             sub_agents: vec![],
@@ -397,7 +397,7 @@ fn router_agent_includes_routes() {
         "router".to_string(),
         AgentSchema {
             agent_type: AgentType::Router,
-            model: Some("gemini-2.0-flash".to_string()),
+            model: Some("gemini-2.5-flash".to_string()),
             instruction: "Route.".to_string(),
             tools: vec![],
             sub_agents: vec![],
@@ -723,7 +723,7 @@ fn template_simple_chat_generates_code() {
         "chat_agent".to_string(),
         AgentSchema {
             agent_type: AgentType::Llm,
-            model: Some("gemini-2.0-flash".to_string()),
+            model: Some("gemini-2.5-flash".to_string()),
             instruction: "You are a helpful assistant.".to_string(),
             tools: vec![],
             sub_agents: vec![],
@@ -752,7 +752,7 @@ fn template_research_pipeline_generates_code() {
         "researcher".to_string(),
         AgentSchema {
             agent_type: AgentType::Llm,
-            model: Some("gemini-2.0-flash".to_string()),
+            model: Some("gemini-2.5-flash".to_string()),
             instruction: "Research the topic.".to_string(),
             tools: vec!["google_search".to_string()],
             sub_agents: vec![],
@@ -765,7 +765,7 @@ fn template_research_pipeline_generates_code() {
         "summarizer".to_string(),
         AgentSchema {
             agent_type: AgentType::Llm,
-            model: Some("gemini-2.0-flash".to_string()),
+            model: Some("gemini-2.5-flash".to_string()),
             instruction: "Summarize the research.".to_string(),
             tools: vec![],
             sub_agents: vec![],
@@ -808,7 +808,7 @@ fn template_content_refiner_generates_code() {
         "improver".to_string(),
         AgentSchema {
             agent_type: AgentType::Llm,
-            model: Some("gemini-2.0-flash".to_string()),
+            model: Some("gemini-2.5-flash".to_string()),
             instruction: "Improve the content.".to_string(),
             tools: vec![],
             sub_agents: vec![],
@@ -821,7 +821,7 @@ fn template_content_refiner_generates_code() {
         "reviewer".to_string(),
         AgentSchema {
             agent_type: AgentType::Llm,
-            model: Some("gemini-2.0-flash".to_string()),
+            model: Some("gemini-2.5-flash".to_string()),
             instruction: "Review and decide if done.".to_string(),
             tools: vec!["exit_loop".to_string()],
             sub_agents: vec![],
@@ -864,7 +864,7 @@ fn template_parallel_analyzer_generates_code() {
         "sentiment_analyzer".to_string(),
         AgentSchema {
             agent_type: AgentType::Llm,
-            model: Some("gemini-2.0-flash".to_string()),
+            model: Some("gemini-2.5-flash".to_string()),
             instruction: "Analyze sentiment.".to_string(),
             tools: vec![],
             sub_agents: vec![],
@@ -877,7 +877,7 @@ fn template_parallel_analyzer_generates_code() {
         "entity_extractor".to_string(),
         AgentSchema {
             agent_type: AgentType::Llm,
-            model: Some("gemini-2.0-flash".to_string()),
+            model: Some("gemini-2.5-flash".to_string()),
             instruction: "Extract entities.".to_string(),
             tools: vec![],
             sub_agents: vec![],
@@ -919,7 +919,7 @@ fn template_support_router_generates_code() {
         "router".to_string(),
         AgentSchema {
             agent_type: AgentType::Router,
-            model: Some("gemini-2.0-flash".to_string()),
+            model: Some("gemini-2.5-flash".to_string()),
             instruction: "Classify the request.".to_string(),
             tools: vec![],
             sub_agents: vec![],
@@ -936,7 +936,7 @@ fn template_support_router_generates_code() {
         "tech_support".to_string(),
         AgentSchema {
             agent_type: AgentType::Llm,
-            model: Some("gemini-2.0-flash".to_string()),
+            model: Some("gemini-2.5-flash".to_string()),
             instruction: "Handle technical issues.".to_string(),
             tools: vec![],
             sub_agents: vec![],
@@ -949,7 +949,7 @@ fn template_support_router_generates_code() {
         "billing_support".to_string(),
         AgentSchema {
             agent_type: AgentType::Llm,
-            model: Some("gemini-2.0-flash".to_string()),
+            model: Some("gemini-2.5-flash".to_string()),
             instruction: "Handle billing issues.".to_string(),
             tools: vec![],
             sub_agents: vec![],
@@ -962,7 +962,7 @@ fn template_support_router_generates_code() {
         "general_support".to_string(),
         AgentSchema {
             agent_type: AgentType::Llm,
-            model: Some("gemini-2.0-flash".to_string()),
+            model: Some("gemini-2.5-flash".to_string()),
             instruction: "Handle general questions.".to_string(),
             tools: vec![],
             sub_agents: vec![],
@@ -1001,7 +1001,7 @@ fn template_web_researcher_generates_code() {
         "web_agent".to_string(),
         AgentSchema {
             agent_type: AgentType::Llm,
-            model: Some("gemini-2.0-flash".to_string()),
+            model: Some("gemini-2.5-flash".to_string()),
             instruction: "Research using browser.".to_string(),
             tools: vec!["browser".to_string()],
             sub_agents: vec![],
@@ -1030,7 +1030,7 @@ fn template_writing_team_generates_code() {
         "writer".to_string(),
         AgentSchema {
             agent_type: AgentType::Llm,
-            model: Some("gemini-2.0-flash".to_string()),
+            model: Some("gemini-2.5-flash".to_string()),
             instruction: "Write content.".to_string(),
             tools: vec![],
             sub_agents: vec![],
@@ -1043,7 +1043,7 @@ fn template_writing_team_generates_code() {
         "editor".to_string(),
         AgentSchema {
             agent_type: AgentType::Llm,
-            model: Some("gemini-2.0-flash".to_string()),
+            model: Some("gemini-2.5-flash".to_string()),
             instruction: "Edit content.".to_string(),
             tools: vec![],
             sub_agents: vec![],
@@ -1056,7 +1056,7 @@ fn template_writing_team_generates_code() {
         "fact_checker".to_string(),
         AgentSchema {
             agent_type: AgentType::Llm,
-            model: Some("gemini-2.0-flash".to_string()),
+            model: Some("gemini-2.5-flash".to_string()),
             instruction: "Check facts.".to_string(),
             tools: vec!["google_search".to_string()],
             sub_agents: vec![],
@@ -1104,7 +1104,7 @@ fn template_eval_loop_generates_code() {
         "generator".to_string(),
         AgentSchema {
             agent_type: AgentType::Llm,
-            model: Some("gemini-2.0-flash".to_string()),
+            model: Some("gemini-2.5-flash".to_string()),
             instruction: "Generate response.".to_string(),
             tools: vec![],
             sub_agents: vec![],
@@ -1117,7 +1117,7 @@ fn template_eval_loop_generates_code() {
         "evaluator".to_string(),
         AgentSchema {
             agent_type: AgentType::Llm,
-            model: Some("gemini-2.0-flash".to_string()),
+            model: Some("gemini-2.5-flash".to_string()),
             instruction: "Evaluate response.".to_string(),
             tools: vec!["exit_loop".to_string()],
             sub_agents: vec![],
@@ -1159,7 +1159,7 @@ fn template_voice_assistant_generates_code() {
         "voice_agent".to_string(),
         AgentSchema {
             agent_type: AgentType::Llm,
-            model: Some("gemini-2.0-flash".to_string()),
+            model: Some("gemini-2.5-flash".to_string()),
             instruction: "Respond naturally for voice.".to_string(),
             tools: vec![],
             sub_agents: vec![],
@@ -1183,7 +1183,7 @@ fn template_realtime_translator_generates_code() {
         "translator".to_string(),
         AgentSchema {
             agent_type: AgentType::Llm,
-            model: Some("gemini-2.0-flash".to_string()),
+            model: Some("gemini-2.5-flash".to_string()),
             instruction: "Translate in real-time.".to_string(),
             tools: vec![],
             sub_agents: vec![],

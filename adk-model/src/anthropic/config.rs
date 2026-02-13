@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 pub struct AnthropicConfig {
     /// Anthropic API key.
     pub api_key: String,
-    /// Model name (e.g., "claude-sonnet-4-20250514", "claude-3-5-sonnet-20241022").
+    /// Model name (e.g., "claude-sonnet-4.5", "claude-3-5-sonnet-20241022").
     pub model: String,
     /// Maximum tokens to generate.
     #[serde(default = "default_max_tokens")]
@@ -25,7 +25,7 @@ impl Default for AnthropicConfig {
     fn default() -> Self {
         Self {
             api_key: String::new(),
-            model: "claude-sonnet-4-20250514".to_string(),
+            model: "claude-sonnet-4.5".to_string(),
             max_tokens: default_max_tokens(),
             base_url: None,
         }

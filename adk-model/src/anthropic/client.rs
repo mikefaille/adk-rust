@@ -37,7 +37,7 @@ impl AnthropicClient {
 
     /// Create a client with just an API key (uses default model).
     pub fn from_api_key(api_key: impl Into<String>) -> Result<Self, AdkError> {
-        Self::new(AnthropicConfig::new(api_key, "claude-sonnet-4-20250514"))
+        Self::new(AnthropicConfig::new(api_key, "claude-sonnet-4.5"))
     }
 
     #[must_use]

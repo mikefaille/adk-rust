@@ -9,7 +9,7 @@
 //!
 //! let client = AnthropicClient::new(AnthropicConfig::new(
 //!     std::env::var("ANTHROPIC_API_KEY").unwrap(),
-//!     "claude-sonnet-4-20250514",
+//!     "claude-sonnet-4.5",
 //! ))?;
 //! ```
 

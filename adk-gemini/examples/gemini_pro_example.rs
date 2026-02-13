@@ -33,7 +33,7 @@ async fn do_main() -> Result<(), Box<dyn std::error::Error>> {
     let gemini = Gemini::pro(api_key).expect("unable to create Gemini API client");
 
     // This example matches the exact curl request format:
-    // curl "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=$GEMINI_API_KEY" \
+    // curl "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=$GEMINI_API_KEY" \
     //   -H 'Content-Type: application/json' \
     //   -d '{
     //     "system_instruction": {
