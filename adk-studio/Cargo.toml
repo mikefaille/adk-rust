@@ -77,4 +77,4 @@ dirs = "5"
 cron = "0.12"
 
 [dev-dependencies]
-proptest = "1.4"
+proptest = "1.6"

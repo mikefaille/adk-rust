@@ -43,7 +43,7 @@ uuid = { version = "1.10", features = ["v4"] }
 sha2 = "0.10"
 
 [dev-dependencies]
-proptest = "1.5"
+proptest = "1.6"
 tokio-test = "0.4"
 
 [features]

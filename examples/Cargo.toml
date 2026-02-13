@@ -602,5 +602,5 @@ image = "0.25"
 clap = { version = "4.0", features = ["derive"] }
 
 [dev-dependencies]
-proptest = "1.0"
+proptest = "1.6"
 tokio-test = "0.4"

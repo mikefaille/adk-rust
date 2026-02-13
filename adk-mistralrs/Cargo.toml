@@ -46,7 +46,7 @@ mistralrs = { git = "https://github.com/EricLBuehler/mistral.rs", branch = "mast
 reqwest = { version = "0.12", features = ["blocking"], optional = true }
 
 [dev-dependencies]
-proptest = "1.0"
+proptest = "1.6"
 tokio-test = "0.4"
 criterion = { version = "0.5", features = ["async_tokio"] }
 
