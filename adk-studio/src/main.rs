@@ -79,7 +79,16 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    let cors = CorsLayer::new().allow_origin(Any).allow_methods(Any).allow_headers(Any);
+    let allowed_origins = [
+        "http://localhost:5173".parse::<axum::http::HeaderValue>().unwrap(),
+        "http://127.0.0.1:5173".parse::<axum::http::HeaderValue>().unwrap(),
+        format!("http://localhost:{}", port).parse::<axum::http::HeaderValue>().unwrap(),
+        format!("http://127.0.0.1:{}", port).parse::<axum::http::HeaderValue>().unwrap(),
+    ];
+    let cors = CorsLayer::new()
+        .allow_origin(allowed_origins)
+        .allow_methods(Any)
+        .allow_headers(Any);
 
     let mut app = Router::new().nest("/api", api_routes()).layer(cors).with_state(state);
 
