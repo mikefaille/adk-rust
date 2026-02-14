@@ -2,6 +2,7 @@
 
 ## Version
 The installed version of the `wild` linker is 0.8.0.
+Binary path: `/home/jules/.cargo/bin/wild` (verified as the primary binary in `PATH` within the devenv environment).
 
 ## Findings
 - **WILD_INCREMENTAL**: The environment variable `WILD_INCREMENTAL` was **not found** in the `wild` binary strings or help output. It does not appear to be a valid configuration option for this version of the tool.
@@ -19,4 +20,4 @@ The installed version of the `wild` linker is 0.8.0.
     - `WILD_REFERENCE_LINKER`
 
 ## Conclusion
-Based on the analysis of `wild` v0.8.0, `WILD_INCREMENTAL` is not used. The user might be referring to a different linker (e.g., Mold uses `MOLD_INCREMENTAL`) or a newer version of Wild.
+Based on the analysis of `wild` v0.8.0, `WILD_INCREMENTAL` is not used. The user might be referring to a different linker (e.g., Mold uses `MOLD_INCREMENTAL`) or a newer version of Wild. The presence of the binary in `~/.cargo/bin` suggests it might be a user-installed version overriding the Nix store version, but analysis of this specific binary confirms the absence of the variable.
