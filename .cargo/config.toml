@@ -16,6 +16,3 @@ debug = 0            # Cranelift debug info is limited anyway
 strip = "debuginfo"  # Don't emit huge symbol files
 incremental = true
 codegen-units = 256
-
-[env]
-WILD_INCREMENTAL = "1"
