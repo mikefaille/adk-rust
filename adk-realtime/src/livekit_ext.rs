@@ -1,8 +1,9 @@
 #![cfg(feature = "livekit")]
 use crate::error::Result;
 use crate::runner::{EventHandler, RealtimeRunner};
+use crate::audio::{AudioChunk, AudioFormat, AudioEncoding};
 use async_trait::async_trait;
-use base64::{Engine as _, engine::general_purpose::STANDARD};
+// use base64::{Engine as _, engine::general_purpose::STANDARD};
 use futures::StreamExt;
 use livekit::prelude::RemoteAudioTrack;
 use livekit::webrtc::audio_frame::AudioFrame;
@@ -36,17 +37,15 @@ impl LiveKitEventHandler {
 impl EventHandler for LiveKitEventHandler {
     async fn on_audio(&self, audio: &[u8], item_id: &str) -> Result<()> {
         // 1. Convert bytes to i16 (assuming PCM16 LE)
-        // Manual conversion for safety (avoids unsafe blocks or bytemuck assumptions)
-        if audio.len() % 2 != 0 {
-            tracing::error!("[LiveKit] Invalid audio length: {}", audio.len());
-            return Ok(());
-        }
-
-        let mut samples = Vec::with_capacity(audio.len() / 2);
-        for chunk in audio.chunks_exact(2) {
-             let sample = i16::from_le_bytes([chunk[0], chunk[1]]);
-             samples.push(sample);
-        }
+        // use AudioChunk helper
+        let chunk = AudioChunk::pcm16_24khz(audio.to_vec());
+        let samples = match chunk.to_i16_samples() {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::error!("[LiveKit] Audio conversion error: {}", e);
+                return Ok(());
+            }
+        };
 
         // 2. Push to LiveKit source
         // Gemini is 24kHz mono
@@ -119,14 +118,11 @@ pub fn bridge_input(
             NativeAudioStream::new(track.rtc_track(), sample_rate as i32, channels as i32);
 
         while let Some(frame) = reader.next().await {
-            // Convert i16 samples to bytes (LE)
-            // Manual conversion for safety
-            let mut data_u8 = Vec::with_capacity(frame.data.len() * 2);
-            for sample in &frame.data {
-                data_u8.extend_from_slice(&sample.to_le_bytes());
-            }
+            // Convert i16 samples to bytes (LE) and base64 encode using AudioChunk
+            let format = AudioFormat::new(sample_rate, channels as u8, 16, AudioEncoding::Pcm16);
+            let chunk = AudioChunk::from_i16_samples(&frame.data, format);
 
-            let b64 = STANDARD.encode(&data_u8);
+            let b64 = chunk.to_base64();
             if let Err(e) = runner.send_audio(&b64).await {
                 tracing::error!("[Bridge] Failed to send audio to runner: {}", e);
                 break;
