@@ -1,18 +1,17 @@
 [target.x86_64-unknown-linux-gnu]
-# Use the Wild linker and Cranelift backend
+linker = "clang"
 rustflags = [
     "-C", "link-arg=-fuse-ld=wild",
+    "-C", "link-arg=-Wl,--update-in-place",
     "-Z", "codegen-backend=cranelift"
 ]
 
 [build]
-# Ensure sccache is used
 rustc-wrapper = "sccache"
 
 [profile.dev]
-# Optimize for compile speed
 opt-level = 0
-debug = 0            # Cranelift debug info is limited anyway
-strip = "debuginfo"  # Don't emit huge symbol files
+debug = 0
+strip = "debuginfo"
 incremental = true
 codegen-units = 256

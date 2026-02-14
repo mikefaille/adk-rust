@@ -6223,25 +6223,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "readme_validation"
-version = "0.1.0"
-dependencies = [
- "adk-agent",
- "adk-browser",
- "adk-core",
- "adk-eval",
- "adk-graph",
- "adk-model",
- "adk-realtime",
- "adk-rust",
- "adk-ui",
- "anyhow",
- "dotenvy",
- "serde_json",
- "tokio",
-]
-
-[[package]]
 name = "realtime_readme_test"
 version = "0.1.0"
 dependencies = [
