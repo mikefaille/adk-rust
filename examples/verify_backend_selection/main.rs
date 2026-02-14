@@ -61,9 +61,7 @@ async fn do_main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ── Test 3: GeminiBuilder → Studio backend ──────────────────────
     info!("━━━ Test 3: GeminiBuilder → Studio backend ━━━");
-    let client = GeminiBuilder::new(&api_key)
-        .with_model(Model::Gemini25Flash)
-        .build()?;
+    let client = GeminiBuilder::new(&api_key).with_model(Model::Gemini25Flash).build()?;
     let response = client
         .generate_content()
         .with_user_message("Say 'builder works' in exactly those words.")
@@ -74,11 +72,8 @@ async fn do_main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ── Test 4: Studio streaming ────────────────────────────────────
     info!("━━━ Test 4: Studio streaming ━━━");
-    let mut stream = client
-        .generate_content()
-        .with_user_message("Count from 1 to 3.")
-        .execute_stream()
-        .await?;
+    let mut stream =
+        client.generate_content().with_user_message("Count from 1 to 3.").execute_stream().await?;
 
     let mut chunks = 0u32;
     while let Some(chunk) = stream.try_next().await? {
@@ -110,11 +105,7 @@ async fn do_main() -> Result<(), Box<dyn std::error::Error>> {
     // ── Test 6: v1 API constructor ──────────────────────────────────
     info!("━━━ Test 6: Gemini::with_v1() ━━━");
     let client = Gemini::with_v1(&api_key)?;
-    let response = client
-        .generate_content()
-        .with_user_message("Say 'v1 works'.")
-        .execute()
-        .await?;
+    let response = client.generate_content().with_user_message("Say 'v1 works'.").execute().await?;
     info!(response = %response.text(), "v1 API works");
     info!("✅ v1 API constructor");
 

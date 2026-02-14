@@ -6,8 +6,7 @@
 use super::{BackendStream, GeminiBackend};
 use crate::{
     batch::model::{
-        BatchGenerateContentRequest, BatchGenerateContentResponse,
-        ListBatchesResponse,
+        BatchGenerateContentRequest, BatchGenerateContentResponse, ListBatchesResponse,
     },
     cache::model::{
         CacheExpirationRequest, CachedContent, CreateCachedContentRequest,
@@ -15,7 +14,8 @@ use crate::{
     },
     client::{
         BadResponseSnafu, ConstructUrlSnafu, DecodeResponseSnafu, DeserializeSnafu, Error,
-        InvalidApiKeySnafu, MissingResponseHeaderSnafu, Model, PerformRequestNewSnafu, UrlParseSnafu,
+        InvalidApiKeySnafu, MissingResponseHeaderSnafu, Model, PerformRequestNewSnafu,
+        UrlParseSnafu,
     },
     embedding::{
         BatchContentEmbeddingResponse, BatchEmbedContentsRequest, ContentEmbeddingResponse,
@@ -89,9 +89,7 @@ impl StudioBackend {
     // ── URL helpers ─────────────────────────────────────────────────────
 
     fn build_url_with_suffix(&self, suffix: &str) -> Result<Url, Error> {
-        self.base_url
-            .join(suffix)
-            .context(ConstructUrlSnafu { suffix: suffix.to_string() })
+        self.base_url.join(suffix).context(ConstructUrlSnafu { suffix: suffix.to_string() })
     }
 
     fn build_url(&self, endpoint: &str) -> Result<Url, Error> {
@@ -100,9 +98,7 @@ impl StudioBackend {
     }
 
     fn build_batch_url(&self, name: &str, action: Option<&str>) -> Result<Url, Error> {
-        let suffix = action
-            .map(|a| format!("{name}:{a}"))
-            .unwrap_or_else(|| name.to_string());
+        let suffix = action.map(|a| format!("{name}:{a}")).unwrap_or_else(|| name.to_string());
         self.build_url_with_suffix(&suffix)
     }
 
@@ -139,12 +135,7 @@ impl StudioBackend {
     }
 
     async fn get_json<T: serde::de::DeserializeOwned>(&self, url: Url) -> Result<T, Error> {
-        let response = self
-            .http_client
-            .get(url)
-            .send()
-            .await
-            .context(PerformRequestNewSnafu)?;
+        let response = self.http_client.get(url).send().await.context(PerformRequestNewSnafu)?;
         let response = Self::check_response(response).await?;
         response.json().await.context(DecodeResponseSnafu)
     }
@@ -154,13 +145,8 @@ impl StudioBackend {
         url: Url,
         body: &Req,
     ) -> Result<Res, Error> {
-        let response = self
-            .http_client
-            .post(url)
-            .json(body)
-            .send()
-            .await
-            .context(PerformRequestNewSnafu)?;
+        let response =
+            self.http_client.post(url).json(body).send().await.context(PerformRequestNewSnafu)?;
         let response = Self::check_response(response).await?;
         response.json().await.context(DecodeResponseSnafu)
     }
@@ -236,8 +222,7 @@ impl GeminiBackend for StudioBackend {
             .eventsource()
             .map_err(|e| Error::BadPart { source: e })
             .and_then(|event| async move {
-                serde_json::from_str::<GenerationResponse>(&event.data)
-                    .context(DeserializeSnafu)
+                serde_json::from_str::<GenerationResponse>(&event.data).context(DeserializeSnafu)
             });
 
         Ok(Box::pin(stream))
@@ -271,10 +256,7 @@ impl GeminiBackend for StudioBackend {
         self.post_json(url, &request).await
     }
 
-    async fn get_batch_operation(
-        &self,
-        name: &str,
-    ) -> Result<serde_json::Value, Error> {
+    async fn get_batch_operation(&self, name: &str) -> Result<serde_json::Value, Error> {
         let url = self.build_batch_url(name, None)?;
         self.get_json(url).await
     }
@@ -309,12 +291,7 @@ impl GeminiBackend for StudioBackend {
 
     async fn delete_batch_operation(&self, name: &str) -> Result<(), Error> {
         let url = self.build_batch_url(name, None)?;
-        let response = self
-            .http_client
-            .delete(url)
-            .send()
-            .await
-            .context(PerformRequestNewSnafu)?;
+        let response = self.http_client.delete(url).send().await.context(PerformRequestNewSnafu)?;
         Self::check_response(response).await?;
         Ok(())
     }
@@ -357,23 +334,12 @@ impl GeminiBackend for StudioBackend {
         let mut url = self
             .base_url
             .join(&format!("/download/v1beta/{name}:download"))
-            .context(ConstructUrlSnafu {
-                suffix: format!("/download/v1beta/{name}:download"),
-            })?;
+            .context(ConstructUrlSnafu { suffix: format!("/download/v1beta/{name}:download") })?;
         url.query_pairs_mut().append_pair("alt", "media");
 
-        let response = self
-            .http_client
-            .get(url)
-            .send()
-            .await
-            .context(PerformRequestNewSnafu)?;
+        let response = self.http_client.get(url).send().await.context(PerformRequestNewSnafu)?;
         let response = Self::check_response(response).await?;
-        response
-            .bytes()
-            .await
-            .context(DecodeResponseSnafu)
-            .map(|b| b.to_vec())
+        response.bytes().await.context(DecodeResponseSnafu).map(|b| b.to_vec())
     }
 
     async fn list_files(
@@ -393,12 +359,7 @@ impl GeminiBackend for StudioBackend {
 
     async fn delete_file(&self, name: &str) -> Result<(), Error> {
         let url = self.build_files_url(Some(name))?;
-        let response = self
-            .http_client
-            .delete(url)
-            .send()
-            .await
-            .context(PerformRequestNewSnafu)?;
+        let response = self.http_client.delete(url).send().await.context(PerformRequestNewSnafu)?;
         Self::check_response(response).await?;
         Ok(())
     }
@@ -458,12 +419,7 @@ impl GeminiBackend for StudioBackend {
 
     async fn delete_cached_content(&self, name: &str) -> Result<(), Error> {
         let url = self.build_cache_url(Some(name))?;
-        let response = self
-            .http_client
-            .delete(url)
-            .send()
-            .await
-            .context(PerformRequestNewSnafu)?;
+        let response = self.http_client.delete(url).send().await.context(PerformRequestNewSnafu)?;
         Self::check_response(response).await?;
         Ok(())
     }
