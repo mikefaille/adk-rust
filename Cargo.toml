@@ -52,7 +52,7 @@ members = [
     "docs/official_docs_examples/graph/graph_readme_test",
     "docs/official_docs_examples/guardrail/guardrail_readme_test",
     "docs/official_docs_examples/realtime/realtime_readme_test",
-    "docs/official_docs_examples/readme_validation",
+    "docs/official_docs_examples/readme_validation", "minimal_linker_test",
 ]
 exclude = [
     # Git-only packages with GPU dependencies (build explicitly with: cargo build -p adk-mistralrs)
