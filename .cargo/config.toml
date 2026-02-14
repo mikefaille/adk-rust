@@ -1,13 +1,5 @@
 [target.x86_64-unknown-linux-gnu]
 linker = "clang"
-rustflags = [
-    "-C", "link-arg=-fuse-ld=wild",
-    "-C", "link-arg=-Wl,--update-in-place",
-    "-Z", "codegen-backend=cranelift"
-]
-
-[build]
-rustc-wrapper = "sccache"
 
 [profile.dev]
 opt-level = 0
@@ -15,3 +7,5 @@ debug = 0
 strip = "debuginfo"
 incremental = true
 codegen-units = 256
+[build]
+rustc-wrapper = "sccache"

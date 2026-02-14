@@ -13,13 +13,11 @@
       "rustfmt"
       "rust-analyzer"
       "rust-src"
-      "rustc-codegen-cranelift-preview" # <--- The speed booster
     ];
   };
 
   # 2. System Tools (Linker & Cache) & 3. Libraries (Runtime + Headers)
   packages = [
-    pkgs.wild           # Fast Linker
     pkgs.sccache        # Compiler Cache
     pkgs.pkg-config     # Library Finder
     pkgs.glib
@@ -33,13 +31,13 @@
   enterShell = ''
     export PKG_CONFIG_PATH="${pkgs.glib.dev}/lib/pkgconfig:$PKG_CONFIG_PATH"
 
-    echo "🏎️  Rust Ferrari Mode: Nightly 2026-01-15 + Cranelift + Wild + Sccache"
+    echo "🏎️  Rust Ferrari Mode: Nightly 2026-01-15 + Sccache"
   '';
 
   tasks = {
     "ci:test:adk" = {
       description = "Run tests for the adk-rust crate";
-      exec = "cd adk-rust && cargo test";
+      exec = "cargo test --manifest-path adk-rust/Cargo.toml";
     };
   };
 }
