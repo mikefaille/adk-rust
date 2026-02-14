@@ -268,7 +268,7 @@ impl GeminiRealtimeSession {
                 system_instruction,
                 generation_config: Some(generation_config),
                 tools,
-                cached_content: config.cached_content.clone(),
+                cached_content: config.cached_content,
             }),
             realtime_input: None,
             tool_response: None,

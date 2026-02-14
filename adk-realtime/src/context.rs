@@ -97,6 +97,13 @@ pub mod gemini {
     use std::sync::Arc;
     use std::time::Duration;
 
+    /// Approx 1 token per 1700 base64 chars (approx 1 sec audio ~ 25 tokens).
+    const BASE64_CHARS_PER_AUDIO_TOKEN: usize = 1700;
+    /// Approx 1 token per 4 text chars.
+    const CHARS_PER_TEXT_TOKEN: usize = 4;
+    /// Default TTL for cached content (10 minutes).
+    const DEFAULT_CACHE_TTL_SECS: u64 = 600;
+
     /// Automatically caches audio context when it exceeds a threshold.
     ///
     /// Realtime audio sessions consume tokens very rapidly (approx 10x text).
@@ -152,8 +159,7 @@ pub mod gemini {
         pub fn process_input(&mut self, event: &ClientEvent) {
              match event {
                  ClientEvent::AppendInputAudio { audio, .. } => {
-                     // Heuristic: 1 token per ~1700 base64 chars (approx 1 sec audio ~ 25 tokens)
-                     self.token_count += audio.len() / 1700;
+                     self.token_count += audio.len() / BASE64_CHARS_PER_AUDIO_TOKEN;
 
                      self.buffer.push(Content {
                          role: Role::User,
@@ -164,7 +170,7 @@ pub mod gemini {
                      });
                  }
                  ClientEvent::TextMessage { text, .. } => {
-                     self.token_count += text.len() / 4;
+                     self.token_count += text.len() / CHARS_PER_TEXT_TOKEN;
                      self.buffer.push(Content::user(text));
                  }
                  _ => {}
@@ -177,7 +183,7 @@ pub mod gemini {
         pub fn process_output(&mut self, event: &ServerEvent) {
             match event {
                 ServerEvent::TextDone { text, .. } => {
-                     self.token_count += text.len() / 4;
+                     self.token_count += text.len() / CHARS_PER_TEXT_TOKEN;
                      self.buffer.push(Content::model(text));
                 }
                 // Note: We don't easily get the full audio blob from ServerEvent unless we accumulate deltas.
@@ -203,17 +209,19 @@ pub mod gemini {
                 return Ok(None);
             }
 
-            // Create cache with 10 min TTL
+            // Efficiently move contents out of buffer without cloning
+            let contents = std::mem::take(&mut self.buffer);
+
+            // Create cache with default TTL
             let builder = CacheBuilder::new(self.client.clone())
-                .with_contents(self.buffer.clone())
-                .with_ttl(Duration::from_secs(600));
+                .with_contents(contents)
+                .with_ttl(Duration::from_secs(DEFAULT_CACHE_TTL_SECS));
 
             let handle = builder.execute().await.map_err(|e| {
                 crate::error::RealtimeError::provider(format!("Cache creation failed: {}", e))
             })?;
 
-            // Clear buffer
-            self.buffer.clear();
+            // Reset token count (buffer is already cleared by take)
             self.token_count = 0;
 
             Ok(Some(handle.name().to_string()))
