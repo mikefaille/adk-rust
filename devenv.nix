@@ -5,6 +5,7 @@
   languages.rust = {
     enable = true;
     channel = "nightly";
+    version = "2026-01-15"; # <--- The Safe Harbor
     components = [
       "rustc"
       "cargo"
@@ -32,6 +33,6 @@
   enterShell = ''
     export PKG_CONFIG_PATH="${pkgs.glib.dev}/lib/pkgconfig:$PKG_CONFIG_PATH"
 
-    echo "🏎️  Rust Ferrari Mode: Nightly + Cranelift + Wild + Sccache"
+    echo "🏎️  Rust Ferrari Mode: Nightly 2026-01-15 + Cranelift + Wild + Sccache"
   '';
 }

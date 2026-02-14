@@ -4719,10 +4719,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "68354c5c6bd36d73ff3feceb05efa59b6acb7626617f4962be322a825e61f79a"
 
 [[package]]
-name = "minimal_linker_test"
-version = "0.3.0"
-
-[[package]]
 name = "miniz_oxide"
 version = "0.8.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6224,25 +6220,6 @@ dependencies = [
  "time",
  "x509-parser 0.18.1",
  "yasna",
-]
-
-[[package]]
-name = "readme_validation"
-version = "0.1.0"
-dependencies = [
- "adk-agent",
- "adk-browser",
- "adk-core",
- "adk-eval",
- "adk-graph",
- "adk-model",
- "adk-realtime",
- "adk-rust",
- "adk-ui",
- "anyhow",
- "dotenvy",
- "serde_json",
- "tokio",
 ]
 
 [[package]]
