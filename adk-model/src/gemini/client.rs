@@ -3,7 +3,7 @@ use adk_core::{
     CitationMetadata, CitationSource, Content, FinishReason, Llm, LlmRequest, LlmResponse,
     LlmResponseStream, Part, Result, UsageMetadata,
 };
-use adk_gemini::Gemini;
+use adk_gemini::{Gemini, GeminiBuilder};
 use async_trait::async_trait;
 
 pub struct GeminiModel {
