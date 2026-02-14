@@ -21,29 +21,39 @@ use std::sync::Arc;
 /// 2. Pushing AI-generated audio back to a LiveKit room via a `NativeAudioSource` (`LiveKitEventHandler`).
 
 /// EventHandler that bridges audio to a LiveKit NativeAudioSource.
-pub struct LiveKitEventHandler<T: EventHandler> {
+pub struct LiveKitEventHandler {
     source: NativeAudioSource,
-    inner: Arc<T>,
+    inner: Arc<dyn EventHandler>,
 }
 
-impl<T: EventHandler> LiveKitEventHandler<T> {
-    pub fn new(source: NativeAudioSource, inner: Arc<T>) -> Self {
+impl LiveKitEventHandler {
+    pub fn new(source: NativeAudioSource, inner: Arc<dyn EventHandler>) -> Self {
         Self { source, inner }
     }
 }
 
 #[async_trait]
-impl<T: EventHandler> EventHandler for LiveKitEventHandler<T> {
+impl EventHandler for LiveKitEventHandler {
     async fn on_audio(&self, audio: &[u8], item_id: &str) -> Result<()> {
         // 1. Convert bytes to i16 (assuming PCM16 LE)
-        let i16_samples = bytemuck::cast_slice::<u8, i16>(audio).to_vec();
+        // Manual conversion for safety (avoids unsafe blocks or bytemuck assumptions)
+        if audio.len() % 2 != 0 {
+            tracing::error!("[LiveKit] Invalid audio length: {}", audio.len());
+            return Ok(());
+        }
+
+        let mut samples = Vec::with_capacity(audio.len() / 2);
+        for chunk in audio.chunks_exact(2) {
+             let sample = i16::from_le_bytes([chunk[0], chunk[1]]);
+             samples.push(sample);
+        }
 
         // 2. Push to LiveKit source
         // Gemini is 24kHz mono
-        let num_samples = i16_samples.len();
+        let num_samples = samples.len();
         self.source
             .capture_frame(&AudioFrame {
-                data: i16_samples.into(),
+                data: samples.into(),
                 sample_rate: 24000,
                 num_channels: 1,
                 samples_per_channel: num_samples as u32,
@@ -103,19 +113,25 @@ pub fn bridge_input(
     channels: u32,
 ) {
     tokio::spawn(async move {
+        tracing::info!("[Bridge] Starting audio bridge (Target: {}Hz, {}ch)...", sample_rate, channels);
         // Create a NativeAudioStream which handles resampling if needed.
         let mut reader =
             NativeAudioStream::new(track.rtc_track(), sample_rate as i32, channels as i32);
 
         while let Some(frame) = reader.next().await {
             // Convert i16 samples to bytes (LE)
-            let bytes = bytemuck::cast_slice::<i16, u8>(&frame.data);
+            // Manual conversion for safety
+            let mut data_u8 = Vec::with_capacity(frame.data.len() * 2);
+            for sample in &frame.data {
+                data_u8.extend_from_slice(&sample.to_le_bytes());
+            }
 
-            let b64 = STANDARD.encode(bytes);
+            let b64 = STANDARD.encode(&data_u8);
             if let Err(e) = runner.send_audio(&b64).await {
-                tracing::error!("Failed to send audio to runner: {}", e);
+                tracing::error!("[Bridge] Failed to send audio to runner: {}", e);
                 break;
             }
         }
+        tracing::info!("[Bridge] Audio bridge ended");
     });
 }
