@@ -28,6 +28,7 @@
 //! For more specialized types, import them directly from the crate root or their
 //! respective modules.
 
+pub mod backend;
 pub mod client;
 mod models;
 
