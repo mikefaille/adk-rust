@@ -12,6 +12,8 @@ use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+#[allow(unused_imports)]
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 
 /// Handler for tool/function calls from the realtime model.
 #[async_trait]
