@@ -34,10 +34,10 @@ full = [
     "doc-audit",
     "realtime",
     "livekit",
+    "auth",
     "browser",
     "eval",
     "guardrail",
-    "auth",
     "plugin"
 ]
 
