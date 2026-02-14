@@ -1,5 +1,7 @@
 #![cfg(feature = "livekit")]
 use crate::error::Result;
+pub use ::livekit::*;
+pub use ::livekit_api as api;
 use crate::runner::{EventHandler, RealtimeRunner};
 use crate::audio::{AudioChunk, AudioFormat, AudioEncoding};
 use async_trait::async_trait;
@@ -120,7 +122,7 @@ pub fn bridge_input(
         while let Some(frame) = reader.next().await {
             // Convert i16 samples to bytes (LE) and base64 encode using AudioChunk
             let format = AudioFormat::new(sample_rate, channels as u8, 16, AudioEncoding::Pcm16);
-            let chunk = AudioChunk::from_i16_samples(&frame.data, format);
+            let chunk = AudioChunk::from_i16_samples(frame.data.as_ref(), format);
 
             let b64 = chunk.to_base64();
             if let Err(e) = runner.send_audio(&b64).await {
