@@ -19,5 +19,18 @@ Binary path: `/home/jules/.cargo/bin/wild` (verified as the primary binary in `P
     - `WILD_PERFETTO_OUT`
     - `WILD_REFERENCE_LINKER`
 
+## Verification
+To ensure the binary was actually linked with Wild and not a system default, check the `.comment` section:
+
+```bash
+readelf -p .comment <your_binary>
+```
+
+You should see a string similar to:
+`Linker: Wild version 0.8.0`
+
+## Limitations
+Combining `--update-in-place` with certain features like Section Garbage Collection (`--gc-sections`) may be disabled or limited because it adds significant complexity to the incremental mapping.
+
 ## Conclusion
-Based on the analysis of `wild` v0.8.0, `WILD_INCREMENTAL` is not used. The user might be referring to a different linker (e.g., Mold uses `MOLD_INCREMENTAL`) or a newer version of Wild. The presence of the binary in `~/.cargo/bin` suggests it might be a user-installed version overriding the Nix store version, but analysis of this specific binary confirms the absence of the variable.
+Based on the analysis of `wild` v0.8.0, `WILD_INCREMENTAL` is not used. The correct flag for incremental linking is `--update-in-place`.
