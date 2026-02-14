@@ -35,4 +35,11 @@
 
     echo "🏎️  Rust Ferrari Mode: Nightly 2026-01-15 + Cranelift + Wild + Sccache"
   '';
+
+  tasks = {
+    "ci:test:adk" = {
+      description = "Run tests for the adk-rust crate";
+      exec = "cd adk-rust && cargo test";
+    };
+  };
 }
