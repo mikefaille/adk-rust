@@ -97,14 +97,7 @@ pub mod gemini;
 pub use adk_gemini;
 
 #[cfg(feature = "livekit")]
-pub mod livekit_ext;
-
-#[cfg(feature = "livekit")]
-pub mod livekit {
-    pub use crate::livekit_ext::*;
-    pub use ::livekit::*;
-    pub use ::livekit_api as api;
-}
+pub mod livekit;
 
 #[cfg(feature = "livekit")]
 pub use livekit_api;
