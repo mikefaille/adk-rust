@@ -1,10 +1,18 @@
 [target.x86_64-unknown-linux-gnu]
-linker = "clang"
-rustflags = ["-C", "link-arg=--ld-path=wild"]
+# Use the Wild linker and Cranelift backend
+rustflags = [
+    "-C", "link-arg=-fuse-ld=wild",
+    "-Z", "codegen-backend=cranelift"
+]
 
-[target.'cfg(all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64")))']
-linker = "clang"
-rustflags = ["-C", "link-arg=--ld-path=wild"]
+[build]
+# Ensure sccache is used
+rustc-wrapper = "sccache"
 
-[env]
-WILD_INCREMENTAL = "1"
+[profile.dev]
+# Optimize for compile speed
+opt-level = 0
+debug = 0            # Cranelift debug info is limited anyway
+strip = "debuginfo"  # Don't emit huge symbol files
+incremental = true
+codegen-units = 256
