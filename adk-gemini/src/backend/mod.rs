@@ -11,8 +11,7 @@ pub mod vertex;
 
 use crate::{
     batch::model::{
-        BatchGenerateContentRequest, BatchGenerateContentResponse,
-        ListBatchesResponse,
+        BatchGenerateContentRequest, BatchGenerateContentResponse, ListBatchesResponse,
     },
     cache::model::{
         CacheExpirationRequest, CachedContent, CreateCachedContentRequest,
@@ -79,10 +78,7 @@ pub trait GeminiBackend: Send + Sync + std::fmt::Debug {
         Err(Error::GoogleCloudUnsupported { operation: "batchGenerateContent" })
     }
 
-    async fn get_batch_operation(
-        &self,
-        _name: &str,
-    ) -> Result<serde_json::Value, Error> {
+    async fn get_batch_operation(&self, _name: &str) -> Result<serde_json::Value, Error> {
         Err(Error::GoogleCloudUnsupported { operation: "getBatchOperation" })
     }
 

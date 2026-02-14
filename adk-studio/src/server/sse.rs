@@ -551,9 +551,7 @@ async fn get_or_create_session(
         }
     }
 
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| format!("Failed to start binary: {}", e))?;
+    let mut child = cmd.spawn().map_err(|e| format!("Failed to start binary: {}", e))?;
 
     let stdin = BufWriter::new(
         child.stdin.take().ok_or_else(|| "Failed to capture child stdin".to_string())?,
@@ -599,17 +597,20 @@ pub async fn stream_handler(
     Query(query): Query<StreamQuery>,
     State(app_state): State<AppState>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    let api_key = query.api_key.or_else(|| {
-        // Try all known provider API keys, not just Google
-        std::env::var("GOOGLE_API_KEY")
-            .or_else(|_| std::env::var("GEMINI_API_KEY"))
-            .or_else(|_| std::env::var("ANTHROPIC_API_KEY"))
-            .or_else(|_| std::env::var("OPENAI_API_KEY"))
-            .or_else(|_| std::env::var("DEEPSEEK_API_KEY"))
-            .or_else(|_| std::env::var("GROQ_API_KEY"))
-            .or_else(|_| std::env::var("OLLAMA_HOST"))
-            .ok()
-    }).unwrap_or_default();
+    let api_key = query
+        .api_key
+        .or_else(|| {
+            // Try all known provider API keys, not just Google
+            std::env::var("GOOGLE_API_KEY")
+                .or_else(|_| std::env::var("GEMINI_API_KEY"))
+                .or_else(|_| std::env::var("ANTHROPIC_API_KEY"))
+                .or_else(|_| std::env::var("OPENAI_API_KEY"))
+                .or_else(|_| std::env::var("DEEPSEEK_API_KEY"))
+                .or_else(|_| std::env::var("GROQ_API_KEY"))
+                .or_else(|_| std::env::var("OLLAMA_HOST"))
+                .ok()
+        })
+        .unwrap_or_default();
     let input = query.input.clone();
     let binary_path = query.binary_path;
     let session_id = query.session_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());

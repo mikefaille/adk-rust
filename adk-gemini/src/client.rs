@@ -17,10 +17,7 @@ use futures::Stream;
 use google_cloud_aiplatform_v1::client::PredictionService;
 use google_cloud_auth::credentials::{self, Credentials};
 use mime::Mime;
-use reqwest::{
-    ClientBuilder,
-    header::InvalidHeaderValue,
-};
+use reqwest::{ClientBuilder, header::InvalidHeaderValue};
 use serde::{Deserialize, Serialize};
 use snafu::{ResultExt, Snafu};
 use std::{
@@ -129,62 +126,103 @@ impl fmt::Display for Model {
 #[snafu(visibility(pub))]
 pub enum Error {
     #[snafu(display("failed to parse API key"))]
-    InvalidApiKey { source: InvalidHeaderValue },
+    InvalidApiKey {
+        source: InvalidHeaderValue,
+    },
 
     #[snafu(display("failed to construct URL (probably incorrect model name): {suffix}"))]
-    ConstructUrl { source: url::ParseError, suffix: String },
+    ConstructUrl {
+        source: url::ParseError,
+        suffix: String,
+    },
 
-    PerformRequestNew { source: reqwest::Error },
+    PerformRequestNew {
+        source: reqwest::Error,
+    },
 
     #[snafu(display("failed to perform request to '{url}'"))]
-    PerformRequest { source: reqwest::Error, url: Url },
+    PerformRequest {
+        source: reqwest::Error,
+        url: Url,
+    },
 
     #[snafu(display("bad response from server; code {code}; description: {}", description.as_deref().unwrap_or("none")))]
-    BadResponse { code: u16, description: Option<String> },
+    BadResponse {
+        code: u16,
+        description: Option<String>,
+    },
 
-    MissingResponseHeader { header: String },
+    MissingResponseHeader {
+        header: String,
+    },
 
     #[snafu(display("failed to obtain stream SSE part"))]
-    BadPart { source: EventStreamError<reqwest::Error> },
+    BadPart {
+        source: EventStreamError<reqwest::Error>,
+    },
 
     #[snafu(display("failed to deserialize JSON response"))]
-    Deserialize { source: serde_json::Error },
+    Deserialize {
+        source: serde_json::Error,
+    },
 
     #[snafu(display("failed to generate content"))]
-    DecodeResponse { source: reqwest::Error },
+    DecodeResponse {
+        source: reqwest::Error,
+    },
 
     #[snafu(display("failed to parse URL"))]
-    UrlParse { source: url::ParseError },
+    UrlParse {
+        source: url::ParseError,
+    },
 
     #[snafu(display("failed to build google cloud credentials"))]
-    GoogleCloudAuth { source: google_cloud_auth::build_errors::Error },
+    GoogleCloudAuth {
+        source: google_cloud_auth::build_errors::Error,
+    },
 
     #[snafu(display("failed to obtain google cloud auth headers"))]
-    GoogleCloudCredentialHeaders { source: google_cloud_auth::errors::CredentialsError },
+    GoogleCloudCredentialHeaders {
+        source: google_cloud_auth::errors::CredentialsError,
+    },
 
     #[snafu(display("google cloud credentials returned NotModified without cached headers"))]
     GoogleCloudCredentialHeadersUnavailable,
 
     #[snafu(display("failed to parse google cloud credentials JSON"))]
-    GoogleCloudCredentialParse { source: serde_json::Error },
+    GoogleCloudCredentialParse {
+        source: serde_json::Error,
+    },
 
     #[snafu(display("failed to build google cloud vertex client"))]
-    GoogleCloudClientBuild { source: google_cloud_gax::client_builder::Error },
+    GoogleCloudClientBuild {
+        source: google_cloud_gax::client_builder::Error,
+    },
 
     #[snafu(display("failed to send google cloud vertex request"))]
-    GoogleCloudRequest { source: google_cloud_aiplatform_v1::Error },
+    GoogleCloudRequest {
+        source: google_cloud_aiplatform_v1::Error,
+    },
 
     #[snafu(display("failed to serialize google cloud request"))]
-    GoogleCloudRequestSerialize { source: serde_json::Error },
+    GoogleCloudRequestSerialize {
+        source: serde_json::Error,
+    },
 
     #[snafu(display("failed to deserialize google cloud request"))]
-    GoogleCloudRequestDeserialize { source: serde_json::Error },
+    GoogleCloudRequestDeserialize {
+        source: serde_json::Error,
+    },
 
     #[snafu(display("failed to serialize google cloud response"))]
-    GoogleCloudResponseSerialize { source: serde_json::Error },
+    GoogleCloudResponseSerialize {
+        source: serde_json::Error,
+    },
 
     #[snafu(display("failed to deserialize google cloud response"))]
-    GoogleCloudResponseDeserialize { source: serde_json::Error },
+    GoogleCloudResponseDeserialize {
+        source: serde_json::Error,
+    },
 
     #[snafu(display("google cloud request payload is not an object"))]
     GoogleCloudRequestNotObject,
@@ -201,17 +239,25 @@ pub enum Error {
     #[snafu(display("api key is required for this configuration"))]
     MissingApiKey,
 
-    #[snafu(display("operation '{operation}' is not supported with the google cloud sdk backend (PredictionService currently exposes generateContent/embedContent only)"))]
-    GoogleCloudUnsupported { operation: &'static str },
+    #[snafu(display(
+        "operation '{operation}' is not supported with the google cloud sdk backend (PredictionService currently exposes generateContent/embedContent only)"
+    ))]
+    GoogleCloudUnsupported {
+        operation: &'static str,
+    },
 
     #[snafu(display("failed to create tokio runtime for google cloud client"))]
-    TokioRuntime { source: std::io::Error },
+    TokioRuntime {
+        source: std::io::Error,
+    },
 
     #[snafu(display("google cloud client initialization thread panicked"))]
     GoogleCloudInitThreadPanicked,
 
     #[snafu(display("I/O error during file operations"))]
-    Io { source: std::io::Error },
+    Io {
+        source: std::io::Error,
+    },
 }
 
 // ══════════════════════════════════════════════════════════════════════
@@ -625,9 +671,7 @@ impl GeminiBuilder {
                 endpoint,
             );
 
-            return Ok(Gemini {
-                client: Arc::new(GeminiClient::with_vertex(model, vertex)),
-            });
+            return Ok(Gemini { client: Arc::new(GeminiClient::with_vertex(model, vertex)) });
         }
 
         // ── AI Studio REST path ─────────────────────────────────────────
@@ -639,12 +683,9 @@ impl GeminiBuilder {
         let studio =
             backend::studio::StudioBackend::new(&api_key, self.model.clone(), self.base_url)?;
 
-        Ok(Gemini {
-            client: Arc::new(GeminiClient::with_studio(self.model, studio)),
-        })
+        Ok(Gemini { client: Arc::new(GeminiClient::with_studio(self.model, studio)) })
     }
 }
-
 
 // ══════════════════════════════════════════════════════════════════════
 // Gemini — the main public-facing client
@@ -784,14 +825,9 @@ impl Gemini {
         base_url: Url,
     ) -> Result<Self, Error> {
         let model = model.into();
-        let studio = backend::studio::StudioBackend::new(
-            api_key.as_ref(),
-            model.clone(),
-            base_url,
-        )?;
-        Ok(Self {
-            client: Arc::new(GeminiClient::with_studio(model, studio)),
-        })
+        let studio =
+            backend::studio::StudioBackend::new(api_key.as_ref(), model.clone(), base_url)?;
+        Ok(Self { client: Arc::new(GeminiClient::with_studio(model, studio)) })
     }
 
     /// Start building a content generation request

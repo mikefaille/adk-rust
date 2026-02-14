@@ -42,7 +42,11 @@ fn detect_provider(model: &str) -> &'static str {
     } else if m.contains("llama") || m.contains("mixtral") {
         // Ollama-style tags have colons (e.g. "llama3.2:3b")
         if m.contains(':') { "ollama" } else { "groq" }
-    } else if m.contains("qwen") || m.contains("mistral") || m.contains("codellama") || m.contains("devstral") {
+    } else if m.contains("qwen")
+        || m.contains("mistral")
+        || m.contains("codellama")
+        || m.contains("devstral")
+    {
         "ollama"
     } else {
         "gemini" // default
@@ -3959,15 +3963,30 @@ fn generate_cargo_toml(project: &ProjectSchema) -> String {
     // Determine which adk-model features are needed based on providers used
     let providers = collect_providers(project);
     let mut model_features: Vec<&str> = Vec::new();
-    if providers.contains("gemini") { model_features.push("gemini"); }
-    if providers.contains("openai") { model_features.push("openai"); }
-    if providers.contains("anthropic") { model_features.push("anthropic"); }
-    if providers.contains("deepseek") { model_features.push("deepseek"); }
-    if providers.contains("groq") { model_features.push("groq"); }
-    if providers.contains("ollama") { model_features.push("ollama"); }
+    if providers.contains("gemini") {
+        model_features.push("gemini");
+    }
+    if providers.contains("openai") {
+        model_features.push("openai");
+    }
+    if providers.contains("anthropic") {
+        model_features.push("anthropic");
+    }
+    if providers.contains("deepseek") {
+        model_features.push("deepseek");
+    }
+    if providers.contains("groq") {
+        model_features.push("groq");
+    }
+    if providers.contains("ollama") {
+        model_features.push("ollama");
+    }
     // Default to gemini if no providers detected
-    if model_features.is_empty() { model_features.push("gemini"); }
-    let features_str = model_features.iter().map(|f| format!("\"{}\"", f)).collect::<Vec<_>>().join(", ");
+    if model_features.is_empty() {
+        model_features.push("gemini");
+    }
+    let features_str =
+        model_features.iter().map(|f| format!("\"{}\"", f)).collect::<Vec<_>>().join(", ");
 
     let adk_deps = if use_path_deps {
         format!(

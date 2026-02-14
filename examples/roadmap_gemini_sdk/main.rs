@@ -118,7 +118,11 @@ fn build_embedding_client(mode: SdkMode) -> Result<Gemini> {
         }
         SdkMode::VertexAdc => {
             let project_id = project_id()?;
-            Ok(Gemini::with_google_cloud_adc_model(project_id, location, Model::GeminiEmbedding001)?)
+            Ok(Gemini::with_google_cloud_adc_model(
+                project_id,
+                location,
+                Model::GeminiEmbedding001,
+            )?)
         }
         SdkMode::VertexServiceAccount => {
             let service_account_json =

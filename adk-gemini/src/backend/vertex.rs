@@ -181,8 +181,7 @@ impl GeminiBackend for VertexBackend {
             .eventsource()
             .map_err(|e| Error::BadPart { source: e })
             .and_then(|event| async move {
-                serde_json::from_str::<GenerationResponse>(&event.data)
-                    .context(DeserializeSnafu)
+                serde_json::from_str::<GenerationResponse>(&event.data).context(DeserializeSnafu)
             });
 
         Ok(Box::pin(stream))

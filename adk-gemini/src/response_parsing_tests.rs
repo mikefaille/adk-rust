@@ -6,8 +6,8 @@
 //! blocked prompts, grounding metadata, and mixed part types.
 
 use crate::{
-    BlockReason, FinishReason, GenerationResponse, HarmCategory, HarmProbability,
-    Modality, Part, SafetyRating,
+    BlockReason, FinishReason, GenerationResponse, HarmCategory, HarmProbability, Modality, Part,
+    SafetyRating,
 };
 use serde_json::json;
 
@@ -568,10 +568,7 @@ fn parse_unknown_finish_reason_string() {
     });
 
     let resp: GenerationResponse = serde_json::from_value(json).unwrap();
-    assert_eq!(
-        resp.candidates[0].finish_reason,
-        Some(FinishReason::Other)
-    );
+    assert_eq!(resp.candidates[0].finish_reason, Some(FinishReason::Other));
 }
 
 #[test]
@@ -584,10 +581,7 @@ fn parse_unknown_finish_reason_number() {
     });
 
     let resp: GenerationResponse = serde_json::from_value(json).unwrap();
-    assert_eq!(
-        resp.candidates[0].finish_reason,
-        Some(FinishReason::Other)
-    );
+    assert_eq!(resp.candidates[0].finish_reason, Some(FinishReason::Other));
 }
 
 #[test]

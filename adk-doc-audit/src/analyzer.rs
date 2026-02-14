@@ -155,10 +155,7 @@ impl CodeAnalyzer {
             Some(info) => info,
             None => {
                 // Create suggestion using helper method
-                let suggestion = Self::suggest_similar_crate_names(
-                    &api_ref.crate_name,
-                    registry,
-                );
+                let suggestion = Self::suggest_similar_crate_names(&api_ref.crate_name, registry);
                 return Ok(ValidationResult {
                     success: false,
                     errors: vec![format!("Crate '{}' not found in workspace", api_ref.crate_name)],
@@ -180,10 +177,7 @@ impl CodeAnalyzer {
 
         match matching_apis.len() {
             0 => {
-                let suggestion = Self::suggest_similar_api_names(
-                    &api_ref.item_path,
-                    crate_info,
-                );
+                let suggestion = Self::suggest_similar_api_names(&api_ref.item_path, crate_info);
                 Ok(ValidationResult {
                     success: false,
                     errors: vec![format!(
@@ -365,8 +359,7 @@ impl CodeAnalyzer {
                 match registry.crates.get(parts[0]) {
                     Some(info) => info,
                     None => {
-                        let suggestion =
-                            Self::suggest_similar_crate_names(parts[0], registry);
+                        let suggestion = Self::suggest_similar_crate_names(parts[0], registry);
                         return Ok(ValidationResult {
                             success: false,
                             errors: vec![format!("Crate '{}' not found in workspace", parts[0])],
@@ -396,8 +389,7 @@ impl CodeAnalyzer {
             crate_info.public_apis.iter().filter(|api| api.path.ends_with(&item_path)).collect();
 
         if matching_apis.is_empty() {
-            let suggestion =
-                Self::suggest_similar_api_names(&item_path, crate_info);
+            let suggestion = Self::suggest_similar_api_names(&item_path, crate_info);
             Ok(ValidationResult {
                 success: false,
                 errors: vec![format!("Item '{}' not found in crate '{}'", item_path, crate_name)],

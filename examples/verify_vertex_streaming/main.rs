@@ -57,8 +57,7 @@ async fn main() -> ExitCode {
 async fn do_main() -> Result<(), Box<dyn std::error::Error>> {
     let project = env::var("GOOGLE_CLOUD_PROJECT")
         .expect("GOOGLE_CLOUD_PROJECT environment variable required");
-    let location =
-        env::var("GOOGLE_CLOUD_LOCATION").unwrap_or_else(|_| "us-central1".to_string());
+    let location = env::var("GOOGLE_CLOUD_LOCATION").unwrap_or_else(|_| "us-central1".to_string());
 
     info!(project = %project, location = %location, "building Vertex AI client");
 
@@ -105,17 +104,11 @@ async fn do_main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ── Test 3: Embedding ───────────────────────────────────────────
     info!("━━━ Test 3: Embedding ━━━");
-    let embed_client = build_vertex_client_with_model(
-        &project,
-        &location,
-        Model::GeminiEmbedding001,
-    )?;
+    let embed_client =
+        build_vertex_client_with_model(&project, &location, Model::GeminiEmbedding001)?;
 
-    let embedding = embed_client
-        .embed_content()
-        .with_text("Vertex AI streaming now works")
-        .execute()
-        .await?;
+    let embedding =
+        embed_client.embed_content().with_text("Vertex AI streaming now works").execute().await?;
 
     let dim = embedding.embedding.values.len();
     info!(dimensions = dim, "embedding received");
@@ -155,8 +148,9 @@ fn build_vertex_client_with_model(
     }
 
     // Fall back to API key
-    let api_key = env::var("GEMINI_API_KEY")
-        .expect("one of GOOGLE_APPLICATION_CREDENTIALS, VERTEX_USE_ADC, or GEMINI_API_KEY required");
+    let api_key = env::var("GEMINI_API_KEY").expect(
+        "one of GOOGLE_APPLICATION_CREDENTIALS, VERTEX_USE_ADC, or GEMINI_API_KEY required",
+    );
     info!("using API key authentication");
     Gemini::with_google_cloud_model(api_key, project, location, model)
 }
