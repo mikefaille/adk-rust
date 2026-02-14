@@ -62,6 +62,9 @@ pub mod tools;
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+mod response_parsing_tests;
+
 // ========== Core Types ==========
 // These are the fundamental types used throughout the API
 
