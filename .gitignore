@@ -98,3 +98,4 @@ node_modules/
 # Audio
 *.pcm.nix-eval-cache
 nix-eval-cache
+.devenv
