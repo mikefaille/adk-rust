@@ -63,6 +63,8 @@ struct GeminiSetup {
     generation_config: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tools: Option<Vec<Value>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cached_content: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -266,6 +268,7 @@ impl GeminiRealtimeSession {
                 system_instruction,
                 generation_config: Some(generation_config),
                 tools,
+                cached_content: config.cached_content,
             }),
             realtime_input: None,
             tool_response: None,

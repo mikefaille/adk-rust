@@ -66,3 +66,11 @@ fn test_config_temperature() {
 
     assert_eq!(config.temperature, Some(0.7));
 }
+
+#[test]
+fn test_config_cached_content() {
+    let config = RealtimeConfig::builder()
+        .cached_content("cache-123")
+        .build();
+    assert_eq!(config.cached_content, Some("cache-123".to_string()));
+}

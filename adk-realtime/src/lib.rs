@@ -80,6 +80,7 @@
 pub mod agent;
 pub mod audio;
 pub mod config;
+pub mod context;
 pub mod error;
 pub mod events;
 pub mod model;
@@ -106,6 +107,9 @@ pub use livekit_api;
 pub use agent::{RealtimeAgent, RealtimeAgentBuilder};
 pub use audio::{AudioEncoding, AudioFormat};
 pub use config::{RealtimeConfig, RealtimeConfigBuilder, VadConfig, VadMode};
+pub use context::InterruptionCompactor;
+#[cfg(feature = "gemini")]
+pub use context::gemini::AudioContextCacheProcessor;
 pub use error::{RealtimeError, Result};
 pub use events::{ClientEvent, ServerEvent, ToolCall, ToolResponse};
 pub use model::RealtimeModel;
