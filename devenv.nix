@@ -13,11 +13,13 @@
       "rustfmt"
       "rust-analyzer"
       "rust-src"
+      "rustc-codegen-cranelift-preview"
     ];
   };
 
   # 2. System Tools (Linker & Cache) & 3. Libraries (Runtime + Headers)
   packages = [
+    pkgs.wild
     pkgs.sccache        # Compiler Cache
     pkgs.pkg-config     # Library Finder
     pkgs.glib
@@ -30,8 +32,9 @@
   # Force pkg-config to look in the glib.dev output
   enterShell = ''
     export PKG_CONFIG_PATH="${pkgs.glib.dev}/lib/pkgconfig:$PKG_CONFIG_PATH"
+    export RUSTFLAGS="-Z codegen-backend=cranelift"
 
-    echo "🏎️  Rust Ferrari Mode: Nightly 2026-01-15 + Sccache"
+    echo "🏎️  Rust Ferrari Mode: Nightly 2026-01-15  + Sccache"
   '';
 
   tasks = {
