@@ -33,7 +33,12 @@ full = [
     "ui",
     "doc-audit",
     "realtime",
-    "livekit"
+    "livekit",
+    "browser",
+    "eval",
+    "guardrail",
+    "auth",
+    "plugin"
 ]
 
 # CLI launcher support
@@ -53,6 +58,11 @@ telemetry = ["dep:adk-telemetry"]
 graph = ["dep:adk-graph"]
 ui = ["dep:adk-ui"]
 doc-audit = ["dep:adk-doc-audit"]
+browser = ["dep:adk-browser"]
+eval = ["dep:adk-eval"]
+guardrail = ["dep:adk-guardrail"]
+auth = ["dep:adk-auth"]
+plugin = ["dep:adk-plugin"]
 
 # Minimal preset (just agents + models + runner)
 minimal = ["agents", "models", "runner"]
@@ -88,6 +98,11 @@ adk-graph = { workspace = true, optional = true }
 adk-ui = { workspace = true, optional = true }
 adk-doc-audit = { workspace = true, optional = true }
 adk-realtime = { workspace = true, optional = true }
+adk-browser = { workspace = true, optional = true }
+adk-eval = { workspace = true, optional = true }
+adk-guardrail = { workspace = true, optional = true }
+adk-auth = { workspace = true, optional = true }
+adk-plugin = { workspace = true, optional = true }
 
 # Re-export common dependencies
 tokio = { workspace = true }
