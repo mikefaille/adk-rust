@@ -31,10 +31,10 @@ jobs:
       with:
         components: rustfmt, clippy
 
-    - name: Install mold linker
+    - name: Install system dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y mold
+        sudo apt-get install -y mold cmake libglib2.0-dev
 
     - name: Setup sccache
       uses: mozilla-actions/sccache-action@v0.0.9
