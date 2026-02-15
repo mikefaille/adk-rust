@@ -96,4 +96,6 @@ mistral-rs-ref/
 node_modules/
 
 # Audio
-*.pcm
+*.pcm.nix-eval-cache
+nix-eval-cache
+.devenv
