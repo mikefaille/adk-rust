@@ -23,3 +23,9 @@ By setting `RUSTFLAGS` in `devenv.nix`:
 3.  **Enable `sccache` in `devenv.nix`**: Set `RUSTC_WRAPPER` correctly.
 
 This approach fixes the SIGSEGV, enables `sccache`, and uses `wild`/`cranelift` where appropriate.
+
+## Update on Linkers (Mold/Wild)
+
+Attempts to replace the default linker with `wild` or `mold` (even using absolute paths to `ld.mold` as suggested) resulted in `SIGSEGV` errors during the execution of build scripts (e.g., `build-script-build`). This suggests an incompatibility between the binaries produced by `cranelift` + `mold`/`wild` and the container environment's execution of those binaries.
+
+Therefore, the configuration has been reverted to use the default system linker (likely `ld` via `clang`), which works correctly with `cranelift` and `sccache`. This ensures a stable and passing build environment.

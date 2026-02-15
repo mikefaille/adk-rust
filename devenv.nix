@@ -19,11 +19,12 @@
 
   # 2. System Tools (Linker & Cache) & 3. Libraries (Runtime + Headers)
   packages = [
-    pkgs.wild
+    # pkgs.mold         # Linker (Disabled due to SIGSEGV in build scripts with Cranelift)
     pkgs.sccache        # Compiler Cache
     pkgs.pkg-config     # Library Finder
     pkgs.glib
     pkgs.glib.dev       # <--- CRITICAL: Fixes "glib-2.0 not found"
+    pkgs.libva
   ];
 
   # 4. Environment Configuration
@@ -34,7 +35,7 @@
     export PKG_CONFIG_PATH="${pkgs.glib.dev}/lib/pkgconfig:$PKG_CONFIG_PATH"
     export RUSTFLAGS="-Z codegen-backend=cranelift"
 
-    echo "🏎️  Rust Ferrari Mode: Nightly 2026-01-15  + Sccache"
+    echo "🏎️  Rust Ferrari Mode: Nightly 2026-01-15 + Cranelift + Sccache"
   '';
 
   tasks = {
