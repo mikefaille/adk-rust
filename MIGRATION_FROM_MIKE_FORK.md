@@ -1,332 +1,305 @@
 # Migration Guide: mikefaille/adk-rust → zavora-ai/adk-rust
 
-This document compares Mike's fork (`mikefaille/adk-rust`) with our implementation (`zavora-ai/adk-rust` branch `feat/realtime-audio-transport`) and identifies what Mike needs to change to migrate.
+This document helps Mike (and anyone on his fork) migrate to our `feat/realtime-audio-transport` branch. It covers every API difference, the reasoning behind our choices, and exact code changes needed.
 
 ## TL;DR
 
-Our implementation covers all the same functionality as Mike's fork but with different design choices. The core `RealtimeSession` trait, `EventHandler`, `RealtimeRunner`, `RealtimeAgent`, events, and audio types are API-compatible. The main differences are in:
+Both implementations provide the same capabilities — OpenAI WebRTC, Gemini Live (Studio + Vertex), and LiveKit bridging. The core traits (`RealtimeSession`, `EventHandler`, `RealtimeRunner`, `RealtimeAgent`) are API-compatible. The differences are in plumbing:
 
-1. **WebRTC crate** — Mike uses `rtc` (v0.8.5), we use `str0m` (v0.16)
-2. **Feature flag names** — Mike: `webrtc`, `vertex`; Ours: `openai-webrtc`, `vertex-live`
-3. **GeminiLiveBackend location** — Mike: defined in `adk-gemini`; Ours: defined in `adk-realtime`
-4. **LiveKit module structure** — Mike: single `livekit.rs`; Ours: `livekit/` directory with `mod.rs`, `handler.rs`, `bridge.rs`
-5. **Audio transport in events** — Mike: `Bytes` (from `bytes` crate); Ours: `Vec<u8>`
+| Area | Mike's Fork | Our Implementation |
+|------|------------|-------------------|
+| WebRTC crate | `rtc` v0.8.5 | `str0m` v0.16 |
+| Feature flags | `webrtc`, `vertex` | `openai-webrtc`, `vertex-live` |
+| `GeminiLiveBackend` location | `adk-gemini` | `adk-realtime` |
+| LiveKit module | single `livekit.rs` | `livekit/` directory |
+| Audio in events | `bytes::Bytes` | `Vec<u8>` |
+| SDP signaling | Direct API key | Ephemeral token (OpenAI recommended) |
+| Data channel buffering | Pre-open queue in event loop | Pre-open queue in session struct |
+| `full` feature | includes WebRTC | excludes WebRTC (no cmake needed) |
 
 ---
 
-## Detailed Comparison
+## Feature Flag Mapping
 
-### 1. Feature Flags (Cargo.toml)
+| Feature | Mike | Ours | Notes |
+|---------|------|------|-------|
+| OpenAI WebSocket | `openai` | `openai` | Same |
+| Gemini Live | `gemini` | `gemini` | Same |
+| Vertex AI | `vertex` | `vertex-live` | We use `google-cloud-auth` directly instead of forwarding to `adk-gemini/vertex` |
+| LiveKit | `livekit` | `livekit` | Same |
+| WebRTC | `webrtc` | `openai-webrtc` | More specific name; both are OpenAI-only |
+| All (no cmake) | — | `full` | `openai + gemini + vertex-live + livekit` |
+| All (with cmake) | `full` | `full-webrtc` | Adds `openai-webrtc` which requires cmake for `audiopus` |
 
-| Feature | Mike's Fork | Our Implementation |
-|---------|------------|-------------------|
-| OpenAI WebSocket | `openai` | `openai` |
-| Gemini Live | `gemini` | `gemini` |
-| Vertex AI | `vertex` (forwards to `adk-gemini/vertex`) | `vertex-live` (uses `google-cloud-auth` directly) |
-| LiveKit | `livekit` | `livekit` |
-| WebRTC | `webrtc` (generic, uses `rtc` crate) | `openai-webrtc` (OpenAI-specific, uses `str0m` crate) |
-| All features | `full` = openai + gemini + livekit + adk | `full` = openai + gemini + vertex-live + livekit + openai-webrtc |
+**Why `full` excludes WebRTC:** The `audiopus` crate builds the Opus C library from source and requires `cmake`. Since `full` is the default feature, including WebRTC would force every user to install cmake even if they don't need WebRTC. Users who want WebRTC opt in with `--features openai-webrtc` or `--features full-webrtc`.
 
-**Migration action:** Update any `--features webrtc` to `--features openai-webrtc`. Update `--features vertex` to `--features vertex-live`.
+**cmake 4.x note:** With cmake >= 4.0, set `CMAKE_POLICY_VERSION_MINIMUM=3.5` in your environment to work around the bundled Opus CMakeLists.txt.
 
-### 2. WebRTC Crate: `rtc` vs `str0m`
+---
+
+## Detailed Differences
+
+### 1. WebRTC Crate: `rtc` vs `str0m`
+
+Both are Sans-IO WebRTC implementations. Neither requires cmake — that's `audiopus`.
 
 | Aspect | Mike (`rtc` v0.8.5) | Ours (`str0m` v0.16) |
 |--------|---------------------|---------------------|
-| Architecture | Sans-IO with `RTCPeerConnection` | Sans-IO with `Rtc` |
-| UDP I/O | Manual `UdpSocket` + event loop | Manual I/O driving via `poll_output()` |
-| RTP | Manual `Packet` construction with `Header` | `writer(mid).write(pt, wallclock, rtp_time, data)` |
-| SSRC | Manual random SSRC generation | Managed by str0m internally |
-| ICE | Manual `CandidateHostConfig` + gathering loop | Handled by str0m's SDP API |
+| RTP | Manual `Packet` + `Header` construction | `writer(mid).write(pt, wallclock, rtp_time, data)` |
+| SSRC | Manual random generation | Managed internally |
+| ICE | Manual `CandidateHostConfig` + gathering loop | Handled by SDP API |
 | Data channel | `pc.data_channel(id).send_text()` | `rtc.channel(id).write(reliable, bytes)` |
 | SDP | `create_offer()` / `set_remote_description()` | `sdp_api().apply()` / `accept_answer()` |
-| Opus encoding | Manual in event loop with `audiopus` | Encapsulated in `OpusCodec` struct |
+| I/O loop | `tokio::spawn(run_pc_loop(...))` | Caller-driven via `poll_output()` |
 
-**Migration action:** If Mike has custom code using `rtc` APIs directly, it needs to be rewritten for `str0m`. Our `OpenAIWebRTCSession` in `adk-realtime/src/openai/webrtc.rs` is the drop-in replacement — it handles the full SDP signaling, Opus encoding, data channel, and `RealtimeSession` trait implementation.
+**Migration:** No action needed — our `OpenAIWebRTCSession` is a drop-in replacement that handles all of this internally.
 
-### 3. GeminiLiveBackend Enum
+### 2. GeminiLiveBackend Enum
 
-**Mike's approach:** Defined in `adk-gemini/src/types.rs`, three variants:
+**Mike** (in `adk-gemini/src/types.rs`):
 ```rust
 pub enum GeminiLiveBackend {
     Studio { api_key: String },
-    #[cfg(feature = "vertex")]
-    Vertex(VertexContext),           // Pre-authenticated with token
-    #[cfg(feature = "vertex")]
+    Vertex(VertexContext),           // Pre-authenticated token
     VertexADC { project, location }, // ADC auto-discovery
 }
 ```
 
-**Our approach:** Defined in `adk-realtime/src/gemini/session.rs`, two variants:
+**Ours** (in `adk-realtime/src/gemini/session.rs`):
 ```rust
 pub enum GeminiLiveBackend {
     Studio { api_key: String },
-    #[cfg(feature = "vertex-live")]
-    Vertex { credentials, region, project_id }, // google-cloud-auth Credentials
+    Vertex { credentials, region, project_id },
+}
+
+impl GeminiLiveBackend {
+    pub fn studio(api_key: impl Into<String>) -> Self;
+    pub fn vertex_adc(project_id: impl Into<String>, region: impl Into<String>) -> Result<Self>;
 }
 ```
 
-**Key differences:**
-- Mike has `Vertex` (pre-authenticated token) + `VertexADC` (auto-discovery) as separate variants
-- We have a single `Vertex` variant that takes `google-cloud-auth::Credentials` — the caller decides how to obtain credentials (ADC, service account, etc.)
-- Mike's `GeminiLiveBackend` lives in `adk-gemini`; ours lives in `adk-realtime`
-- Mike depends on `adk-gemini` features (`vertex`) for auth; we use `google-cloud-auth` directly
+We collapsed Mike's two Vertex variants into one `Vertex` variant plus a `vertex_adc()` convenience constructor. The constructor auto-discovers ADC credentials, giving the same ergonomics as Mike's `VertexADC` variant.
 
-**Migration action:** Replace `GeminiLiveBackend::VertexADC { project, location }` with:
+**Migration:**
 ```rust
+// Before (Mike)
+let backend = GeminiLiveBackend::VertexADC { project, location };
+
+// After — convenience constructor (recommended)
+let backend = GeminiLiveBackend::vertex_adc(project, location)?;
+
+// After — manual credentials
 let credentials = google_cloud_auth::credentials::Builder::default().build()?;
-GeminiLiveBackend::Vertex { credentials, region: location, project_id: project }
+let backend = GeminiLiveBackend::Vertex { credentials, region: location, project_id: project };
 ```
 
-### 4. Gemini Session — `send_text()` Implementation
+### 3. Gemini `send_text()` Format
 
-**Mike:** Uses `client_content` with `turns` array (correct Gemini Live API format):
-```rust
-client_content: Some(GeminiClientContent {
-    turns: vec![GeminiTurn {
-        role: "user",
-        parts: vec![GeminiPart { text: Some(text) }],
-    }],
-    turn_complete: true,
-})
+Both implementations use the correct `client_content.turns[]` format with `turn_complete: true`. No migration needed.
+
+### 4. SDP Signaling Flow
+
+**Mike:** Single-step — sends API key directly to the SDP endpoint:
 ```
-
-**Ours:** Check our `adk-realtime/src/gemini/session.rs` — should use the same `client_content` pattern. If it still uses `realtime_input.text`, that's a bug from the original codebase that Mike fixed.
-
-**Migration action:** Verify our Gemini `send_text()` uses `client_content` format. If not, adopt Mike's pattern.
-
-### 5. Events — Audio Data Type
-
-**Mike:** Uses `bytes::Bytes` for audio in events:
-```rust
-ClientEvent::AudioDelta { audio: Bytes, format: AudioFormat, ... }
-ServerEvent::AudioDelta { delta: Bytes, ... }
-```
-
-**Ours:** Uses `Vec<u8>`:
-```rust
-ClientEvent::AudioDelta { audio: Vec<u8>, ... }
-ServerEvent::AudioDelta { delta: Vec<u8>, ... }
-```
-
-**Mike's `ClientEvent::AudioDelta`** also carries a `format: AudioFormat` field (skipped in serde). Ours does not.
-
-**Migration action:** If Mike's code passes `Bytes` to event constructors, convert with `.to_vec()` or `Bytes::from(vec)`. The `format` field on `AudioDelta` is `#[serde(skip)]` in Mike's code so it doesn't affect wire format.
-
-### 6. LiveKit Module Structure
-
-**Mike:** Single file `src/livekit.rs` with:
-- `LiveKitEventHandler` — wraps `Arc<dyn EventHandler>`, no generic parameter
-- `bridge_input(track, runner, sample_rate, channels)` — takes sample rate/channels as params
-- `bridge_gemini_input(track, runner)` — convenience wrapper calling `bridge_input` with 16kHz
-
-**Ours:** Directory `src/livekit/` with:
-- `handler.rs` — `LiveKitEventHandler<H: EventHandler>` — generic over handler type
-- `bridge.rs` — `bridge_input(track, runner)` and `bridge_gemini_input(track, runner)`
-- `mod.rs` — re-exports
-
-**Key differences:**
-- Mike's `LiveKitEventHandler::new(source, inner)` takes `NativeAudioSource` first, `Arc<dyn EventHandler>` second
-- Ours takes `(inner_handler, audio_source, sample_rate, channels)` — more explicit about audio params
-- Mike's `bridge_input` takes `sample_rate` and `channels` as parameters; ours infers from context
-
-**Migration action:** Update constructor call order. The functionality is equivalent.
-
-### 7. OpenAI WebRTC Session Architecture
-
-**Mike:** Separate model `OpenAiWebRtcModel` that implements `RealtimeModel`:
-```rust
-// Separate struct from OpenAIRealtimeModel
-pub struct OpenAiWebRtcModel { model_id, api_key }
-impl RealtimeModel for OpenAiWebRtcModel { ... }
-```
-The WebRTC session runs a full `tokio::spawn` event loop (`run_pc_loop`) that handles UDP I/O, RTP packetization, data channel messages, and ICE.
-
-**Ours:** Single `OpenAIRealtimeModel` with `OpenAITransport` enum:
-```rust
-pub enum OpenAITransport { WebSocket, WebRTC }
-// OpenAIRealtimeModel.with_transport(OpenAITransport::WebRTC)
-```
-The `OpenAIWebRTCSession` implements `RealtimeSession` directly. The I/O loop is the caller's responsibility (str0m is Sans-IO).
-
-**Migration action:** Replace `OpenAiWebRtcModel::new(model_id, api_key)` with:
-```rust
-OpenAIRealtimeModel::new(api_key, model_id).with_transport(OpenAITransport::WebRTC)
-```
-
-### 8. SDP Signaling Flow
-
-**Mike:** Direct SDP exchange — sends offer SDP directly to OpenAI with API key:
-```rust
-POST /v1/realtime?model=... 
+POST /v1/realtime?model=...
 Authorization: Bearer {api_key}
 Content-Type: application/sdp
-Body: {offer_sdp}
 ```
 
 **Ours:** Two-step — ephemeral token first, then SDP exchange:
-```rust
-// Step 1: Get ephemeral token
-POST /v1/realtime/sessions
-Authorization: Bearer {api_key}
-Body: { "model": model_id, "voice": "alloy" }
-// Returns: { "client_secret": { "value": "..." } }
-
-// Step 2: SDP exchange with ephemeral token
-POST /v1/realtime?model=...
-Authorization: Bearer {ephemeral_token}
-Content-Type: application/sdp
-Body: {offer_sdp}
+```
+POST /v1/realtime/sessions        → ephemeral token
+POST /v1/realtime?model=...       → SDP answer (using ephemeral token)
 ```
 
-**Migration action:** Our approach follows OpenAI's recommended flow for WebRTC (ephemeral tokens are short-lived and safer). Mike's direct API key approach works but exposes the key to the WebRTC endpoint. No code change needed — this is internal to the session.
+Our approach follows OpenAI's recommended pattern. The ephemeral token is short-lived and scoped, so if it leaks it's less damaging than a full API key. For server-side use where the key never leaves your backend, Mike's approach works fine too.
+
+**Migration:** No action needed — this is internal to the session.
+
+### 5. Data Channel Pre-Open Buffering
+
+Both implementations buffer messages when the data channel isn't open yet:
+
+**Mike:** Buffers in the `run_pc_loop` event loop with `pending_dc_messages: Vec<String>`, flushes on `OnDataChannel(OnOpen)`.
+
+**Ours:** Buffers in the `OpenAIWebRTCSession` struct with `pending_dc_messages: Arc<Mutex<Vec<Vec<u8>>>>`, flushed via `flush_pending_dc_messages()`. Both cap at 50 messages.
+
+**Migration:** No action needed — same behavior, different location.
+
+### 6. Events — Audio Data Type
+
+**Mike:** `bytes::Bytes` for audio, plus `format: AudioFormat` on `ClientEvent::AudioDelta` (skipped in serde).
+
+**Ours:** `Vec<u8>` for audio, plus `format: Option<AudioFormat>` on `ClientEvent::AudioDelta` (skipped in serde).
+
+**Migration:**
+```rust
+// If passing Bytes to event constructors:
+let audio_vec: Vec<u8> = bytes_value.to_vec();
+
+// If reading audio from events:
+// delta is Vec<u8> instead of Bytes — same API for slicing/iterating
+```
+
+### 7. OpenAI WebRTC Model API
+
+**Mike:** Separate `OpenAiWebRtcModel` struct.
+
+**Ours:** Single `OpenAIRealtimeModel` with transport selection.
+
+**Migration:**
+```rust
+// Before (Mike)
+let model = OpenAiWebRtcModel::new("gpt-4o-realtime-preview", api_key);
+
+// After
+let model = OpenAIRealtimeModel::new(api_key, "gpt-4o-realtime-preview")
+    .with_transport(OpenAITransport::WebRTC);
+```
+
+### 8. LiveKit Module
+
+**Mike:** Single `livekit.rs`, `LiveKitEventHandler::new(source, inner)`.
+
+**Ours:** `livekit/` directory, `LiveKitEventHandler::new(inner, source, sample_rate, channels)`.
+
+**Migration:**
+```rust
+// Before (Mike)
+let handler = LiveKitEventHandler::new(source, Arc::new(inner));
+
+// After
+let handler = LiveKitEventHandler::new(inner, source, 24000, 1);
+```
 
 ### 9. Error Types
 
-**Mike:** No transport-specific error variants:
+We added transport-specific variants. These are additive — existing match arms still work:
+
 ```rust
-pub enum RealtimeError {
-    ConnectionError(String),
-    MessageError(String),
-    AuthError(String),
-    // ... generic variants
-}
+RealtimeError::OpusCodecError(String)  // Opus encode/decode failures
+RealtimeError::WebRTCError(String)     // WebRTC connection/signaling failures
+RealtimeError::LiveKitError(String)    // LiveKit bridge failures
 ```
 
-**Ours:** Added transport-specific variants:
-```rust
-pub enum RealtimeError {
-    // ... all of Mike's variants, plus:
-    OpusCodecError(String),  // Opus encode/decode failures
-    WebRTCError(String),     // WebRTC-specific failures
-    LiveKitError(String),    // LiveKit bridge failures
-}
-```
+### 10. Facade Crate (`adk-rust`)
 
-**Migration action:** If Mike's code catches specific error types, the new variants are additive — existing match arms still work. Add new arms for `OpusCodecError`, `WebRTCError`, `LiveKitError` if needed.
+**Mike:** Only `realtime` and `livekit` forwarded.
 
-### 10. `adk-rust` Facade Crate
+**Ours:** `realtime`, `vertex-live`, `livekit`, `openai-webrtc` all forwarded, plus prelude re-exports for `RealtimeAgent`, `RealtimeAgentBuilder`, `RealtimeConfig`, `RealtimeModel`, `RealtimeRunner`, `RealtimeSession`, `RealtimeSessionExt`, `BoxedSession`, `BoxedModel`.
 
-**Mike's facade features:**
-```toml
-realtime = ["dep:adk-realtime"]
-livekit = ["realtime", "adk-realtime/livekit"]
-# No vertex-live or openai-webrtc forwarding
-```
+### 11. Convenience APIs
 
-**Our facade features:**
-```toml
-realtime = ["dep:adk-realtime"]
-vertex-live = ["realtime", "adk-realtime/vertex-live"]
-livekit = ["realtime", "adk-realtime/livekit"]
-openai-webrtc = ["realtime", "adk-realtime/openai-webrtc"]
-```
+These already exist in our implementation (no migration needed, just use them):
 
-Plus prelude re-exports for `RealtimeAgent`, `RealtimeAgentBuilder`, `RealtimeConfig`, `RealtimeModel`, `RealtimeRunner`, `RealtimeSession`.
-
-**Migration action:** Use `adk-rust` features directly instead of `adk-realtime` features when depending on the facade crate.
-
-### 11. `.cargo/config.toml`
-
-**Mike:** Has a Linux-specific build config:
-```toml
-[target.x86_64-unknown-linux-gnu]
-linker = "clang"
-rustflags = ["-C", "link-arg=-fuse-ld=wild", "-Z", "codegen-backend=cranelift"]
-[build]
-rustc-wrapper = "sccache"
-```
-
-**Ours:** No `.cargo/config.toml` — we don't enforce a specific linker or build cache.
-
-**Migration action:** This is Mike's local dev optimization. Not needed for migration, but can be kept for Linux dev environments.
-
-### 12. `devenv.nix`
-
-**Mike:** Has a Nix development environment file.
-
-**Ours:** No Nix support.
-
-**Migration action:** Not relevant to code migration. Mike can keep his Nix setup.
+| API | Description |
+|-----|-------------|
+| `BoxedSession` | `type BoxedSession = Box<dyn RealtimeSession>` |
+| `BoxedModel` | `type BoxedModel = Arc<dyn RealtimeModel>` |
+| `RealtimeSessionExt` | Blanket trait with `send_text_and_wait()`, `send_audio_and_wait()`, `collect_audio()` |
+| `GeminiLiveBackend::studio(key)` | Convenience constructor for Studio backend |
+| `GeminiLiveBackend::vertex_adc(project, region)` | Convenience constructor for Vertex ADC |
 
 ---
 
 ## What Mike Gets By Migrating
 
-1. **Property tests** — 5 proptest suites (100 iterations each) covering Vertex URL construction, LiveKit delegation, Opus round-trip, SDP offer structure, error context preservation
-2. **Integration tests** — `#[ignore]` tests for all three transports with timeout guards
-3. **Examples** — `vertex_live_voice`, `livekit_bridge`, `openai_webrtc` with READMEs
-4. **Ephemeral token flow** — Safer WebRTC signaling (no API key on the wire)
-5. **str0m** — More actively maintained Sans-IO WebRTC crate (vs `rtc`)
-6. **Comprehensive README** — Architecture diagrams, feature flag docs, testing commands
-7. **ROADMAP** — Documented future work and known issues
-8. **cmake compatibility docs** — `CMAKE_POLICY_VERSION_MINIMUM=3.5` for audiopus builds
-
-## What We Should Consider Adopting from Mike
-
-1. ~~**`client_content` for Gemini `send_text()`**~~ — ✅ Already implemented correctly. Our `send_text()` uses `client_content.turns[]` with `turn_complete: true`.
-2. ~~**`VertexADC` convenience**~~ — ✅ Added `GeminiLiveBackend::vertex_adc(project_id, region)` convenience constructor that auto-discovers ADC credentials.
-3. ~~**`RealtimeSessionExt` trait**~~ — ✅ Already implemented with `send_text_and_wait()`, `send_audio_and_wait()`, `collect_audio()` as a blanket extension trait.
-4. ~~**`BoxedSession` type alias**~~ — ✅ Already defined: `type BoxedSession = Box<dyn RealtimeSession>`.
-5. ~~**`BoxedModel` type alias**~~ — ✅ Already defined: `type BoxedModel = Arc<dyn RealtimeModel>`. Now re-exported from `lib.rs`.
-6. ~~**Data channel message queuing**~~ — ✅ Added pre-open buffering to `OpenAIWebRTCSession`. Messages are queued (up to 50) when the data channel isn't open yet, then flushed in FIFO order via `flush_pending_dc_messages()` when the channel opens.
-7. ~~**`AudioFormat` field on `ClientEvent::AudioDelta`**~~ — ✅ Added `format: Option<AudioFormat>` field with `#[serde(skip)]` for in-memory metadata without affecting wire format.
-
-**Additional improvement:** Removed `openai-webrtc` from the `full` feature flag so that `cargo build` with default features doesn't require cmake. Users who want WebRTC opt in explicitly with `--features openai-webrtc` or `--features full-webrtc`.
+- 5 property test suites (100 iterations each): Vertex URL, LiveKit delegation, Opus round-trip, SDP offer structure, error context
+- Integration tests (`#[ignore]`) for all three transports with timeout guards
+- Examples: `vertex_live_voice`, `livekit_bridge`, `openai_webrtc` with READMEs
+- Ephemeral token SDP signaling (OpenAI recommended)
+- cmake-free default build (`full` doesn't require cmake)
+- Comprehensive README with architecture diagrams
+- ROADMAP with known issues and future work
+- `RealtimeSessionExt` convenience methods
+- `vertex_adc()` ergonomic constructor
+- Data channel pre-open buffering
+- `AudioFormat` metadata on client audio events
 
 ---
 
-## Step-by-Step Migration for Mike
+## Step-by-Step Migration
 
-1. **Switch branch:** `git checkout feat/realtime-audio-transport`
-2. **Update feature flags** in any scripts/CI: `webrtc` → `openai-webrtc`, `vertex` → `vertex-live`
+1. **Switch branch:**
+   ```bash
+   git checkout feat/realtime-audio-transport
+   ```
+
+2. **Update feature flags** in scripts/CI:
+   - `webrtc` → `openai-webrtc`
+   - `vertex` → `vertex-live`
+   - `full` no longer includes WebRTC; use `full-webrtc` for everything
+
 3. **Update imports:**
-   - `use adk_realtime::openai::OpenAiWebRtcModel` → `use adk_realtime::openai::{OpenAIRealtimeModel, OpenAITransport}`
-   - `use adk_gemini::GeminiLiveBackend` → `use adk_realtime::gemini::GeminiLiveBackend`
+   ```rust
+   // Before
+   use adk_realtime::openai::OpenAiWebRtcModel;
+   use adk_gemini::GeminiLiveBackend;
+
+   // After
+   use adk_realtime::openai::{OpenAIRealtimeModel, OpenAITransport};
+   use adk_realtime::gemini::GeminiLiveBackend;
+   ```
+
 4. **Update WebRTC model creation:**
    ```rust
-   // Before (Mike)
+   // Before
    let model = OpenAiWebRtcModel::new("gpt-4o-realtime-preview", api_key);
-   
-   // After (ours)
+
+   // After
    let model = OpenAIRealtimeModel::new(api_key, "gpt-4o-realtime-preview")
        .with_transport(OpenAITransport::WebRTC);
    ```
+
 5. **Update Vertex AI connection:**
    ```rust
-   // Before (Mike)
+   // Before
    let backend = GeminiLiveBackend::VertexADC { project, location };
-   
-   // After (ours) — convenience constructor (recommended)
+
+   // After
    let backend = GeminiLiveBackend::vertex_adc(project, location)?;
-   
-   // After (ours) — manual credentials construction
-   let credentials = google_cloud_auth::credentials::Builder::default().build()?;
-   let backend = GeminiLiveBackend::Vertex { credentials, region: location, project_id: project };
    ```
+
 6. **Update LiveKit handler:**
    ```rust
-   // Before (Mike)
+   // Before
    let handler = LiveKitEventHandler::new(source, Arc::new(inner));
-   
-   // After (ours)
+
+   // After
    let handler = LiveKitEventHandler::new(inner, source, 24000, 1);
    ```
-7. **Update audio event handling** if using `Bytes`:
+
+7. **Update audio event handling** (if using `Bytes`):
    ```rust
-   // Before (Mike)
-   ServerEvent::AudioDelta { delta, .. } => { /* delta is Bytes */ }
-   
-   // After (ours)
-   ServerEvent::AudioDelta { delta, .. } => { /* delta is Vec<u8> */ }
+   // Before — delta is Bytes
+   ServerEvent::AudioDelta { delta, .. } => { delta.as_ref() }
+
+   // After — delta is Vec<u8>
+   ServerEvent::AudioDelta { delta, .. } => { delta.as_slice() }
    ```
-8. **Build with cmake env var** for WebRTC:
+
+8. **Build with cmake env var** (WebRTC only):
    ```bash
    export CMAKE_POLICY_VERSION_MINIMUM=3.5
    cargo check -p adk-realtime --features openai-webrtc
    ```
-9. **Run property tests** to verify:
+
+9. **Verify:**
    ```bash
    cargo test -p adk-realtime --test error_context_tests
+   cargo test -p adk-realtime --test events_tests
    cargo test -p adk-realtime --features vertex-live --test vertex_url_property_tests
+   cargo test -p adk-realtime --features livekit --test livekit_delegation_tests
+   CMAKE_POLICY_VERSION_MINIMUM=3.5 cargo test -p adk-realtime --features openai-webrtc --test opus_roundtrip_tests
+   CMAKE_POLICY_VERSION_MINIMUM=3.5 cargo test -p adk-realtime --features openai-webrtc --test sdp_offer_tests
    ```
+
+---
+
+## Files Not Relevant to Migration
+
+| File | Notes |
+|------|-------|
+| `.cargo/config.toml` | Mike's Linux dev optimization (wild linker, sccache). Keep if desired. |
+| `devenv.nix` | Mike's Nix environment. Keep if desired. |
+| `adk-studio/src/server/cors.rs` | We have CORS handling in `main.rs` already. |
