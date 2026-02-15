@@ -15,9 +15,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("📊 Found {} session(s) in database:", sessions.len());
     for session in sessions {
-        println!("   - Session ID: {}", session.id());
-        println!("     App: {}", session.app_name());
-        println!("     User: {}", session.user_id());
+        println!("   - Session ID: [redacted]");
+        println!("     App: [redacted]");
+        println!("     User: [redacted]");
         println!("     Events: {}", session.events().len());
         println!("     State keys: {}", session.state().all().len());
     }

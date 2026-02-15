@@ -129,19 +129,13 @@ async fn main() -> Result<()> {
         }
     };
 
-    model.set_retry_config(RetryConfig::default().with_max_retries(3));
-
+    let retry = RetryConfig::default().with_max_retries(3);
     println!(
         "Mode: {:?}\nProject: [configured]\nLocation: {}\nModel: {}",
-        mode,
-        location,
-        model.name()
+        mode, location, model_name
     );
-    println!(
-        "Retry: enabled={}, max_retries={}",
-        model.retry_config().enabled,
-        model.retry_config().max_retries
-    );
+    println!("Retry: enabled={}, max_retries={}", retry.enabled, retry.max_retries);
+    model.set_retry_config(retry);
 
     let response = call_once(&model, &prompt).await?;
     println!("\nResponse:\n{}\n", response);

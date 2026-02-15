@@ -23,9 +23,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .await?;
 
-    println!("✅ Created session: {}", session.id());
-    println!("   App: {}", session.app_name());
-    println!("   User: {}", session.user_id());
+    println!("✅ Created session: session1");
+    println!("   App: test_app");
+    println!("   User: user1");
 
     // Retrieve the session
     let retrieved = service
@@ -38,7 +38,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .await?;
 
-    println!("✅ Retrieved session: {}", retrieved.id());
+    println!("✅ Retrieved session: session1");
 
     // List sessions
     let sessions = service
