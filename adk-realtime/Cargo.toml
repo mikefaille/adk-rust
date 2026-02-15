@@ -27,7 +27,7 @@ serde.workspace = true
 serde_json.workspace = true
 
 # WebSocket
-tokio-tungstenite = { version = "0.26", features = ["rustls-tls-native-roots"], optional = true }
+tokio-tungstenite = { version = "0.28", features = ["rustls-tls-native-roots"], optional = true }
 
 # Zero-copy bytes
 bytes = "1"
@@ -49,7 +49,7 @@ uuid.workspace = true
 async-openai = { version = "0.27", optional = true, default-features = false, features = ["rustls"] }
 
 # Random bytes for WebSocket key generation (optional)
-getrandom = { version = "0.2", optional = true }
+getrandom = { version = "0.3", optional = true }
 
 # Gemini backend (optional)
 adk-gemini = { workspace = true, optional = true }

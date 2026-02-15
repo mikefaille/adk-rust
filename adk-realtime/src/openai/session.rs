@@ -346,7 +346,7 @@ impl RealtimeSession for OpenAIRealtimeSession {
 fn generate_ws_key() -> String {
     use base64::Engine;
     let mut key = [0u8; 16];
-    getrandom::getrandom(&mut key).unwrap_or_default();
+    getrandom::fill(&mut key).unwrap_or_default();
     base64::engine::general_purpose::STANDARD.encode(key)
 }
 
