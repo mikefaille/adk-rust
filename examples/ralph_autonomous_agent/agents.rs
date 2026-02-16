@@ -3,7 +3,6 @@
 //! This module will contain the Loop Agent and Worker Agent implementations
 //! that form the core of the Ralph autonomous development workflow.
 
-use crate::error::{RalphError, Result};
 use adk_core::{Agent, EventStream, InvocationContext};
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -12,6 +11,7 @@ use std::sync::Arc;
 pub struct RalphLoopAgent {
     name: String,
     description: String,
+    sub_agents: Vec<Arc<dyn Agent>>,
     // TODO: Add fields for model, tools, and configuration
     // This will be implemented in later tasks
 }
@@ -22,7 +22,13 @@ impl RalphLoopAgent {
         Self {
             name: "Ralph Loop Agent".to_string(),
             description: "Orchestrates autonomous development workflow by managing task iteration and delegation".to_string(),
+            sub_agents: Vec::new(),
         }
+    }
+
+    /// Add a sub-agent to the loop agent.
+    pub fn add_sub_agent(&mut self, agent: Arc<dyn Agent>) {
+        self.sub_agents.push(agent);
     }
 }
 
@@ -37,8 +43,7 @@ impl Agent for RalphLoopAgent {
     }
 
     fn sub_agents(&self) -> &[Arc<dyn Agent>] {
-        // TODO: Return sub-agents when implemented
-        &[]
+        &self.sub_agents
     }
 
     async fn run(&self, _ctx: Arc<dyn InvocationContext>) -> adk_core::Result<EventStream> {
@@ -52,6 +57,7 @@ impl Agent for RalphLoopAgent {
 pub struct RalphWorkerAgent {
     name: String,
     instruction: String,
+    sub_agents: Vec<Arc<dyn Agent>>,
     // TODO: Add fields for model and tools
     // This will be implemented in later tasks
 }
@@ -71,7 +77,16 @@ impl RalphWorkerAgent {
             task_id, task_description
         );
 
-        Self { name: format!("Ralph Worker Agent - {}", task_id), instruction }
+        Self {
+            name: format!("Ralph Worker Agent - {}", task_id),
+            instruction,
+            sub_agents: Vec::new(),
+        }
+    }
+
+    /// Add a sub-agent to the worker agent.
+    pub fn add_sub_agent(&mut self, agent: Arc<dyn Agent>) {
+        self.sub_agents.push(agent);
     }
 }
 
@@ -86,8 +101,7 @@ impl Agent for RalphWorkerAgent {
     }
 
     fn sub_agents(&self) -> &[Arc<dyn Agent>] {
-        // TODO: Return sub-agents when implemented
-        &[]
+        &self.sub_agents
     }
 
     async fn run(&self, _ctx: Arc<dyn InvocationContext>) -> adk_core::Result<EventStream> {

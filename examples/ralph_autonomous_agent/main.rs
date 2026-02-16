@@ -59,6 +59,7 @@ mod tests {
     use super::agents::{RalphLoopAgent, RalphWorkerAgent};
     use adk_core::Agent;
     use proptest::prelude::*;
+    use std::sync::Arc;
 
     /// Generate arbitrary task IDs for testing
     fn arb_task_id() -> impl Strategy<Value = String> {
@@ -93,6 +94,12 @@ mod tests {
             let sub_agents = agent.sub_agents();
             prop_assert_eq!(sub_agents.len(), 0, "Loop agent should have no sub-agents initially");
 
+            // Verify adding a sub-agent
+            let mut agent = agent;
+            let sub_worker = Arc::new(RalphWorkerAgent::new("sub-1".to_string(), "desc".to_string()));
+            agent.add_sub_agent(sub_worker);
+            prop_assert_eq!(agent.sub_agents().len(), 1, "Loop agent should have 1 sub-agent after addition");
+
             // Verify the agent is Send + Sync (required by Agent trait bounds)
             fn assert_send_sync<T: Send + Sync>(_: &T) {}
             assert_send_sync(&agent);
@@ -121,6 +128,12 @@ mod tests {
             // Verify Agent trait implementation - sub_agents() method
             let sub_agents = agent.sub_agents();
             prop_assert_eq!(sub_agents.len(), 0, "Worker agent should have no sub-agents initially");
+
+            // Verify adding a sub-agent
+            let mut agent = agent;
+            let sub_worker = Arc::new(RalphWorkerAgent::new("sub-2".to_string(), "desc".to_string()));
+            agent.add_sub_agent(sub_worker);
+            prop_assert_eq!(agent.sub_agents().len(), 1, "Worker agent should have 1 sub-agent after addition");
 
             // Verify the agent is Send + Sync (required by Agent trait bounds)
             fn assert_send_sync<T: Send + Sync>(_: &T) {}
