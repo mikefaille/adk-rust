@@ -83,3 +83,7 @@ docs/ADK-STUDIO-*.md
 # Vendor / Patches
 CLAUDE.md
 mistral-rs-ref/
+
+# Documentation Audit
+adk-doc-audit/audit-report.json
+**/audit-report.json
