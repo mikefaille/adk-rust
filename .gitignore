@@ -87,3 +87,4 @@ mistral-rs-ref/
 # Documentation Audit
 adk-doc-audit/audit-report.json
 **/audit-report.json
+.devenv/nix-eval-cache.db-*
