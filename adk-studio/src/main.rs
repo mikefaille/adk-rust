@@ -79,24 +79,7 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    // Restrict CORS to localhost origins to prevent drive-by attacks
-    // while allowing local development and usage.
-    let cors = CorsLayer::new()
-        .allow_origin(AllowOrigin::predicate(|origin, _| {
-            let origin_str = origin.to_str().unwrap_or("");
-            if let Some(rest) =
-                origin_str.strip_prefix("http://").or_else(|| origin_str.strip_prefix("https://"))
-            {
-                const ALLOWED_HOSTS: &[&str] = &["localhost", "127.0.0.1", "[::1]"];
-                ALLOWED_HOSTS
-                    .iter()
-                    .any(|host| rest == *host || rest.starts_with(&format!("{}:", host)))
-            } else {
-                false
-            }
-        }))
-        .allow_methods(Any)
-        .allow_headers(Any);
+    let cors = adk_studio::build_cors_layer();
 
     let mut app = Router::new().nest("/api", api_routes()).layer(cors).with_state(state);
 
