@@ -170,46 +170,53 @@ impl Validate for Chart {
 
 impl Validate for Card {
     fn validate(&self, path: &str) -> Vec<ValidationError> {
-        let mut errors = Vec::new();
-        for (i, child) in self.content.iter().enumerate() {
-            errors.extend(child.validate(&format!("{}.content[{}]", path, i)));
-        }
+        let mut errors = self
+            .content
+            .iter()
+            .enumerate()
+            .flat_map(|(i, child)| child.validate(&format!("{}.content[{}]", path, i)))
+            .collect::<Vec<_>>();
+
         if let Some(footer) = &self.footer {
-            for (i, child) in footer.iter().enumerate() {
-                errors.extend(child.validate(&format!("{}.footer[{}]", path, i)));
-            }
+            errors.extend(
+                footer
+                    .iter()
+                    .enumerate()
+                    .flat_map(|(i, child)| child.validate(&format!("{}.footer[{}]", path, i))),
+            );
         }
+
         errors
     }
 }
 
 impl Validate for Modal {
     fn validate(&self, path: &str) -> Vec<ValidationError> {
-        let mut errors = Vec::new();
-        for (i, child) in self.content.iter().enumerate() {
-            errors.extend(child.validate(&format!("{}.content[{}]", path, i)));
-        }
-        errors
+        self.content
+            .iter()
+            .enumerate()
+            .flat_map(|(i, child)| child.validate(&format!("{}.content[{}]", path, i)))
+            .collect()
     }
 }
 
 impl Validate for Stack {
     fn validate(&self, path: &str) -> Vec<ValidationError> {
-        let mut errors = Vec::new();
-        for (i, child) in self.children.iter().enumerate() {
-            errors.extend(child.validate(&format!("{}.children[{}]", path, i)));
-        }
-        errors
+        self.children
+            .iter()
+            .enumerate()
+            .flat_map(|(i, child)| child.validate(&format!("{}.children[{}]", path, i)))
+            .collect()
     }
 }
 
 impl Validate for Grid {
     fn validate(&self, path: &str) -> Vec<ValidationError> {
-        let mut errors = Vec::new();
-        for (i, child) in self.children.iter().enumerate() {
-            errors.extend(child.validate(&format!("{}.children[{}]", path, i)));
-        }
-        errors
+        self.children
+            .iter()
+            .enumerate()
+            .flat_map(|(i, child)| child.validate(&format!("{}.children[{}]", path, i)))
+            .collect()
     }
 }
 
@@ -222,6 +229,11 @@ impl Validate for Tabs {
                 message: "Tabs must have at least one tab".to_string(),
             });
         }
+        for (i, tab) in self.tabs.iter().enumerate() {
+            for (j, component) in tab.content.iter().enumerate() {
+                errors.extend(component.validate(&format!("{}.tabs[{}].content[{}]", path, i, j)));
+            }
+        }
         errors
     }
 }
@@ -229,19 +241,18 @@ impl Validate for Tabs {
 impl Validate for Component {
     fn validate(&self, path: &str) -> Vec<ValidationError> {
         match self {
-            Component::Text(t) => t.validate(path),
-            Component::Button(b) => b.validate(path),
-            Component::TextInput(t) => t.validate(path),
-            Component::NumberInput(n) => n.validate(path),
-            Component::Select(s) => s.validate(path),
-            Component::Table(t) => t.validate(path),
-            Component::Chart(c) => c.validate(path),
-            Component::Card(c) => c.validate(path),
-            Component::Modal(m) => m.validate(path),
-            Component::Stack(s) => s.validate(path),
-            Component::Grid(g) => g.validate(path),
-            Component::Tabs(t) => t.validate(path),
-            // Components with no additional validation constraints
+            Component::Text(text) => text.validate(path),
+            Component::Button(button) => button.validate(path),
+            Component::TextInput(text_input) => text_input.validate(path),
+            Component::NumberInput(number_input) => number_input.validate(path),
+            Component::Select(select) => select.validate(path),
+            Component::Table(table) => table.validate(path),
+            Component::Chart(chart) => chart.validate(path),
+            Component::Card(card) => card.validate(path),
+            Component::Modal(modal) => modal.validate(path),
+            Component::Stack(stack) => stack.validate(path),
+            Component::Grid(grid) => grid.validate(path),
+            Component::Tabs(tabs) => tabs.validate(path),
             _ => Vec::new(),
         }
     }
