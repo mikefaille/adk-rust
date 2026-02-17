@@ -95,6 +95,8 @@ pub mod gemini;
 
 #[cfg(feature = "livekit")]
 pub mod livekit;
+#[cfg(feature = "livekit")]
+pub use livekit_api;
 
 // Re-exports
 pub use agent::{RealtimeAgent, RealtimeAgentBuilder};

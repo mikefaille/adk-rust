@@ -23,3 +23,8 @@ mod handler;
 
 pub use bridge::{bridge_gemini_input, bridge_input};
 pub use handler::LiveKitEventHandler;
+
+pub use livekit::*;
+pub mod prelude {
+    pub use livekit::prelude::*;
+}
