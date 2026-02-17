@@ -98,6 +98,9 @@
 
     # Explicitly set PROTOC for build-scripts (e.g., lance-encoding)
     PROTOC = "${pkgs.protobuf}/bin/protoc";
+
+    # Sccache Configurations
+    SCCACHE_CACHE_SIZE = "50G";
   };
 
   # --------------------------------------------------------------------------
