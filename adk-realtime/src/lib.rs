@@ -94,7 +94,18 @@ pub mod openai;
 pub mod gemini;
 
 #[cfg(feature = "livekit")]
-pub mod livekit;
+pub mod livekit_bridge;
+
+#[cfg(feature = "livekit")]
+pub mod livekit {
+    // Re-export internal bridge items (LiveKitEventHandler, bridge_input, etc.)
+    pub use super::livekit_bridge::*;
+    // Re-export the entire livekit crate options/types (Room, prelude, etc.)
+    pub use ::livekit::*;
+}
+
+#[cfg(feature = "livekit")]
+pub use livekit_api;
 
 // Re-exports
 pub use agent::{RealtimeAgent, RealtimeAgentBuilder};
