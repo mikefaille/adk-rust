@@ -667,6 +667,59 @@ pub mod doc_audit {
 #[cfg(feature = "cli")]
 #[cfg_attr(docsrs, doc(cfg(feature = "cli")))]
 pub use adk_cli::{Launcher, SingleAgentLoader};
+/// Real-time bidirectional streaming (voice, video).
+///
+/// Available with feature: `realtime`
+#[cfg(feature = "realtime")]
+#[cfg_attr(docsrs, doc(cfg(feature = "realtime")))]
+pub mod realtime {
+    pub use adk_realtime::*;
+}
+
+/// Browser automation (WebDriver).
+///
+/// Available with feature: `browser`
+#[cfg(feature = "browser")]
+#[cfg_attr(docsrs, doc(cfg(feature = "browser")))]
+pub mod browser {
+    pub use adk_browser::*;
+}
+
+/// Agent evaluation framework.
+///
+/// Available with feature: `eval`
+#[cfg(feature = "eval")]
+#[cfg_attr(docsrs, doc(cfg(feature = "eval")))]
+pub mod eval {
+    pub use adk_eval::*;
+}
+
+/// Guardrails for safety and policy enforcement.
+///
+/// Available with feature: `guardrail`
+#[cfg(feature = "guardrail")]
+#[cfg_attr(docsrs, doc(cfg(feature = "guardrail")))]
+pub mod guardrail {
+    pub use adk_guardrail::*;
+}
+
+/// Authentication and access control.
+///
+/// Available with feature: `auth`
+#[cfg(feature = "auth")]
+#[cfg_attr(docsrs, doc(cfg(feature = "auth")))]
+pub mod auth {
+    pub use adk_auth::*;
+}
+
+/// Plugin system for extending agent behavior.
+///
+/// Available with feature: `plugin`
+#[cfg(feature = "plugin")]
+#[cfg_attr(docsrs, doc(cfg(feature = "plugin")))]
+pub mod plugin {
+    pub use adk_plugin::*;
+}
 
 /// Real-time bidirectional streaming (voice, video).
 ///
@@ -852,6 +905,29 @@ pub mod prelude {
     // UI
     #[cfg(feature = "ui")]
     pub use crate::ui::UiToolset;
+    // Realtime
+    #[cfg(feature = "realtime")]
+    pub use crate::realtime;
+
+    // Browser
+    #[cfg(feature = "browser")]
+    pub use crate::browser::{BrowserConfig, BrowserSession, BrowserToolset};
+
+    // Eval
+    #[cfg(feature = "eval")]
+    pub use crate::eval::{EvaluationConfig, EvaluationCriteria, Evaluator};
+
+    // Guardrail
+    #[cfg(feature = "guardrail")]
+    pub use crate::guardrail::{ContentFilter, GuardrailSet, PiiRedactor};
+
+    // Auth
+    #[cfg(feature = "auth")]
+    pub use crate::auth::{AccessControl, Permission, Role};
+
+    // Plugin
+    #[cfg(feature = "plugin")]
+    pub use crate::plugin;
 
     // Realtime
     #[cfg(feature = "realtime")]

@@ -52,6 +52,7 @@ use mistralrs::{
     RequestBuilder, Response, TextMessageRole, TextMessages, TextModelBuilder, Topology,
     XLoraModelBuilder,
 };
+use mistralrs::core::Ordering;
 use tokio::sync::RwLock;
 use tracing::{debug, info, instrument, warn};
 

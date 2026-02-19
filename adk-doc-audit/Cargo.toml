@@ -12,6 +12,7 @@ keywords = ["documentation", "audit", "validation", "rust", "adk"]
 categories = ["development-tools", "command-line-utilities"]
 
 [dependencies]
+
 # Core dependencies
 tokio = { workspace = true }
 async-trait = { workspace = true }

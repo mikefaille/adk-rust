@@ -29,11 +29,16 @@
 //! ```
 
 mod model;
+
+#[cfg(feature = "webrtc")]
+pub mod rtc;
 mod session;
 #[cfg(feature = "openai-webrtc")]
 pub mod webrtc;
 
 pub use model::OpenAIRealtimeModel;
+#[cfg(feature = "webrtc")]
+pub use rtc::OpenAiWebRtcModel;
 pub use session::OpenAIRealtimeSession;
 
 #[cfg(feature = "openai-webrtc")]

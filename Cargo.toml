@@ -31,6 +31,7 @@ members = [
     # Development packages (not published)
     "examples",
     "examples/ralph",
+    "examples/ralph_autonomous_agent",
     "docs/official_docs_examples/quickstart_test", "docs/official_docs_examples/agents/llm_agent_test",
     "docs/official_docs_examples/tools/mcp_test",
     "docs/official_docs_examples/tools/rag_test",
@@ -53,7 +54,6 @@ members = [
     "docs/official_docs_examples/graph/graph_readme_test",
     "docs/official_docs_examples/guardrail/guardrail_readme_test",
     "docs/official_docs_examples/realtime/realtime_readme_test",
-    "docs/official_docs_examples/readme_validation",
 ]
 exclude = [
     # Git-only packages with GPU dependencies (build explicitly with: cargo build -p adk-mistralrs)
@@ -117,6 +117,8 @@ tracing = "0.1"
 tracing-subscriber = "0.3"
 opentelemetry = "0.21"
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+livekit = { version = "0.7.29", default-features = false, features = ["rustls-tls-native-roots", "tokio"] }
+livekit-api = { version = "0.3", default-features = false, features = ["rustls-tls-native-roots"] }
 
 # ADK internal crates (use { workspace = true } in member crates)
 adk-core = { path = "adk-core", version = "0.3.2" }

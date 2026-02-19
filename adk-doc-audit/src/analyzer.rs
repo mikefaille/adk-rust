@@ -987,7 +987,11 @@ impl CodeAnalyzer {
     }
 
     /// Suggest similar crate names when a crate is not found.
+<<<<<<< HEAD
     fn suggest_similar_crate_names(target: &str, registry: &CrateRegistry) -> String {
+=======
+    fn suggest_similar_crate_names( target: &str, registry: &CrateRegistry) -> String {
+>>>>>>> mike/main
         Self::suggest_similar_crate_names_static(
             target,
             &registry.crates.keys().cloned().collect::<Vec<_>>(),
@@ -1012,7 +1016,11 @@ impl CodeAnalyzer {
     }
 
     /// Suggest similar API names when an API is not found.
+<<<<<<< HEAD
     fn suggest_similar_api_names(target: &str, crate_info: &CrateInfo) -> String {
+=======
+    fn suggest_similar_api_names( target: &str, crate_info: &CrateInfo) -> String {
+>>>>>>> mike/main
         Self::suggest_similar_api_names_static(target, &crate_info.public_apis)
     }
 

@@ -21,6 +21,7 @@ impl GeminiModel {
         Ok(Self { client, model_name, retry_config: RetryConfig::default() })
     }
 
+    #[cfg(feature = "vertex")]
     pub fn new_google_cloud(
         api_key: impl Into<String>,
         project_id: impl AsRef<str>,
@@ -39,6 +40,7 @@ impl GeminiModel {
         Ok(Self { client, model_name, retry_config: RetryConfig::default() })
     }
 
+    #[cfg(feature = "vertex")]
     pub fn new_google_cloud_service_account(
         service_account_json: &str,
         project_id: impl AsRef<str>,
@@ -57,6 +59,7 @@ impl GeminiModel {
         Ok(Self { client, model_name, retry_config: RetryConfig::default() })
     }
 
+    #[cfg(feature = "vertex")]
     pub fn new_google_cloud_adc(
         project_id: impl AsRef<str>,
         location: impl AsRef<str>,
@@ -73,6 +76,7 @@ impl GeminiModel {
         Ok(Self { client, model_name, retry_config: RetryConfig::default() })
     }
 
+    #[cfg(feature = "vertex")]
     pub fn new_google_cloud_wif(
         wif_json: &str,
         project_id: impl AsRef<str>,
@@ -132,6 +136,14 @@ impl GeminiModel {
                                     .unwrap_or(serde_json::Value::Null),
                             },
                             id: None,
+                        });
+                    }
+                    adk_gemini::Part::CodeExecutionResult { code_execution_result } => {
+                        converted_parts.push(Part::CodeExecutionResult {
+                            code_execution_result: adk_core::CodeExecutionResultData {
+                                outcome: code_execution_result.outcome.clone(),
+                                output: code_execution_result.output.clone(),
+                            },
                         });
                     }
                     _ => {}
@@ -251,6 +263,14 @@ impl GeminiModel {
                                     },
                                 });
                             }
+                            Part::CodeExecutionResult { code_execution_result } => {
+                                gemini_parts.push(adk_gemini::Part::CodeExecutionResult {
+                                    code_execution_result: adk_gemini::CodeExecutionResultData {
+                                        outcome: code_execution_result.outcome.clone(),
+                                        output: code_execution_result.output.clone(),
+                                    },
+                                });
+                            }
                             _ => {}
                         }
                     }
@@ -285,6 +305,14 @@ impl GeminiModel {
                                         thought_signature: None,
                                     },
                                     thought_signature: None,
+                                });
+                            }
+                            Part::CodeExecutionResult { code_execution_result } => {
+                                gemini_parts.push(adk_gemini::Part::CodeExecutionResult {
+                                    code_execution_result: adk_gemini::CodeExecutionResultData {
+                                        outcome: code_execution_result.outcome.clone(),
+                                        output: code_execution_result.output.clone(),
+                                    },
                                 });
                             }
                             _ => {}
