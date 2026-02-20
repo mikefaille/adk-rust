@@ -1,24 +1,36 @@
 //! Type conversions between ADK and Claudius types.
 
+use super::error::ConversionError;
 use crate::attachment;
 use adk_core::{Content, FinishReason, LlmResponse, Part, UsageMetadata};
 use claudius::ImageMediaType;
 use claudius::{
-    Base64ImageSource, Base64PdfSource, ContentBlock, DocumentBlock, ImageBlock, Message,
-    MessageCreateParams, MessageParam, MessageRole, Model, PlainTextSource, StopReason,
-    SystemPrompt, TextBlock, ToolParam, ToolResultBlock, ToolResultBlockContent, ToolUnionParam,
-    ToolUseBlock, UrlPdfSource,
+    Base64ImageSource, Base64PdfSource, CacheControlEphemeral, ContentBlock, DocumentBlock,
+    ImageBlock, Message, MessageCreateParams, MessageParam, MessageRole, Model, PlainTextSource,
+    StopReason, SystemPrompt, TextBlock, ToolParam, ToolResultBlock, ToolResultBlockContent,
+    ToolUnionParam, ToolUseBlock, UrlPdfSource,
 };
 use serde_json::Value;
 use std::collections::HashMap;
 
 /// Convert ADK Content to Claudius MessageParam.
-pub fn content_to_message(content: &Content) -> MessageParam {
+///
+/// When `prompt_caching` is true, eligible content blocks will have
+/// `cache_control: {"type": "ephemeral"}` set on them.
+///
+/// Returns `Err(ConversionError::UnsupportedMimeType)` if any part contains
+/// an unsupported MIME type for `InlineData` or `FileData`.
+pub fn content_to_message(
+    content: &Content,
+    prompt_caching: bool,
+) -> Result<MessageParam, ConversionError> {
     let role = match content.role.as_str() {
         "user" | "function" | "tool" => MessageRole::User,
         "model" | "assistant" => MessageRole::Assistant,
         _ => MessageRole::User,
     };
+
+    let cache = if prompt_caching { Some(CacheControlEphemeral::new()) } else { None };
 
     let blocks: Vec<ContentBlock> = content
         .parts
@@ -28,15 +40,25 @@ pub fn content_to_message(content: &Content) -> MessageParam {
                 if text.is_empty() {
                     None
                 } else {
-                    Some(ContentBlock::Text(TextBlock::new(text.clone())))
+                    let mut block = TextBlock::new(text.clone());
+                    if let Some(ref cc) = cache {
+                        block = block.with_cache_control(cc.clone());
+                    }
+                    Some(ContentBlock::Text(block))
                 }
             }
-            Part::FunctionCall { name, args, id } => Some(ContentBlock::ToolUse(ToolUseBlock {
-                id: id.clone().unwrap_or_else(|| format!("call_{}", name)),
-                name: name.clone(),
-                input: args.clone(),
-                cache_control: None,
-            })),
+            Part::FunctionCall { name, args, id } => {
+                let mut block = ToolUseBlock {
+                    id: id.clone().unwrap_or_else(|| format!("call_{name}")),
+                    name: name.clone(),
+                    input: args.clone(),
+                    cache_control: None,
+                };
+                if let Some(ref cc) = cache {
+                    block = block.with_cache_control(cc.clone());
+                }
+                Some(ContentBlock::ToolUse(block))
+            }
             Part::FunctionResponse { function_response, id } => {
                 Some(ContentBlock::ToolResult(ToolResultBlock {
                     tool_use_id: id.clone().unwrap_or_else(|| "unknown".to_string()),
@@ -103,7 +125,7 @@ pub fn content_to_message(content: &Content) -> MessageParam {
         blocks
     };
 
-    MessageParam::new_with_blocks(blocks, role)
+    Ok(MessageParam::new_with_blocks(blocks, role))
 }
 
 /// Convert ADK tools to Claudius ToolUnionParam format.
@@ -129,7 +151,7 @@ pub fn convert_tools(tools: &HashMap<String, Value>) -> Vec<ToolUnionParam> {
 }
 
 /// Convert Claudius Message to ADK LlmResponse.
-pub fn from_anthropic_message(message: &Message) -> LlmResponse {
+pub fn from_anthropic_message(message: &Message) -> (LlmResponse, HashMap<String, String>) {
     let mut parts = Vec::new();
 
     for block in &message.content {
@@ -167,17 +189,22 @@ pub fn from_anthropic_message(message: &Message) -> LlmResponse {
         _ => FinishReason::Stop,
     });
 
-    LlmResponse {
-        content,
-        usage_metadata,
-        finish_reason,
-        citation_metadata: None,
-        partial: false,
-        turn_complete: true,
-        interrupted: false,
-        error_code: None,
-        error_message: None,
-    }
+    let cache_meta = extract_cache_usage(&message.usage);
+
+    (
+        LlmResponse {
+            content,
+            usage_metadata,
+            finish_reason,
+            citation_metadata: None,
+            partial: false,
+            turn_complete: true,
+            interrupted: false,
+            error_code: None,
+            error_message: None,
+        },
+        cache_meta,
+    )
 }
 
 /// Convert streaming text delta to ADK LlmResponse.
@@ -196,6 +223,51 @@ pub fn from_text_delta(text: &str) -> LlmResponse {
         error_code: None,
         error_message: None,
     }
+}
+
+/// Convert streaming thinking delta to ADK LlmResponse.
+pub fn from_thinking_delta(thinking_text: &str) -> LlmResponse {
+    LlmResponse {
+        content: Some(Content {
+            role: "model".to_string(),
+            parts: vec![Part::Text { text: format!("<thinking>{thinking_text}</thinking>") }],
+        }),
+        usage_metadata: None,
+        finish_reason: None,
+        citation_metadata: None,
+        partial: true,
+        turn_complete: false,
+        interrupted: false,
+        error_code: None,
+        error_message: None,
+    }
+}
+
+/// Create an LlmResponse representing a streaming error event.
+pub fn from_stream_error(error_type: &str, message: &str) -> LlmResponse {
+    LlmResponse {
+        content: None,
+        usage_metadata: None,
+        finish_reason: None,
+        citation_metadata: None,
+        partial: false,
+        turn_complete: true,
+        interrupted: false,
+        error_code: Some(error_type.to_string()),
+        error_message: Some(message.to_string()),
+    }
+}
+
+/// Extract cache usage tokens from a claudius `Usage` into provider metadata.
+pub fn extract_cache_usage(usage: &claudius::Usage) -> HashMap<String, String> {
+    let mut metadata = HashMap::new();
+    if let Some(tokens) = usage.cache_creation_input_tokens {
+        metadata.insert("anthropic.cache_creation_input_tokens".to_string(), tokens.to_string());
+    }
+    if let Some(tokens) = usage.cache_read_input_tokens {
+        metadata.insert("anthropic.cache_read_input_tokens".to_string(), tokens.to_string());
+    }
+    metadata
 }
 
 /// Create final response with tool calls.
@@ -232,6 +304,8 @@ pub fn build_message_params(
     temperature: Option<f32>,
     top_p: Option<f32>,
     top_k: Option<i32>,
+    prompt_caching: bool,
+    thinking: Option<&super::config::ThinkingConfig>,
 ) -> MessageCreateParams {
     let mut params =
         MessageCreateParams::new(max_tokens, messages, Model::Custom(model.to_string()));
@@ -241,7 +315,12 @@ pub fn build_message_params(
     }
 
     if let Some(sys) = system_prompt {
-        params.system = Some(SystemPrompt::from_string(sys));
+        if prompt_caching {
+            let block = TextBlock::new(sys).with_cache_control(CacheControlEphemeral::new());
+            params.system = Some(SystemPrompt::from_blocks(vec![block]));
+        } else {
+            params.system = Some(SystemPrompt::from_string(sys));
+        }
     }
 
     if let Some(temp) = temperature {
@@ -254,6 +333,10 @@ pub fn build_message_params(
 
     if let Some(k) = top_k {
         params.top_k = Some(k as u32);
+    }
+
+    if let Some(tc) = thinking {
+        params.thinking = Some(claudius::ThinkingConfig::enabled(tc.budget_tokens));
     }
 
     params
@@ -269,7 +352,7 @@ mod tests {
             role: "user".to_string(),
             parts: vec![Part::Text { text: "Hello".to_string() }],
         };
-        let msg = content_to_message(&content);
+        let msg = content_to_message(&content, false).unwrap();
         assert!(matches!(msg.role, MessageRole::User));
     }
 
@@ -279,7 +362,7 @@ mod tests {
             role: "model".to_string(),
             parts: vec![Part::Text { text: "Hi there".to_string() }],
         };
-        let msg = content_to_message(&content);
+        let msg = content_to_message(&content, false).unwrap();
         assert!(matches!(msg.role, MessageRole::Assistant));
     }
 
@@ -295,7 +378,7 @@ mod tests {
                 },
             ],
         };
-        let msg = content_to_message(&content);
+        let msg = content_to_message(&content, false).unwrap();
         assert!(matches!(msg.role, MessageRole::User));
 
         // Should have 2 blocks: text + image
@@ -323,7 +406,7 @@ mod tests {
                 },
             ],
         };
-        let msg = content_to_message(&content);
+        let msg = content_to_message(&content, false).unwrap();
 
         // Audio part should be preserved as textual attachment fallback.
         let json = serde_json::to_value(&msg).unwrap();
@@ -344,7 +427,7 @@ mod tests {
                 Part::InlineData { mime_type: "image/webp".to_string(), data: vec![0x52, 0x49] },
             ],
         };
-        let msg = content_to_message(&content);
+        let msg = content_to_message(&content, false).unwrap();
 
         let json = serde_json::to_value(&msg).unwrap();
         let content_blocks = json["content"].as_array().unwrap();
@@ -362,7 +445,7 @@ mod tests {
                 data: b"%PDF-1.4".to_vec(),
             }],
         };
-        let msg = content_to_message(&content);
+        let msg = content_to_message(&content, false).unwrap();
 
         let json = serde_json::to_value(&msg).unwrap();
         let content_blocks = json["content"].as_array().unwrap();
@@ -381,7 +464,7 @@ mod tests {
                 file_uri: "https://example.com/test.pdf".to_string(),
             }],
         };
-        let msg = content_to_message(&content);
+        let msg = content_to_message(&content, false).unwrap();
 
         let json = serde_json::to_value(&msg).unwrap();
         let content_blocks = json["content"].as_array().unwrap();

@@ -40,3 +40,6 @@ deepseek = ["dep:reqwest"]
 ollama = ["dep:ollama-rs", "dep:schemars"]
 groq = ["dep:reqwest"]
 all-providers = ["gemini", "openai", "anthropic", "deepseek", "ollama", "groq"]
+
+[dev-dependencies]
+proptest = "1.5"

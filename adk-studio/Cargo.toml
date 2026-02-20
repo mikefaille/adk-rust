@@ -19,7 +19,7 @@ path = "src/main.rs"
 # ADK crates
 adk-core.workspace = true
 adk-agent.workspace = true
-adk-model.workspace = true
+adk-model = { workspace = true, features = ["gemini"] }
 adk-tool.workspace = true
 adk-runner.workspace = true
 adk-session.workspace = true
@@ -73,8 +73,18 @@ redis = { version = "0.27", features = ["tokio-comp"] }
 # Platform directories
 dirs = "5"
 
+# Encryption (API key management)
+aes-gcm = "0.10"
+hkdf = "0.12"
+sha2 = "0.10"
+rand = "0.8"
+
+# Machine ID
+machine-uid = "0.5"
+
 # Cron expression parsing for schedule triggers
 cron = "0.15"
 
 [dev-dependencies]
 proptest = "1.4"
+tempfile = "3"

@@ -7,7 +7,7 @@
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 ![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)
 
-> **🎉 v0.3.2 Released!** RAG pipeline with 6 vector store backends, declarative scope-based security, Models Discovery API, Gemini 3 model support, and multi-turn tool fix. [Get started →](https://github.com/zavora-ai/adk-rust/wiki/quickstart)
+> **🎉 v0.3.2 Released!** RAG pipeline with 6 vector store backends, multimodal support across all providers, Models Discovery API, Gemini 3 model support, generation config on agents, and multi-turn tool fix. [@mikefaille](https://github.com/mikefaille) — realtime audio transport & LiveKit bridge, [@rohan-panickar](https://github.com/rohan-panickar) — attachment support & multi-provider content, [@dhruv-pant](https://github.com/dhruv-pant) — Gemini service account auth. [Get started →](https://github.com/zavora-ai/adk-rust/wiki/quickstart)
 
 A comprehensive and production-ready Rust framework for building AI agents. Create powerful and high-performance AI agent systems with a flexible, modular architecture. Model-agnostic. Type-safe. Blazingly fast.
 
@@ -55,11 +55,11 @@ ADK supports multiple LLM providers with a unified API:
 
 | Provider | Model Examples | Feature Flag |
 |----------|---------------|--------------|
-| Gemini | `gemini-2.5-flash`, `gemini-2.5-pro`, `gemini-3-pro`, `gemini-3-flash` | (default) |
-| OpenAI | `gpt-5-mini`, `gpt-5`, `gpt-5.1` | `openai` |
-| Anthropic | `claude-sonnet-4.5`, `claude-opus-4.5`, `claude-haiku-4.5` | `anthropic` |
-| DeepSeek | `deepseek-chat`, `deepseek-r1`, `deepseek-v3.1` | `deepseek` |
-| Groq | `llama-4-scout`, `llama-3.1-70b-versatile`, `mixtral-8x7b-32768` | `groq` |
+| Gemini | `gemini-2.5-flash`, `gemini-2.5-pro`, `gemini-3-pro-preview`, `gemini-3-flash-preview` | (default) |
+| OpenAI | `gpt-5`, `gpt-5-mini`, `gpt-5-nano` | `openai` |
+| Anthropic | `claude-sonnet-4-5-20250929`, `claude-opus-4-5-20251101`, `claude-haiku-4-5-20251001` | `anthropic` |
+| DeepSeek | `deepseek-chat`, `deepseek-reasoner` | `deepseek` |
+| Groq | `meta-llama/llama-4-scout-17b-16e-instruct`, `llama-3.3-70b-versatile` | `groq` |
 | Ollama | `llama3.2:3b`, `qwen2.5:7b`, `mistral:7b` | `ollama` |
 | mistral.rs | Phi-3, Mistral, Llama, Gemma, LLaVa, FLUX | git dependency |
 
@@ -210,7 +210,7 @@ use adk_rust::Launcher;
 async fn main() -> AnyhowResult<()> {
     dotenvy::dotenv().ok();
     let api_key = std::env::var("ANTHROPIC_API_KEY")?;
-    let model = AnthropicClient::new(AnthropicConfig::new(api_key, "claude-sonnet-4.5"))?;
+    let model = AnthropicClient::new(AnthropicConfig::new(api_key, "claude-sonnet-4-5-20250929"))?;
 
     let agent = LlmAgentBuilder::new("assistant")
         .instruction("You are a helpful assistant.")
@@ -312,6 +312,10 @@ cargo run --example groq_basic --features groq
 
 # Ollama examples (requires --features ollama)
 cargo run --example ollama_basic --features ollama
+
+# Multimodal examples (image analysis)
+cargo run --example gemini_multimodal
+cargo run --example anthropic_multimodal --features anthropic
 
 # REST API server
 cargo run --example server
@@ -741,6 +745,10 @@ See [examples/](examples/) directory for complete, runnable examples:
 - `multiple_tools/` - Agent with multiple tools
 - `agent_tool/` - Use agents as callable tools
 
+**Multimodal (Image/Audio/PDF)**
+- `gemini_multimodal/` - Inline image analysis, multi-image comparison, vision agent
+- `anthropic_multimodal/` - Image analysis with Claude (requires `--features anthropic`)
+
 **OpenAI Integration** (requires `--features openai`)
 - `openai_basic/` - Simple OpenAI GPT agent
 - `openai_tools/` - OpenAI with function calling
@@ -903,7 +911,7 @@ Contributions welcome! Please open an issue or pull request on GitHub.
 - **Vertex AI Live streaming** — `adk-gemini` refactored with `GeminiBackend` trait, pluggable `StudioBackend` (REST) and `VertexBackend` (REST SSE + gRPC fallback)
 - **Realtime audio transports** — Vertex AI Live with ADC auth, LiveKit WebRTC bridge, OpenAI WebRTC with Opus codec
 - **Multi-provider Studio codegen** — Gemini, OpenAI, Anthropic, DeepSeek, Groq, Ollama support in code generation
-- **2026 model names** — all docs, examples, and defaults updated (gemini-2.5-flash, gpt-5-mini, claude-sonnet-4.5)
+- **2026 model names** — all docs, examples, and defaults updated (gemini-2.5-flash, gpt-5-mini, claude-sonnet-4-5-20250929)
 - **Response parsing hardening** — 25 tests covering Gemini edge cases (safety ratings, streaming, function calls, grounding)
 
 **Implemented** (v0.3.0):

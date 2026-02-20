@@ -62,10 +62,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Code generation emits `.temperature()`, `.top_p()`, `.top_k()`, `.max_output_tokens()` builder calls
 
 #### Examples
+- `gemini_multimodal` — inline image analysis, multi-image comparison, and vision agent pattern using `Part::InlineData` with Gemini
+- `anthropic_multimodal` — image analysis with Claude using `Part::InlineData` (requires `--features anthropic`)
 - `multi_turn_tool` — inventory management scenario demonstrating multi-turn tool conversations with both Gemini (default) and OpenAI (`--features openai`)
 - `rag_surrealdb` — SurrealDB vector store with embedded in-memory mode
 
 ### Fixed
+- **adk-server**: Runtime endpoints (`run_sse`, `run_sse_compat`) now process attachments and `inlineData` instead of silently dropping them — base64 validation, size limits, and per-provider content conversion (#142, #143)
+- **adk-model**: All providers now handle `InlineData` and `FileData` parts — native image/audio/PDF blocks for Anthropic and OpenAI, text fallback for DeepSeek/Groq/Ollama, Gemini response `InlineData` no longer silently dropped (#142, #143)
 - **adk-runner**: `conversation_history()` now preserves `function`/`tool` content roles instead of overwriting them to `model`, fixing multi-turn tool conversations (#139)
 - **adk-gemini**: `PerformRequestNew` error variant now displays the underlying reqwest error instead of swallowing it
 - **adk-gemini**: `From<String> for Model` now correctly maps known model names (e.g. `"gemini-2.5-flash"`) to proper enum variants instead of always creating `Custom`
@@ -79,8 +83,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Contributors
 Thanks to the following people for their contributions to this release:
-- **@rohanpanickar** — fix for tool context role preservation in multi-turn conversations (#139)
-- **@mikefaille** — CI improvements (sccache summaries, devenv script fixes), environment sync, documentation consolidation, and PR template (#134, #136, #137)
+- **@mikefaille** — major contributions to `adk-realtime` (tokio-tungstenite upgrade, rustls migration), LiveKit WebRTC bridge groundwork, CI improvements (sccache summaries, devenv script fixes), environment sync, documentation consolidation, and PR template (#134, #136, #137)
+- **@rohan-panickar** — attachment support for runtime endpoints and multi-provider content conversion (#142, #143), fix for tool context role preservation (#139)
+- **@dhruv-pant** — Gemini service account auth and configurable retry logic
 
 ## [0.3.1] - 2026-02-14
 
@@ -88,7 +93,7 @@ Thanks to the following people for their contributions to this release:
 - **Vertex AI Streaming**: `adk-gemini` refactored with `GeminiBackend` trait — pluggable `StudioBackend` (REST) and `VertexBackend` (REST SSE streaming + gRPC fallback)
 - **Realtime Stabilization**: `adk-realtime` audio transport rewritten with raw bytes, Gemini Live session corrected, event types renamed for OpenAI SDK alignment
 - **Multi-Provider Codegen**: ADK Studio code generation now supports Gemini, OpenAI, Anthropic, DeepSeek, Groq, and Ollama (was hardcoded to Gemini)
-- **2026 Model Names**: All docs, examples, and source defaults updated to current model names (gemini-2.5-flash, gpt-5-mini, claude-sonnet-4.5, etc.)
+- **2026 Model Names**: All docs, examples, and source defaults updated to current model names (gemini-2.5-flash, gpt-5-mini, claude-sonnet-4-5-20250929, etc.)
 - **Response Parsing Tests**: 25 rigorous tests covering Gemini response edge cases (safety ratings, streaming chunks, function calls, grounding metadata, citations)
 - **Code Health**: Span-based line numbers in doc-audit analyzer, validation refactor in adk-ui, dead code cleanup, CONTRIBUTING.md rewrite
 
@@ -151,7 +156,7 @@ Thanks to the following people for their contributions to this release:
 - All model name defaults updated to 2026 versions across 95+ files:
   - `gemini-2.0-flash` → `gemini-2.5-flash`
   - `gpt-4o` / `gpt-4o-mini` → `gpt-5-mini`
-  - `claude-sonnet-4-20250514` → `claude-sonnet-4.5`
+  - `claude-sonnet-4-20250514` → `claude-sonnet-4-5-20250929`
   - `gemini-2.0-flash-live-preview-04-09` → `gemini-live-2.5-flash-native-audio`
 - `adk-doc-audit` now depends on `proc-macro2` with `span-locations` feature for accurate line numbers
 - `CONTRIBUTING.md` rewritten with full 25+ crate inventory, build commands, architecture notes

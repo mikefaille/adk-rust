@@ -238,6 +238,18 @@ impl GeminiModel {
         req: LlmRequest,
         stream: bool,
     ) -> Result<LlmResponseStream> {
+        // Helper to format the full error chain (Display + all source errors)
+        fn format_error_chain(e: &dyn std::error::Error) -> String {
+            let mut msg = e.to_string();
+            let mut source = e.source();
+            while let Some(s) = source {
+                msg.push_str(": ");
+                msg.push_str(&s.to_string());
+                source = s.source();
+            }
+            msg
+        }
+
         let mut builder = self.client.generate_content();
 
         // Add contents using proper builder methods
@@ -392,7 +404,7 @@ impl GeminiModel {
             adk_telemetry::debug!("Executing streaming request");
             let response_stream = builder.execute_stream().await.map_err(|e| {
                 adk_telemetry::error!(error = %e, "Model request failed");
-                adk_core::AdkError::Model(e.to_string())
+                adk_core::AdkError::Model(format_error_chain(&e))
             })?;
 
             let mapped_stream = async_stream::stream! {
@@ -416,7 +428,7 @@ impl GeminiModel {
                         }
                         Err(e) => {
                             adk_telemetry::error!(error = %e, "Stream error");
-                            yield Err(adk_core::AdkError::Model(e.to_string()));
+                            yield Err(adk_core::AdkError::Model(format_error_chain(&e)));
                         }
                     }
                 }
@@ -427,7 +439,7 @@ impl GeminiModel {
             adk_telemetry::debug!("Executing blocking request");
             let response = builder.execute().await.map_err(|e| {
                 adk_telemetry::error!(error = %e, "Model request failed");
-                adk_core::AdkError::Model(e.to_string())
+                adk_core::AdkError::Model(format_error_chain(&e))
             })?;
 
             let llm_response = Self::convert_response(&response)?;
