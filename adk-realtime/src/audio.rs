@@ -215,7 +215,8 @@ impl SmartAudioBuffer {
     }
 
     fn should_flush(&self) -> bool {
-        let duration_ms = (self.buffer.len() as u64 * 1000) / self.sample_rate as u64;
+        let duration_ms = (self.buffer.len() as f64 / self.sample_rate as f64) * 1000.0;
+
         duration_ms >= self.target_duration_ms as u64
     }
 
