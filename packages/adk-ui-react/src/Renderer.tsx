@@ -73,6 +73,147 @@ export const StreamingRenderer: React.FC<StreamingRendererProps> = ({ component,
     return <Renderer component={current} onAction={onAction} theme={theme} />;
 };
 
+const TableRenderer: React.FC<{
+    component: Extract<Component, { type: 'table' }>;
+    onAction?: (event: UiEvent) => void;
+}> = ({ component, onAction }) => {
+    const [sortColumn, setSortColumn] = useState<string | null>(null);
+    const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('asc');
+    const [currentPage, setCurrentPage] = useState(0);
+
+    const handleSort = (accessorKey: string) => {
+        if (!component.sortable) return;
+        const column = component.columns.find(col => col.accessor_key === accessorKey);
+        if (column?.sortable === false) return;
+
+        if (sortColumn === accessorKey) {
+            setSortDirection(sortDirection === 'asc' ? 'desc' : 'asc');
+        } else {
+            setSortColumn(accessorKey);
+            setSortDirection('asc');
+        }
+    };
+
+    const sortedData = useMemo(() => {
+        let tableData = [...component.data];
+        if (sortColumn) {
+            tableData.sort((a, b) => {
+                const aVal = a[sortColumn] ?? '';
+                const bVal = b[sortColumn] ?? '';
+                const cmp = String(aVal).localeCompare(String(bVal));
+                return sortDirection === 'asc' ? cmp : -cmp;
+            });
+        }
+        return tableData;
+    }, [component.data, sortColumn, sortDirection]);
+
+    const pageSize = component.page_size || sortedData.length;
+    const totalPages = Math.ceil(sortedData.length / pageSize);
+
+    const paginatedData = useMemo(() => {
+        return sortedData.slice(currentPage * pageSize, (currentPage + 1) * pageSize);
+    }, [sortedData, currentPage, pageSize]);
+
+    return (
+        <div className="mb-4 overflow-x-auto">
+            <table className={clsx('min-w-full divide-y divide-gray-200 dark:divide-gray-700 border dark:border-gray-700 rounded-lg overflow-hidden')}>
+                <thead className="bg-gray-50 dark:bg-gray-800">
+                    <tr>
+                        {component.columns.map((col, i) => (
+                            <th
+                                key={i}
+                                onClick={() => handleSort(col.accessor_key)}
+                                className={clsx(
+                                    'px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider',
+                                    component.sortable && col.sortable !== false && 'cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-700'
+                                )}
+                            >
+                                {col.header}
+                                {sortColumn === col.accessor_key && (
+                                    <span className="ml-1">{sortDirection === 'asc' ? '↑' : '↓'}</span>
+                                )}
+                            </th>
+                        ))}
+                    </tr>
+                </thead>
+                <tbody className="bg-white dark:bg-gray-900 divide-y divide-gray-200 dark:divide-gray-700">
+                    {paginatedData.map((row, ri) => (
+                        <tr key={ri} className={clsx(
+                            'hover:bg-gray-50 dark:hover:bg-gray-800',
+                            component.striped && ri % 2 === 1 && 'bg-gray-50 dark:bg-gray-800/50'
+                        )}>
+                            {component.columns.map((col, ci) => (
+                                <td key={ci} className="px-4 py-3 text-sm text-gray-700 dark:text-gray-300">
+                                    {String(row[col.accessor_key] ?? '')}
+                                </td>
+                            ))}
+                        </tr>
+                    ))}
+                </tbody>
+            </table>
+            {component.page_size && totalPages > 1 && (
+                <div className="flex items-center justify-between mt-2 px-2">
+                    <span className="text-sm text-gray-500 dark:text-gray-400">
+                        Page {currentPage + 1} of {totalPages}
+                    </span>
+                    <div className="flex gap-2">
+                        <button
+                            onClick={() => setCurrentPage(Math.max(0, currentPage - 1))}
+                            disabled={currentPage === 0}
+                            className="px-3 py-1 text-sm border rounded hover:bg-gray-100 dark:hover:bg-gray-700 disabled:opacity-50 dark:border-gray-600 dark:text-gray-300"
+                        >
+                            Previous
+                        </button>
+                        <button
+                            onClick={() => setCurrentPage(Math.min(totalPages - 1, currentPage + 1))}
+                            disabled={currentPage === totalPages - 1}
+                            className="px-3 py-1 text-sm border rounded hover:bg-gray-100 dark:hover:bg-gray-700 disabled:opacity-50 dark:border-gray-600 dark:text-gray-300"
+                        >
+                            Next
+                        </button>
+                    </div>
+                </div>
+            )}
+        </div>
+    );
+};
+
+const TabsRenderer: React.FC<{
+    component: Extract<Component, { type: 'tabs' }>;
+    onAction?: (event: UiEvent) => void;
+}> = ({ component, onAction }) => {
+    const [activeTab, setActiveTab] = useState(0);
+
+    return (
+        <div className="mb-4">
+            <div className="border-b border-gray-200">
+                <nav className="flex space-x-4">
+                    {component.tabs.map((tab, i) => (
+                        <button
+                            key={i}
+                            onClick={() => {
+                                setActiveTab(i);
+                                onAction?.({ action: 'tab_change', index: i });
+                            }}
+                            className={clsx('px-4 py-2 border-b-2 font-medium text-sm transition-colors', {
+                                'border-blue-600 text-blue-600': activeTab === i,
+                                'border-transparent text-gray-500 hover:text-gray-700': activeTab !== i,
+                            })}
+                        >
+                            {tab.label}
+                        </button>
+                    ))}
+                </nav>
+            </div>
+            <div className="p-4">
+                {component.tabs[activeTab].content.map((child, i) =>
+                    <ComponentRenderer key={i} component={child} />
+                )}
+            </div>
+        </div>
+    );
+};
+
 const ComponentRenderer: React.FC<{ component: Component }> = ({ component }) => {
     const { onAction } = useContext(FormContext);
     const formRef = useRef<HTMLFormElement>(null);
@@ -546,128 +687,10 @@ const ComponentRenderer: React.FC<{ component: Component }> = ({ component }) =>
             );
 
         case 'tabs':
-            const [activeTab, setActiveTab] = React.useState(0);
-            return (
-                <div className="mb-4">
-                    <div className="border-b border-gray-200">
-                        <nav className="flex space-x-4">
-                            {component.tabs.map((tab, i) => (
-                                <button
-                                    key={i}
-                                    onClick={() => {
-                                        setActiveTab(i);
-                                        onAction?.({ action: 'tab_change', index: i });
-                                    }}
-                                    className={clsx('px-4 py-2 border-b-2 font-medium text-sm transition-colors', {
-                                        'border-blue-600 text-blue-600': activeTab === i,
-                                        'border-transparent text-gray-500 hover:text-gray-700': activeTab !== i,
-                                    })}
-                                >
-                                    {tab.label}
-                                </button>
-                            ))}
-                        </nav>
-                    </div>
-                    <div className="p-4">
-                        {component.tabs[activeTab].content.map((child, i) =>
-                            <ComponentRenderer key={i} component={child} />
-                        )}
-                    </div>
-                </div>
-            );
+            return <TabsRenderer component={component} onAction={onAction} />;
 
         case 'table':
-            // Table with sorting and pagination support
-            const [sortColumn, setSortColumn] = React.useState<string | null>(null);
-            const [sortDirection, setSortDirection] = React.useState<'asc' | 'desc'>('asc');
-            const [currentPage, setCurrentPage] = React.useState(0);
-
-            const handleSort = (accessorKey: string) => {
-                if (!component.sortable) return;
-                if (sortColumn === accessorKey) {
-                    setSortDirection(sortDirection === 'asc' ? 'desc' : 'asc');
-                } else {
-                    setSortColumn(accessorKey);
-                    setSortDirection('asc');
-                }
-            };
-
-            let tableData = [...component.data];
-            if (sortColumn) {
-                tableData.sort((a, b) => {
-                    const aVal = a[sortColumn] ?? '';
-                    const bVal = b[sortColumn] ?? '';
-                    const cmp = String(aVal).localeCompare(String(bVal));
-                    return sortDirection === 'asc' ? cmp : -cmp;
-                });
-            }
-
-            const pageSize = component.page_size || tableData.length;
-            const totalPages = Math.ceil(tableData.length / pageSize);
-            const paginatedData = tableData.slice(currentPage * pageSize, (currentPage + 1) * pageSize);
-
-            return (
-                <div className="mb-4 overflow-x-auto">
-                    <table className={clsx('min-w-full divide-y divide-gray-200 dark:divide-gray-700 border dark:border-gray-700 rounded-lg overflow-hidden')}>
-                        <thead className="bg-gray-50 dark:bg-gray-800">
-                            <tr>
-                                {component.columns.map((col, i) => (
-                                    <th
-                                        key={i}
-                                        onClick={() => handleSort(col.accessor_key)}
-                                        className={clsx(
-                                            'px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider',
-                                            component.sortable && col.sortable !== false && 'cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-700'
-                                        )}
-                                    >
-                                        {col.header}
-                                        {sortColumn === col.accessor_key && (
-                                            <span className="ml-1">{sortDirection === 'asc' ? '↑' : '↓'}</span>
-                                        )}
-                                    </th>
-                                ))}
-                            </tr>
-                        </thead>
-                        <tbody className="bg-white dark:bg-gray-900 divide-y divide-gray-200 dark:divide-gray-700">
-                            {paginatedData.map((row, ri) => (
-                                <tr key={ri} className={clsx(
-                                    'hover:bg-gray-50 dark:hover:bg-gray-800',
-                                    component.striped && ri % 2 === 1 && 'bg-gray-50 dark:bg-gray-800/50'
-                                )}>
-                                    {component.columns.map((col, ci) => (
-                                        <td key={ci} className="px-4 py-3 text-sm text-gray-700 dark:text-gray-300">
-                                            {String(row[col.accessor_key] ?? '')}
-                                        </td>
-                                    ))}
-                                </tr>
-                            ))}
-                        </tbody>
-                    </table>
-                    {component.page_size && totalPages > 1 && (
-                        <div className="flex items-center justify-between mt-2 px-2">
-                            <span className="text-sm text-gray-500 dark:text-gray-400">
-                                Page {currentPage + 1} of {totalPages}
-                            </span>
-                            <div className="flex gap-2">
-                                <button
-                                    onClick={() => setCurrentPage(Math.max(0, currentPage - 1))}
-                                    disabled={currentPage === 0}
-                                    className="px-3 py-1 text-sm border rounded hover:bg-gray-100 dark:hover:bg-gray-700 disabled:opacity-50 dark:border-gray-600 dark:text-gray-300"
-                                >
-                                    Previous
-                                </button>
-                                <button
-                                    onClick={() => setCurrentPage(Math.min(totalPages - 1, currentPage + 1))}
-                                    disabled={currentPage === totalPages - 1}
-                                    className="px-3 py-1 text-sm border rounded hover:bg-gray-100 dark:hover:bg-gray-700 disabled:opacity-50 dark:border-gray-600 dark:text-gray-300"
-                                >
-                                    Next
-                                </button>
-                            </div>
-                        </div>
-                    )}
-                </div>
-            );
+            return <TableRenderer component={component} onAction={onAction} />;
 
         case 'chart':
             const DEFAULT_COLORS = ['#3B82F6', '#10B981', '#F59E0B', '#EF4444', '#8B5CF6', '#EC4899', '#06B6D4'];
