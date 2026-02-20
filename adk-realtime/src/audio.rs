@@ -184,6 +184,14 @@ impl AudioChunk {
 }
 
 /// Buffers audio samples until a target duration is reached.
+///
+/// Smart buffering (e.g., 200ms) is essential for AI voice services to:
+/// 1. **Reduce Network Overhead**: Aggregating small frames into larger chunks
+///    drastically reduces packet rate, lowering CPU usage and bandwidth overhead.
+/// 2. **Improve Model Performance**: Provides sufficient context for Voice Activity
+///    Detection (VAD) to distinguish speech from noise.
+/// 3. **Resist Jitter**: Smooths out network jitter common in mobile networks.
+/// 4. **Latency Trade-off**: Maintains a real-time feel while gaining stability.
 #[derive(Debug, Clone)]
 pub struct SmartAudioBuffer {
     buffer: Vec<i16>,
