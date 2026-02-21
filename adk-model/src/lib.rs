@@ -9,10 +9,12 @@
 //! - [`GeminiModel`] - Google's Gemini models (3 Pro, 2.5 Flash, etc.)
 //! - `OpenAIClient` - OpenAI models (GPT-5, GPT-5-mini, o3, etc.) - requires `openai` feature
 //! - `AzureOpenAIClient` - Azure OpenAI Service - requires `openai` feature
+//! - `XAIClient` - xAI Grok models via OpenAI-compatible API - requires `xai` feature
 //! - `AnthropicClient` - Anthropic Claude models (Opus 4.6, Sonnet 4.5, etc.) - requires `anthropic` feature
 //! - `DeepSeekClient` - DeepSeek models (deepseek-chat, deepseek-reasoner) - requires `deepseek` feature
 //! - `GroqClient` - Groq ultra-fast inference (Llama 4, Llama 3.3, Mixtral) - requires `groq` feature
 //! - `OllamaModel` - Local LLMs via Ollama (LLaMA, Mistral, Qwen, etc.) - requires `ollama` feature
+//! - `OpenAICompatible` - Shared OpenAI-compatible client for custom providers - requires `openai` or `xai`
 //! - [`MockLlm`] - Mock LLM for testing
 //!
 //! ## Quick Start
@@ -134,7 +136,11 @@ pub mod mock;
 pub mod ollama;
 #[cfg(feature = "openai")]
 pub mod openai;
+#[cfg(feature = "openai")]
+pub mod openai_compatible;
 pub mod retry;
+#[cfg(feature = "xai")]
+pub mod xai;
 
 #[cfg(feature = "anthropic")]
 pub use anthropic::AnthropicClient;
@@ -149,5 +155,9 @@ pub use mock::MockLlm;
 pub use ollama::{OllamaConfig, OllamaModel};
 #[cfg(feature = "openai")]
 pub use openai::{AzureConfig, AzureOpenAIClient, OpenAIClient, OpenAIConfig};
+#[cfg(feature = "openai")]
+pub use openai_compatible::{OpenAICompatible, OpenAICompatibleConfig};
 pub use retry::RetryConfig;
 pub use retry::ServerRetryHint;
+#[cfg(feature = "xai")]
+pub use xai::{XAIClient, XAIConfig};
