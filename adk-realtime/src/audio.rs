@@ -165,6 +165,29 @@ impl AudioChunk {
         Self::new(data, format)
     }
 
+    /// Encode i16 samples directly to base64, skipping intermediate allocations.
+    ///
+    /// On Little Endian platforms, this uses `bytemuck` for zero-copy casting.
+    pub fn encode_i16_to_base64(samples: &[i16]) -> String {
+        use base64::Engine;
+
+        #[cfg(target_endian = "little")]
+        {
+            let bytes: &[u8] = bytemuck::cast_slice(samples);
+            base64::engine::general_purpose::STANDARD.encode(bytes)
+        }
+
+        #[cfg(not(target_endian = "little"))]
+        {
+            // Fallback for Big Endian: must manually convert to Little Endian bytes first
+            let mut data = Vec::with_capacity(samples.len() * 2);
+            for sample in samples {
+                data.extend_from_slice(&sample.to_le_bytes());
+            }
+            base64::engine::general_purpose::STANDARD.encode(&data)
+        }
+    }
+
     /// Convert the audio data to a vector of i16 samples (assuming PCM16 little-endian).
     ///
     /// Returns an error string if the data length is not even (not valid PCM16).
@@ -322,5 +345,19 @@ mod tests {
     fn test_i16_samples_odd_bytes_error() {
         let chunk = AudioChunk::pcm16_24khz(vec![0, 1, 2]); // 3 bytes = invalid PCM16
         assert!(chunk.to_i16_samples().is_err());
+    }
+
+    #[test]
+    fn test_encode_i16_to_base64_correctness() {
+        let samples: Vec<i16> = vec![0, 1, -1, 32767, -32768, 1000, -1000];
+
+        // Old way
+        let chunk = AudioChunk::from_i16_samples(&samples, AudioFormat::pcm16_24khz());
+        let expected = chunk.to_base64();
+
+        // New way
+        let actual = AudioChunk::encode_i16_to_base64(&samples);
+
+        assert_eq!(actual, expected);
     }
 }
