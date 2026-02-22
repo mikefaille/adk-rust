@@ -67,9 +67,10 @@ async fn handle_socket(mut socket: WebSocket, project_id: String, state: AppStat
     }
 }
 
-async fn send_event(socket: &mut WebSocket, event: StreamEvent) -> Result<(), axum::Error> {
-    let json = serde_json::to_string(&event).map_err(|e| axum::Error::new(e))?;
-    socket.send(Message::Text(json.into())).await
+async fn send_event(socket: &mut WebSocket, event: StreamEvent) -> anyhow::Result<()> {
+    let json = serde_json::to_string(&event)?;
+    socket.send(Message::Text(json.into())).await?;
+    Ok(())
 }
 
 async fn stream_response(
