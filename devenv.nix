@@ -61,6 +61,7 @@
 
     # System libraries required by livekit-webrtc
     glib
+    pkgs.glib.dev
     libva
 
     # Protobuf (for gRPC codegen if needed)
@@ -98,6 +99,9 @@
 
     # Explicitly set PROTOC for build-scripts (e.g., lance-encoding)
     PROTOC = "${pkgs.protobuf}/bin/protoc";
+
+    # Ensure pkg-config can find glib
+    PKG_CONFIG_PATH = "${pkgs.glib.dev}/lib/pkgconfig:$PKG_CONFIG_PATH";
   };
 
   # --------------------------------------------------------------------------
