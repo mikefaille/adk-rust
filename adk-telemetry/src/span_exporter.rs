@@ -39,29 +39,20 @@ impl AdkSpanExporter {
     pub fn get_session_trace(&self, session_id: &str) -> Vec<HashMap<String, String>> {
         debug!("AdkSpanExporter::get_session_trace called with session_id: {}", session_id);
 
-        // O(1) lookup using session_index
+        // O(1) lookup using session_index without cloning event_ids
         let session_index = self.session_index.read().unwrap();
-        let event_ids = match session_index.get(session_id) {
-            Some(ids) => ids.clone(),
-            None => {
-                debug!("get_session_trace result for session_id '{}': 0 spans", session_id);
-                return Vec::new();
-            }
-        };
-        // Release index lock before acquiring trace_dict lock
-        drop(session_index);
-
-        let trace_dict = self.trace_dict.read().unwrap();
-        let mut spans = Vec::with_capacity(event_ids.len());
-
-        for event_id in event_ids {
-            if let Some(attributes) = trace_dict.get(&event_id) {
-                spans.push(attributes.clone());
-            }
+        if let Some(event_ids) = session_index.get(session_id) {
+            let trace_dict = self.trace_dict.read().unwrap();
+            let spans: Vec<_> = event_ids
+                .iter()
+                .filter_map(|id| trace_dict.get(id).cloned())
+                .collect();
+            debug!("get_session_trace result for session_id '{}': {} spans", session_id, spans.len());
+            spans
+        } else {
+            debug!("get_session_trace result for session_id '{}': 0 spans", session_id);
+            Vec::new()
         }
-
-        debug!("get_session_trace result for session_id '{}': {} spans", session_id, spans.len());
-        spans
     }
 
     /// Internal method to store span (following ADK-Go ExportSpans pattern)
@@ -81,18 +72,19 @@ impl AdkSpanExporter {
                     span_name, event_id
                 );
 
-                let is_new_event = {
-                    let mut trace_dict = self.trace_dict.write().unwrap();
-                    trace_dict.insert(event_id.clone(), attributes).is_none()
-                };
-                debug!("AdkSpanExporter: Span stored");
+                // Acquire locks in consistent order: session_index then trace_dict
+                // to prevent potential deadlocks with get_session_trace
+                let mut session_index = self.session_index.write().unwrap();
+                let mut trace_dict = self.trace_dict.write().unwrap();
 
-                // Update session index if session_id exists and it's a new event
-                if is_new_event {
+                if trace_dict.insert(event_id.clone(), attributes).is_none() {
+                    debug!("AdkSpanExporter: Span stored");
+                    // Update session index if session_id exists and it's a new event
                     if let Some(sid) = session_id_opt {
-                        let mut session_index = self.session_index.write().unwrap();
                         session_index.entry(sid).or_default().push(event_id);
                     }
+                } else {
+                    debug!("AdkSpanExporter: Span updated");
                 }
             } else {
                 debug!("AdkSpanExporter: Skipping span '{}' - no event_id found", span_name);
