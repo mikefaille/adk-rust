@@ -22,8 +22,10 @@ impl AdkSpanExporter {
     }
 
     /// Get trace dict (following ADK-Go GetTraceDict method)
-    pub fn get_trace_dict(&self) -> HashMap<String, HashMap<String, String>> {
-        self.trace_dict.read().unwrap().clone()
+    pub fn get_trace_dict(
+        &self,
+    ) -> std::sync::RwLockReadGuard<'_, HashMap<String, HashMap<String, String>>> {
+        self.trace_dict.read().unwrap()
     }
 
     /// Get trace by event_id (following ADK-Go pattern)
