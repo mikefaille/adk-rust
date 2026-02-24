@@ -158,11 +158,65 @@ impl AudioChunk {
     /// This is useful when working with audio APIs (like LiveKit) that provide
     /// samples as `i16` slices rather than raw byte buffers.
     pub fn from_i16_samples(samples: &[i16], format: AudioFormat) -> Self {
+        #[cfg(target_endian = "little")]
+        let data = bytemuck::cast_slice(samples).to_vec();
+
+        #[cfg(not(target_endian = "little"))]
+        let data = Self::i16_samples_to_le_bytes(samples);
+
+        Self::new(data, format)
+    }
+
+    /// Encode i16 samples directly to base64 string.
+    ///
+    /// This bypasses intermediate `Vec<u8>` allocation when possible.
+    pub fn encode_i16_to_base64(samples: &[i16]) -> String {
+        use base64::Engine;
+        #[cfg(target_endian = "little")]
+        let bytes: &[u8] = bytemuck::cast_slice(samples);
+
+        #[cfg(not(target_endian = "little"))]
+        let temp = Self::i16_samples_to_le_bytes(samples);
+        #[cfg(not(target_endian = "little"))]
+        let bytes = &temp;
+
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    }
+
+    #[cfg(not(target_endian = "little"))]
+    fn i16_samples_to_le_bytes(samples: &[i16]) -> Vec<u8> {
         let mut data = Vec::with_capacity(samples.len() * 2);
         for sample in samples {
             data.extend_from_slice(&sample.to_le_bytes());
         }
-        Self::new(data, format)
+        data
+    }
+
+    /// Downsample audio using a simple box filter (average consecutive samples).
+    ///
+    /// This reduces aliasing compared to simple decimation by averaging `factor` samples
+    /// into one output sample.
+    ///
+    /// **Note:** If the input length is not a multiple of `factor`, trailing samples
+    /// will be discarded.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `factor` is 0.
+    pub fn downsample_box_filter(samples: &[i16], factor: usize) -> Vec<i16> {
+        if factor == 0 {
+            panic!("Downsampling factor cannot be zero.");
+        }
+        if factor == 1 {
+            return samples.to_vec();
+        }
+        samples
+            .chunks_exact(factor)
+            .map(|chunk| {
+                let sum: i32 = chunk.iter().map(|&s| s as i32).sum();
+                (sum / factor as i32) as i16
+            })
+            .collect()
     }
 
     /// Convert the audio data to a vector of i16 samples (assuming PCM16 little-endian).
@@ -322,5 +376,54 @@ mod tests {
     fn test_i16_samples_odd_bytes_error() {
         let chunk = AudioChunk::pcm16_24khz(vec![0, 1, 2]); // 3 bytes = invalid PCM16
         assert!(chunk.to_i16_samples().is_err());
+    }
+
+    #[test]
+    fn test_encode_i16_to_base64() {
+        let samples: Vec<i16> = vec![0, 1, -1, 32767, -32768];
+        let encoded = AudioChunk::encode_i16_to_base64(&samples);
+        let chunk = AudioChunk::from_i16_samples(&samples, AudioFormat::pcm16_24khz());
+        assert_eq!(encoded, chunk.to_base64());
+    }
+
+    #[test]
+    fn test_downsample_factor_2() {
+        // Input: 6 samples (e.g. 1ms at 6kHz, or just arbitrary data)
+        let input = vec![100, 200, 300, 400, -100, -200];
+        // Expected: average pairs
+        // (100+200)/2 = 150
+        // (300+400)/2 = 350
+        // (-100-200)/2 = -150
+        let expected = vec![150, 350, -150];
+
+        let output = AudioChunk::downsample_box_filter(&input, 2);
+        assert_eq!(output, expected);
+    }
+
+    #[test]
+    fn test_downsample_factor_3() {
+        // Input: 6 samples
+        let input = vec![100, 200, 300, 600, 600, 600];
+        // Expected: average triplets
+        // (100+200+300)/3 = 600/3 = 200
+        // (600+600+600)/3 = 1800/3 = 600
+        let expected = vec![200, 600];
+
+        let output = AudioChunk::downsample_box_filter(&input, 3);
+        assert_eq!(output, expected);
+    }
+
+    #[test]
+    fn test_downsample_factor_1() {
+        let input = vec![100, 200, 300];
+        let output = AudioChunk::downsample_box_filter(&input, 1);
+        assert_eq!(output, input);
+    }
+
+    #[test]
+    #[should_panic(expected = "Downsampling factor cannot be zero.")]
+    fn test_downsample_factor_0() {
+        let input = vec![100, 200, 300];
+        AudioChunk::downsample_box_filter(&input, 0);
     }
 }
