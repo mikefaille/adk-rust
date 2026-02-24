@@ -192,24 +192,19 @@ impl AudioChunk {
         data
     }
 
-    /// Downsample 48kHz audio to 24kHz using a simple box filter (average pairs).
-    pub fn downsample_48kHz_to_24kHz(samples: &[i16]) -> Vec<i16> {
+    /// Downsample audio using a simple box filter (average consecutive samples).
+    ///
+    /// This reduces aliasing compared to simple decimation by averaging `factor` samples
+    /// into one output sample.
+    pub fn downsample_box_filter(samples: &[i16], factor: usize) -> Vec<i16> {
+        if factor == 0 || factor == 1 {
+            return samples.to_vec();
+        }
         samples
-            .chunks_exact(2)
+            .chunks_exact(factor)
             .map(|chunk| {
-                let sum: i32 = chunk[0] as i32 + chunk[1] as i32;
-                (sum / 2) as i16
-            })
-            .collect()
-    }
-
-    /// Downsample 48kHz audio to 16kHz using a simple box filter (average triplets).
-    pub fn downsample_48kHz_to_16kHz(samples: &[i16]) -> Vec<i16> {
-        samples
-            .chunks_exact(3)
-            .map(|chunk| {
-                let sum: i32 = chunk[0] as i32 + chunk[1] as i32 + chunk[2] as i32;
-                (sum / 3) as i16
+                let sum: i32 = chunk.iter().map(|&s| s as i32).sum();
+                (sum / factor as i32) as i16
             })
             .collect()
     }
@@ -382,7 +377,7 @@ mod tests {
     }
 
     #[test]
-    fn test_downsample_48k_to_24k() {
+    fn test_downsample_factor_2() {
         // Input: 6 samples (e.g. 1ms at 6kHz, or just arbitrary data)
         let input = vec![100, 200, 300, 400, -100, -200];
         // Expected: average pairs
@@ -391,12 +386,12 @@ mod tests {
         // (-100-200)/2 = -150
         let expected = vec![150, 350, -150];
 
-        let output = AudioChunk::downsample_48kHz_to_24kHz(&input);
+        let output = AudioChunk::downsample_box_filter(&input, 2);
         assert_eq!(output, expected);
     }
 
     #[test]
-    fn test_downsample_48k_to_16k() {
+    fn test_downsample_factor_3() {
         // Input: 6 samples
         let input = vec![100, 200, 300, 600, 600, 600];
         // Expected: average triplets
@@ -404,7 +399,14 @@ mod tests {
         // (600+600+600)/3 = 1800/3 = 600
         let expected = vec![200, 600];
 
-        let output = AudioChunk::downsample_48kHz_to_16kHz(&input);
+        let output = AudioChunk::downsample_box_filter(&input, 3);
         assert_eq!(output, expected);
+    }
+
+    #[test]
+    fn test_downsample_factor_1() {
+        let input = vec![100, 200, 300];
+        let output = AudioChunk::downsample_box_filter(&input, 1);
+        assert_eq!(output, input);
     }
 }

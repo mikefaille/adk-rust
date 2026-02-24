@@ -31,31 +31,7 @@ const BUFFER_DURATION_MS: u32 = 200;
 /// * `track` — The LiveKit remote audio track to read from.
 /// * `runner` — The realtime runner to send audio to.
 pub async fn bridge_input(track: RemoteAudioTrack, runner: &RealtimeRunner) -> Result<()> {
-    // Request native 48kHz mono from LiveKit.
-    let mut stream =
-        NativeAudioStream::new(track.rtc_track(), NATIVE_SAMPLE_RATE, DEFAULT_NUM_CHANNELS);
-    let mut buffer = SmartAudioBuffer::new(DEFAULT_SAMPLE_RATE as u32, BUFFER_DURATION_MS);
-
-    let send_audio = |samples: &[i16]| {
-        let base64 = AudioChunk::encode_i16_to_base64(samples);
-        async move { runner.send_audio(&base64).await }
-    };
-
-    while let Some(frame) = stream.next().await {
-        // Downsample 48kHz -> 24kHz (box filter)
-        let downsampled = AudioChunk::downsample_48kHz_to_24kHz(&frame.data);
-        buffer.push(&downsampled);
-
-        if let Some(samples) = buffer.flush() {
-            send_audio(&samples).await?;
-        }
-    }
-
-    if let Some(samples) = buffer.flush_remaining() {
-        send_audio(&samples).await?;
-    }
-
-    Ok(())
+    bridge_audio_internal(track, runner, DEFAULT_SAMPLE_RATE as u32, 2).await
 }
 
 /// Reads audio frames from a LiveKit [`RemoteAudioTrack`], resamples to 16kHz
@@ -70,10 +46,20 @@ pub async fn bridge_input(track: RemoteAudioTrack, runner: &RealtimeRunner) -> R
 /// * `track` — The LiveKit remote audio track to read from.
 /// * `runner` — The realtime runner to send audio to.
 pub async fn bridge_gemini_input(track: RemoteAudioTrack, runner: &RealtimeRunner) -> Result<()> {
+    bridge_audio_internal(track, runner, GEMINI_SAMPLE_RATE as u32, 3).await
+}
+
+/// Internal helper to bridge audio with a specific decimation factor.
+async fn bridge_audio_internal(
+    track: RemoteAudioTrack,
+    runner: &RealtimeRunner,
+    target_sample_rate: u32,
+    decimation_factor: usize,
+) -> Result<()> {
     // Request native 48kHz mono from LiveKit.
     let mut stream =
         NativeAudioStream::new(track.rtc_track(), NATIVE_SAMPLE_RATE, DEFAULT_NUM_CHANNELS);
-    let mut buffer = SmartAudioBuffer::new(GEMINI_SAMPLE_RATE as u32, BUFFER_DURATION_MS);
+    let mut buffer = SmartAudioBuffer::new(target_sample_rate, BUFFER_DURATION_MS);
 
     let send_audio = |samples: &[i16]| {
         let base64 = AudioChunk::encode_i16_to_base64(samples);
@@ -81,8 +67,8 @@ pub async fn bridge_gemini_input(track: RemoteAudioTrack, runner: &RealtimeRunne
     };
 
     while let Some(frame) = stream.next().await {
-        // Downsample 48kHz -> 16kHz (box filter)
-        let downsampled = AudioChunk::downsample_48kHz_to_16kHz(&frame.data);
+        // Downsample using generic box filter
+        let downsampled = AudioChunk::downsample_box_filter(&frame.data, decimation_factor);
         buffer.push(&downsampled);
 
         if let Some(samples) = buffer.flush() {
