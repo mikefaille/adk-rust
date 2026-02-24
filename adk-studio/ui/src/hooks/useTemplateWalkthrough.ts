@@ -28,14 +28,8 @@ export interface TemplateWalkthroughStep {
   };
 }
 
-/**
- * Generate walkthrough steps for a template
- */
-export function generateTemplateWalkthroughSteps(template: Template): TemplateWalkthroughStep[] {
-  const steps: TemplateWalkthroughStep[] = [];
-  
-  // Step 1: Welcome/Overview
-  steps.push({
+function createOverviewStep(template: Template): TemplateWalkthroughStep {
+  return {
     id: 'overview',
     title: `Welcome to ${template.name}`,
     description: template.useCase || template.description,
@@ -45,96 +39,109 @@ export function generateTemplateWalkthroughSteps(template: Template): TemplateWa
       ...(template.actionNodes ? [`${Object.keys(template.actionNodes).length} action node(s) for automation`] : []),
       `${template.edges.length} connections between nodes`,
     ],
+  };
+}
+
+function createEnvVarsStep(template: Template): TemplateWalkthroughStep | null {
+  if (!template.envVars || template.envVars.length === 0) {
+    return null;
+  }
+
+  const requiredVars = template.envVars.filter(v => v.required);
+  const optionalVars = template.envVars.filter(v => !v.required);
+  
+  return {
+    id: 'env-vars',
+    title: 'Configure Environment Variables',
+    description: 'This template requires some configuration before it can run. Set up the following environment variables:',
+    icon: '🔑',
+    tips: [
+      ...requiredVars.map(v => `${v.name} (required): ${v.description}`),
+      ...(optionalVars.length > 0 ? [`Plus ${optionalVars.length} optional variable(s)`] : []),
+    ],
+    action: {
+      label: 'Open Settings',
+      type: 'open-env',
+    },
+  };
+}
+
+function createAgentsStep(template: Template): TemplateWalkthroughStep | null {
+  const agentEntries = Object.entries(template.agents);
+  if (agentEntries.length === 0) {
+    return null;
+  }
+
+  const agentTips = agentEntries.slice(0, 4).map(([id, agent]) => {
+    const typeLabel = agent.type === 'llm' ? 'LLM Agent' :
+                     agent.type === 'sequential' ? 'Sequential' :
+                     agent.type === 'parallel' ? 'Parallel' :
+                     agent.type === 'loop' ? 'Loop' :
+                     agent.type === 'router' ? 'Router' : agent.type;
+    return `${id}: ${typeLabel}${agent.tools?.length ? ` with ${agent.tools.length} tool(s)` : ''}`;
   });
   
-  // Step 2: Environment Variables (if any)
-  if (template.envVars && template.envVars.length > 0) {
-    const requiredVars = template.envVars.filter(v => v.required);
-    const optionalVars = template.envVars.filter(v => !v.required);
-    
-    steps.push({
-      id: 'env-vars',
-      title: 'Configure Environment Variables',
-      description: 'This template requires some configuration before it can run. Set up the following environment variables:',
-      icon: '🔑',
-      tips: [
-        ...requiredVars.map(v => `${v.name} (required): ${v.description}`),
-        ...(optionalVars.length > 0 ? [`Plus ${optionalVars.length} optional variable(s)`] : []),
-      ],
-      action: {
-        label: 'Open Settings',
-        type: 'open-env',
-      },
-    });
+  if (agentEntries.length > 4) {
+    agentTips.push(`...and ${agentEntries.length - 4} more agent(s)`);
   }
   
-  // Step 3: AI Agents Overview
-  const agentEntries = Object.entries(template.agents);
-  if (agentEntries.length > 0) {
-    const agentTips = agentEntries.slice(0, 4).map(([id, agent]) => {
-      const typeLabel = agent.type === 'llm' ? 'LLM Agent' : 
-                       agent.type === 'sequential' ? 'Sequential' :
-                       agent.type === 'parallel' ? 'Parallel' :
-                       agent.type === 'loop' ? 'Loop' :
-                       agent.type === 'router' ? 'Router' : agent.type;
-      return `${id}: ${typeLabel}${agent.tools?.length ? ` with ${agent.tools.length} tool(s)` : ''}`;
-    });
-    
-    if (agentEntries.length > 4) {
-      agentTips.push(`...and ${agentEntries.length - 4} more agent(s)`);
-    }
-    
-    steps.push({
-      id: 'agents',
-      title: 'AI Agents in This Workflow',
-      description: 'This template uses AI agents to process and analyze data. Click on any agent to customize its instructions.',
-      icon: '🤖',
-      tips: agentTips,
-      highlightNodes: agentEntries.slice(0, 3).map(([id]) => id),
-    });
+  return {
+    id: 'agents',
+    title: 'AI Agents in This Workflow',
+    description: 'This template uses AI agents to process and analyze data. Click on any agent to customize its instructions.',
+    icon: '🤖',
+    tips: agentTips,
+    highlightNodes: agentEntries.slice(0, 3).map(([id]) => id),
+  };
+}
+
+function createActionNodesStep(template: Template): TemplateWalkthroughStep | null {
+  if (!template.actionNodes || Object.keys(template.actionNodes).length === 0) {
+    return null;
   }
+
+  const actionEntries = Object.entries(template.actionNodes);
+  const nodeTypes = [...new Set(actionEntries.map(([, node]) => node.type))];
   
-  // Step 4: Action Nodes Overview (if any)
-  if (template.actionNodes && Object.keys(template.actionNodes).length > 0) {
-    const actionEntries = Object.entries(template.actionNodes);
-    const nodeTypes = [...new Set(actionEntries.map(([, node]) => node.type))];
-    
-    const nodeTypeLabels: Record<string, string> = {
-      trigger: '🎯 Trigger - Starts the workflow',
-      http: '🌐 HTTP - API calls and webhooks',
-      database: '🗄️ Database - Data storage',
-      email: '📧 Email - Send/receive emails',
-      transform: '⚙️ Transform - Data manipulation',
-      switch: '🔀 Switch - Conditional routing',
-      loop: '🔄 Loop - Iterate over items',
-      wait: '⏱️ Wait - Delays and scheduling',
-      notification: '🔔 Notification - Alerts',
-      set: '📝 Set - Variables',
-    };
-    
-    steps.push({
-      id: 'action-nodes',
-      title: 'Action Nodes for Automation',
-      description: 'Action nodes handle the non-AI parts of your workflow like API calls, database operations, and notifications.',
-      icon: '⚡',
-      tips: nodeTypes.slice(0, 5).map(type => nodeTypeLabels[type] || `${type} node`),
-      highlightNodes: actionEntries.slice(0, 3).map(([id]) => id),
-    });
+  const nodeTypeLabels: Record<string, string> = {
+    trigger: '🎯 Trigger - Starts the workflow',
+    http: '🌐 HTTP - API calls and webhooks',
+    database: '🗄️ Database - Data storage',
+    email: '📧 Email - Send/receive emails',
+    transform: '⚙️ Transform - Data manipulation',
+    switch: '🔀 Switch - Conditional routing',
+    loop: '🔄 Loop - Iterate over items',
+    wait: '⏱️ Wait - Delays and scheduling',
+    notification: '🔔 Notification - Alerts',
+    set: '📝 Set - Variables',
+  };
+
+  return {
+    id: 'action-nodes',
+    title: 'Action Nodes for Automation',
+    description: 'Action nodes handle the non-AI parts of your workflow like API calls, database operations, and notifications.',
+    icon: '⚡',
+    tips: nodeTypes.slice(0, 5).map(type => nodeTypeLabels[type] || `${type} node`),
+    highlightNodes: actionEntries.slice(0, 3).map(([id]) => id),
+  };
+}
+
+function createCustomizationStep(template: Template): TemplateWalkthroughStep | null {
+  if (!template.customizationTips || template.customizationTips.length === 0) {
+    return null;
   }
-  
-  // Step 5: Customization Tips
-  if (template.customizationTips && template.customizationTips.length > 0) {
-    steps.push({
-      id: 'customization',
-      title: 'Customize for Your Needs',
-      description: 'Here are some ways you can adapt this template to your specific use case:',
-      icon: '✨',
-      tips: template.customizationTips.slice(0, 5),
-    });
-  }
-  
-  // Step 6: Documentation (if available)
-  steps.push({
+
+  return {
+    id: 'customization',
+    title: 'Customize for Your Needs',
+    description: 'Here are some ways you can adapt this template to your specific use case:',
+    icon: '✨',
+    tips: template.customizationTips.slice(0, 5),
+  };
+}
+
+function createDocsStep(): TemplateWalkthroughStep {
+  return {
     id: 'docs',
     title: 'Learn More',
     description: 'Check out the full documentation for detailed setup instructions, examples, and troubleshooting tips.',
@@ -149,10 +156,11 @@ export function generateTemplateWalkthroughSteps(template: Template): TemplateWa
       label: 'View Documentation',
       type: 'open-docs',
     },
-  });
-  
-  // Step 7: Ready to Run
-  steps.push({
+  };
+}
+
+function createReadyStep(): TemplateWalkthroughStep {
+  return {
     id: 'ready',
     title: 'Ready to Go!',
     description: 'Your template is loaded and ready. Configure any remaining settings, then build and run your workflow!',
@@ -167,7 +175,31 @@ export function generateTemplateWalkthroughSteps(template: Template): TemplateWa
       label: 'Run Workflow',
       type: 'run-workflow',
     },
-  });
+  };
+}
+
+/**
+ * Generate walkthrough steps for a template
+ */
+export function generateTemplateWalkthroughSteps(template: Template): TemplateWalkthroughStep[] {
+  const steps: TemplateWalkthroughStep[] = [];
+
+  steps.push(createOverviewStep(template));
+
+  const envVarsStep = createEnvVarsStep(template);
+  if (envVarsStep) steps.push(envVarsStep);
+
+  const agentsStep = createAgentsStep(template);
+  if (agentsStep) steps.push(agentsStep);
+
+  const actionNodesStep = createActionNodesStep(template);
+  if (actionNodesStep) steps.push(actionNodesStep);
+
+  const customizationStep = createCustomizationStep(template);
+  if (customizationStep) steps.push(customizationStep);
+
+  steps.push(createDocsStep());
+  steps.push(createReadyStep());
   
   return steps;
 }
