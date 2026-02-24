@@ -42,8 +42,16 @@ pub async fn bridge_input(track: RemoteAudioTrack, runner: &RealtimeRunner) -> R
     };
 
     while let Some(frame) = stream.next().await {
-        // Downsample 48kHz -> 24kHz (decimate by 2)
-        let downsampled: Vec<i16> = frame.data.iter().step_by(2).copied().collect();
+        // Downsample 48kHz -> 24kHz (box filter: average every 2 samples)
+        // This simple low-pass filter reduces aliasing compared to pure decimation.
+        let downsampled: Vec<i16> = frame
+            .data
+            .chunks_exact(2)
+            .map(|chunk| {
+                let sum: i32 = chunk[0] as i32 + chunk[1] as i32;
+                (sum / 2) as i16
+            })
+            .collect();
         buffer.push(&downsampled);
 
         if let Some(samples) = buffer.flush() {
@@ -81,8 +89,16 @@ pub async fn bridge_gemini_input(track: RemoteAudioTrack, runner: &RealtimeRunne
     };
 
     while let Some(frame) = stream.next().await {
-        // Downsample 48kHz -> 16kHz (decimate by 3)
-        let downsampled: Vec<i16> = frame.data.iter().step_by(3).copied().collect();
+        // Downsample 48kHz -> 16kHz (box filter: average every 3 samples)
+        // This simple low-pass filter reduces aliasing compared to pure decimation.
+        let downsampled: Vec<i16> = frame
+            .data
+            .chunks_exact(3)
+            .map(|chunk| {
+                let sum: i32 = chunk[0] as i32 + chunk[1] as i32 + chunk[2] as i32;
+                (sum / 3) as i16
+            })
+            .collect();
         buffer.push(&downsampled);
 
         if let Some(samples) = buffer.flush() {
