@@ -192,6 +192,28 @@ impl AudioChunk {
         data
     }
 
+    /// Downsample 48kHz audio to 24kHz using a simple box filter (average pairs).
+    pub fn downsample_48kHz_to_24kHz(samples: &[i16]) -> Vec<i16> {
+        samples
+            .chunks_exact(2)
+            .map(|chunk| {
+                let sum: i32 = chunk[0] as i32 + chunk[1] as i32;
+                (sum / 2) as i16
+            })
+            .collect()
+    }
+
+    /// Downsample 48kHz audio to 16kHz using a simple box filter (average triplets).
+    pub fn downsample_48kHz_to_16kHz(samples: &[i16]) -> Vec<i16> {
+        samples
+            .chunks_exact(3)
+            .map(|chunk| {
+                let sum: i32 = chunk[0] as i32 + chunk[1] as i32 + chunk[2] as i32;
+                (sum / 3) as i16
+            })
+            .collect()
+    }
+
     /// Convert the audio data to a vector of i16 samples (assuming PCM16 little-endian).
     ///
     /// Returns an error string if the data length is not even (not valid PCM16).
@@ -357,5 +379,32 @@ mod tests {
         let encoded = AudioChunk::encode_i16_to_base64(&samples);
         let chunk = AudioChunk::from_i16_samples(&samples, AudioFormat::pcm16_24khz());
         assert_eq!(encoded, chunk.to_base64());
+    }
+
+    #[test]
+    fn test_downsample_48k_to_24k() {
+        // Input: 6 samples (e.g. 1ms at 6kHz, or just arbitrary data)
+        let input = vec![100, 200, 300, 400, -100, -200];
+        // Expected: average pairs
+        // (100+200)/2 = 150
+        // (300+400)/2 = 350
+        // (-100-200)/2 = -150
+        let expected = vec![150, 350, -150];
+
+        let output = AudioChunk::downsample_48kHz_to_24kHz(&input);
+        assert_eq!(output, expected);
+    }
+
+    #[test]
+    fn test_downsample_48k_to_16k() {
+        // Input: 6 samples
+        let input = vec![100, 200, 300, 600, 600, 600];
+        // Expected: average triplets
+        // (100+200+300)/3 = 600/3 = 200
+        // (600+600+600)/3 = 1800/3 = 600
+        let expected = vec![200, 600];
+
+        let output = AudioChunk::downsample_48kHz_to_16kHz(&input);
+        assert_eq!(output, expected);
     }
 }
