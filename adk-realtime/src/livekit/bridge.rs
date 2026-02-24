@@ -36,20 +36,23 @@ pub async fn bridge_input(track: RemoteAudioTrack, runner: &RealtimeRunner) -> R
         NativeAudioStream::new(track.rtc_track(), NATIVE_SAMPLE_RATE, DEFAULT_NUM_CHANNELS);
     let mut buffer = SmartAudioBuffer::new(DEFAULT_SAMPLE_RATE as u32, BUFFER_DURATION_MS);
 
+    let send_audio = |samples: &[i16]| {
+        let base64 = AudioChunk::encode_i16_to_base64(samples);
+        async move { runner.send_audio(&base64).await }
+    };
+
     while let Some(frame) = stream.next().await {
         // Downsample 48kHz -> 24kHz (decimate by 2)
         let downsampled: Vec<i16> = frame.data.iter().step_by(2).copied().collect();
         buffer.push(&downsampled);
 
         if let Some(samples) = buffer.flush() {
-            let base64 = AudioChunk::encode_i16_to_base64(&samples);
-            runner.send_audio(&base64).await?;
+            send_audio(&samples).await?;
         }
     }
 
     if let Some(samples) = buffer.flush_remaining() {
-        let base64 = AudioChunk::encode_i16_to_base64(&samples);
-        runner.send_audio(&base64).await?;
+        send_audio(&samples).await?;
     }
 
     Ok(())
@@ -72,20 +75,23 @@ pub async fn bridge_gemini_input(track: RemoteAudioTrack, runner: &RealtimeRunne
         NativeAudioStream::new(track.rtc_track(), NATIVE_SAMPLE_RATE, DEFAULT_NUM_CHANNELS);
     let mut buffer = SmartAudioBuffer::new(GEMINI_SAMPLE_RATE as u32, BUFFER_DURATION_MS);
 
+    let send_audio = |samples: &[i16]| {
+        let base64 = AudioChunk::encode_i16_to_base64(samples);
+        async move { runner.send_audio(&base64).await }
+    };
+
     while let Some(frame) = stream.next().await {
         // Downsample 48kHz -> 16kHz (decimate by 3)
         let downsampled: Vec<i16> = frame.data.iter().step_by(3).copied().collect();
         buffer.push(&downsampled);
 
         if let Some(samples) = buffer.flush() {
-            let base64 = AudioChunk::encode_i16_to_base64(&samples);
-            runner.send_audio(&base64).await?;
+            send_audio(&samples).await?;
         }
     }
 
     if let Some(samples) = buffer.flush_remaining() {
-        let base64 = AudioChunk::encode_i16_to_base64(&samples);
-        runner.send_audio(&base64).await?;
+        send_audio(&samples).await?;
     }
 
     Ok(())

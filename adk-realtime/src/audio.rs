@@ -162,11 +162,8 @@ impl AudioChunk {
         let data = bytemuck::cast_slice(samples).to_vec();
 
         #[cfg(not(target_endian = "little"))]
-        let mut data = Vec::with_capacity(samples.len() * 2);
-        #[cfg(not(target_endian = "little"))]
-        for sample in samples {
-            data.extend_from_slice(&sample.to_le_bytes());
-        }
+        let data = Self::i16_samples_to_le_bytes(samples);
+
         Self::new(data, format)
     }
 
@@ -179,17 +176,20 @@ impl AudioChunk {
         let bytes: &[u8] = bytemuck::cast_slice(samples);
 
         #[cfg(not(target_endian = "little"))]
-        let temp = {
-            let mut data = Vec::with_capacity(samples.len() * 2);
-            for sample in samples {
-                data.extend_from_slice(&sample.to_le_bytes());
-            }
-            data
-        };
+        let temp = Self::i16_samples_to_le_bytes(samples);
         #[cfg(not(target_endian = "little"))]
         let bytes = &temp;
 
         base64::engine::general_purpose::STANDARD.encode(bytes)
+    }
+
+    #[cfg(not(target_endian = "little"))]
+    fn i16_samples_to_le_bytes(samples: &[i16]) -> Vec<u8> {
+        let mut data = Vec::with_capacity(samples.len() * 2);
+        for sample in samples {
+            data.extend_from_slice(&sample.to_le_bytes());
+        }
+        data
     }
 
     /// Convert the audio data to a vector of i16 samples (assuming PCM16 little-endian).
