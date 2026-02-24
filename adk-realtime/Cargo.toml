@@ -58,8 +58,8 @@ adk-gemini = { workspace = true, optional = true }
 google-cloud-auth = { version = "1.4", optional = true, default-features = false, features = ["default-rustls-provider"] }
 
 # LiveKit bridge (optional)
-livekit = { version = "0.7", optional = true }
-livekit-api = { version = "0.4", optional = true }
+livekit = { version = "0.7", optional = true, features = ["rustls-tls-native-roots"] }
+livekit-api = { version = "0.4", optional = true, features = ["rustls-tls-native-roots"] }
 
 # OpenAI WebRTC (optional)
 # NOTE: `audiopus` builds the Opus C library from source and requires `cmake`.
@@ -84,8 +84,12 @@ name = "vertex_live_tools"
 required-features = ["vertex-live"]
 
 [[example]]
-name = "livekit_bridge"
+name = "livekit_openai"
 required-features = ["livekit", "openai"]
+
+[[example]]
+name = "livekit_gemini"
+required-features = ["livekit", "gemini"]
 
 [[example]]
 name = "openai_webrtc"
