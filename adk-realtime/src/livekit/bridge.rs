@@ -31,7 +31,8 @@ const BUFFER_DURATION_MS: u32 = 200;
 /// * `track` — The LiveKit remote audio track to read from.
 /// * `runner` — The realtime runner to send audio to.
 pub async fn bridge_input(track: RemoteAudioTrack, runner: &RealtimeRunner) -> Result<()> {
-    bridge_audio_internal(track, runner, DEFAULT_SAMPLE_RATE as u32, 2).await
+    let factor = (NATIVE_SAMPLE_RATE / DEFAULT_SAMPLE_RATE) as usize;
+    bridge_audio_internal(track, runner, DEFAULT_SAMPLE_RATE as u32, factor).await
 }
 
 /// Reads audio frames from a LiveKit [`RemoteAudioTrack`], resamples to 16kHz
@@ -46,7 +47,8 @@ pub async fn bridge_input(track: RemoteAudioTrack, runner: &RealtimeRunner) -> R
 /// * `track` — The LiveKit remote audio track to read from.
 /// * `runner` — The realtime runner to send audio to.
 pub async fn bridge_gemini_input(track: RemoteAudioTrack, runner: &RealtimeRunner) -> Result<()> {
-    bridge_audio_internal(track, runner, GEMINI_SAMPLE_RATE as u32, 3).await
+    let factor = (NATIVE_SAMPLE_RATE / GEMINI_SAMPLE_RATE) as usize;
+    bridge_audio_internal(track, runner, GEMINI_SAMPLE_RATE as u32, factor).await
 }
 
 /// Internal helper to bridge audio with a specific decimation factor.
@@ -56,6 +58,13 @@ async fn bridge_audio_internal(
     target_sample_rate: u32,
     decimation_factor: usize,
 ) -> Result<()> {
+    // Verify decimation factor is exact (native rate must be divisible by target rate)
+    if NATIVE_SAMPLE_RATE as u32 % target_sample_rate != 0 {
+        return Err(crate::error::RealtimeError::config(format!(
+            "Invalid target sample rate {}: must divide native rate {} evenly",
+            target_sample_rate, NATIVE_SAMPLE_RATE
+        )));
+    }
     // Request native 48kHz mono from LiveKit.
     let mut stream =
         NativeAudioStream::new(track.rtc_track(), NATIVE_SAMPLE_RATE, DEFAULT_NUM_CHANNELS);
