@@ -320,6 +320,12 @@ where
                 }
             }
 
+            let is_long_running = mcp_tool
+                .execution
+                .as_ref()
+                .and_then(|e| e.task_support.as_ref())
+                .is_some();
+
             let adk_tool = McpTool {
                 name: tool_name,
                 description: mcp_tool.description.map(|d| d.to_string()).unwrap_or_default(),
@@ -336,7 +342,7 @@ where
                 client: self.client.clone(),
                 connection_factory: self.connection_factory.clone(),
                 refresh_config: self.refresh_config.clone(),
-                is_long_running: false, // TODO: detect from MCP tool annotations
+                is_long_running,
                 task_config: self.task_config.clone(),
             };
 
