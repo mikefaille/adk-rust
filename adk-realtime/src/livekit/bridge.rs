@@ -70,23 +70,20 @@ async fn bridge_audio_internal(
         NativeAudioStream::new(track.rtc_track(), NATIVE_SAMPLE_RATE, DEFAULT_NUM_CHANNELS);
     let mut buffer = SmartAudioBuffer::new(target_sample_rate, BUFFER_DURATION_MS);
 
-    let send_audio = |samples: &[i16]| {
-        let base64 = AudioChunk::encode_i16_to_base64(samples);
-        async move { runner.send_audio(&base64).await }
-    };
-
     while let Some(frame) = stream.next().await {
         // Downsample using generic box filter
         let downsampled = AudioChunk::downsample_box_filter(&frame.data, decimation_factor);
         buffer.push(&downsampled);
 
         if let Some(samples) = buffer.flush() {
-            send_audio(&samples).await?;
+            let base64 = AudioChunk::encode_i16_to_base64(&samples);
+            runner.send_audio(&base64).await?;
         }
     }
 
     if let Some(samples) = buffer.flush_remaining() {
-        send_audio(&samples).await?;
+        let base64 = AudioChunk::encode_i16_to_base64(&samples);
+        runner.send_audio(&base64).await?;
     }
 
     Ok(())

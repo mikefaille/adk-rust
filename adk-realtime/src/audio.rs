@@ -196,8 +196,18 @@ impl AudioChunk {
     ///
     /// This reduces aliasing compared to simple decimation by averaging `factor` samples
     /// into one output sample.
+    ///
+    /// **Note:** If the input length is not a multiple of `factor`, trailing samples
+    /// will be discarded.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `factor` is 0.
     pub fn downsample_box_filter(samples: &[i16], factor: usize) -> Vec<i16> {
-        if factor == 0 || factor == 1 {
+        if factor == 0 {
+            panic!("Downsampling factor cannot be zero.");
+        }
+        if factor == 1 {
             return samples.to_vec();
         }
         samples
@@ -408,5 +418,12 @@ mod tests {
         let input = vec![100, 200, 300];
         let output = AudioChunk::downsample_box_filter(&input, 1);
         assert_eq!(output, input);
+    }
+
+    #[test]
+    #[should_panic(expected = "Downsampling factor cannot be zero.")]
+    fn test_downsample_factor_0() {
+        let input = vec![100, 200, 300];
+        AudioChunk::downsample_box_filter(&input, 0);
     }
 }
