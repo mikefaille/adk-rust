@@ -158,11 +158,38 @@ impl AudioChunk {
     /// This is useful when working with audio APIs (like LiveKit) that provide
     /// samples as `i16` slices rather than raw byte buffers.
     pub fn from_i16_samples(samples: &[i16], format: AudioFormat) -> Self {
+        #[cfg(target_endian = "little")]
+        let data = bytemuck::cast_slice(samples).to_vec();
+
+        #[cfg(not(target_endian = "little"))]
         let mut data = Vec::with_capacity(samples.len() * 2);
+        #[cfg(not(target_endian = "little"))]
         for sample in samples {
             data.extend_from_slice(&sample.to_le_bytes());
         }
         Self::new(data, format)
+    }
+
+    /// Encode i16 samples directly to base64 string.
+    ///
+    /// This bypasses intermediate `Vec<u8>` allocation when possible.
+    pub fn encode_i16_to_base64(samples: &[i16]) -> String {
+        use base64::Engine;
+        #[cfg(target_endian = "little")]
+        let bytes: &[u8] = bytemuck::cast_slice(samples);
+
+        #[cfg(not(target_endian = "little"))]
+        let temp = {
+            let mut data = Vec::with_capacity(samples.len() * 2);
+            for sample in samples {
+                data.extend_from_slice(&sample.to_le_bytes());
+            }
+            data
+        };
+        #[cfg(not(target_endian = "little"))]
+        let bytes = &temp;
+
+        base64::engine::general_purpose::STANDARD.encode(bytes)
     }
 
     /// Convert the audio data to a vector of i16 samples (assuming PCM16 little-endian).
@@ -322,5 +349,13 @@ mod tests {
     fn test_i16_samples_odd_bytes_error() {
         let chunk = AudioChunk::pcm16_24khz(vec![0, 1, 2]); // 3 bytes = invalid PCM16
         assert!(chunk.to_i16_samples().is_err());
+    }
+
+    #[test]
+    fn test_encode_i16_to_base64() {
+        let samples: Vec<i16> = vec![0, 1, -1, 32767, -32768];
+        let encoded = AudioChunk::encode_i16_to_base64(&samples);
+        let chunk = AudioChunk::from_i16_samples(&samples, AudioFormat::pcm16_24khz());
+        assert_eq!(encoded, chunk.to_base64());
     }
 }
