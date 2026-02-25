@@ -104,6 +104,8 @@ struct GeminiSetup {
     tools: Option<Vec<Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     cached_content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    output_audio_transcription: Option<Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -185,14 +187,14 @@ pub struct GeminiRealtimeSession {
 impl GeminiRealtimeSession {
     /// Connect to Gemini Live API using the specified backend.
     pub async fn connect(
-        backend: GeminiLiveBackend,
         model: &str,
+        backend: GeminiLiveBackend,
         config: RealtimeConfig,
     ) -> Result<Self> {
-        let ws_stream = match &backend {
+        let (ws_stream, setup_model) = match &backend {
             GeminiLiveBackend::Studio { api_key } => {
                 let url = format!(
-                    "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key={}",
+                    "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key={}",
                     api_key
                 );
                 let request = url.into_client_request().map_err(|e| {
@@ -201,11 +203,11 @@ impl GeminiRealtimeSession {
                 let (ws, _) = connect_async(request).await.map_err(|e| {
                     RealtimeError::connection(format!("WebSocket connect error: {}", e))
                 })?;
-                ws
+                (ws, model.to_string())
             }
             #[cfg(feature = "vertex-live")]
             GeminiLiveBackend::Vertex { credentials, region, project_id } => {
-                let url = build_vertex_live_url(region, project_id)?;
+                let url = build_vertex_live_url(region)?;
 
                 // Obtain OAuth2 bearer token from ADC credentials
                 let header_map =
@@ -259,7 +261,12 @@ impl GeminiRealtimeSession {
                         "Vertex AI Live WebSocket connect error: {e}"
                     ))
                 })?;
-                ws
+                
+                // Construct Vertex AI model path
+                let base_model = model.strip_prefix("models/").unwrap_or(model);
+                let setup_model = format!("projects/{}/locations/{}/publishers/google/models/{}", project_id, region, base_model);
+                
+                (ws, setup_model)
             }
         };
 
@@ -274,7 +281,7 @@ impl GeminiRealtimeSession {
             audio_buffer: Arc::new(Mutex::new(Vec::new())),
         };
 
-        session.send_setup(model, config).await?;
+        session.send_setup(&setup_model, config).await?;
         Ok(session)
     }
 
@@ -325,13 +332,18 @@ impl GeminiRealtimeSession {
                 generation_config: Some(generation_config),
                 tools,
                 cached_content: config.cached_content,
+                output_audio_transcription: Some(json!({})),
             }),
             realtime_input: None,
             tool_response: None,
             client_content: None,
         };
 
-        tracing::info!(model_id = %model, "Sending Gemini Live setup");
+        tracing::info!(
+            model_id = %model,
+            payload = %serde_json::to_string(&setup).unwrap_or_default(),
+            "Sending Gemini Live setup"
+        );
         self.send_raw(&setup).await
     }
 
@@ -368,7 +380,8 @@ impl GeminiRealtimeSession {
                     e
                 )))),
             },
-            Some(Ok(Message::Close(_))) => {
+            Some(Ok(Message::Close(reason))) => {
+                tracing::error!("[Reflex] WebSocket closed by server: {:?}", reason);
                 self.connected.store(false, Ordering::SeqCst);
                 None
             }
@@ -606,21 +619,17 @@ impl std::fmt::Debug for GeminiRealtimeSession {
     }
 }
 
-/// Construct the Vertex AI Live WebSocket URL from region and project ID.
+/// Construct the Vertex AI Live WebSocket URL from region.
 ///
-/// Returns `RealtimeError::ConfigError` if region or project_id is empty.
+/// Returns `RealtimeError::ConfigError` if region is empty.
 #[cfg(feature = "vertex-live")]
-pub fn build_vertex_live_url(region: &str, project_id: &str) -> Result<String> {
+pub fn build_vertex_live_url(region: &str) -> Result<String> {
     if region.is_empty() {
         return Err(RealtimeError::config("Vertex AI Live requires a non-empty region"));
     }
-    if project_id.is_empty() {
-        return Err(RealtimeError::config("Vertex AI Live requires a non-empty project_id"));
-    }
     Ok(format!(
         "wss://{region}-aiplatform.googleapis.com/ws/\
-         google.cloud.aiplatform.v1beta1.LlmBidiService/BidiGenerateContent\
-         ?project_id={project_id}",
+         google.cloud.aiplatform.v1beta1.LlmBidiService/BidiGenerateContent"
     ))
 }
 
