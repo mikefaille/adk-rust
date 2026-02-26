@@ -53,6 +53,23 @@ pub struct Runner {
 }
 
 impl Runner {
+    fn create_context_builder<'a>(
+        app_name: String,
+        invocation_id: &'a str,
+        agent: Arc<dyn Agent>,
+        user_id: &'a str,
+        session_id: &'a str,
+        user_content: Content,
+    ) -> crate::context::RunnerContextBuilder {
+        crate::context::RunnerContext::builder()
+            .invocation_id(invocation_id)
+            .agent(agent)
+            .user_id(user_id)
+            .app_name(app_name)
+            .session_id(session_id)
+            .user_content(user_content)
+    }
+
     pub fn new(config: RunnerConfig) -> Result<Self> {
         let cache_manager = config
             .context_cache_config
@@ -156,14 +173,15 @@ impl Runner {
                 }
             }
 
-            let mut builder = RunnerContext::builder()
-                .invocation_id(invocation_id.clone())
-                .agent(agent_to_run.clone())
-                .user_id(user_id.clone())
-                .app_name(app_name.clone())
-                .session_id(session_id.clone())
-                .user_content(effective_user_content.clone())
-                .session(Arc::from(session));
+            let mut builder = Self::create_context_builder(
+                app_name.clone(),
+                &invocation_id,
+                agent_to_run.clone(),
+                &user_id,
+                &session_id,
+                effective_user_content.clone(),
+            )
+            .session(Arc::from(session));
 
             // Add optional services
             if let Some(service) = artifact_service {
@@ -223,14 +241,15 @@ impl Runner {
                     Ok(Some(modified)) => {
                         effective_user_content = modified;
 
-                        let mut builder = RunnerContext::builder()
-                            .invocation_id(invocation_id.clone())
-                            .agent(agent_to_run.clone())
-                            .user_id(user_id.clone())
-                            .app_name(app_name.clone())
-                            .session_id(session_id.clone())
-                            .user_content(effective_user_content.clone())
-                            .mutable_session(ctx.mutable_session().clone());
+                        let mut builder = Self::create_context_builder(
+                            app_name.clone(),
+                            &invocation_id,
+                            agent_to_run.clone(),
+                            &user_id,
+                            &session_id,
+                            effective_user_content.clone(),
+                        )
+                        .mutable_session(ctx.mutable_session().clone());
 
                         if let Some(service) = artifact_service_clone.clone() {
                             let scoped = adk_artifact::ScopedArtifacts::new(
@@ -317,14 +336,15 @@ impl Runner {
                     if let Some(cache_name) = cm.record_invocation() {
                         run_config.cached_content = Some(cache_name.to_string());
                         // Rebuild the invocation context with the updated run config
-                        let mut builder = RunnerContext::builder()
-                            .invocation_id(invocation_id.clone())
-                            .agent(agent_to_run.clone())
-                            .user_id(user_id.clone())
-                            .app_name(app_name.clone())
-                            .session_id(session_id.clone())
-                            .user_content(effective_user_content.clone())
-                            .mutable_session(ctx.mutable_session().clone());
+                        let mut builder = Self::create_context_builder(
+                            app_name.clone(),
+                            &invocation_id,
+                            agent_to_run.clone(),
+                            &user_id,
+                            &session_id,
+                            effective_user_content.clone(),
+                        )
+                        .mutable_session(ctx.mutable_session().clone());
 
                         if let Some(service) = artifact_service_clone.clone() {
                             let scoped = adk_artifact::ScopedArtifacts::new(
@@ -440,14 +460,15 @@ impl Runner {
                 if let Some(target_agent) = Self::find_agent(&root_agent, &target_name) {
                     // For transfers, we reuse the same mutable session to preserve state
                     let transfer_invocation_id = format!("inv-{}", uuid::Uuid::new_v4());
-                    let mut transfer_builder = RunnerContext::builder()
-                        .invocation_id(transfer_invocation_id.clone())
-                        .agent(target_agent.clone())
-                        .user_id(user_id.clone())
-                        .app_name(app_name.clone())
-                        .session_id(session_id.clone())
-                        .user_content(effective_user_content.clone())
-                        .mutable_session(ctx.mutable_session().clone());
+                    let mut transfer_builder = Self::create_context_builder(
+                        app_name.clone(),
+                        &transfer_invocation_id,
+                        target_agent.clone(),
+                        &user_id,
+                        &session_id,
+                        effective_user_content.clone(),
+                    )
+                    .mutable_session(ctx.mutable_session().clone());
 
                     if let Some(service) = artifact_service_clone {
                         let scoped = adk_artifact::ScopedArtifacts::new(
