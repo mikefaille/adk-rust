@@ -1,3 +1,9 @@
+# =============================================================================
+# ADK-Rust Development Environment (devenv.nix)
+# =============================================================================
+# Optimized for monorepo scale to fix "Argument list too long" (ARG_MAX) errors.
+# =============================================================================
+
 { pkgs, lib, config, ... }:
 
 let
@@ -10,8 +16,10 @@ let
     paths = [
       pkgs.pkg-config
       pkgs.openssl
+      pkgs.cmake
+      pkgs.protobuf
       pkgs.glib
-      pkgs.libopus
+      pkgs.glib.dev
       pkgs.libva
       pkgs.libvdpau
       pkgs.libxcb
@@ -34,18 +42,28 @@ let
   };
 
 in {
-  # https://devenv.sh/basics/
-  # env.GREET = "devenv";
+  name = "adk-rust";
+
+  # Enable Cachix binary cache
+  cachix.pull = [ "devenv" ];
+
+  # Load .env file automatically
 
   # https://devenv.sh/packages/
   packages = [ 
     pkgs.git
-    pkgs.curl
     pkgs.jq
+    pkgs.curl
     pkgs.nodejs_22
     pkgs.bun
     pkgs.sccache
-    pkgs.livekit-cli
+    pkgs.mold
+    pkgs.wild
+    
+    # System libraries (redundant but safe for pkg-config)
+    pkgs.glib
+    pkgs.glib.dev
+    pkgs.libva
     
     # Core build environment
     adkBuildEnv
@@ -54,6 +72,8 @@ in {
     llvm.clang
     llvm.libclang
     llvm.lld
+  ] ++ lib.optionals pkgs.stdenv.isLinux [
+    pkgs.valgrind
   ];
 
   # Centralized Build Search Paths
@@ -63,13 +83,16 @@ in {
   
   # Rust/LLVM configuration
   env.LIBCLANG_PATH = "${llvm.libclang.lib}/lib";
+  env.PROTOC = "${adkBuildEnv}/bin/protoc";
   env.CC = "clang";
   env.CXX = "clang++";
   env.LD = "lld";
   
-  # Sccache optimization
+  # Optimization
   env.RUSTC_WRAPPER = "sccache";
   env.SCCACHE_CACHE_SIZE = "50G";
+  env.WILD_INCREMENTAL = "1";
+  env.CMAKE_POLICY_VERSION_MINIMUM = "3.5";
 
   # https://devenv.sh/languages/
   languages.rust = {
@@ -79,20 +102,25 @@ in {
   };
 
   # https://devenv.sh/scripts/
-  scripts.fmt.exec = "cargo fmt --all";
-  scripts.check.exec = "cargo check --all-features";
-  scripts.test.exec = "cargo test --all-features";
-  scripts.clippy.exec = "cargo clippy --all-features -- -D warnings";
+  scripts.ws-fmt.exec = "cargo fmt --all $@";
+  scripts.ws-check.exec = "cargo check --all-features $@";
+  scripts.ws-test.exec = "cargo test --all-features $@";
+  scripts.ws-clippy.exec = "cargo clippy --all-features -- -D warnings $@";
 
   # https://devenv.sh/pre-commit-hooks/
-  pre-commit.hooks = {
+  git-hooks.hooks = {
     rustfmt.enable = true;
     clippy.enable = true;
     clippy.settings.allFeatures = true;
   };
 
-  # https://devenv.sh/processes/
-  # processes.ping.exec = "ping devenv.sh";
-
-  # See full reference at https://devenv.sh/reference/options/
+  enterShell = ''
+    echo "🚀 Welcome to the ADK-Rust Development Environment!"
+    echo "   Rust:    $(rustc --version)"
+    echo "   Cargo:   $(cargo --version)"
+    echo "   sccache: $(sccache --version 2>/dev/null || echo 'not found')"
+    echo "   Node:    $(node --version)"
+    echo ""
+    echo "💡 Run 'devenv tasks list' or use the scripts: ws-fmt, ws-check, ws-test, ws-clippy."
+  '';
 }
