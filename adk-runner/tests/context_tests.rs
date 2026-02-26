@@ -110,15 +110,16 @@ fn test_context_creation() {
     let content =
         Content { role: "user".to_string(), parts: vec![Part::Text { text: "Hello".to_string() }] };
 
-    let ctx = RunnerContext::new(
-        "inv-123".to_string(),
-        agent.clone(),
-        "user-456".to_string(),
-        "test-app".to_string(),
-        "session-789".to_string(),
-        content.clone(),
-        Arc::new(MockSessionWithState::new()),
-    );
+    let ctx = RunnerContext::builder()
+        .invocation_id("inv-123".to_string())
+        .agent(agent.clone())
+        .user_id("user-456".to_string())
+        .app_name("test-app".to_string())
+        .session_id("session-789".to_string())
+        .user_content(content.clone())
+        .session(Arc::new(MockSessionWithState::new()))
+        .build()
+        .expect("Failed to build context");
 
     assert_eq!(ctx.invocation_id(), "inv-123");
     assert_eq!(ctx.agent_name(), "test_agent");
@@ -135,16 +136,17 @@ fn test_context_with_branch() {
 
     let content = Content::new("user");
 
-    let ctx = RunnerContext::new(
-        "inv-123".to_string(),
-        agent,
-        "user-456".to_string(),
-        "test-app".to_string(),
-        "session-789".to_string(),
-        content,
-        Arc::new(MockSessionWithState::new()),
-    )
-    .with_branch("main.sub".to_string());
+    let ctx = RunnerContext::builder()
+        .invocation_id("inv-123".to_string())
+        .agent(agent)
+        .user_id("user-456".to_string())
+        .app_name("test-app".to_string())
+        .session_id("session-789".to_string())
+        .user_content(content)
+        .session(Arc::new(MockSessionWithState::new()))
+        .build()
+        .expect("Failed to build context")
+        .with_branch("main.sub".to_string());
 
     assert_eq!(ctx.branch(), "main.sub");
 }
@@ -157,16 +159,17 @@ fn test_context_with_run_config() {
 
     let config = RunConfig { streaming_mode: StreamingMode::SSE, ..RunConfig::default() };
 
-    let ctx = RunnerContext::new(
-        "inv-123".to_string(),
-        agent,
-        "user-456".to_string(),
-        "test-app".to_string(),
-        "session-789".to_string(),
-        content,
-        Arc::new(MockSessionWithState::new()),
-    )
-    .with_run_config(config);
+    let ctx = RunnerContext::builder()
+        .invocation_id("inv-123".to_string())
+        .agent(agent)
+        .user_id("user-456".to_string())
+        .app_name("test-app".to_string())
+        .session_id("session-789".to_string())
+        .user_content(content)
+        .session(Arc::new(MockSessionWithState::new()))
+        .run_config(config)
+        .build()
+        .expect("Failed to build context");
 
     assert_eq!(ctx.run_config().streaming_mode, StreamingMode::SSE);
 }
@@ -177,15 +180,16 @@ fn test_context_end_invocation() {
 
     let content = Content::new("user");
 
-    let ctx = RunnerContext::new(
-        "inv-123".to_string(),
-        agent,
-        "user-456".to_string(),
-        "test-app".to_string(),
-        "session-789".to_string(),
-        content,
-        Arc::new(MockSessionWithState::new()),
-    );
+    let ctx = RunnerContext::builder()
+        .invocation_id("inv-123".to_string())
+        .agent(agent)
+        .user_id("user-456".to_string())
+        .app_name("test-app".to_string())
+        .session_id("session-789".to_string())
+        .user_content(content)
+        .session(Arc::new(MockSessionWithState::new()))
+        .build()
+        .expect("Failed to build context");
 
     assert!(!ctx.ended());
     ctx.end_invocation();
@@ -198,15 +202,16 @@ fn test_context_agent_access() {
 
     let content = Content::new("user");
 
-    let ctx = RunnerContext::new(
-        "inv-123".to_string(),
-        agent.clone(),
-        "user-456".to_string(),
-        "test-app".to_string(),
-        "session-789".to_string(),
-        content,
-        Arc::new(MockSessionWithState::new()),
-    );
+    let ctx = RunnerContext::builder()
+        .invocation_id("inv-123".to_string())
+        .agent(agent.clone())
+        .user_id("user-456".to_string())
+        .app_name("test-app".to_string())
+        .session_id("session-789".to_string())
+        .user_content(content)
+        .session(Arc::new(MockSessionWithState::new()))
+        .build()
+        .expect("Failed to build context");
 
     let retrieved_agent = ctx.agent();
     assert_eq!(retrieved_agent.name(), "test_agent");
@@ -218,15 +223,16 @@ fn test_context_optional_services() {
 
     let content = Content::new("user");
 
-    let ctx = RunnerContext::new(
-        "inv-123".to_string(),
-        agent,
-        "user-456".to_string(),
-        "test-app".to_string(),
-        "session-789".to_string(),
-        content,
-        Arc::new(MockSessionWithState::new()),
-    );
+    let ctx = RunnerContext::builder()
+        .invocation_id("inv-123".to_string())
+        .agent(agent)
+        .user_id("user-456".to_string())
+        .app_name("test-app".to_string())
+        .session_id("session-789".to_string())
+        .user_content(content)
+        .session(Arc::new(MockSessionWithState::new()))
+        .build()
+        .expect("Failed to build context");
 
     assert!(ctx.artifacts().is_none());
     assert!(ctx.memory().is_none());
@@ -287,15 +293,16 @@ fn test_mutable_session_shared_across_contexts() {
     let content = Content::new("user");
 
     // Create first context
-    let ctx1 = RunnerContext::new(
-        "inv-1".to_string(),
-        agent.clone(),
-        "user-456".to_string(),
-        "test-app".to_string(),
-        "session-789".to_string(),
-        content.clone(),
-        Arc::new(MockSessionWithState::new()),
-    );
+    let ctx1 = RunnerContext::builder()
+        .invocation_id("inv-1".to_string())
+        .agent(agent.clone())
+        .user_id("user-456".to_string())
+        .app_name("test-app".to_string())
+        .session_id("session-789".to_string())
+        .user_content(content.clone())
+        .session(Arc::new(MockSessionWithState::new()))
+        .build()
+        .expect("Failed to build context 1");
 
     // Get the mutable session from ctx1 and apply a state delta
     let mut delta = HashMap::new();
@@ -303,15 +310,16 @@ fn test_mutable_session_shared_across_contexts() {
     ctx1.mutable_session().apply_state_delta(&delta);
 
     // Create second context sharing the same MutableSession
-    let ctx2 = RunnerContext::with_mutable_session(
-        "inv-2".to_string(),
-        agent.clone(),
-        "user-456".to_string(),
-        "test-app".to_string(),
-        "session-789".to_string(),
-        content,
-        ctx1.mutable_session().clone(),
-    );
+    let ctx2 = RunnerContext::builder()
+        .invocation_id("inv-2".to_string())
+        .agent(agent.clone())
+        .user_id("user-456".to_string())
+        .app_name("test-app".to_string())
+        .session_id("session-789".to_string())
+        .user_content(content)
+        .mutable_session(ctx1.mutable_session().clone())
+        .build()
+        .expect("Failed to build context 2");
 
     // ctx2 should see the state set by ctx1
     assert_eq!(

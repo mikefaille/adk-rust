@@ -166,6 +166,12 @@ pub struct RunnerContext {
 }
 
 impl RunnerContext {
+    /// Create a new builder for `RunnerContext`.
+    pub fn builder() -> RunnerContextBuilder {
+        RunnerContextBuilder::default()
+    }
+
+    #[deprecated(since = "0.4.0", note = "Use RunnerContext::builder() instead")]
     pub fn new(
         invocation_id: String,
         agent: Arc<dyn Agent>,
@@ -175,29 +181,22 @@ impl RunnerContext {
         user_content: Content,
         session: Arc<dyn AdkSession>,
     ) -> Self {
-        let base = Self::build_base_context(
-            invocation_id,
-            &agent,
-            user_id,
-            app_name,
-            session_id,
-            user_content,
-        );
-
-        Self {
-            base,
-            agent,
-            artifacts: None,
-            memory: None,
-            run_config: RunConfig::default(),
-            ended: Arc::new(AtomicBool::new(false)),
-            session: Arc::new(MutableSession::new(session)),
-        }
+        Self::builder()
+            .invocation_id(invocation_id)
+            .agent(agent)
+            .user_id(user_id)
+            .app_name(app_name)
+            .session_id(session_id)
+            .user_content(user_content)
+            .session(session)
+            .build()
+            .expect("Failed to build RunnerContext")
     }
 
     /// Create a RunnerContext with an existing MutableSession.
     /// This allows sharing the same mutable session across multiple contexts
     /// (e.g., for agent transfers).
+    #[deprecated(since = "0.4.0", note = "Use RunnerContext::builder() with mutable_session() instead")]
     pub fn with_mutable_session(
         invocation_id: String,
         agent: Arc<dyn Agent>,
@@ -207,42 +206,16 @@ impl RunnerContext {
         user_content: Content,
         session: Arc<MutableSession>,
     ) -> Self {
-        let base = Self::build_base_context(
-            invocation_id,
-            &agent,
-            user_id,
-            app_name,
-            session_id,
-            user_content,
-        );
-
-        Self {
-            base,
-            agent,
-            artifacts: None,
-            memory: None,
-            run_config: RunConfig::default(),
-            ended: Arc::new(AtomicBool::new(false)),
-            session,
-        }
-    }
-
-    fn build_base_context(
-        invocation_id: String,
-        agent: &Arc<dyn Agent>,
-        user_id: String,
-        app_name: String,
-        session_id: String,
-        user_content: Content,
-    ) -> adk_core::AdkContext {
-        adk_core::AdkContext::builder()
+        Self::builder()
             .invocation_id(invocation_id)
-            .agent_name(agent.name())
+            .agent(agent)
             .user_id(user_id)
             .app_name(app_name)
             .session_id(session_id)
             .user_content(user_content)
+            .mutable_session(session)
             .build()
+            .expect("Failed to build RunnerContext")
     }
 
     pub fn with_branch(mut self, branch: String) -> Self {
@@ -334,5 +307,116 @@ impl InvocationContextTrait for RunnerContext {
 
     fn ended(&self) -> bool {
         self.ended.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+/// Builder for `RunnerContext`.
+#[derive(Default)]
+pub struct RunnerContextBuilder {
+    invocation_id: Option<String>,
+    agent: Option<Arc<dyn Agent>>,
+    user_id: Option<String>,
+    app_name: Option<String>,
+    session_id: Option<String>,
+    user_content: Option<Content>,
+    artifacts: Option<Arc<dyn Artifacts>>,
+    memory: Option<Arc<dyn Memory>>,
+    run_config: Option<RunConfig>,
+    session: Option<Arc<dyn AdkSession>>,
+    mutable_session: Option<Arc<MutableSession>>,
+}
+
+impl RunnerContextBuilder {
+    pub fn invocation_id(mut self, id: impl Into<String>) -> Self {
+        self.invocation_id = Some(id.into());
+        self
+    }
+
+    pub fn agent(mut self, agent: Arc<dyn Agent>) -> Self {
+        self.agent = Some(agent);
+        self
+    }
+
+    pub fn user_id(mut self, id: impl Into<String>) -> Self {
+        self.user_id = Some(id.into());
+        self
+    }
+
+    pub fn app_name(mut self, name: impl Into<String>) -> Self {
+        self.app_name = Some(name.into());
+        self
+    }
+
+    pub fn session_id(mut self, id: impl Into<String>) -> Self {
+        self.session_id = Some(id.into());
+        self
+    }
+
+    pub fn user_content(mut self, content: Content) -> Self {
+        self.user_content = Some(content);
+        self
+    }
+
+    pub fn artifacts(mut self, artifacts: Arc<dyn Artifacts>) -> Self {
+        self.artifacts = Some(artifacts);
+        self
+    }
+
+    pub fn memory(mut self, memory: Arc<dyn Memory>) -> Self {
+        self.memory = Some(memory);
+        self
+    }
+
+    pub fn run_config(mut self, config: RunConfig) -> Self {
+        self.run_config = Some(config);
+        self
+    }
+
+    pub fn session(mut self, session: Arc<dyn AdkSession>) -> Self {
+        self.session = Some(session);
+        self.mutable_session = None; // Reset mutable session if raw session is provided
+        self
+    }
+
+    pub fn mutable_session(mut self, session: Arc<MutableSession>) -> Self {
+        self.mutable_session = Some(session);
+        self.session = None; // Reset raw session if mutable session is provided
+        self
+    }
+
+    pub fn build(self) -> adk_core::Result<RunnerContext> {
+        let invocation_id = self.invocation_id.ok_or_else(|| adk_core::AdkError::Config("Invocation ID is required".into()))?;
+        let agent = self.agent.ok_or_else(|| adk_core::AdkError::Config("Agent is required".into()))?;
+        let user_id = self.user_id.ok_or_else(|| adk_core::AdkError::Config("User ID is required".into()))?;
+        let app_name = self.app_name.unwrap_or_else(|| "adk-app".to_string());
+        let session_id = self.session_id.ok_or_else(|| adk_core::AdkError::Config("Session ID is required".into()))?;
+        let user_content = self.user_content.unwrap_or_default();
+
+        let session = if let Some(ms) = self.mutable_session {
+            ms
+        } else if let Some(s) = self.session {
+            Arc::new(MutableSession::new(s))
+        } else {
+            return Err(adk_core::AdkError::Config("Session is required".into()));
+        };
+
+        let base = adk_core::AdkContext::builder()
+            .invocation_id(invocation_id)
+            .agent_name(agent.name())
+            .user_id(user_id)
+            .app_name(app_name)
+            .session_id(session_id)
+            .user_content(user_content)
+            .build();
+
+        Ok(RunnerContext {
+            base,
+            agent,
+            artifacts: self.artifacts,
+            memory: self.memory,
+            run_config: self.run_config.unwrap_or_default(),
+            ended: Arc::new(AtomicBool::new(false)),
+            session,
+        })
     }
 }

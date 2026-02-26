@@ -156,15 +156,14 @@ impl Runner {
                 }
             }
 
-            let mut invocation_ctx = RunnerContext::new(
-                invocation_id.clone(),
-                agent_to_run.clone(),
-                user_id.clone(),
-                app_name.clone(),
-                session_id.clone(),
-                effective_user_content.clone(),
-                Arc::from(session),
-            );
+            let mut builder = RunnerContext::builder()
+                .invocation_id(invocation_id.clone())
+                .agent(agent_to_run.clone())
+                .user_id(user_id.clone())
+                .app_name(app_name.clone())
+                .session_id(session_id.clone())
+                .user_content(effective_user_content.clone())
+                .session(Arc::from(session));
 
             // Add optional services
             if let Some(service) = artifact_service {
@@ -175,16 +174,16 @@ impl Runner {
                     user_id.clone(),
                     session_id.clone(),
                 );
-                invocation_ctx = invocation_ctx.with_artifacts(Arc::new(scoped));
+                builder = builder.artifacts(Arc::new(scoped));
             }
             if let Some(memory) = memory_service {
-                invocation_ctx = invocation_ctx.with_memory(memory);
+                builder = builder.memory(memory);
             }
 
             // Apply run config (streaming mode, etc.)
-            invocation_ctx = invocation_ctx.with_run_config(run_config.clone());
+            builder = builder.run_config(run_config.clone());
 
-            let mut ctx = Arc::new(invocation_ctx);
+            let mut ctx: Arc<RunnerContext> = Arc::new(builder.build()?);
 
             if let Some(manager) = plugin_manager.as_ref() {
                 match manager
@@ -224,15 +223,14 @@ impl Runner {
                     Ok(Some(modified)) => {
                         effective_user_content = modified;
 
-                        let mut refreshed_ctx = RunnerContext::with_mutable_session(
-                            invocation_id.clone(),
-                            agent_to_run.clone(),
-                            user_id.clone(),
-                            app_name.clone(),
-                            session_id.clone(),
-                            effective_user_content.clone(),
-                            ctx.mutable_session().clone(),
-                        );
+                        let mut builder = RunnerContext::builder()
+                            .invocation_id(invocation_id.clone())
+                            .agent(agent_to_run.clone())
+                            .user_id(user_id.clone())
+                            .app_name(app_name.clone())
+                            .session_id(session_id.clone())
+                            .user_content(effective_user_content.clone())
+                            .mutable_session(ctx.mutable_session().clone());
 
                         if let Some(service) = artifact_service_clone.clone() {
                             let scoped = adk_artifact::ScopedArtifacts::new(
@@ -241,13 +239,13 @@ impl Runner {
                                 user_id.clone(),
                                 session_id.clone(),
                             );
-                            refreshed_ctx = refreshed_ctx.with_artifacts(Arc::new(scoped));
+                            builder = builder.artifacts(Arc::new(scoped));
                         }
                         if let Some(memory) = memory_service_clone.clone() {
-                            refreshed_ctx = refreshed_ctx.with_memory(memory);
+                            builder = builder.memory(memory);
                         }
-                        refreshed_ctx = refreshed_ctx.with_run_config(run_config.clone());
-                        ctx = Arc::new(refreshed_ctx);
+                        builder = builder.run_config(run_config.clone());
+                        ctx = Arc::new(builder.build()?);
                     }
                     Ok(None) => {}
                     Err(e) => {
@@ -319,15 +317,15 @@ impl Runner {
                     if let Some(cache_name) = cm.record_invocation() {
                         run_config.cached_content = Some(cache_name.to_string());
                         // Rebuild the invocation context with the updated run config
-                        let mut refreshed_ctx = RunnerContext::with_mutable_session(
-                            invocation_id.clone(),
-                            agent_to_run.clone(),
-                            user_id.clone(),
-                            app_name.clone(),
-                            session_id.clone(),
-                            effective_user_content.clone(),
-                            ctx.mutable_session().clone(),
-                        );
+                        let mut builder = RunnerContext::builder()
+                            .invocation_id(invocation_id.clone())
+                            .agent(agent_to_run.clone())
+                            .user_id(user_id.clone())
+                            .app_name(app_name.clone())
+                            .session_id(session_id.clone())
+                            .user_content(effective_user_content.clone())
+                            .mutable_session(ctx.mutable_session().clone());
+
                         if let Some(service) = artifact_service_clone.clone() {
                             let scoped = adk_artifact::ScopedArtifacts::new(
                                 service,
@@ -335,13 +333,13 @@ impl Runner {
                                 user_id.clone(),
                                 session_id.clone(),
                             );
-                            refreshed_ctx = refreshed_ctx.with_artifacts(Arc::new(scoped));
+                            builder = builder.artifacts(Arc::new(scoped));
                         }
                         if let Some(memory) = memory_service_clone.clone() {
-                            refreshed_ctx = refreshed_ctx.with_memory(memory);
+                            builder = builder.memory(memory);
                         }
-                        refreshed_ctx = refreshed_ctx.with_run_config(run_config.clone());
-                        ctx = Arc::new(refreshed_ctx);
+                        builder = builder.run_config(run_config.clone());
+                        ctx = Arc::new(builder.build()?);
                     }
                 }
             }
@@ -442,15 +440,14 @@ impl Runner {
                 if let Some(target_agent) = Self::find_agent(&root_agent, &target_name) {
                     // For transfers, we reuse the same mutable session to preserve state
                     let transfer_invocation_id = format!("inv-{}", uuid::Uuid::new_v4());
-                    let mut transfer_ctx = RunnerContext::with_mutable_session(
-                        transfer_invocation_id.clone(),
-                        target_agent.clone(),
-                        user_id.clone(),
-                        app_name.clone(),
-                        session_id.clone(),
-                        effective_user_content.clone(),
-                        ctx.mutable_session().clone(),
-                    );
+                    let mut transfer_builder = RunnerContext::builder()
+                        .invocation_id(transfer_invocation_id.clone())
+                        .agent(target_agent.clone())
+                        .user_id(user_id.clone())
+                        .app_name(app_name.clone())
+                        .session_id(session_id.clone())
+                        .user_content(effective_user_content.clone())
+                        .mutable_session(ctx.mutable_session().clone());
 
                     if let Some(service) = artifact_service_clone {
                         let scoped = adk_artifact::ScopedArtifacts::new(
@@ -459,13 +456,13 @@ impl Runner {
                             user_id.clone(),
                             session_id.clone(),
                         );
-                        transfer_ctx = transfer_ctx.with_artifacts(Arc::new(scoped));
+                        transfer_builder = transfer_builder.artifacts(Arc::new(scoped));
                     }
                     if let Some(memory) = memory_service_clone {
-                        transfer_ctx = transfer_ctx.with_memory(memory);
+                        transfer_builder = transfer_builder.memory(memory);
                     }
 
-                    let transfer_ctx = Arc::new(transfer_ctx);
+                    let transfer_ctx: Arc<RunnerContext> = Arc::new(transfer_builder.build()?);
 
                     // Run the transferred agent
                     let mut transfer_stream = match target_agent.run(transfer_ctx.clone()).await {
