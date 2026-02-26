@@ -3,10 +3,10 @@ use crate::types::Content;
 use std::collections::HashMap;
 
 /// A concrete, domain-focused implementation of `ReadonlyContext`.
-/// 
+///
 /// This struct holds the foundational identifiers for an ADK execution (Invocation, Session, etc.)
-/// without being tied to any specific observability framework. 
-/// 
+/// without being tied to any specific observability framework.
+///
 /// Tracing capabilities are provided as extension traits in `adk-telemetry`.
 #[derive(Debug, Clone, Default)]
 pub struct AdkContext {

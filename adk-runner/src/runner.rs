@@ -357,7 +357,7 @@ impl Runner {
                 agent_span.record("adk.skills.selected_name", selected_skill_name);
                 agent_span.record("adk.skills.selected_id", selected_skill_id);
             }
-            // event_id and gen_ai.conversation.id are legacy/specific, 
+            // event_id and gen_ai.conversation.id are legacy/specific,
             // the new generalized ones are already in the span from TraceContextExt.
 
             let mut agent_stream = match agent_to_run.run(ctx.clone()).instrument(agent_span).await {

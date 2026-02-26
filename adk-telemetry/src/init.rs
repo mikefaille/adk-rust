@@ -21,10 +21,7 @@ pub struct TelemetryConfig {
 impl TelemetryConfig {
     /// Create a new configuration with the given service name.
     pub fn new(service_name: impl Into<String>) -> Self {
-        Self {
-            service_name: service_name.into(),
-            ..Default::default()
-        }
+        Self { service_name: service_name.into(), ..Default::default() }
     }
 
     /// Enable OTLP export to the specified endpoint.
@@ -59,7 +56,7 @@ impl TelemetryConfig {
     }
 
     /// Load configuration from environment variables.
-    /// 
+    ///
     /// Supported variables:
     /// - `SERVICE_NAME`: The name of the service (default: "adk-service")
     /// - `OTLP_ENDPOINT`: OTLP collector endpoint (e.g., "http://localhost:4317")
@@ -67,9 +64,11 @@ impl TelemetryConfig {
     /// - `LANGSMITH_PROJECT`: LangSmith project name (enables LangSmith layer)
     /// - `LOG_LEVEL`: Default log level (default: "info")
     pub fn from_env() -> Self {
-        let service_name = std::env::var("SERVICE_NAME").unwrap_or_else(|_| "adk-service".to_string());
+        let service_name =
+            std::env::var("SERVICE_NAME").unwrap_or_else(|_| "adk-service".to_string());
         let otlp_endpoint = std::env::var("OTLP_ENDPOINT").ok();
-        let adk_exporter = std::env::var("ADK_TELEMETRY_EXPORTER").map(|v| v == "true").unwrap_or(false);
+        let adk_exporter =
+            std::env::var("ADK_TELEMETRY_EXPORTER").map(|v| v == "true").unwrap_or(false);
         let langsmith_project = std::env::var("LANGSMITH_PROJECT").ok();
         let default_level = std::env::var("LOG_LEVEL").ok();
 
@@ -108,10 +107,10 @@ pub fn init_with_adk_exporter(
 ) -> Result<Arc<AdkSpanExporter>, Box<dyn std::error::Error>> {
     let exporter = Arc::new(AdkSpanExporter::new());
     let config = TelemetryConfig::new(service_name).with_adk_exporter();
-    
+
     // Internal helper to bypass normal init for pre-created exporter
     init_internal(config, Some(exporter.clone()))?;
-    
+
     Ok(exporter)
 }
 
@@ -148,10 +147,7 @@ fn init_internal(
         }
 
         // Always add fmt (console) layer
-        let fmt_layer = fmt::layer()
-            .with_target(true)
-            .with_thread_ids(true)
-            .with_line_number(true);
+        let fmt_layer = fmt::layer().with_target(true).with_thread_ids(true).with_line_number(true);
 
         // OTLP Layer
         #[cfg(not(target_arch = "wasm32"))]
@@ -174,10 +170,9 @@ fn init_internal(
             let meter_provider = opentelemetry_otlp::new_pipeline()
                 .metrics(opentelemetry_sdk::runtime::Tokio)
                 .with_exporter(opentelemetry_otlp::new_exporter().tonic().with_endpoint(endpoint))
-                .with_resource(opentelemetry_sdk::Resource::new(vec![opentelemetry::KeyValue::new(
-                    "service.name",
-                    config.service_name.clone(),
-                )]))
+                .with_resource(opentelemetry_sdk::Resource::new(vec![
+                    opentelemetry::KeyValue::new("service.name", config.service_name.clone()),
+                ]))
                 .build()
                 .expect("Failed to build meter provider");
 
@@ -205,13 +200,11 @@ fn init_internal(
             None
         };
 
-        let registry = tracing_subscriber::registry()
-            .with(filter)
-            .with(fmt_layer);
+        let registry = tracing_subscriber::registry().with(filter).with(fmt_layer);
 
         #[cfg(not(target_arch = "wasm32"))]
         let registry = registry.with(otlp_layer);
-        
+
         let registry = registry.with(adk_layer);
 
         #[cfg(feature = "langsmith")]

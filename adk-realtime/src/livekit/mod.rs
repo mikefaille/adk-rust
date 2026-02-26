@@ -145,8 +145,6 @@ pub use livekit_api::access_token::VideoGrants;
 /// ```
 pub mod prelude {
     pub use super::{
-        // Configuration
-        LiveKitConfig,
         // Authentication
         AccessToken,
         // Audio I/O
@@ -156,6 +154,8 @@ pub mod prelude {
         ConnectionState,
         DataPacket,
         DataPacketKind,
+        // Configuration
+        LiveKitConfig,
         // Bridge utilities
         LiveKitEventHandler,
         // Tracks

@@ -1,10 +1,10 @@
 //! LangSmith tracing layer implementation
+use crate::visitor::StringVisitor;
 #[cfg(feature = "langsmith")]
-use langsmith_rust::{Tracer, RunType};
+use langsmith_rust::{RunType, Tracer};
+use serde_json::json;
 use tracing::{Id, Subscriber};
 use tracing_subscriber::{Layer, layer::Context, registry::LookupSpan};
-use serde_json::json;
-use crate::visitor::StringVisitor;
 
 #[cfg(feature = "langsmith")]
 /// Tracing layer that captures spans and exports them to LangSmith
@@ -50,7 +50,7 @@ where
         let run_type = Self::map_run_type(span_name);
 
         let inputs = json!(fields_map);
-        
+
         let mut tracer = if let Some(parent) = span.parent() {
             if let Some(parent_run) = parent.extensions().get::<LangSmithRun>() {
                 parent_run.tracer.create_child(span_name, run_type, inputs)
@@ -63,7 +63,7 @@ where
 
         // Add metadata/labels
         if let Some(session_id) = fields_map.get("adk.agent.session_id") {
-             tracer = tracer.with_thread_id(session_id.clone());
+            tracer = tracer.with_thread_id(session_id.clone());
         }
 
         let mut tracer_to_post = tracer.clone();
@@ -80,10 +80,10 @@ where
 
         if let Some(run) = extensions.get::<LangSmithRun>() {
             let mut tracer = run.tracer.clone();
-            
+
             // For now just setting fixed empty output
             tracer.end(json!({}));
-            
+
             tokio::spawn(async move {
                 let _ = tracer.patch().await;
             });

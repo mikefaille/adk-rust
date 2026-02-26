@@ -2,7 +2,7 @@ use adk_core::ReadonlyContext;
 use tracing::Span;
 
 /// An extension trait that adds tracing capabilities to any ADK context.
-/// 
+///
 /// By providing this as an extension trait in `adk-telemetry`, we keep `adk-core`
 /// lightweight and free of tracing dependencies, while ensuring all frameworks
 /// (Realtime, Skill, Model) can gain high-fidelity observability with zero effort.

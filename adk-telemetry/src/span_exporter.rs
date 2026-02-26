@@ -1,8 +1,8 @@
+use crate::visitor::StringVisitor;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use tracing::{Id, Subscriber, debug};
 use tracing_subscriber::{Layer, layer::Context, registry::LookupSpan};
-use crate::visitor::StringVisitor;
 
 /// ADK-Go style span exporter that stores spans by event_id
 /// Follows the pattern from APIServerSpanExporter in ADK-Go
@@ -44,11 +44,13 @@ impl AdkSpanExporter {
         let session_index = self.session_index.read().unwrap();
         if let Some(event_ids) = session_index.get(session_id) {
             let trace_dict = self.trace_dict.read().unwrap();
-            let spans: Vec<_> = event_ids
-                .iter()
-                .filter_map(|id| trace_dict.get(id).cloned())
-                .collect();
-            debug!("get_session_trace result for session_id '{}': {} spans", session_id, spans.len());
+            let spans: Vec<_> =
+                event_ids.iter().filter_map(|id| trace_dict.get(id).cloned()).collect();
+            debug!(
+                "get_session_trace result for session_id '{}': {} spans",
+                session_id,
+                spans.len()
+            );
             spans
         } else {
             debug!("get_session_trace result for session_id '{}': 0 spans", session_id);
@@ -294,10 +296,6 @@ mod tests {
 
         let trace = exporter.get_session_trace(session_id);
         assert_eq!(trace.len(), 1, "Should have only 1 span for the session");
-        assert_eq!(
-            trace[0].get("adk.agent.event_id").map(String::as_str),
-            Some(event_id)
-        );
+        assert_eq!(trace[0].get("adk.agent.event_id").map(String::as_str), Some(event_id));
     }
 }
-

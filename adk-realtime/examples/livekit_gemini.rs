@@ -58,8 +58,8 @@
 use std::sync::Arc;
 
 use adk_realtime::RealtimeConfig;
-use adk_realtime::livekit::{LiveKitEventHandler, bridge_input};
 use adk_realtime::gemini::{GeminiLiveBackend, GeminiRealtimeModel};
+use adk_realtime::livekit::{LiveKitEventHandler, bridge_input};
 use adk_realtime::runner::{EventHandler, RealtimeRunner};
 
 use livekit::options::TrackPublishOptions;

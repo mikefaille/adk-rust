@@ -261,11 +261,14 @@ impl GeminiRealtimeSession {
                         "Vertex AI Live WebSocket connect error: {e}"
                     ))
                 })?;
-                
+
                 // Construct Vertex AI model path
                 let base_model = model.strip_prefix("models/").unwrap_or(model);
-                let setup_model = format!("projects/{}/locations/{}/publishers/google/models/{}", project_id, region, base_model);
-                
+                let setup_model = format!(
+                    "projects/{}/locations/{}/publishers/google/models/{}",
+                    project_id, region, base_model
+                );
+
                 (ws, setup_model)
             }
         };

@@ -379,6 +379,7 @@ version = "0.3.2"
 dependencies = [
  "adk-core",
  "adk-gemini",
+ "adk-telemetry",
  "async-openai",
  "async-stream",
  "async-trait",
@@ -414,6 +415,7 @@ dependencies = [
  "adk-plugin",
  "adk-session",
  "adk-skill",
+ "adk-telemetry",
  "async-stream",
  "async-trait",
  "chrono",
@@ -581,6 +583,7 @@ dependencies = [
 name = "adk-telemetry"
 version = "0.3.2"
 dependencies = [
+ "adk-core",
  "langsmith-rust",
  "opentelemetry",
  "opentelemetry-otlp",

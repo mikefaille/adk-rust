@@ -73,17 +73,8 @@ proptest! {
 #[test]
 fn prop_empty_region_returns_config_error() {
     let result = build_vertex_live_url("");
-    assert!(
-        result.is_err(),
-        "Expected ConfigError for empty region, got Ok({})",
-        result.unwrap()
-    );
+    assert!(result.is_err(), "Expected ConfigError for empty region, got Ok({})", result.unwrap());
     let err = result.unwrap_err();
     let display = format!("{}", err);
-    assert!(
-        display.contains("region"),
-        "Error message '{}' should mention 'region'",
-        display
-    );
+    assert!(display.contains("region"), "Error message '{}' should mention 'region'", display);
 }
-
