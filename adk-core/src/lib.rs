@@ -59,7 +59,6 @@
 //! - `app:` - Application state (application-wide)
 //! - `temp:` - Temporary data (cleared each turn)
 
-pub mod adk_context;
 pub mod agent;
 pub mod agent_loader;
 pub mod callbacks;
@@ -71,7 +70,6 @@ pub mod model;
 pub mod tool;
 pub mod types;
 
-pub use adk_context::{AdkContext, AdkContextBuilder};
 pub use agent::{Agent, EventStream, ResolvedContext};
 pub use agent_loader::{AgentLoader, MultiAgentLoader, SingleAgentLoader};
 pub use callbacks::{
@@ -80,9 +78,10 @@ pub use callbacks::{
     EventsCompactionConfig, GlobalInstructionProvider, InstructionProvider,
 };
 pub use context::{
-    Artifacts, CallbackContext, IncludeContents, InvocationContext, MAX_STATE_KEY_LEN, Memory,
-    MemoryEntry, ReadonlyContext, ReadonlyState, RunConfig, Session, State, StreamingMode,
-    ToolConfirmationDecision, ToolConfirmationPolicy, ToolConfirmationRequest, validate_state_key,
+    AdkContext, AdkContextBuilder, Artifacts, CallbackContext, IncludeContents, InvocationContext,
+    MAX_STATE_KEY_LEN, Memory, MemoryEntry, ReadonlyContext, ReadonlyState, RunConfig, Session,
+    State, StreamingMode, ToolConfirmationDecision, ToolConfirmationPolicy, ToolConfirmationRequest,
+    validate_state_key,
 };
 pub use error::{AdkError, Result};
 pub use event::{
