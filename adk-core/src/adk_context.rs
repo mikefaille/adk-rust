@@ -7,6 +7,15 @@ use std::collections::HashMap;
 /// This struct holds the foundational identifiers for an ADK execution (Invocation, Session, etc.)
 /// without being tied to any specific observability framework.
 ///
+/// It is the standard, lightweight context implementation for use cases where the full `Runner`
+/// environment is not required (e.g., lightweight tools, simple agents, or tests).
+///
+/// # Extensibility
+///
+/// This struct is designed to be reusable and extendable. For example, high-fidelity observability
+/// can be added by importing the `TraceContextExt` trait from `adk-telemetry`, which implements
+/// tracing logic on top of any `ReadonlyContext`.
+///
 /// Tracing capabilities are provided as extension traits in `adk-telemetry`.
 #[derive(Debug, Clone, Default)]
 pub struct AdkContext {

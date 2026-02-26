@@ -16,6 +16,31 @@ pub trait ReadonlyContext: Send + Sync {
     fn user_content(&self) -> &Content;
 }
 
+#[async_trait]
+impl<T: ?Sized + ReadonlyContext> ReadonlyContext for Arc<T> {
+    fn invocation_id(&self) -> &str {
+        (**self).invocation_id()
+    }
+    fn agent_name(&self) -> &str {
+        (**self).agent_name()
+    }
+    fn user_id(&self) -> &str {
+        (**self).user_id()
+    }
+    fn app_name(&self) -> &str {
+        (**self).app_name()
+    }
+    fn session_id(&self) -> &str {
+        (**self).session_id()
+    }
+    fn branch(&self) -> &str {
+        (**self).branch()
+    }
+    fn user_content(&self) -> &Content {
+        (**self).user_content()
+    }
+}
+
 // State management traits
 
 /// Maximum allowed length for state keys (256 bytes).

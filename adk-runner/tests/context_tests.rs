@@ -3,7 +3,7 @@ use adk_core::{
     InvocationContext as InvocationContextTrait, Part, ReadonlyContext, RunConfig,
     Session as CoreSession, StreamingMode,
 };
-use adk_runner::{InvocationContext, MutableSession};
+use adk_runner::{MutableSession, RunnerContext};
 use adk_session::{Events, Session, State};
 use async_trait::async_trait;
 use std::collections::HashMap;
@@ -110,7 +110,7 @@ fn test_context_creation() {
     let content =
         Content { role: "user".to_string(), parts: vec![Part::Text { text: "Hello".to_string() }] };
 
-    let ctx = InvocationContext::new(
+    let ctx = RunnerContext::new(
         "inv-123".to_string(),
         agent.clone(),
         "user-456".to_string(),
@@ -125,7 +125,7 @@ fn test_context_creation() {
     assert_eq!(ctx.user_id(), "user-456");
     assert_eq!(ctx.app_name(), "test-app");
     assert_eq!(ctx.session_id(), "session-789");
-    assert_eq!(ctx.branch(), "");
+    assert_eq!(ctx.branch(), "main");
     assert_eq!(ctx.user_content().role, "user");
 }
 
@@ -135,7 +135,7 @@ fn test_context_with_branch() {
 
     let content = Content::new("user");
 
-    let ctx = InvocationContext::new(
+    let ctx = RunnerContext::new(
         "inv-123".to_string(),
         agent,
         "user-456".to_string(),
@@ -157,7 +157,7 @@ fn test_context_with_run_config() {
 
     let config = RunConfig { streaming_mode: StreamingMode::SSE, ..RunConfig::default() };
 
-    let ctx = InvocationContext::new(
+    let ctx = RunnerContext::new(
         "inv-123".to_string(),
         agent,
         "user-456".to_string(),
@@ -177,7 +177,7 @@ fn test_context_end_invocation() {
 
     let content = Content::new("user");
 
-    let ctx = InvocationContext::new(
+    let ctx = RunnerContext::new(
         "inv-123".to_string(),
         agent,
         "user-456".to_string(),
@@ -198,7 +198,7 @@ fn test_context_agent_access() {
 
     let content = Content::new("user");
 
-    let ctx = InvocationContext::new(
+    let ctx = RunnerContext::new(
         "inv-123".to_string(),
         agent.clone(),
         "user-456".to_string(),
@@ -218,7 +218,7 @@ fn test_context_optional_services() {
 
     let content = Content::new("user");
 
-    let ctx = InvocationContext::new(
+    let ctx = RunnerContext::new(
         "inv-123".to_string(),
         agent,
         "user-456".to_string(),
@@ -287,7 +287,7 @@ fn test_mutable_session_shared_across_contexts() {
     let content = Content::new("user");
 
     // Create first context
-    let ctx1 = InvocationContext::new(
+    let ctx1 = RunnerContext::new(
         "inv-1".to_string(),
         agent.clone(),
         "user-456".to_string(),
@@ -303,7 +303,7 @@ fn test_mutable_session_shared_across_contexts() {
     ctx1.mutable_session().apply_state_delta(&delta);
 
     // Create second context sharing the same MutableSession
-    let ctx2 = InvocationContext::with_mutable_session(
+    let ctx2 = RunnerContext::with_mutable_session(
         "inv-2".to_string(),
         agent.clone(),
         "user-456".to_string(),

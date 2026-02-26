@@ -10,10 +10,23 @@ pub struct FunctionResponseData {
     pub response: serde_json::Value,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Content {
     pub role: String,
     pub parts: Vec<Part>,
+}
+
+impl Default for Content {
+    /// Creates a default `Content` with an empty role and no parts.
+    ///
+    /// Note that an empty role is typically interpreted as a "user" role
+    /// by downstream consumers (like model converters).
+    fn default() -> Self {
+        Self {
+            role: String::new(),
+            parts: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -546,9 +546,14 @@ impl Agent for RealtimeAgent {
 
         let s = stream! {
             #[cfg(feature = "telemetry")]
-            let _span = ctx.agent_span().enter();
+            let span = ctx.agent_span();
+            #[cfg(feature = "telemetry")]
+            let _span = span.enter();
+
             #[cfg(not(feature = "telemetry"))]
-            let _span = tracing::info_span!("realtime.session").enter();
+            let span = tracing::info_span!("realtime.session");
+            #[cfg(not(feature = "telemetry"))]
+            let _span = span.enter();
 
             // ===== BEFORE AGENT CALLBACKS =====
             for callback in before_callbacks.as_ref() {

@@ -1,4 +1,4 @@
-use crate::InvocationContext;
+use crate::context::RunnerContext;
 use crate::cache::CacheManager;
 use adk_artifact::ArtifactService;
 use adk_core::{
@@ -156,7 +156,7 @@ impl Runner {
                 }
             }
 
-            let mut invocation_ctx = InvocationContext::new(
+            let mut invocation_ctx = RunnerContext::new(
                 invocation_id.clone(),
                 agent_to_run.clone(),
                 user_id.clone(),
@@ -224,7 +224,7 @@ impl Runner {
                     Ok(Some(modified)) => {
                         effective_user_content = modified;
 
-                        let mut refreshed_ctx = InvocationContext::with_mutable_session(
+                        let mut refreshed_ctx = RunnerContext::with_mutable_session(
                             invocation_id.clone(),
                             agent_to_run.clone(),
                             user_id.clone(),
@@ -319,7 +319,7 @@ impl Runner {
                     if let Some(cache_name) = cm.record_invocation() {
                         run_config.cached_content = Some(cache_name.to_string());
                         // Rebuild the invocation context with the updated run config
-                        let mut refreshed_ctx = InvocationContext::with_mutable_session(
+                        let mut refreshed_ctx = RunnerContext::with_mutable_session(
                             invocation_id.clone(),
                             agent_to_run.clone(),
                             user_id.clone(),
@@ -442,7 +442,7 @@ impl Runner {
                 if let Some(target_agent) = Self::find_agent(&root_agent, &target_name) {
                     // For transfers, we reuse the same mutable session to preserve state
                     let transfer_invocation_id = format!("inv-{}", uuid::Uuid::new_v4());
-                    let mut transfer_ctx = InvocationContext::with_mutable_session(
+                    let mut transfer_ctx = RunnerContext::with_mutable_session(
                         transfer_invocation_id.clone(),
                         target_agent.clone(),
                         user_id.clone(),

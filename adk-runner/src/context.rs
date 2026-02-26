@@ -152,14 +152,9 @@ impl adk_core::State for MutableSession {
     }
 }
 
-pub struct InvocationContext {
-    invocation_id: String,
+pub struct RunnerContext {
+    base: adk_core::AdkContext,
     agent: Arc<dyn Agent>,
-    user_id: String,
-    app_name: String,
-    session_id: String,
-    branch: String,
-    user_content: Content,
     artifacts: Option<Arc<dyn Artifacts>>,
     memory: Option<Arc<dyn Memory>>,
     run_config: RunConfig,
@@ -170,7 +165,7 @@ pub struct InvocationContext {
     session: Arc<MutableSession>,
 }
 
-impl InvocationContext {
+impl RunnerContext {
     pub fn new(
         invocation_id: String,
         agent: Arc<dyn Agent>,
@@ -180,14 +175,18 @@ impl InvocationContext {
         user_content: Content,
         session: Arc<dyn AdkSession>,
     ) -> Self {
+        let base = adk_core::AdkContext::builder()
+            .invocation_id(invocation_id)
+            .agent_name(agent.name())
+            .user_id(user_id)
+            .app_name(app_name)
+            .session_id(session_id)
+            .user_content(user_content)
+            .build();
+
         Self {
-            invocation_id,
+            base,
             agent,
-            user_id,
-            app_name,
-            session_id,
-            branch: String::new(),
-            user_content,
             artifacts: None,
             memory: None,
             run_config: RunConfig::default(),
@@ -196,7 +195,7 @@ impl InvocationContext {
         }
     }
 
-    /// Create an InvocationContext with an existing MutableSession.
+    /// Create a RunnerContext with an existing MutableSession.
     /// This allows sharing the same mutable session across multiple contexts
     /// (e.g., for agent transfers).
     pub fn with_mutable_session(
@@ -208,14 +207,18 @@ impl InvocationContext {
         user_content: Content,
         session: Arc<MutableSession>,
     ) -> Self {
+        let base = adk_core::AdkContext::builder()
+            .invocation_id(invocation_id)
+            .agent_name(agent.name())
+            .user_id(user_id)
+            .app_name(app_name)
+            .session_id(session_id)
+            .user_content(user_content)
+            .build();
+
         Self {
-            invocation_id,
+            base,
             agent,
-            user_id,
-            app_name,
-            session_id,
-            branch: String::new(),
-            user_content,
             artifacts: None,
             memory: None,
             run_config: RunConfig::default(),
@@ -225,7 +228,7 @@ impl InvocationContext {
     }
 
     pub fn with_branch(mut self, branch: String) -> Self {
-        self.branch = branch;
+        self.base.branch = branch;
         self
     }
 
@@ -252,45 +255,45 @@ impl InvocationContext {
 }
 
 #[async_trait]
-impl ReadonlyContext for InvocationContext {
+impl ReadonlyContext for RunnerContext {
     fn invocation_id(&self) -> &str {
-        &self.invocation_id
+        &self.base.invocation_id
     }
 
     fn agent_name(&self) -> &str {
-        self.agent.name()
+        &self.base.agent_name
     }
 
     fn user_id(&self) -> &str {
-        &self.user_id
+        &self.base.user_id
     }
 
     fn app_name(&self) -> &str {
-        &self.app_name
+        &self.base.app_name
     }
 
     fn session_id(&self) -> &str {
-        &self.session_id
+        &self.base.session_id
     }
 
     fn branch(&self) -> &str {
-        &self.branch
+        &self.base.branch
     }
 
     fn user_content(&self) -> &Content {
-        &self.user_content
+        &self.base.user_content
     }
 }
 
 #[async_trait]
-impl CallbackContext for InvocationContext {
+impl CallbackContext for RunnerContext {
     fn artifacts(&self) -> Option<Arc<dyn Artifacts>> {
         self.artifacts.clone()
     }
 }
 
 #[async_trait]
-impl InvocationContextTrait for InvocationContext {
+impl InvocationContextTrait for RunnerContext {
     fn agent(&self) -> Arc<dyn Agent> {
         self.agent.clone()
     }
