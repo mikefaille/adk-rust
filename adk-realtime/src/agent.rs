@@ -60,6 +60,8 @@ use adk_core::{
     GlobalInstructionProvider, InstructionProvider, InvocationContext, MemoryEntry, Part,
     ReadonlyContext, Result, Tool, ToolContext,
 };
+#[cfg(feature = "telemetry")]
+use adk_telemetry::TraceContextExt;
 use async_stream::stream;
 use async_trait::async_trait;
 
@@ -543,6 +545,11 @@ impl Agent for RealtimeAgent {
         let config = self.build_config(&ctx).await?;
 
         let s = stream! {
+            #[cfg(feature = "telemetry")]
+            let _span = ctx.agent_span().enter();
+            #[cfg(not(feature = "telemetry"))]
+            let _span = tracing::info_span!("realtime.session").enter();
+
             // ===== BEFORE AGENT CALLBACKS =====
             for callback in before_callbacks.as_ref() {
                 match callback(ctx.clone() as Arc<dyn CallbackContext>).await {
@@ -680,6 +687,15 @@ impl Agent for RealtimeAgent {
                                 let tool = tools.iter().find(|t| t.name() == name);
 
                                 let (result, actions) = if let Some(tool) = tool {
+                                    #[cfg(feature = "telemetry")]
+                                    let _tool_span = ctx.child_span("tool.execute").enter();
+                                    #[cfg(feature = "telemetry")]
+                                    {
+                                        tracing::Span::current().record("adk.tool.name", &name);
+                                        tracing::Span::current()
+                                            .record("gcp.vertex.agent.tool_name", &name);
+                                    }
+
                                     let args: serde_json::Value = serde_json::from_str(&arguments)
                                         .unwrap_or(serde_json::json!({}));
 

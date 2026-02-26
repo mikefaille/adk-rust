@@ -61,6 +61,7 @@
 
 pub mod agent;
 pub mod agent_loader;
+pub mod adk_context;
 pub mod callbacks;
 pub mod context;
 pub mod error;
@@ -72,6 +73,7 @@ pub mod types;
 
 pub use agent::{Agent, EventStream, ResolvedContext};
 pub use agent_loader::{AgentLoader, MultiAgentLoader, SingleAgentLoader};
+pub use adk_context::{AdkContext, AdkContextBuilder};
 pub use callbacks::{
     AfterAgentCallback, AfterModelCallback, AfterToolCallback, BaseEventsSummarizer,
     BeforeAgentCallback, BeforeModelCallback, BeforeModelResult, BeforeToolCallback,

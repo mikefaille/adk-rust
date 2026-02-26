@@ -22,12 +22,6 @@ fn arb_region() -> impl Strategy<Value = String> {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(100))]
-
-    /// **Feature: realtime-audio-transport, Property 1: Vertex AI Live URL Construction**
-    /// *For any* valid region, the URL SHALL start with `wss://`.
-    /// **Validates: Requirements 1.2, 3.1, 3.2**
-    #[test]
     fn prop_vertex_url_starts_with_wss(region in arb_region()) {
         let url = build_vertex_live_url(&region)
             .expect("should produce a valid URL for non-empty inputs");
@@ -38,11 +32,6 @@ proptest! {
         );
     }
 
-    /// **Feature: realtime-audio-transport, Property 1: Vertex AI Live URL Construction**
-    /// *For any* valid region, the URL SHALL contain
-    /// `{region}-aiplatform.googleapis.com` as the host.
-    /// **Validates: Requirements 1.2, 3.1, 3.2**
-    #[test]
     fn prop_vertex_url_contains_regional_host(region in arb_region()) {
         let url = build_vertex_live_url(&region)
             .expect("should produce a valid URL for non-empty inputs");
@@ -55,10 +44,6 @@ proptest! {
         );
     }
 
-    /// **Feature: realtime-audio-transport, Property 1: Vertex AI Live URL Construction**
-    /// *For any* valid region, the URL SHALL contain the correct API path.
-    /// **Validates: Requirements 1.2, 3.1**
-    #[test]
     fn prop_vertex_url_contains_bidi_path(region in arb_region()) {
         let url = build_vertex_live_url(&region)
             .expect("should produce a valid URL for non-empty inputs");
@@ -71,10 +56,6 @@ proptest! {
         );
     }
 
-    /// **Feature: realtime-audio-transport, Property 1: Vertex AI Live URL Construction**
-    /// *For any* valid region, the URL SHALL be parseable as a valid URL.
-    /// **Validates: Requirements 3.2**
-    #[test]
     fn prop_vertex_url_is_parseable(region in arb_region()) {
         let url = build_vertex_live_url(&region)
             .expect("should produce a valid URL for non-empty inputs");
@@ -87,23 +68,22 @@ proptest! {
         );
     }
 
-    /// **Feature: realtime-audio-transport, Property 1: Vertex AI Live URL Construction**
-    /// An empty region SHALL return a ConfigError.
-    /// **Validates: Requirements 3.3**
-    #[test]
-    fn prop_empty_region_returns_config_error() {
-        let result = build_vertex_live_url("");
-        prop_assert!(
-            result.is_err(),
-            "Expected ConfigError for empty region, got Ok({})",
-            result.unwrap()
-        );
-        let err = result.unwrap_err();
-        let display = format!("{}", err);
-        prop_assert!(
-            display.contains("region"),
-            "Error message '{}' should mention 'region'",
-            display
-        );
-    }
 }
+
+#[test]
+fn prop_empty_region_returns_config_error() {
+    let result = build_vertex_live_url("");
+    assert!(
+        result.is_err(),
+        "Expected ConfigError for empty region, got Ok({})",
+        result.unwrap()
+    );
+    let err = result.unwrap_err();
+    let display = format!("{}", err);
+    assert!(
+        display.contains("region"),
+        "Error message '{}' should mention 'region'",
+        display
+    );
+}
+

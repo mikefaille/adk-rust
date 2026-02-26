@@ -15,6 +15,7 @@ readme = "README.md"
 [dependencies]
 # Core ADK dependencies
 adk-core.workspace = true
+adk-telemetry = { path = "../adk-telemetry", optional = true }
 
 # Async runtime
 tokio = { workspace = true }
@@ -107,7 +108,9 @@ vertex-live = ["gemini", "dep:google-cloud-auth"]
 livekit = ["dep:livekit", "dep:livekit-api", "dep:tokio-tungstenite"]
 # Enable OpenAI WebRTC transport (requires openai + Sans-IO WebRTC + Opus codec)
 openai-webrtc = ["openai", "dep:str0m", "dep:audiopus", "dep:reqwest"]
+# Enable instrumentation synergy via adk-telemetry
+telemetry = ["dep:adk-telemetry"]
 # Enable all providers and transports (except openai-webrtc which requires cmake)
-full = ["openai", "gemini", "vertex-live", "livekit"]
+full = ["openai", "gemini", "vertex-live", "livekit", "telemetry"]
 # Enable everything including WebRTC (requires cmake installed)
 full-webrtc = ["full", "openai-webrtc"]

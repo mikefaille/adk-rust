@@ -134,7 +134,7 @@ impl EventHandler for PrintingEventHandler {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // --- 1. Create the Gemini realtime model ---
     let api_key = std::env::var("GEMINI_API_KEY").expect("GEMINI_API_KEY env var is required");
-    let backend = GeminiLiveBackend::Public { api_key };
+    let backend = GeminiLiveBackend::Studio { api_key };
     let model = GeminiRealtimeModel::new(backend, "models/gemini-2.5-flash-native-audio");
 
     // --- 2. Connect to LiveKit room ---

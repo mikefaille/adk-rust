@@ -7,6 +7,8 @@ use adk_core::{
 use adk_plugin::PluginManager;
 use adk_session::SessionService;
 use adk_skill::{SkillInjector, SkillInjectorConfig};
+#[cfg(feature = "telemetry")]
+use adk_telemetry::TraceContextExt;
 use async_stream::stream;
 use std::sync::Arc;
 use tracing::Instrument;
@@ -344,17 +346,19 @@ impl Runner {
                 }
             }
 
-            // Run the agent with instrumentation (ADK-Go style attributes)
-            let agent_span = tracing::info_span!(
-                "agent.execute",
-                "gcp.vertex.agent.invocation_id" = %invocation_id,
-                "gcp.vertex.agent.session_id" = %session_id,
-                "gcp.vertex.agent.event_id" = %invocation_id, // Use invocation_id as event_id for agent spans
-                "gen_ai.conversation.id" = %session_id,
-                "agent.name" = %agent_to_run.name(),
-                "adk.skills.selected_name" = %selected_skill_name,
-                "adk.skills.selected_id" = %selected_skill_id
-            );
+            // Run the agent with synergistic instrumentation
+            #[cfg(feature = "telemetry")]
+            let agent_span = ctx.agent_span();
+            #[cfg(not(feature = "telemetry"))]
+            let agent_span = tracing::info_span!("agent.execute", agent.name = %agent_to_run.name());
+
+            #[cfg(feature = "telemetry")]
+            {
+                agent_span.record("adk.skills.selected_name", selected_skill_name);
+                agent_span.record("adk.skills.selected_id", selected_skill_id);
+            }
+            // event_id and gen_ai.conversation.id are legacy/specific, 
+            // the new generalized ones are already in the span from TraceContextExt.
 
             let mut agent_stream = match agent_to_run.run(ctx.clone()).instrument(agent_span).await {
                 Ok(s) => s,
