@@ -130,6 +130,7 @@ dependencies = [
  "async-stream",
  "async-trait",
  "chrono",
+ "derive_more",
  "futures",
  "serde",
  "serde_json",
