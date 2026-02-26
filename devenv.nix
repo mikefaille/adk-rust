@@ -106,8 +106,16 @@ in {
     # Rust/LLVM configuration
     LIBCLANG_PATH = "${llvm.libclang.lib}/lib";
     PROTOC = "${adkBuildEnv}/bin/protoc";
-    CC = "clang";
-    CXX = "clang++";
+    
+    # Global Sccache Wrappers (C, C++, Assembly)
+    CC = "sccache clang";
+    CXX = "sccache clang++";
+    
+    # CMake Sccache Integration
+    CMAKE_C_COMPILER_LAUNCHER = "sccache";
+    CMAKE_CXX_COMPILER_LAUNCHER = "sccache";
+    
+    # Linker configuration
     LD = "lld";
     
     # Optimization
