@@ -68,34 +68,45 @@ impl Session for SimpleSession {
 }
 
 struct AgentContext {
+    identity: adk_core::types::AdkIdentity,
     agent: Arc<dyn Agent>,
     content: Content,
     config: RunConfig,
     session: SimpleSession,
 }
 
+impl AgentContext {
+    fn new(agent: Arc<dyn Agent>, content: Content) -> Self {
+        let mut identity = adk_core::types::AdkIdentity::default();
+        identity.invocation_id = "inv-1".to_string().into();
+        identity.agent_name = agent.name().to_string();
+        identity.user_id = "user".to_string().into();
+        identity.app_name = "browser_openai".to_string();
+        identity.session_id = "browser-openai-session".to_string().into();
+        identity.branch = "".to_string();
+
+        Self {
+            identity,
+            agent,
+            content,
+            config: RunConfig::default(),
+            session: SimpleSession { state: SimpleState::new() },
+        }
+    }
+}
+
 #[async_trait]
 impl adk_core::ReadonlyContext for AgentContext {
-    fn invocation_id(&self) -> &str {
-        "inv-1"
-    }
-    fn agent_name(&self) -> &str {
-        self.agent.name()
-    }
-    fn user_id(&self) -> &str {
-        "user"
-    }
-    fn app_name(&self) -> &str {
-        "browser_openai"
-    }
-    fn session_id(&self) -> &str {
-        "browser-openai-session"
-    }
-    fn branch(&self) -> &str {
-        ""
+    fn identity(&self) -> &adk_core::types::AdkIdentity {
+        &self.identity
     }
     fn user_content(&self) -> &Content {
         &self.content
+    }
+    fn metadata(&self) -> &std::collections::HashMap<String, String> {
+        static METADATA: std::sync::OnceLock<std::collections::HashMap<String, String>> =
+            std::sync::OnceLock::new();
+        METADATA.get_or_init(std::collections::HashMap::new)
     }
 }
 
@@ -133,12 +144,7 @@ async fn run_agent(
     let content =
         Content { role: "user".to_string(), parts: vec![Part::Text { text: task.to_string() }] };
 
-    let ctx = Arc::new(AgentContext {
-        agent: agent.clone(),
-        content,
-        config: RunConfig::default(),
-        session: SimpleSession { state: SimpleState::new() },
-    });
+    let ctx = Arc::new(AgentContext::new(agent.clone(), content));
 
     let mut stream = agent.run(ctx).await?;
     let mut response = String::new();

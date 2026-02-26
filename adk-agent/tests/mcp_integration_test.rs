@@ -7,7 +7,7 @@
 use adk_agent::LlmAgentBuilder;
 use adk_core::{
     Agent, Content, InvocationContext, Part, ReadonlyContext, RunConfig, Session, State, Tool,
-    ToolContext,
+    ToolContext, types::AdkIdentity,
 };
 use adk_model::GeminiModel;
 use async_trait::async_trait;
@@ -48,44 +48,38 @@ impl State for MockState {
 }
 
 struct MockContext {
+    identity: AdkIdentity,
     session: MockSession,
     user_content: Content,
+    metadata: HashMap<String, String>,
 }
 
 impl MockContext {
     fn new(text: &str) -> Self {
         Self {
+            identity: AdkIdentity::default(),
             session: MockSession,
             user_content: Content {
                 role: "user".to_string(),
                 parts: vec![Part::Text { text: text.to_string() }],
             },
+            metadata: HashMap::new(),
         }
     }
 }
 
 #[async_trait]
 impl ReadonlyContext for MockContext {
-    fn invocation_id(&self) -> &str {
-        "mcp-inv"
+    fn identity(&self) -> &AdkIdentity {
+        &self.identity
     }
-    fn agent_name(&self) -> &str {
-        "mcp-agent"
-    }
-    fn user_id(&self) -> &str {
-        "mcp-user"
-    }
-    fn app_name(&self) -> &str {
-        "mcp-app"
-    }
-    fn session_id(&self) -> &str {
-        "mcp-session"
-    }
-    fn branch(&self) -> &str {
-        "main"
-    }
+
     fn user_content(&self) -> &Content {
         &self.user_content
+    }
+
+    fn metadata(&self) -> &HashMap<String, String> {
+        &self.metadata
     }
 }
 

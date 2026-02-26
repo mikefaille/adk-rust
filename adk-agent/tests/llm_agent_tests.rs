@@ -1,6 +1,7 @@
 use adk_agent::LlmAgentBuilder;
 use adk_core::{
     Agent, Content, InvocationContext, LlmRequest, Part, ReadonlyContext, RunConfig, ToolContext,
+    types::AdkIdentity,
 };
 use adk_skill::SelectionPolicy;
 use adk_tool::FunctionTool;
@@ -98,6 +99,8 @@ impl adk_core::Llm for SpyLlm {
 struct TestContext {
     content: Content,
     config: RunConfig,
+    identity: AdkIdentity,
+    metadata: std::collections::HashMap<String, String>,
 }
 
 impl TestContext {
@@ -108,32 +111,22 @@ impl TestContext {
                 parts: vec![Part::Text { text: message.to_string() }],
             },
             config: RunConfig::default(),
+            identity: AdkIdentity::default(),
+            metadata: std::collections::HashMap::new(),
         }
     }
 }
 
 #[async_trait]
 impl ReadonlyContext for TestContext {
-    fn invocation_id(&self) -> &str {
-        "test-invocation"
-    }
-    fn agent_name(&self) -> &str {
-        "test-agent"
-    }
-    fn user_id(&self) -> &str {
-        "test-user"
-    }
-    fn app_name(&self) -> &str {
-        "test-app"
-    }
-    fn session_id(&self) -> &str {
-        "test-session"
-    }
-    fn branch(&self) -> &str {
-        ""
+    fn identity(&self) -> &AdkIdentity {
+        &self.identity
     }
     fn user_content(&self) -> &Content {
         &self.content
+    }
+    fn metadata(&self) -> &std::collections::HashMap<String, String> {
+        &self.metadata
     }
 }
 

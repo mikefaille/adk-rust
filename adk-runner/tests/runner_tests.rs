@@ -336,7 +336,7 @@ impl Agent for EchoUserContentAgent {
             })
             .unwrap_or_default();
 
-        let mut event = Event::new(ctx.invocation_id());
+        let mut event = Event::new(ctx.invocation_id().to_string());
         event.author = "echo".to_string();
         event.llm_response.content =
             Some(Content::new("model").with_text(format!("agent-saw:{input_text}")));

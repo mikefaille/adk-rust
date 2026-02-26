@@ -104,26 +104,27 @@ impl MockContext {
 
 #[async_trait]
 impl ReadonlyContext for MockContext {
-    fn invocation_id(&self) -> &str {
-        "inv-1"
-    }
-    fn agent_name(&self) -> &str {
-        "test-agent"
-    }
-    fn user_id(&self) -> &str {
-        "user-1"
-    }
-    fn app_name(&self) -> &str {
-        "test-app"
-    }
-    fn session_id(&self) -> &str {
-        "session-1"
-    }
-    fn branch(&self) -> &str {
-        "main"
+    fn identity(&self) -> &adk_core::types::AdkIdentity {
+        static IDENTITY: std::sync::OnceLock<adk_core::types::AdkIdentity> =
+            std::sync::OnceLock::new();
+        IDENTITY.get_or_init(|| {
+            let mut id = adk_core::types::AdkIdentity::default();
+            id.invocation_id = "inv-1".to_string().into();
+            id.agent_name = "test-agent".to_string();
+            id.user_id = "user-1".to_string().into();
+            id.app_name = "test-app".to_string();
+            id.session_id = "session-1".to_string().into();
+            id.branch = "main".to_string();
+            id
+        })
     }
     fn user_content(&self) -> &Content {
-        unimplemented!()
+        static CONTENT: std::sync::OnceLock<Content> = std::sync::OnceLock::new();
+        CONTENT.get_or_init(|| Content::new("user"))
+    }
+    fn metadata(&self) -> &HashMap<String, String> {
+        static METADATA: std::sync::OnceLock<HashMap<String, String>> = std::sync::OnceLock::new();
+        METADATA.get_or_init(HashMap::new)
     }
 }
 

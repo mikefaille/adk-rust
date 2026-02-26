@@ -1,4 +1,4 @@
-use adk_core::{Artifacts, CallbackContext, Content, Part, ReadonlyContext};
+use adk_core::{Artifacts, CallbackContext, Content, Part, ReadonlyContext, types::AdkIdentity};
 use adk_runner::Callbacks;
 use async_trait::async_trait;
 use std::sync::{Arc, Mutex};
@@ -7,36 +7,31 @@ use std::sync::{Arc, Mutex};
 struct MockCallbackContext {
     invocation_id: String,
     content: Content,
+    identity: AdkIdentity,
+    metadata: std::collections::HashMap<String, String>,
 }
 
 impl MockCallbackContext {
     fn new(id: &str) -> Self {
-        Self { invocation_id: id.to_string(), content: Content::new("user") }
+        Self {
+            invocation_id: id.to_string(),
+            content: Content::new("user"),
+            identity: AdkIdentity::default(),
+            metadata: std::collections::HashMap::new(),
+        }
     }
 }
 
 #[async_trait]
 impl ReadonlyContext for MockCallbackContext {
-    fn invocation_id(&self) -> &str {
-        &self.invocation_id
-    }
-    fn agent_name(&self) -> &str {
-        "test-agent"
-    }
-    fn user_id(&self) -> &str {
-        "test-user"
-    }
-    fn app_name(&self) -> &str {
-        "test-app"
-    }
-    fn session_id(&self) -> &str {
-        "test-session"
-    }
-    fn branch(&self) -> &str {
-        ""
+    fn identity(&self) -> &AdkIdentity {
+        &self.identity
     }
     fn user_content(&self) -> &Content {
         &self.content
+    }
+    fn metadata(&self) -> &std::collections::HashMap<String, String> {
+        &self.metadata
     }
 }
 

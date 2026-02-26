@@ -490,7 +490,7 @@ fn generate_main_rs(project: &ProjectSchema) -> String {
         "use adk_tool::{FunctionTool, GoogleSearchTool, ExitLoopTool, LoadArtifactsTool};\n",
     );
     if uses_mcp || uses_browser {
-        code.push_str("use adk_core::{ReadonlyContext, Toolset, Content};\n");
+        code.push_str("use adk_core::{ReadonlyContext, Toolset, Content, types::AdkIdentity};\n");
     }
     if uses_mcp {
         code.push_str("use adk_tool::McpToolset;\n");
@@ -511,17 +511,25 @@ fn generate_main_rs(project: &ProjectSchema) -> String {
     // Add MinimalContext for MCP/browser toolset initialization
     if uses_mcp || uses_browser {
         code.push_str("// Minimal context for toolset initialization\n");
-        code.push_str("struct MinimalContext { content: Content }\n");
-        code.push_str("impl MinimalContext { fn new() -> Self { Self { content: Content { role: String::new(), parts: vec![] } } } }\n");
+        code.push_str("struct MinimalContext {\n");
+        code.push_str("    identity: AdkIdentity,\n");
+        code.push_str("    content: Content,\n");
+        code.push_str("    metadata: std::collections::HashMap<String, String>,\n");
+        code.push_str("}\n");
+        code.push_str("impl MinimalContext {\n");
+        code.push_str("    fn new() -> Self {\n");
+        code.push_str("        Self {\n");
+        code.push_str("            identity: AdkIdentity::default(),\n");
+        code.push_str("            content: Content { role: String::new(), parts: vec![] },\n");
+        code.push_str("            metadata: std::collections::HashMap::new(),\n");
+        code.push_str("        }\n");
+        code.push_str("    }\n");
+        code.push_str("}\n");
         code.push_str("#[async_trait]\n");
         code.push_str("impl ReadonlyContext for MinimalContext {\n");
-        code.push_str("    fn invocation_id(&self) -> &str { \"init\" }\n");
-        code.push_str("    fn agent_name(&self) -> &str { \"init\" }\n");
-        code.push_str("    fn user_id(&self) -> &str { \"init\" }\n");
-        code.push_str("    fn app_name(&self) -> &str { \"init\" }\n");
-        code.push_str("    fn session_id(&self) -> &str { \"init\" }\n");
-        code.push_str("    fn branch(&self) -> &str { \"main\" }\n");
+        code.push_str("    fn identity(&self) -> &AdkIdentity { &self.identity }\n");
         code.push_str("    fn user_content(&self) -> &Content { &self.content }\n");
+        code.push_str("    fn metadata(&self) -> &std::collections::HashMap<String, String> { &self.metadata }\n");
         code.push_str("}\n\n");
     }
 

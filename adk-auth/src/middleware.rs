@@ -90,8 +90,8 @@ impl<T: Tool + Send + Sync> Tool for ProtectedTool<T> {
         if let Some(sink) = &self.audit_sink {
             let outcome =
                 if check_result.is_ok() { AuditOutcome::Allowed } else { AuditOutcome::Denied };
-            let event =
-                AuditEvent::tool_access(user_id, tool_name, outcome).with_session(ctx.session_id());
+            let event = AuditEvent::tool_access(user_id, tool_name, outcome)
+                .with_session(ctx.session_id().to_string());
 
             // Log asynchronously (don't block on audit failure)
             let _ = sink.log(event).await;
@@ -238,8 +238,8 @@ impl Tool for ProtectedToolDyn {
         if let Some(sink) = &self.audit_sink {
             let outcome =
                 if check_result.is_ok() { AuditOutcome::Allowed } else { AuditOutcome::Denied };
-            let event =
-                AuditEvent::tool_access(user_id, tool_name, outcome).with_session(ctx.session_id());
+            let event = AuditEvent::tool_access(user_id, tool_name, outcome)
+                .with_session(ctx.session_id().to_string());
 
             // Log asynchronously (don't block on audit failure)
             let _ = sink.log(event).await;

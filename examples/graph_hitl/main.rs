@@ -172,7 +172,7 @@ async fn main() -> anyhow::Result<()> {
     let mut input = State::new();
     input.insert("task".to_string(), json!("Read and summarize the README.md file"));
 
-    let result = graph.invoke(input, ExecutionConfig::new("low-risk-001")).await?;
+    let result = graph.invoke(input, ExecutionConfig::new("low-risk-001".to_string())).await?;
 
     println!("\nResult:\n{}", result.get("result").and_then(|v| v.as_str()).unwrap_or("None"));
 
@@ -185,7 +185,7 @@ async fn main() -> anyhow::Result<()> {
     input.insert("task".to_string(), json!("Delete all backup files from the production server"));
 
     let thread_id = "high-risk-001";
-    let result = graph.invoke(input, ExecutionConfig::new(thread_id)).await;
+    let result = graph.invoke(input, ExecutionConfig::new(thread_id.to_string())).await;
 
     match result {
         Err(GraphError::Interrupted(interrupted)) => {
@@ -205,7 +205,8 @@ async fn main() -> anyhow::Result<()> {
 
             // Resume execution
             println!("\n*** RESUMING EXECUTION ***\n");
-            let final_result = graph.invoke(State::new(), ExecutionConfig::new(thread_id)).await?;
+            let final_result =
+                graph.invoke(State::new(), ExecutionConfig::new(thread_id.to_string())).await?;
 
             println!(
                 "\nFinal Result:\n{}",
@@ -270,7 +271,8 @@ async fn main() -> anyhow::Result<()> {
     let mut input = State::new();
     input.insert("task".to_string(), json!("Organize project files"));
 
-    let result = graph_static.invoke(input, ExecutionConfig::new("static-interrupt")).await;
+    let result =
+        graph_static.invoke(input, ExecutionConfig::new("static-interrupt".to_string())).await;
 
     match result {
         Err(GraphError::Interrupted(interrupted)) => {

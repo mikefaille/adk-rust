@@ -1,10 +1,11 @@
 use adk_agent::CustomAgent;
 use adk_core::{
     Agent, CallbackContext, Content, Event, InvocationContext, Memory, Part, ReadonlyContext,
-    RunConfig, Session,
+    RunConfig, Session, types::AdkIdentity,
 };
 use async_trait::async_trait;
 use futures::StreamExt;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 struct MockSession;
@@ -32,6 +33,8 @@ struct MockContext {
     content: Content,
     session: MockSession,
     user_content: Content,
+    identity: AdkIdentity,
+    metadata: HashMap<String, String>,
 }
 
 impl MockContext {
@@ -46,32 +49,22 @@ impl MockContext {
                 role: "user".to_string(),
                 parts: vec![Part::Text { text: "test".to_string() }],
             },
+            identity: AdkIdentity::default(),
+            metadata: HashMap::new(),
         }
     }
 }
 
 #[async_trait]
 impl ReadonlyContext for MockContext {
-    fn invocation_id(&self) -> &str {
-        "test-inv"
-    }
-    fn agent_name(&self) -> &str {
-        "test-agent"
-    }
-    fn user_id(&self) -> &str {
-        "test-user"
-    }
-    fn app_name(&self) -> &str {
-        "test-app"
-    }
-    fn session_id(&self) -> &str {
-        "test-session"
-    }
-    fn branch(&self) -> &str {
-        "main"
+    fn identity(&self) -> &AdkIdentity {
+        &self.identity
     }
     fn user_content(&self) -> &Content {
         &self.user_content
+    }
+    fn metadata(&self) -> &HashMap<String, String> {
+        &self.metadata
     }
 }
 
@@ -125,7 +118,7 @@ async fn test_custom_agent_run() {
     let agent = CustomAgent::builder("echo_agent")
         .description("Echoes input")
         .handler(|ctx| async move {
-            let mut event = Event::new(ctx.invocation_id());
+            let mut event = Event::new(ctx.invocation_id().to_string());
             event.llm_response.content = Some(ctx.user_content().clone());
 
             let stream = async_stream::stream! {

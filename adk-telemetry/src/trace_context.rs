@@ -1,73 +1,90 @@
 use adk_core::ReadonlyContext;
 use tracing::Span;
 
-/// An extension trait that adds tracing capabilities to any ADK context.
-///
-/// By providing this as an extension trait in `adk-telemetry`, we keep `adk-core`
-/// lightweight and free of tracing dependencies, while ensuring all frameworks
-/// (Realtime, Skill, Model) can gain high-fidelity observability with zero effort.
+/// An extension trait that adds synergistic tracing capabilities to any ADK context.
 pub trait TraceContextExt: ReadonlyContext {
-    /// Create a tracing span pre-populated with ADK standard attributes.
-    /// This uses the metadata provided by the `ReadonlyContext` trait.
-    fn span(&self) -> Span {
-        tracing::info_span!(
-            "adk_invocation",
-            adk.agent.invocation_id = %self.invocation_id(),
-            adk.agent.session_id = %self.session_id(),
-            adk.agent.name = %self.agent_name(),
-            adk.user.id = %self.user_id(),
-            adk.app.name = %self.app_name(),
-            adk.branch = %self.branch(),
-            // Compatibility fields
-            gcp.vertex.agent.invocation_id = %self.invocation_id(),
-            gcp.vertex.agent.session_id = %self.session_id(),
-            gen_ai.conversation.id = %self.session_id(),
-        )
+    /// Creates a top-level invocation span.
+    fn invocation_span(&self) -> Span {
+        let id = self.identity();
+        let span = tracing::info_span!(
+            "adk.invocation",
+            "adk.invocation_id" = %id.invocation_id,
+            "adk.session_id" = %id.session_id,
+            "adk.user_id" = %id.user_id,
+            "adk.app_name" = %id.app_name,
+            "adk.branch" = %id.branch,
+            // Restore Google/Vertex specific keys
+            "gcp.vertex.agent.invocation_id" = %id.invocation_id,
+            "gcp.vertex.agent.session_id" = %id.session_id,
+            "gen_ai.conversation.id" = %id.session_id
+        );
+        self.record_metadata(&span);
+        span
     }
 
-    /// Create a child span for specific operations, inheriting all parent context identifiers.
-    fn child_span(&self, name: &'static str) -> Span {
-        tracing::info_span!(
-            "adk_step",
-            step.name = name,
-            adk.agent.invocation_id = %self.invocation_id(),
-            adk.agent.session_id = %self.session_id(),
-            adk.agent.name = %self.agent_name(),
-            adk.user.id = %self.user_id(),
-            adk.app.name = %self.app_name(),
-            adk.branch = %self.branch(),
-            adk.skills.selected_name = tracing::field::Empty,
-            adk.skills.selected_id = tracing::field::Empty,
-            adk.tool.name = tracing::field::Empty,
-            // Compatibility fields
-            gcp.vertex.agent.invocation_id = %self.invocation_id(),
-            gcp.vertex.agent.session_id = %self.session_id(),
-            gcp.vertex.agent.tool_name = tracing::field::Empty,
-            gen_ai.conversation.id = %self.session_id(),
-        )
+    /// Creates a child span for a specific execution step.
+    fn step_span(&self, name: &'static str) -> Span {
+        let id = self.identity();
+        let span = tracing::info_span!(
+            "adk.step",
+            "adk.step.name" = name,
+            "adk.invocation_id" = %id.invocation_id,
+            "adk.session_id" = %id.session_id,
+            "adk.user_id" = %id.user_id,
+            "adk.app_name" = %id.app_name,
+            "adk.branch" = %id.branch,
+            "adk.tool.name" = tracing::field::Empty,
+            // Restore Google/Vertex specific keys
+            "gcp.vertex.agent.invocation_id" = %id.invocation_id,
+            "gcp.vertex.agent.session_id" = %id.session_id
+        );
+        self.record_metadata(&span);
+        span
     }
 
-    /// Create a specialized span for agent execution with high-fidelity attributes.
+    /// Creates a specialized span for agent execution.
     fn agent_span(&self) -> Span {
-        tracing::info_span!(
+        let id = self.identity();
+        let span = tracing::info_span!(
             "agent.execute",
-            adk.agent.invocation_id = %self.invocation_id(),
-            adk.agent.session_id = %self.session_id(),
-            adk.agent.name = %self.agent_name(),
-            adk.user.id = %self.user_id(),
-            adk.app.name = %self.app_name(),
-            adk.branch = %self.branch(),
-            adk.skills.selected_name = tracing::field::Empty,
-            adk.skills.selected_id = tracing::field::Empty,
-            // Compatibility fields
-            gcp.vertex.agent.invocation_id = %self.invocation_id(),
-            gcp.vertex.agent.session_id = %self.session_id(),
-            gcp.vertex.agent.event_id = %self.invocation_id(),
-            gen_ai.conversation.id = %self.session_id(),
-            agent.name = %self.agent_name(),
-        )
+            "agent.name" = %id.agent_name,
+            "adk.invocation_id" = %id.invocation_id,
+            "adk.session_id" = %id.session_id,
+            "adk.user_id" = %id.user_id,
+            "adk.app_name" = %id.app_name,
+            "adk.branch" = %id.branch,
+            // Restore Google/Vertex specific keys
+            "gcp.vertex.agent.invocation_id" = %id.invocation_id,
+            "gcp.vertex.agent.session_id" = %id.session_id,
+            // Agent-specific trace attributes
+            "adk.skills.selected_name" = tracing::field::Empty,
+            "adk.skills.selected_id" = tracing::field::Empty
+        );
+        self.record_metadata(&span);
+        span
+    }
+
+    /// Stamps the current span with all identity attributes and metadata from this context.
+    fn record_identity(&self, span: &Span) {
+        let id = self.identity();
+        span.record("adk.invocation_id", id.invocation_id.to_string());
+        span.record("adk.session_id", id.session_id.to_string());
+        span.record("adk.user_id", id.user_id.to_string());
+        span.record("adk.app_name", &id.app_name);
+        span.record("adk.branch", &id.branch);
+        // Record Google/Vertex specific keys
+        span.record("gcp.vertex.agent.invocation_id", id.invocation_id.to_string());
+        span.record("gcp.vertex.agent.session_id", id.session_id.to_string());
+        self.record_metadata(span);
+    }
+
+    /// Records all key-value pairs from the context's metadata map onto the span.
+    fn record_metadata(&self, span: &Span) {
+        for (key, value) in self.metadata() {
+            span.record(key.as_str(), value.as_str());
+        }
     }
 }
 
-// Blanket implementation for all types implementing ReadonlyContext
+// Blanket implementation for all types implementing ReadonlyContext.
 impl<T: ReadonlyContext> TraceContextExt for T {}

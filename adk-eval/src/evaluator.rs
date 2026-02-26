@@ -614,55 +614,50 @@ impl Default for Evaluator {
 
 /// Minimal InvocationContext implementation for evaluation
 struct EvalInvocationContext {
-    invocation_id: String,
+    identity: adk_core::types::AdkIdentity,
     user_content: Content,
     agent: Arc<dyn Agent>,
     session: EvalSession,
     run_config: adk_core::RunConfig,
     ended: std::sync::atomic::AtomicBool,
+    metadata: std::collections::HashMap<String, String>,
 }
 
 impl EvalInvocationContext {
     fn new(invocation_id: String, user_content: Content, agent: Arc<dyn Agent>) -> Self {
         let session_id = format!("eval-session-{}", uuid::Uuid::new_v4());
+        let identity = adk_core::types::AdkIdentity {
+            invocation_id: adk_core::types::InvocationId::from(invocation_id),
+            session_id: adk_core::types::SessionId::from(session_id.clone()),
+            agent_name: agent.name().to_string(),
+            user_id: adk_core::types::UserId::from("eval_user".to_string()),
+            app_name: "eval_app".to_string(),
+            ..Default::default()
+        };
+
         Self {
-            invocation_id,
+            identity,
             user_content,
             agent,
             session: EvalSession::new(session_id),
             run_config: adk_core::RunConfig::default(),
             ended: std::sync::atomic::AtomicBool::new(false),
+            metadata: std::collections::HashMap::new(),
         }
     }
 }
 
 impl adk_core::ReadonlyContext for EvalInvocationContext {
-    fn invocation_id(&self) -> &str {
-        &self.invocation_id
-    }
-
-    fn agent_name(&self) -> &str {
-        self.agent.name()
-    }
-
-    fn user_id(&self) -> &str {
-        "eval_user"
-    }
-
-    fn app_name(&self) -> &str {
-        "eval_app"
-    }
-
-    fn session_id(&self) -> &str {
-        &self.session.id
-    }
-
-    fn branch(&self) -> &str {
-        "main"
+    fn identity(&self) -> &adk_core::types::AdkIdentity {
+        &self.identity
     }
 
     fn user_content(&self) -> &Content {
         &self.user_content
+    }
+
+    fn metadata(&self) -> &std::collections::HashMap<String, String> {
+        &self.metadata
     }
 }
 

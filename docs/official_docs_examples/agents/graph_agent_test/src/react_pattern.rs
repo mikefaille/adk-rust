@@ -153,7 +153,7 @@ async fn main() -> anyhow::Result<()> {
     input.insert("question".to_string(), json!("What's the weather in Paris and what's 15 + 25?"));
 
     println!("🚀 Starting ReAct reasoning cycle...\n");
-    let result = graph.invoke(input, ExecutionConfig::new("react-1")).await?;
+    let result = graph.invoke(input, ExecutionConfig::new("react-1".to_string())).await?;
     
     println!("\n🎯 Final Results:");
     println!("Answer: {}", result.get("response").and_then(|v| v.as_str()).unwrap_or(""));

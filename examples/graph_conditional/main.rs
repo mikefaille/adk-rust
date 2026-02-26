@@ -224,7 +224,7 @@ async fn main() -> anyhow::Result<()> {
         let mut input = State::new();
         input.insert("message".to_string(), json!(message));
 
-        let result = graph.invoke(input, ExecutionConfig::new(&format!("test-{}", i))).await?;
+        let result = graph.invoke(input, ExecutionConfig::new(format!("test-{}", i))).await?;
 
         println!(
             "\nResponse:\n{}",

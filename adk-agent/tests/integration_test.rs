@@ -41,13 +41,23 @@ impl State for MockState {
 }
 
 struct MockContext {
+    identity: adk_core::types::AdkIdentity,
     session: MockSession,
     user_content: Content,
 }
 
 impl MockContext {
     fn new(text: &str) -> Self {
+        let mut identity = adk_core::types::AdkIdentity::default();
+        identity.invocation_id = "inv-real".to_string().into();
+        identity.agent_name = "gemini-agent".to_string();
+        identity.user_id = "user-real".to_string().into();
+        identity.app_name = "test-app".to_string();
+        identity.session_id = "session-real".to_string().into();
+        identity.branch = "main".to_string();
+
         Self {
+            identity,
             session: MockSession,
             user_content: Content {
                 role: "user".to_string(),
@@ -59,26 +69,16 @@ impl MockContext {
 
 #[async_trait]
 impl adk_core::ReadonlyContext for MockContext {
-    fn invocation_id(&self) -> &str {
-        "inv-real"
-    }
-    fn agent_name(&self) -> &str {
-        "gemini-agent"
-    }
-    fn user_id(&self) -> &str {
-        "user-real"
-    }
-    fn app_name(&self) -> &str {
-        "test-app"
-    }
-    fn session_id(&self) -> &str {
-        "session-real"
-    }
-    fn branch(&self) -> &str {
-        "main"
+    fn identity(&self) -> &adk_core::types::AdkIdentity {
+        &self.identity
     }
     fn user_content(&self) -> &Content {
         &self.user_content
+    }
+    fn metadata(&self) -> &std::collections::HashMap<String, String> {
+        static METADATA: std::sync::OnceLock<std::collections::HashMap<String, String>> =
+            std::sync::OnceLock::new();
+        METADATA.get_or_init(std::collections::HashMap::new)
     }
 }
 

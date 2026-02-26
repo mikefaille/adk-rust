@@ -1,42 +1,68 @@
-use crate::{Agent, Result, types::Content};
+use crate::{
+    Agent, Result,
+    types::{AdkIdentity, Content, InvocationId, SessionId, UserId},
+};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
-#[async_trait]
+/// Foundation for all ADK contexts.
+///
+/// This trait provides read-only access to the foundational identifiers of an
+/// ADK execution. It is purposely NOT async to allow usage in hot paths and
+/// synchronization primitives without overhead.
 pub trait ReadonlyContext: Send + Sync {
-    fn invocation_id(&self) -> &str;
-    fn agent_name(&self) -> &str;
-    fn user_id(&self) -> &str;
-    fn app_name(&self) -> &str;
-    fn session_id(&self) -> &str;
-    fn branch(&self) -> &str;
+    /// Returns the consolidated identity capsule for this context.
+    fn identity(&self) -> &AdkIdentity;
+
+    /// Convenience: returns the invocation ID.
+    fn invocation_id(&self) -> &InvocationId {
+        &self.identity().invocation_id
+    }
+
+    /// Convenience: returns the agent name.
+    fn agent_name(&self) -> &str {
+        &self.identity().agent_name
+    }
+
+    /// Convenience: returns the user ID.
+    fn user_id(&self) -> &UserId {
+        &self.identity().user_id
+    }
+
+    /// Convenience: returns the app name.
+    fn app_name(&self) -> &str {
+        &self.identity().app_name
+    }
+
+    /// Convenience: returns the session ID.
+    fn session_id(&self) -> &SessionId {
+        &self.identity().session_id
+    }
+
+    /// Convenience: returns the branch name.
+    fn branch(&self) -> &str {
+        &self.identity().branch
+    }
+
+    /// Returns the initial user content that triggered this context.
     fn user_content(&self) -> &Content;
+
+    /// Returns the metadata map for platform-specific identifiers.
+    fn metadata(&self) -> &HashMap<String, String>;
 }
 
 impl<T: ?Sized + ReadonlyContext> ReadonlyContext for Arc<T> {
-    fn invocation_id(&self) -> &str {
-        (**self).invocation_id()
-    }
-    fn agent_name(&self) -> &str {
-        (**self).agent_name()
-    }
-    fn user_id(&self) -> &str {
-        (**self).user_id()
-    }
-    fn app_name(&self) -> &str {
-        (**self).app_name()
-    }
-    fn session_id(&self) -> &str {
-        (**self).session_id()
-    }
-    fn branch(&self) -> &str {
-        (**self).branch()
+    fn identity(&self) -> &AdkIdentity {
+        (**self).identity()
     }
     fn user_content(&self) -> &Content {
         (**self).user_content()
+    }
+    fn metadata(&self) -> &HashMap<String, String> {
+        (**self).metadata()
     }
 }
 
@@ -57,12 +83,7 @@ impl<T: ?Sized + ReadonlyContext> ReadonlyContext for Arc<T> {
 /// Tracing capabilities are provided as extension traits in `adk-telemetry`.
 #[derive(Debug, Clone, Default)]
 pub struct AdkContext {
-    invocation_id: String,
-    agent_name: String,
-    user_id: String,
-    app_name: String,
-    session_id: String,
-    branch: String,
+    identity: AdkIdentity,
     user_content: Content,
     /// Extensible metadata for any framework-specific attributes.
     metadata: HashMap<String, String>,
@@ -74,58 +95,48 @@ impl AdkContext {
         AdkContextBuilder::default()
     }
 
-    /// Returns the metadata map.
-    pub fn metadata(&self) -> &HashMap<String, String> {
-        &self.metadata
-    }
-
     /// Update the branch name.
     pub fn set_branch(&mut self, branch: impl Into<String>) {
-        self.branch = branch.into();
+        self.identity.branch = branch.into();
     }
 }
 
 /// Fluent builder for `AdkContext` following Rust API guidelines.
 #[derive(Debug, Clone, Default)]
 pub struct AdkContextBuilder {
-    invocation_id: Option<String>,
-    agent_name: Option<String>,
-    user_id: Option<String>,
-    app_name: Option<String>,
-    session_id: Option<String>,
-    branch: Option<String>,
+    identity: AdkIdentity,
     user_content: Option<Content>,
     metadata: HashMap<String, String>,
 }
 
 impl AdkContextBuilder {
-    pub fn invocation_id(mut self, id: impl Into<String>) -> Self {
-        self.invocation_id = Some(id.into());
+    pub fn invocation_id(mut self, id: impl Into<InvocationId>) -> Self {
+        self.identity.invocation_id = id.into();
         self
     }
 
     pub fn agent_name(mut self, name: impl Into<String>) -> Self {
-        self.agent_name = Some(name.into());
+        self.identity.agent_name = name.into();
         self
     }
 
-    pub fn user_id(mut self, id: impl Into<String>) -> Self {
-        self.user_id = Some(id.into());
+    pub fn user_id(mut self, id: impl Into<UserId>) -> Self {
+        self.identity.user_id = id.into();
         self
     }
 
     pub fn app_name(mut self, name: impl Into<String>) -> Self {
-        self.app_name = Some(name.into());
+        self.identity.app_name = name.into();
         self
     }
 
-    pub fn session_id(mut self, id: impl Into<String>) -> Self {
-        self.session_id = Some(id.into());
+    pub fn session_id(mut self, id: impl Into<SessionId>) -> Self {
+        self.identity.session_id = id.into();
         self
     }
 
     pub fn branch(mut self, branch: impl Into<String>) -> Self {
-        self.branch = Some(branch.into());
+        self.identity.branch = branch.into();
         self
     }
 
@@ -141,12 +152,7 @@ impl AdkContextBuilder {
 
     pub fn build(self) -> AdkContext {
         AdkContext {
-            invocation_id: self.invocation_id.unwrap_or_default(),
-            agent_name: self.agent_name.unwrap_or_default(),
-            user_id: self.user_id.unwrap_or_else(|| "anonymous".to_string()),
-            app_name: self.app_name.unwrap_or_else(|| "adk-app".to_string()),
-            session_id: self.session_id.unwrap_or_default(),
-            branch: self.branch.unwrap_or_else(|| "main".to_string()),
+            identity: self.identity,
             user_content: self.user_content.unwrap_or_default(),
             metadata: self.metadata,
         }
@@ -154,32 +160,16 @@ impl AdkContextBuilder {
 }
 
 impl ReadonlyContext for AdkContext {
-    fn invocation_id(&self) -> &str {
-        &self.invocation_id
-    }
-
-    fn agent_name(&self) -> &str {
-        &self.agent_name
-    }
-
-    fn user_id(&self) -> &str {
-        &self.user_id
-    }
-
-    fn app_name(&self) -> &str {
-        &self.app_name
-    }
-
-    fn session_id(&self) -> &str {
-        &self.session_id
-    }
-
-    fn branch(&self) -> &str {
-        &self.branch
+    fn identity(&self) -> &AdkIdentity {
+        &self.identity
     }
 
     fn user_content(&self) -> &Content {
         &self.user_content
+    }
+
+    fn metadata(&self) -> &HashMap<String, String> {
+        &self.metadata
     }
 }
 
@@ -445,17 +435,18 @@ mod tests {
     #[test]
     fn test_adk_context_builder() {
         let ctx = AdkContext::builder()
-            .invocation_id("inv-123")
+            .invocation_id("inv-123".to_string())
             .agent_name("test-agent")
-            .user_id("user-456")
-            .session_id("sess-789")
+            .user_id("user-456".to_string())
+            .session_id("sess-789".to_string())
             .metadata("custom.key", "custom-value")
             .build();
 
-        assert_eq!(ctx.invocation_id(), "inv-123");
-        assert_eq!(ctx.agent_name(), "test-agent");
-        assert_eq!(ctx.user_id(), "user-456");
-        assert_eq!(ctx.session_id(), "sess-789");
+        let id = ctx.identity();
+        assert_eq!(id.invocation_id.as_ref(), "inv-123");
+        assert_eq!(id.agent_name, "test-agent");
+        assert_eq!(id.user_id.as_ref(), "user-456");
+        assert_eq!(id.session_id.as_ref(), "sess-789");
         assert_eq!(ctx.app_name(), "adk-app"); // Default
         assert_eq!(ctx.metadata().get("custom.key").unwrap(), "custom-value");
     }

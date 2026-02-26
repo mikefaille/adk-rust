@@ -41,15 +41,22 @@ impl Tool for MockTool {
 
 /// Mock context for testing
 struct MockContext {
-    user_id: String,
+    identity: adk_core::types::AdkIdentity,
     content: Content,
     actions: Mutex<EventActions>,
 }
 
 impl MockContext {
     fn create(user_id: &str) -> Arc<dyn ToolContext> {
+        let mut identity = adk_core::types::AdkIdentity::default();
+        identity.invocation_id = "test-invocation".to_string().into();
+        identity.agent_name = "test-agent".to_string();
+        identity.user_id = user_id.to_string().into();
+        identity.app_name = "test-app".to_string();
+        identity.session_id = "test-session".to_string().into();
+
         Arc::new(Self {
-            user_id: user_id.into(),
+            identity,
             content: Content::new("user"),
             actions: Mutex::new(EventActions::default()),
         })
@@ -58,26 +65,18 @@ impl MockContext {
 
 #[async_trait]
 impl ReadonlyContext for MockContext {
-    fn invocation_id(&self) -> &str {
-        "test-invocation"
+    fn identity(&self) -> &adk_core::types::AdkIdentity {
+        &self.identity
     }
-    fn agent_name(&self) -> &str {
-        "test-agent"
-    }
-    fn user_id(&self) -> &str {
-        &self.user_id
-    }
-    fn app_name(&self) -> &str {
-        "test-app"
-    }
-    fn session_id(&self) -> &str {
-        "test-session"
-    }
-    fn branch(&self) -> &str {
-        ""
-    }
+
     fn user_content(&self) -> &Content {
         &self.content
+    }
+
+    fn metadata(&self) -> &std::collections::HashMap<String, String> {
+        static METADATA: std::sync::OnceLock<std::collections::HashMap<String, String>> =
+            std::sync::OnceLock::new();
+        METADATA.get_or_init(std::collections::HashMap::new)
     }
 }
 

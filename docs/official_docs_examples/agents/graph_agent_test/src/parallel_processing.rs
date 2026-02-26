@@ -115,7 +115,7 @@ async fn main() -> anyhow::Result<()> {
     input.insert("input".to_string(), json!("AI is transforming how we work and live."));
 
     println!("⚡ Executing parallel processing...\n");
-    let result = agent.invoke(input, ExecutionConfig::new("thread-1")).await?;
+    let result = agent.invoke(input, ExecutionConfig::new("thread-1".to_string())).await?;
     
     println!("\n✅ Final Result:");
     println!("{}", result.get("result").and_then(|v| v.as_str()).unwrap_or(""));

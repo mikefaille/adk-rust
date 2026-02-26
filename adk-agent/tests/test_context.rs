@@ -1,46 +1,42 @@
-use adk_core::{Agent, Content, InvocationContext, Part, ReadonlyContext, RunConfig};
+use adk_core::{
+    Agent, Content, InvocationContext, Part, ReadonlyContext, RunConfig, types::AdkIdentity,
+};
 use async_trait::async_trait;
 use std::sync::Arc;
 
 pub struct TestContext {
+    identity: AdkIdentity,
     content: Content,
     config: RunConfig,
+    metadata: std::collections::HashMap<String, String>,
 }
 
 impl TestContext {
     pub fn new(message: &str) -> Self {
         Self {
+            identity: AdkIdentity::default(),
             content: Content {
                 role: "user".to_string(),
                 parts: vec![Part::Text { text: message.to_string() }],
             },
             config: RunConfig::default(),
+            metadata: std::collections::HashMap::new(),
         }
     }
 }
 
 #[async_trait]
 impl ReadonlyContext for TestContext {
-    fn invocation_id(&self) -> &str {
-        "test-inv"
+    fn identity(&self) -> &AdkIdentity {
+        &self.identity
     }
-    fn agent_name(&self) -> &str {
-        "test-agent"
-    }
-    fn user_id(&self) -> &str {
-        "test-user"
-    }
-    fn app_name(&self) -> &str {
-        "test-app"
-    }
-    fn session_id(&self) -> &str {
-        "test-session"
-    }
-    fn branch(&self) -> &str {
-        ""
-    }
+
     fn user_content(&self) -> &Content {
         &self.content
+    }
+
+    fn metadata(&self) -> &std::collections::HashMap<String, String> {
+        &self.metadata
     }
 }
 

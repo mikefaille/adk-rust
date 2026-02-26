@@ -118,7 +118,7 @@ impl Agent for GraphAgent {
         let input = (self.input_mapper)(ctx.as_ref());
 
         // Create execution config from context
-        let config = ExecutionConfig::new(ctx.session_id());
+        let config = ExecutionConfig::new(ctx.session_id().clone());
 
         // Execute graph
         let graph = self.graph.clone();
@@ -467,7 +467,8 @@ mod tests {
         assert_eq!(agent.description(), "Test agent");
 
         // Test direct invocation
-        let result = agent.invoke(State::new(), ExecutionConfig::new("test")).await.unwrap();
+        let result =
+            agent.invoke(State::new(), ExecutionConfig::new("test".to_string())).await.unwrap();
 
         assert_eq!(result.get("value"), Some(&json!(42)));
     }

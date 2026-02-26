@@ -81,7 +81,7 @@ async fn main() -> Result<()> {
 
     println!("📝 Prompt: Tell me a very short story about a robot.\n");
 
-    let config = ExecutionConfig::new("demo-session");
+    let config = ExecutionConfig::new("demo-session".to_string());
 
     // Choose streaming mode
     let mode = if streaming { StreamMode::Messages } else { StreamMode::Values };

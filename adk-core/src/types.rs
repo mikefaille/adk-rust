@@ -1,4 +1,84 @@
+use derive_more::{AsRef, Deref, Display, From, Into};
 use serde::{Deserialize, Serialize};
+
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    Display,
+    From,
+    AsRef,
+    Deref,
+    Into,
+    Serialize,
+    Deserialize,
+    Default,
+)]
+pub struct SessionId(String);
+
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    Display,
+    From,
+    AsRef,
+    Deref,
+    Into,
+    Serialize,
+    Deserialize,
+    Default,
+)]
+pub struct InvocationId(String);
+
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    Display,
+    From,
+    AsRef,
+    Deref,
+    Into,
+    Serialize,
+    Deserialize,
+    Default,
+)]
+pub struct UserId(String);
+
+/// A consolidated identity capsule for ADK execution.
+///
+/// This struct groups the foundational identifiers that define a specific "run"
+/// or "turn" of an agent. Using a single struct ensures consistency across
+/// the framework and simplifies context propagation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AdkIdentity {
+    pub invocation_id: InvocationId,
+    pub session_id: SessionId,
+    pub user_id: UserId,
+    pub app_name: String,
+    pub branch: String,
+    pub agent_name: String,
+}
+
+impl Default for AdkIdentity {
+    fn default() -> Self {
+        Self {
+            invocation_id: InvocationId::default(),
+            session_id: SessionId::default(),
+            user_id: UserId::from("anonymous".to_string()),
+            app_name: "adk-app".to_string(),
+            branch: "main".to_string(),
+            agent_name: "generic-agent".to_string(),
+        }
+    }
+}
 
 /// Maximum allowed size for inline binary data (10 MB).
 /// Prevents accidental or malicious embedding of oversized payloads in Content parts.
@@ -22,10 +102,7 @@ impl Default for Content {
     /// Note that an empty role is typically interpreted as a "user" role
     /// by downstream consumers (like model converters).
     fn default() -> Self {
-        Self {
-            role: String::new(),
-            parts: Vec::new(),
-        }
+        Self { role: String::new(), parts: Vec::new() }
     }
 }
 

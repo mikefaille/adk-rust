@@ -57,7 +57,7 @@ impl<'a> PregelExecutor<'a> {
             if let Some(interrupt) = result.interrupt {
                 let checkpoint_id = self.save_checkpoint().await?;
                 return Err(GraphError::Interrupted(Box::new(InterruptedExecution::new(
-                    self.config.thread_id.clone(),
+                    self.config.thread_id.to_string(),
                     checkpoint_id,
                     interrupt,
                     self.state.clone(),
@@ -436,7 +436,8 @@ mod tests {
             .compile()
             .unwrap();
 
-        let result = graph.invoke(State::new(), ExecutionConfig::new("test")).await.unwrap();
+        let result =
+            graph.invoke(State::new(), ExecutionConfig::new("test".to_string())).await.unwrap();
 
         assert_eq!(result.get("value"), Some(&json!(42)));
     }
@@ -457,7 +458,8 @@ mod tests {
             .compile()
             .unwrap();
 
-        let result = graph.invoke(State::new(), ExecutionConfig::new("test")).await.unwrap();
+        let result =
+            graph.invoke(State::new(), ExecutionConfig::new("test".to_string())).await.unwrap();
 
         assert_eq!(result.get("value"), Some(&json!(11)));
     }
@@ -489,13 +491,13 @@ mod tests {
         // Test path A
         let mut input = State::new();
         input.insert("path".to_string(), json!("a"));
-        let result = graph.invoke(input, ExecutionConfig::new("test")).await.unwrap();
+        let result = graph.invoke(input, ExecutionConfig::new("test".to_string())).await.unwrap();
         assert_eq!(result.get("result"), Some(&json!("went to A")));
 
         // Test path B
         let mut input = State::new();
         input.insert("path".to_string(), json!("b"));
-        let result = graph.invoke(input, ExecutionConfig::new("test")).await.unwrap();
+        let result = graph.invoke(input, ExecutionConfig::new("test".to_string())).await.unwrap();
         assert_eq!(result.get("result"), Some(&json!("went to B")));
     }
 
@@ -518,7 +520,8 @@ mod tests {
             .compile()
             .unwrap();
 
-        let result = graph.invoke(State::new(), ExecutionConfig::new("test")).await.unwrap();
+        let result =
+            graph.invoke(State::new(), ExecutionConfig::new("test".to_string())).await.unwrap();
 
         assert_eq!(result.get("count"), Some(&json!(5)));
     }
@@ -536,7 +539,7 @@ mod tests {
             .unwrap()
             .with_recursion_limit(10);
 
-        let result = graph.invoke(State::new(), ExecutionConfig::new("test")).await;
+        let result = graph.invoke(State::new(), ExecutionConfig::new("test".to_string())).await;
 
         // The recursion limit check happens when step >= limit, so it will exceed at step 10
         assert!(

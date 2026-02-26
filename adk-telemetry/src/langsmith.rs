@@ -11,6 +11,12 @@ use tracing_subscriber::{Layer, layer::Context, registry::LookupSpan};
 pub struct LangSmithLayer;
 
 #[cfg(feature = "langsmith")]
+impl Default for LangSmithLayer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl LangSmithLayer {
     pub fn new() -> Self {
         Self

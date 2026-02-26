@@ -1,7 +1,7 @@
 use adk_agent::{CustomAgentBuilder, LlmAgentBuilder, SequentialAgent};
 use adk_core::{
     Agent, CallbackContext, Content, Event, InvocationContext, Memory, Part, ReadonlyContext,
-    Result, RunConfig, Session, State,
+    Result, RunConfig, Session, State, types::AdkIdentity,
 };
 use adk_model::gemini::GeminiModel;
 use async_trait::async_trait;
@@ -41,44 +41,38 @@ impl State for TestState {
 
 // Simple test context
 struct TestContext {
+    identity: AdkIdentity,
     session: TestSession,
     user_content: Content,
+    metadata: HashMap<String, String>,
 }
 
 impl TestContext {
     fn new(text: &str) -> Self {
         Self {
+            identity: AdkIdentity::default(),
             session: TestSession,
             user_content: Content {
                 role: "user".to_string(),
                 parts: vec![Part::Text { text: text.to_string() }],
             },
+            metadata: HashMap::new(),
         }
     }
 }
 
 #[async_trait]
 impl ReadonlyContext for TestContext {
-    fn invocation_id(&self) -> &str {
-        "test-inv"
+    fn identity(&self) -> &AdkIdentity {
+        &self.identity
     }
-    fn agent_name(&self) -> &str {
-        "test-agent"
-    }
-    fn user_id(&self) -> &str {
-        "test-user"
-    }
-    fn app_name(&self) -> &str {
-        "test-app"
-    }
-    fn session_id(&self) -> &str {
-        "test-session"
-    }
-    fn branch(&self) -> &str {
-        "main"
-    }
+
     fn user_content(&self) -> &Content {
         &self.user_content
+    }
+
+    fn metadata(&self) -> &HashMap<String, String> {
+        &self.metadata
     }
 }
 

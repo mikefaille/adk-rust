@@ -94,7 +94,7 @@ impl Agent for CustomAgent {
             for callback in after_callbacks.as_ref() {
                 match callback(ctx.clone() as Arc<dyn CallbackContext>).await {
                     Ok(Some(content)) => {
-                        let mut after_event = Event::new(ctx.invocation_id());
+                        let mut after_event = Event::new(ctx.invocation_id().to_string());
                         after_event.author = agent_name.clone();
                         after_event.llm_response.content = Some(content);
                         yield Ok(after_event);

@@ -237,7 +237,7 @@ impl<T: Tool + Send + Sync> Tool for ScopedTool<T> {
                 let outcome =
                     if result.is_ok() { AuditOutcome::Allowed } else { AuditOutcome::Denied };
                 let event = AuditEvent::tool_access(ctx.user_id(), self.name(), outcome)
-                    .with_session(ctx.session_id());
+                    .with_session(ctx.session_id().to_string());
                 let _ = sink.log(event).await;
             }
 
@@ -303,7 +303,7 @@ impl Tool for ScopedToolDyn {
                 let outcome =
                     if result.is_ok() { AuditOutcome::Allowed } else { AuditOutcome::Denied };
                 let event = AuditEvent::tool_access(ctx.user_id(), self.name(), outcome)
-                    .with_session(ctx.session_id());
+                    .with_session(ctx.session_id().to_string());
                 let _ = sink.log(event).await;
             }
 

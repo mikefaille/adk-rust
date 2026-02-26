@@ -18,31 +18,25 @@ use std::sync::Arc;
 use tokio::process::Command;
 
 /// Minimal context for tool discovery
-struct SimpleContext;
+#[derive(Default)]
+struct SimpleContext {
+    identity: adk_core::types::AdkIdentity,
+}
 
-#[async_trait::async_trait]
 impl ReadonlyContext for SimpleContext {
-    fn invocation_id(&self) -> &str {
-        "init"
+    fn identity(&self) -> &adk_core::types::AdkIdentity {
+        &self.identity
     }
-    fn agent_name(&self) -> &str {
-        "init"
-    }
-    fn user_id(&self) -> &str {
-        "user"
-    }
-    fn app_name(&self) -> &str {
-        "mcp"
-    }
-    fn session_id(&self) -> &str {
-        "init"
-    }
-    fn branch(&self) -> &str {
-        "main"
-    }
+
     fn user_content(&self) -> &Content {
         static CONTENT: std::sync::OnceLock<Content> = std::sync::OnceLock::new();
         CONTENT.get_or_init(|| Content::new("user").with_text("init"))
+    }
+
+    fn metadata(&self) -> &std::collections::HashMap<String, String> {
+        static METADATA: std::sync::OnceLock<std::collections::HashMap<String, String>> =
+            std::sync::OnceLock::new();
+        METADATA.get_or_init(std::collections::HashMap::new)
     }
 }
 
@@ -76,7 +70,7 @@ async fn main() -> anyhow::Result<()> {
     let cancel_token = toolset.cancellation_token().await;
 
     // 4. Discover filtered tools
-    let ctx = Arc::new(SimpleContext) as Arc<dyn ReadonlyContext>;
+    let ctx = Arc::new(SimpleContext::default()) as Arc<dyn ReadonlyContext>;
     let tools = toolset.tools(ctx).await?;
 
     println!("Filtered to {} tools:", tools.len());

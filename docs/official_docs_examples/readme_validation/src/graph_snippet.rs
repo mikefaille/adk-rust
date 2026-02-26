@@ -85,7 +85,7 @@ async fn main() -> anyhow::Result<()> {
     // Execute
     let mut input = State::new();
     input.insert("input".to_string(), json!("AI is transforming how we work."));
-    let _result = _agent.invoke(input, ExecutionConfig::new("thread-1")).await?;
+    let _result = _agent.invoke(input, ExecutionConfig::new("thread-1".to_string())).await?;
 
     println!("✓ Graph snippet compiles");
     Ok(())

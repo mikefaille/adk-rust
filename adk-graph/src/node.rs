@@ -6,6 +6,7 @@ use crate::error::Result;
 use crate::interrupt::Interrupt;
 use crate::state::State;
 use crate::stream::StreamEvent;
+use adk_core::types::{AdkIdentity, InvocationId, SessionId, UserId};
 use async_trait::async_trait;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -17,7 +18,7 @@ use std::sync::Arc;
 #[derive(Clone)]
 pub struct ExecutionConfig {
     /// Thread identifier for checkpointing
-    pub thread_id: String,
+    pub thread_id: SessionId,
     /// Resume from a specific checkpoint
     pub resume_from: Option<String>,
     /// Recursion limit for cycles
@@ -28,9 +29,9 @@ pub struct ExecutionConfig {
 
 impl ExecutionConfig {
     /// Create a new config with the given thread ID
-    pub fn new(thread_id: &str) -> Self {
+    pub fn new(thread_id: impl Into<SessionId>) -> Self {
         Self {
-            thread_id: thread_id.to_string(),
+            thread_id: thread_id.into(),
             resume_from: None,
             recursion_limit: 50,
             metadata: HashMap::new(),
@@ -58,7 +59,7 @@ impl ExecutionConfig {
 
 impl Default for ExecutionConfig {
     fn default() -> Self {
-        Self::new(&uuid::Uuid::new_v4().to_string())
+        Self::new(uuid::Uuid::new_v4().to_string())
     }
 }
 
@@ -281,7 +282,6 @@ impl AgentNode {
 
 /// Default input mapper - looks for "messages" or "input" in state
 fn default_input_mapper(state: &State) -> adk_core::Content {
-    // Try to get messages first
     if let Some(messages) = state.get("messages") {
         if let Some(arr) = messages.as_array() {
             if let Some(last) = arr.last() {
@@ -291,40 +291,29 @@ fn default_input_mapper(state: &State) -> adk_core::Content {
             }
         }
     }
-
-    // Try input field
     if let Some(input) = state.get("input") {
         if let Some(text) = input.as_str() {
             return adk_core::Content::new("user").with_text(text);
         }
     }
-
     adk_core::Content::new("user")
 }
 
 /// Default output mapper - extracts text content to "messages"
 fn default_output_mapper(events: &[adk_core::Event]) -> HashMap<String, Value> {
     let mut updates = HashMap::new();
-
-    // Collect text from events
     let mut messages = Vec::new();
     for event in events {
         if let Some(content) = event.content() {
             let text = content.parts.iter().filter_map(|p| p.text()).collect::<Vec<_>>().join("");
-
             if !text.is_empty() {
-                messages.push(serde_json::json!({
-                    "role": "assistant",
-                    "content": text
-                }));
+                messages.push(serde_json::json!({ "role": "assistant", "content": text }));
             }
         }
     }
-
     if !messages.is_empty() {
         updates.insert("messages".to_string(), serde_json::json!(messages));
     }
-
     updates
 }
 
@@ -336,169 +325,83 @@ impl Node for AgentNode {
 
     async fn execute(&self, ctx: &NodeContext) -> Result<NodeOutput> {
         use futures::StreamExt;
-
-        // Map state to input content
         let content = (self.input_mapper)(&ctx.state);
-
-        // Create a graph invocation context with the agent
         let invocation_ctx = Arc::new(GraphInvocationContext::new(
             ctx.config.thread_id.clone(),
             content,
             self.agent.clone(),
         ));
-
-        // Run the agent and collect events
         let stream = self.agent.run(invocation_ctx).await.map_err(|e| {
             crate::error::GraphError::NodeExecutionFailed {
                 node: self.name.clone(),
                 message: e.to_string(),
             }
         })?;
-
         let events: Vec<adk_core::Event> = stream.filter_map(|r| async { r.ok() }).collect().await;
-
-        // Map events to state updates
         let updates = (self.output_mapper)(&events);
-
-        // Convert agent events to stream events for tracing
         let mut output = NodeOutput::new().with_updates(updates);
         for event in &events {
             if let Ok(json) = serde_json::to_value(event) {
                 output = output.with_event(StreamEvent::custom(&self.name, "agent_event", json));
             }
         }
-
         Ok(output)
-    }
-
-    fn execute_stream<'a>(
-        &'a self,
-        ctx: &'a NodeContext,
-    ) -> Pin<Box<dyn futures::Stream<Item = Result<StreamEvent>> + Send + 'a>> {
-        use futures::StreamExt;
-        let name = self.name.clone();
-        let agent = self.agent.clone();
-        let input_mapper = &self.input_mapper;
-        let thread_id = ctx.config.thread_id.clone();
-        let content = (input_mapper)(&ctx.state);
-
-        Box::pin(async_stream::stream! {
-            tracing::debug!("AgentNode::execute_stream called for {}", name);
-            let invocation_ctx = Arc::new(GraphInvocationContext::new(
-                thread_id,
-                content,
-                agent.clone(),
-            ));
-
-            let stream = match agent.run(invocation_ctx).await {
-                Ok(s) => s,
-                Err(e) => {
-                    yield Err(crate::error::GraphError::NodeExecutionFailed {
-                        node: name.clone(),
-                        message: e.to_string(),
-                    });
-                    return;
-                }
-            };
-
-            tokio::pin!(stream);
-            let mut all_events = Vec::new();
-
-            while let Some(result) = stream.next().await {
-                match result {
-                    Ok(event) => {
-                        // Emit streaming event immediately
-                        if let Some(content) = event.content() {
-                            let text: String = content.parts.iter().filter_map(|p| p.text()).collect();
-                            if !text.is_empty() {
-                                yield Ok(StreamEvent::Message {
-                                    node: name.clone(),
-                                    content: text,
-                                    is_final: false,
-                                });
-                            }
-                        }
-                        all_events.push(event);
-                    }
-                    Err(e) => {
-                        yield Err(crate::error::GraphError::NodeExecutionFailed {
-                            node: name.clone(),
-                            message: e.to_string(),
-                        });
-                        return;
-                    }
-                }
-            }
-
-            // Emit final events
-            for event in &all_events {
-                if let Ok(json) = serde_json::to_value(event) {
-                    yield Ok(StreamEvent::custom(&name, "agent_event", json));
-                }
-            }
-        })
     }
 }
 
-/// Full InvocationContext implementation for running agents within graph nodes
+/// Bridge between adk-graph and adk-core
 struct GraphInvocationContext {
-    invocation_id: String,
+    identity: AdkIdentity,
     user_content: adk_core::Content,
     agent: Arc<dyn adk_core::Agent>,
     session: Arc<GraphSession>,
     run_config: adk_core::RunConfig,
     ended: std::sync::atomic::AtomicBool,
+    metadata: HashMap<String, String>,
 }
 
 impl GraphInvocationContext {
     fn new(
-        session_id: String,
+        session_id: SessionId,
         user_content: adk_core::Content,
         agent: Arc<dyn adk_core::Agent>,
     ) -> Self {
-        let invocation_id = uuid::Uuid::new_v4().to_string();
+        let identity = AdkIdentity {
+            invocation_id: InvocationId::from(uuid::Uuid::new_v4().to_string()),
+            session_id: session_id.clone(),
+            agent_name: agent.name().to_string(),
+            app_name: "graph_app".to_string(),
+            user_id: UserId::from("graph_user".to_string()),
+            ..Default::default()
+        };
+
         let session = Arc::new(GraphSession::new(session_id));
         // Add user content to history
         session.append_content(user_content.clone());
         Self {
-            invocation_id,
+            identity,
             user_content,
             agent,
             session,
             run_config: adk_core::RunConfig::default(),
             ended: std::sync::atomic::AtomicBool::new(false),
+            metadata: HashMap::new(),
         }
     }
 }
 
 // Implement ReadonlyContext (required by CallbackContext)
 impl adk_core::ReadonlyContext for GraphInvocationContext {
-    fn invocation_id(&self) -> &str {
-        &self.invocation_id
-    }
-
-    fn agent_name(&self) -> &str {
-        self.agent.name()
-    }
-
-    fn user_id(&self) -> &str {
-        "graph_user"
-    }
-
-    fn app_name(&self) -> &str {
-        "graph_app"
-    }
-
-    fn session_id(&self) -> &str {
-        &self.session.id
-    }
-
-    fn branch(&self) -> &str {
-        "main"
+    fn identity(&self) -> &AdkIdentity {
+        &self.identity
     }
 
     fn user_content(&self) -> &adk_core::Content {
         &self.user_content
+    }
+
+    fn metadata(&self) -> &HashMap<String, String> {
+        &self.metadata
     }
 }
 
@@ -540,13 +443,13 @@ impl adk_core::InvocationContext for GraphInvocationContext {
 
 /// Minimal Session implementation for graph execution
 struct GraphSession {
-    id: String,
+    id: SessionId,
     state: GraphState,
     history: std::sync::RwLock<Vec<adk_core::Content>>,
 }
 
 impl GraphSession {
-    fn new(id: String) -> Self {
+    fn new(id: SessionId) -> Self {
         Self { id, state: GraphState::new(), history: std::sync::RwLock::new(Vec::new()) }
     }
 
@@ -559,7 +462,7 @@ impl GraphSession {
 
 impl adk_core::Session for GraphSession {
     fn id(&self) -> &str {
-        &self.id
+        self.id.as_ref()
     }
 
     fn app_name(&self) -> &str {
@@ -585,27 +488,27 @@ impl adk_core::Session for GraphSession {
 
 /// Minimal State implementation for graph execution
 struct GraphState {
-    data: std::sync::RwLock<std::collections::HashMap<String, serde_json::Value>>,
+    data: std::sync::RwLock<HashMap<String, Value>>,
 }
 
 impl GraphState {
     fn new() -> Self {
-        Self { data: std::sync::RwLock::new(std::collections::HashMap::new()) }
+        Self { data: std::sync::RwLock::new(HashMap::new()) }
     }
 }
 
 impl adk_core::State for GraphState {
-    fn get(&self, key: &str) -> Option<serde_json::Value> {
+    fn get(&self, key: &str) -> Option<Value> {
         self.data.read().ok()?.get(key).cloned()
     }
 
-    fn set(&mut self, key: String, value: serde_json::Value) {
+    fn set(&mut self, key: String, value: Value) {
         if let Ok(mut data) = self.data.write() {
             data.insert(key, value);
         }
     }
 
-    fn all(&self) -> std::collections::HashMap<String, serde_json::Value> {
+    fn all(&self) -> HashMap<String, Value> {
         self.data.read().ok().map(|d| d.clone()).unwrap_or_default()
     }
 }
@@ -613,11 +516,12 @@ impl adk_core::State for GraphState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[tokio::test]
     async fn test_function_node() {
-        let node = FunctionNode::new("test", |_ctx| async {
-            Ok(NodeOutput::new().with_update("result", serde_json::json!("success")))
+        let node = FunctionNode::new("test", |_ctx| async move {
+            Ok(NodeOutput::new().with_update("result", json!("success")))
         });
 
         assert_eq!(node.name(), "test");
@@ -625,7 +529,7 @@ mod tests {
         let ctx = NodeContext::new(State::new(), ExecutionConfig::default(), 0);
         let output = node.execute(&ctx).await.unwrap();
 
-        assert_eq!(output.updates.get("result"), Some(&serde_json::json!("success")));
+        assert_eq!(output.updates.get("result"), Some(&json!("success")));
     }
 
     #[tokio::test]
@@ -642,7 +546,7 @@ mod tests {
     fn test_node_output_builder() {
         let output = NodeOutput::new().with_update("a", 1).with_update("b", "hello");
 
-        assert_eq!(output.updates.get("a"), Some(&serde_json::json!(1)));
-        assert_eq!(output.updates.get("b"), Some(&serde_json::json!("hello")));
+        assert_eq!(output.updates.get("a"), Some(&json!(1)));
+        assert_eq!(output.updates.get("b"), Some(&json!("hello")));
     }
 }

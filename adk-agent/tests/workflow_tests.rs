@@ -4,9 +4,11 @@ use adk_agent::{
 };
 use adk_core::{
     Agent, Content, Event, InvocationContext, LlmRequest, Part, ReadonlyContext, RunConfig,
+    types::AdkIdentity,
 };
 use async_trait::async_trait;
 use futures::stream;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 struct MockSession;
@@ -33,6 +35,8 @@ struct TestContext {
     content: Content,
     config: RunConfig,
     session: MockSession,
+    identity: AdkIdentity,
+    metadata: HashMap<String, String>,
 }
 
 impl TestContext {
@@ -44,32 +48,22 @@ impl TestContext {
             },
             config: RunConfig::default(),
             session: MockSession,
+            identity: AdkIdentity::default(),
+            metadata: HashMap::new(),
         }
     }
 }
 
 #[async_trait]
 impl ReadonlyContext for TestContext {
-    fn invocation_id(&self) -> &str {
-        "test-invocation"
-    }
-    fn agent_name(&self) -> &str {
-        "test-agent"
-    }
-    fn user_id(&self) -> &str {
-        "test-user"
-    }
-    fn app_name(&self) -> &str {
-        "test-app"
-    }
-    fn session_id(&self) -> &str {
-        "test-session"
-    }
-    fn branch(&self) -> &str {
-        ""
+    fn identity(&self) -> &AdkIdentity {
+        &self.identity
     }
     fn user_content(&self) -> &Content {
         &self.content
+    }
+    fn metadata(&self) -> &HashMap<String, String> {
+        &self.metadata
     }
 }
 

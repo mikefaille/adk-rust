@@ -302,7 +302,8 @@ async fn main() -> anyhow::Result<()> {
         input.insert("task".to_string(), json!(task));
         input.insert("history".to_string(), json!([]));
 
-        let result = graph.invoke(input, ExecutionConfig::new("supervisor-thread")).await?;
+        let result =
+            graph.invoke(input, ExecutionConfig::new("supervisor-thread".to_string())).await?;
 
         println!("\n{}", "=".repeat(70));
         println!("{}", result.get("final_result").and_then(|v| v.as_str()).unwrap_or("No result"));

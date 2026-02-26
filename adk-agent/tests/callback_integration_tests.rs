@@ -1,43 +1,36 @@
 use adk_agent::LlmAgentBuilder;
-use adk_core::{Agent, Artifacts, CallbackContext, Content, Part, ReadonlyContext};
+use adk_core::{
+    Agent, Artifacts, CallbackContext, Content, Part, ReadonlyContext, types::AdkIdentity,
+};
 use adk_model::gemini::GeminiModel;
 use async_trait::async_trait;
 use std::sync::{Arc, Mutex};
 
 // Mock context for callback testing
 struct MockCallbackContext {
-    invocation_id: String,
     content: Content,
+    identity: AdkIdentity,
+    metadata: std::collections::HashMap<String, String>,
 }
 
 impl MockCallbackContext {
     fn new(id: &str) -> Self {
-        Self { invocation_id: id.to_string(), content: Content::new("user") }
+        let mut identity = AdkIdentity::default();
+        identity.invocation_id = id.to_string().into();
+        Self { content: Content::new("user"), identity, metadata: std::collections::HashMap::new() }
     }
 }
 
 #[async_trait]
 impl ReadonlyContext for MockCallbackContext {
-    fn invocation_id(&self) -> &str {
-        &self.invocation_id
-    }
-    fn agent_name(&self) -> &str {
-        "test-agent"
-    }
-    fn user_id(&self) -> &str {
-        "test-user"
-    }
-    fn app_name(&self) -> &str {
-        "test-app"
-    }
-    fn session_id(&self) -> &str {
-        "test-session"
-    }
-    fn branch(&self) -> &str {
-        ""
+    fn identity(&self) -> &AdkIdentity {
+        &self.identity
     }
     fn user_content(&self) -> &Content {
         &self.content
+    }
+    fn metadata(&self) -> &std::collections::HashMap<String, String> {
+        &self.metadata
     }
 }
 
