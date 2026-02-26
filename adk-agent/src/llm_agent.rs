@@ -506,10 +506,10 @@ impl Agent for LlmAgent {
     #[adk_telemetry::instrument(
         skip(self, ctx),
         fields(
-            adk.agent.name = %self.name,
-            adk.agent.invocation_id = %ctx.invocation_id().to_string(),
+            adk.name = %self.name,
+            adk.invocation_id = %ctx.invocation_id().to_string(),
             adk.user.id = %ctx.user_id(),
-            adk.agent.session_id = %ctx.session_id()
+            adk.session_id = %ctx.session_id()
         )
     )]
     async fn run(&self, ctx: Arc<dyn InvocationContext>) -> Result<adk_core::EventStream> {
@@ -856,11 +856,11 @@ impl Agent for LlmAgent {
                     cached_event.author = agent_name.clone();
                     cached_event.llm_response.content = cached_response.content.clone();
                     cached_event.llm_request = Some(serde_json::to_string(&request).unwrap_or_default());
-                    cached_event.provider_metadata.insert("adk.agent.llm_request".to_string(), serde_json::to_string(&request).unwrap_or_default());
-                    cached_event.provider_metadata.insert("adk.agent.llm_response".to_string(), serde_json::to_string(&cached_response).unwrap_or_default());
+                    cached_event.provider_metadata.insert("adk.llm_request".to_string(), serde_json::to_string(&request).unwrap_or_default());
+                    cached_event.provider_metadata.insert("adk.llm_response".to_string(), serde_json::to_string(&cached_response).unwrap_or_default());
                     // Legacy support
-                    cached_event.provider_metadata.insert("gcp.vertex.agent.llm_request".to_string(), serde_json::to_string(&request).unwrap_or_default());
-                    cached_event.provider_metadata.insert("gcp.vertex.agent.llm_response".to_string(), serde_json::to_string(&cached_response).unwrap_or_default());
+                    cached_event.provider_metadata.insert("gcp.vertex.llm_request".to_string(), serde_json::to_string(&request).unwrap_or_default());
+                    cached_event.provider_metadata.insert("gcp.vertex.llm_response".to_string(), serde_json::to_string(&cached_response).unwrap_or_default());
 
                     // Populate long_running_tool_ids for function calls from long-running tools
                     if let Some(ref content) = cached_response.content {
@@ -882,19 +882,19 @@ impl Agent for LlmAgent {
                     let llm_event_id = format!("{}_llm_{}", invocation_id, llm_ts);
                     let llm_span = tracing::info_span!(
                         "call_llm",
-                        "adk.agent.event_id" = %llm_event_id,
-                        "adk.agent.invocation_id" = %invocation_id,
-                        "adk.agent.session_id" = %ctx.session_id(),
+                        "adk.event_id" = %llm_event_id,
+                        "adk.invocation_id" = %invocation_id,
+                        "adk.session_id" = %ctx.session_id(),
                         "adk.user.id" = %ctx.user_id(),
-                        "adk.agent.llm_request" = %request_json,
-                        "adk.agent.llm_response" = tracing::field::Empty,
+                        "adk.llm_request" = %request_json,
+                        "adk.llm_response" = tracing::field::Empty,
                         // Compatibility fields
-                        "gcp.vertex.agent.event_id" = %llm_event_id,
-                        "gcp.vertex.agent.invocation_id" = %invocation_id,
-                        "gcp.vertex.agent.session_id" = %ctx.session_id(),
+                        "gcp.vertex.event_id" = %llm_event_id,
+                        "gcp.vertex.invocation_id" = %invocation_id,
+                        "gcp.vertex.session_id" = %ctx.session_id(),
                         "gen_ai.conversation.id" = %ctx.session_id(),
-                        "gcp.vertex.agent.llm_request" = %request_json,
-                        "gcp.vertex.agent.llm_response" = tracing::field::Empty
+                        "gcp.vertex.llm_request" = %request_json,
+                        "gcp.vertex.llm_response" = tracing::field::Empty
                     );
                     let _llm_guard = llm_span.enter();
 
@@ -956,11 +956,11 @@ impl Agent for LlmAgent {
                             let mut partial_event = Event::with_id(&llm_event_id, &invocation_id);
                             partial_event.author = agent_name.clone();
                             partial_event.llm_request = Some(request_json.clone());
-                            partial_event.provider_metadata.insert("adk.agent.llm_request".to_string(), request_json.clone());
-                            partial_event.provider_metadata.insert("adk.agent.llm_response".to_string(), serde_json::to_string(&chunk).unwrap_or_default());
+                            partial_event.provider_metadata.insert("adk.llm_request".to_string(), request_json.clone());
+                            partial_event.provider_metadata.insert("adk.llm_response".to_string(), serde_json::to_string(&chunk).unwrap_or_default());
                             // Legacy
-                            partial_event.provider_metadata.insert("gcp.vertex.agent.llm_request".to_string(), request_json.clone());
-                            partial_event.provider_metadata.insert("gcp.vertex.agent.llm_response".to_string(), serde_json::to_string(&chunk).unwrap_or_default());
+                            partial_event.provider_metadata.insert("gcp.vertex.llm_request".to_string(), request_json.clone());
+                            partial_event.provider_metadata.insert("gcp.vertex.llm_response".to_string(), serde_json::to_string(&chunk).unwrap_or_default());
                             partial_event.llm_response.partial = chunk.partial;
                             partial_event.llm_response.turn_complete = chunk.turn_complete;
                             partial_event.llm_response.finish_reason = chunk.finish_reason;
@@ -988,9 +988,9 @@ impl Agent for LlmAgent {
                     if !should_stream_to_client {
                         let mut final_event = Event::with_id(&llm_event_id, &invocation_id);
                         final_event.author = agent_name.clone();
-                        final_event.provider_metadata.insert("adk.agent.llm_request".to_string(), request_json.clone());
+                        final_event.provider_metadata.insert("adk.llm_request".to_string(), request_json.clone());
                         // Legacy
-                        final_event.provider_metadata.insert("gcp.vertex.agent.llm_request".to_string(), request_json.clone());
+                        final_event.provider_metadata.insert("gcp.vertex.llm_request".to_string(), request_json.clone());
 
                         final_event.llm_response.content = accumulated_content.clone();
                         final_event.llm_response.partial = false;
@@ -998,12 +998,12 @@ impl Agent for LlmAgent {
 
                         // Copy metadata from last chunk
                         if let Some(ref last) = last_chunk {
-                            final_event.provider_metadata.insert("adk.agent.llm_response".to_string(), serde_json::to_string(last).unwrap_or_default());
+                            final_event.provider_metadata.insert("adk.llm_response".to_string(), serde_json::to_string(last).unwrap_or_default());
                             // Legacy
-                            final_event.provider_metadata.insert("gcp.vertex.agent.llm_response".to_string(), serde_json::to_string(last).unwrap_or_default());
+                            final_event.provider_metadata.insert("gcp.vertex.llm_response".to_string(), serde_json::to_string(last).unwrap_or_default());
                             final_event.llm_response.finish_reason = last.finish_reason;
                             final_event.llm_response.usage_metadata = last.usage_metadata.clone();
-                            final_event.provider_metadata.insert("gcp.vertex.agent.llm_response".to_string(), serde_json::to_string(last).unwrap_or_default());
+                            final_event.provider_metadata.insert("gcp.vertex.llm_response".to_string(), serde_json::to_string(last).unwrap_or_default());
                         }
 
                         // Populate long_running_tool_ids
@@ -1017,8 +1017,8 @@ impl Agent for LlmAgent {
                     // Record LLM response to span before guard drops
                     if let Some(ref content) = accumulated_content {
                         let response_json = serde_json::to_string(content).unwrap_or_default();
-                        llm_span.record("adk.agent.llm_response", &response_json);
-                        llm_span.record("gcp.vertex.agent.llm_response", &response_json);
+                        llm_span.record("adk.llm_response", &response_json);
+                        llm_span.record("gcp.vertex.llm_response", &response_json);
                     }
                 }
 
@@ -1078,8 +1078,8 @@ impl Agent for LlmAgent {
                     // Record LLM response for tracing
                     if let Some(ref content) = accumulated_content {
                         let response_json = serde_json::to_string(content).unwrap_or_default();
-                        tracing::Span::current().record("adk.agent.llm_response", &response_json);
-                        tracing::Span::current().record("gcp.vertex.agent.llm_response", &response_json);
+                        tracing::Span::current().record("adk.llm_response", &response_json);
+                        tracing::Span::current().record("gcp.vertex.llm_response", &response_json);
                     }
 
                     tracing::info!(agent.name = %agent_name, "Agent execution complete");
@@ -1234,14 +1234,14 @@ impl Agent for LlmAgent {
                                         "",
                                         otel.name = %span_name,
                                         tool.name = %name,
-                                        "adk.agent.event_id" = %format!("{}_{}", invocation_id, name),
-                                        "adk.agent.invocation_id" = %invocation_id,
-                                        "adk.agent.session_id" = %ctx.session_id(),
+                                        "adk.event_id" = %format!("{}_{}", invocation_id, name),
+                                        "adk.invocation_id" = %invocation_id,
+                                        "adk.session_id" = %ctx.session_id(),
                                         "adk.user.id" = %ctx.user_id(),
                                         // Compatibility
-                                        "gcp.vertex.agent.event_id" = %format!("{}_{}", invocation_id, name),
-                                        "gcp.vertex.agent.invocation_id" = %invocation_id,
-                                        "gcp.vertex.agent.session_id" = %ctx.session_id(),
+                                        "gcp.vertex.event_id" = %format!("{}_{}", invocation_id, name),
+                                        "gcp.vertex.invocation_id" = %invocation_id,
+                                        "gcp.vertex.session_id" = %ctx.session_id(),
                                         "gen_ai.conversation.id" = %ctx.session_id()
                                     );
 

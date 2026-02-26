@@ -13,9 +13,9 @@ pub trait TraceContextExt: ReadonlyContext {
             "adk.user_id" = %id.user_id,
             "adk.app_name" = %id.app_name,
             "adk.branch" = %id.branch,
-            // Restore Google/Vertex specific keys
-            "gcp.vertex.agent.invocation_id" = %id.invocation_id,
-            "gcp.vertex.agent.session_id" = %id.session_id,
+            // Vertex AI Observability: Native integration for Google Cloud monitoring
+            "gcp.vertex.invocation_id" = %id.invocation_id,
+            "gcp.vertex.session_id" = %id.session_id,
             "gen_ai.conversation.id" = %id.session_id
         );
         self.record_metadata(&span);
@@ -34,9 +34,9 @@ pub trait TraceContextExt: ReadonlyContext {
             "adk.app_name" = %id.app_name,
             "adk.branch" = %id.branch,
             "adk.tool.name" = tracing::field::Empty,
-            // Restore Google/Vertex specific keys
-            "gcp.vertex.agent.invocation_id" = %id.invocation_id,
-            "gcp.vertex.agent.session_id" = %id.session_id
+            // Vertex AI Observability: Native integration for Google Cloud monitoring
+            "gcp.vertex.invocation_id" = %id.invocation_id,
+            "gcp.vertex.session_id" = %id.session_id
         );
         self.record_metadata(&span);
         span
@@ -53,9 +53,9 @@ pub trait TraceContextExt: ReadonlyContext {
             "adk.user_id" = %id.user_id,
             "adk.app_name" = %id.app_name,
             "adk.branch" = %id.branch,
-            // Restore Google/Vertex specific keys
-            "gcp.vertex.agent.invocation_id" = %id.invocation_id,
-            "gcp.vertex.agent.session_id" = %id.session_id,
+            // Vertex AI Observability: Native integration for Google Cloud monitoring
+            "gcp.vertex.invocation_id" = %id.invocation_id,
+            "gcp.vertex.session_id" = %id.session_id,
             // Agent-specific trace attributes
             "adk.skills.selected_name" = tracing::field::Empty,
             "adk.skills.selected_id" = tracing::field::Empty
@@ -72,9 +72,9 @@ pub trait TraceContextExt: ReadonlyContext {
         span.record("adk.user_id", id.user_id.to_string());
         span.record("adk.app_name", &id.app_name);
         span.record("adk.branch", &id.branch);
-        // Record Google/Vertex specific keys
-        span.record("gcp.vertex.agent.invocation_id", id.invocation_id.to_string());
-        span.record("gcp.vertex.agent.session_id", id.session_id.to_string());
+        // Vertex AI Observability: Native integration for Google Cloud monitoring
+        span.record("gcp.vertex.invocation_id", id.invocation_id.to_string());
+        span.record("gcp.vertex.session_id", id.session_id.to_string());
         self.record_metadata(span);
     }
 
