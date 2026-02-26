@@ -16,7 +16,6 @@ pub trait ReadonlyContext: Send + Sync {
     fn user_content(&self) -> &Content;
 }
 
-#[async_trait]
 impl<T: ?Sized + ReadonlyContext> ReadonlyContext for Arc<T> {
     fn invocation_id(&self) -> &str {
         (**self).invocation_id()

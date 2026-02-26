@@ -175,14 +175,14 @@ impl RunnerContext {
         user_content: Content,
         session: Arc<dyn AdkSession>,
     ) -> Self {
-        let base = adk_core::AdkContext::builder()
-            .invocation_id(invocation_id)
-            .agent_name(agent.name())
-            .user_id(user_id)
-            .app_name(app_name)
-            .session_id(session_id)
-            .user_content(user_content)
-            .build();
+        let base = Self::build_base_context(
+            invocation_id,
+            &agent,
+            user_id,
+            app_name,
+            session_id,
+            user_content,
+        );
 
         Self {
             base,
@@ -207,14 +207,14 @@ impl RunnerContext {
         user_content: Content,
         session: Arc<MutableSession>,
     ) -> Self {
-        let base = adk_core::AdkContext::builder()
-            .invocation_id(invocation_id)
-            .agent_name(agent.name())
-            .user_id(user_id)
-            .app_name(app_name)
-            .session_id(session_id)
-            .user_content(user_content)
-            .build();
+        let base = Self::build_base_context(
+            invocation_id,
+            &agent,
+            user_id,
+            app_name,
+            session_id,
+            user_content,
+        );
 
         Self {
             base,
@@ -225,6 +225,24 @@ impl RunnerContext {
             ended: Arc::new(AtomicBool::new(false)),
             session,
         }
+    }
+
+    fn build_base_context(
+        invocation_id: String,
+        agent: &Arc<dyn Agent>,
+        user_id: String,
+        app_name: String,
+        session_id: String,
+        user_content: Content,
+    ) -> adk_core::AdkContext {
+        adk_core::AdkContext::builder()
+            .invocation_id(invocation_id)
+            .agent_name(agent.name())
+            .user_id(user_id)
+            .app_name(app_name)
+            .session_id(session_id)
+            .user_content(user_content)
+            .build()
     }
 
     pub fn with_branch(mut self, branch: String) -> Self {
