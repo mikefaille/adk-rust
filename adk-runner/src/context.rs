@@ -152,6 +152,14 @@ impl adk_core::State for MutableSession {
     }
 }
 
+/// Execution context used by the `adk-runner`.
+///
+/// `RunnerContext` is the concrete implementation of `InvocationContext` used during agent execution.
+/// It wraps the core `AdkContext` (for identity and basic metadata) and adds runtime capabilities like:
+/// - Shared mutable session state (`MutableSession`)
+/// - Access to `Artifacts` and `Memory` services
+/// - Execution control (e.g., `end_invocation`)
+/// - Runtime configuration (`RunConfig`)
 pub struct RunnerContext {
     base: adk_core::AdkContext,
     agent: Arc<dyn Agent>,
@@ -166,7 +174,64 @@ pub struct RunnerContext {
 }
 
 impl RunnerContext {
-    /// Create a new builder for `RunnerContext`.
+    /// Create a new builder for [`RunnerContext`].
+    ///
+    /// The builder provides a fluent API to construct a context with all required dependencies.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// # use std::sync::Arc;
+    /// # use adk_core::{Agent, Content};
+    /// # use adk_runner::{RunnerContext, MutableSession};
+    /// # // Mock types for example
+    /// # struct MockAgent;
+    /// # #[async_trait::async_trait] impl Agent for MockAgent {
+    /// #     fn name(&self) -> &str { "mock" }
+    /// #     fn description(&self) -> &str { "" }
+    /// #     fn sub_agents(&self) -> &[Arc<dyn Agent>] { &[] }
+    /// #     async fn run(&self, _: Arc<dyn adk_core::InvocationContext>) -> adk_core::Result<adk_core::EventStream> { Ok(Box::pin(futures::stream::empty())) }
+    /// # }
+    /// # struct MockSession;
+    /// # struct MockState;
+    /// # impl adk_session::State for MockState {
+    /// #     fn get(&self, _: &str) -> Option<serde_json::Value> { None }
+    /// #     fn set(&mut self, _: String, _: serde_json::Value) {}
+    /// #     fn all(&self) -> std::collections::HashMap<String, serde_json::Value> { std::collections::HashMap::new() }
+    /// # }
+    /// # struct MockEvents;
+    /// # impl adk_session::Events for MockEvents {
+    /// #     fn all(&self) -> Vec<adk_core::Event> { vec![] }
+    /// #     fn len(&self) -> usize { 0 }
+    /// #     fn at(&self, _: usize) -> Option<&adk_core::Event> { None }
+    /// # }
+    /// # impl adk_session::Session for MockSession {
+    /// #     fn id(&self) -> &str { "sess-1" }
+    /// #     fn app_name(&self) -> &str { "app" }
+    /// #     fn user_id(&self) -> &str { "user-1" }
+    /// #     fn state(&self) -> &dyn adk_session::State {
+    /// #         static STATE: MockState = MockState;
+    /// #         &STATE
+    /// #     }
+    /// #     fn events(&self) -> &dyn adk_session::Events {
+    /// #         static EVENTS: MockEvents = MockEvents;
+    /// #         &EVENTS
+    /// #     }
+    /// #     fn last_update_time(&self) -> chrono::DateTime<chrono::Utc> { chrono::Utc::now() }
+    /// # }
+    /// # let agent = Arc::new(MockAgent);
+    /// # let session = Arc::new(MockSession);
+    /// let context = RunnerContext::builder()
+    ///     .invocation_id("inv-123")
+    ///     .agent(agent)
+    ///     .user_id("user-456")
+    ///     .app_name("my-app")
+    ///     .session_id("sess-789")
+    ///     .user_content(Content::default())
+    ///     .session(session) // or .mutable_session(ms)
+    ///     .build()
+    ///     .expect("Failed to build context");
+    /// ```
     pub fn builder() -> RunnerContextBuilder {
         RunnerContextBuilder::default()
     }
@@ -310,7 +375,10 @@ impl InvocationContextTrait for RunnerContext {
     }
 }
 
-/// Builder for `RunnerContext`.
+/// Builder for [`RunnerContext`].
+///
+/// Use `RunnerContext::builder()` to create an instance.
+/// Required fields: `invocation_id`, `agent`, `user_id`, `session_id`, and either `session` or `mutable_session`.
 #[derive(Default)]
 pub struct RunnerContextBuilder {
     invocation_id: Option<String>,
