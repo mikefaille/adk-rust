@@ -444,8 +444,6 @@ impl GraphInvocationContext {
         };
 
         let session = Arc::new(GraphSession::new(session_id));
-        // Add user content to history
-        session.append_content(user_content.clone());
         Self {
             identity,
             user_content,
