@@ -1,4 +1,20 @@
+use derive_more::{AsRef, Display, From};
 use serde::{Deserialize, Serialize};
+
+#[derive(
+    Debug, Clone, PartialEq, Eq, Hash, Display, From, AsRef, Serialize, Deserialize, Default,
+)]
+pub struct SessionId(String);
+
+#[derive(
+    Debug, Clone, PartialEq, Eq, Hash, Display, From, AsRef, Serialize, Deserialize, Default,
+)]
+pub struct InvocationId(String);
+
+#[derive(
+    Debug, Clone, PartialEq, Eq, Hash, Display, From, AsRef, Serialize, Deserialize, Default,
+)]
+pub struct UserId(String);
 
 /// Maximum allowed size for inline binary data (10 MB).
 /// Prevents accidental or malicious embedding of oversized payloads in Content parts.
@@ -22,10 +38,7 @@ impl Default for Content {
     /// Note that an empty role is typically interpreted as a "user" role
     /// by downstream consumers (like model converters).
     fn default() -> Self {
-        Self {
-            role: String::new(),
-            parts: Vec::new(),
-        }
+        Self { role: String::new(), parts: Vec::new() }
     }
 }
 

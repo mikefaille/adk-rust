@@ -59,6 +59,7 @@ use adk_core::{
     BeforeToolCallback, CallbackContext, Content, Event, EventActions, EventStream,
     GlobalInstructionProvider, InstructionProvider, InvocationContext, MemoryEntry, Part,
     ReadonlyContext, Result, Tool, ToolContext,
+    types::{InvocationId, SessionId, UserId},
 };
 #[cfg(feature = "telemetry")]
 use adk_telemetry::TraceContextExt;
@@ -693,7 +694,9 @@ impl Agent for RealtimeAgent {
 
                                 let (result, actions) = if let Some(tool) = tool {
                                     #[cfg(feature = "telemetry")]
-                                    let _tool_span = ctx.child_span("tool.execute").enter();
+                                    let span = ctx.child_span("tool.execute");
+                                    #[cfg(feature = "telemetry")]
+                                    let _tool_span = span.enter();
                                     #[cfg(feature = "telemetry")]
                                     {
                                         tracing::Span::current().record("adk.tool.name", &name);
@@ -839,7 +842,7 @@ impl RealtimeToolContext {
 
 #[async_trait]
 impl ReadonlyContext for RealtimeToolContext {
-    fn invocation_id(&self) -> &str {
+    fn invocation_id(&self) -> &InvocationId {
         self.parent_ctx.invocation_id()
     }
 
@@ -847,7 +850,7 @@ impl ReadonlyContext for RealtimeToolContext {
         self.parent_ctx.agent_name()
     }
 
-    fn user_id(&self) -> &str {
+    fn user_id(&self) -> &UserId {
         self.parent_ctx.user_id()
     }
 
@@ -855,7 +858,7 @@ impl ReadonlyContext for RealtimeToolContext {
         self.parent_ctx.app_name()
     }
 
-    fn session_id(&self) -> &str {
+    fn session_id(&self) -> &SessionId {
         self.parent_ctx.session_id()
     }
 

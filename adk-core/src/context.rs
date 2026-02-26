@@ -1,4 +1,7 @@
-use crate::{Agent, Result, types::Content};
+use crate::{
+    Agent, Result,
+    types::{Content, InvocationId, SessionId, UserId},
+};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -7,29 +10,29 @@ use std::sync::Arc;
 
 #[async_trait]
 pub trait ReadonlyContext: Send + Sync {
-    fn invocation_id(&self) -> &str;
+    fn invocation_id(&self) -> &InvocationId;
     fn agent_name(&self) -> &str;
-    fn user_id(&self) -> &str;
+    fn user_id(&self) -> &UserId;
     fn app_name(&self) -> &str;
-    fn session_id(&self) -> &str;
+    fn session_id(&self) -> &SessionId;
     fn branch(&self) -> &str;
     fn user_content(&self) -> &Content;
 }
 
 impl<T: ?Sized + ReadonlyContext> ReadonlyContext for Arc<T> {
-    fn invocation_id(&self) -> &str {
+    fn invocation_id(&self) -> &InvocationId {
         (**self).invocation_id()
     }
     fn agent_name(&self) -> &str {
         (**self).agent_name()
     }
-    fn user_id(&self) -> &str {
+    fn user_id(&self) -> &UserId {
         (**self).user_id()
     }
     fn app_name(&self) -> &str {
         (**self).app_name()
     }
-    fn session_id(&self) -> &str {
+    fn session_id(&self) -> &SessionId {
         (**self).session_id()
     }
     fn branch(&self) -> &str {
@@ -57,11 +60,11 @@ impl<T: ?Sized + ReadonlyContext> ReadonlyContext for Arc<T> {
 /// Tracing capabilities are provided as extension traits in `adk-telemetry`.
 #[derive(Debug, Clone, Default)]
 pub struct AdkContext {
-    invocation_id: String,
+    invocation_id: InvocationId,
     agent_name: String,
-    user_id: String,
+    user_id: UserId,
     app_name: String,
-    session_id: String,
+    session_id: SessionId,
     branch: String,
     user_content: Content,
     /// Extensible metadata for any framework-specific attributes.
@@ -88,18 +91,18 @@ impl AdkContext {
 /// Fluent builder for `AdkContext` following Rust API guidelines.
 #[derive(Debug, Clone, Default)]
 pub struct AdkContextBuilder {
-    invocation_id: Option<String>,
+    invocation_id: Option<InvocationId>,
     agent_name: Option<String>,
-    user_id: Option<String>,
+    user_id: Option<UserId>,
     app_name: Option<String>,
-    session_id: Option<String>,
+    session_id: Option<SessionId>,
     branch: Option<String>,
     user_content: Option<Content>,
     metadata: HashMap<String, String>,
 }
 
 impl AdkContextBuilder {
-    pub fn invocation_id(mut self, id: impl Into<String>) -> Self {
+    pub fn invocation_id(mut self, id: impl Into<InvocationId>) -> Self {
         self.invocation_id = Some(id.into());
         self
     }
@@ -109,7 +112,7 @@ impl AdkContextBuilder {
         self
     }
 
-    pub fn user_id(mut self, id: impl Into<String>) -> Self {
+    pub fn user_id(mut self, id: impl Into<UserId>) -> Self {
         self.user_id = Some(id.into());
         self
     }
@@ -119,7 +122,7 @@ impl AdkContextBuilder {
         self
     }
 
-    pub fn session_id(mut self, id: impl Into<String>) -> Self {
+    pub fn session_id(mut self, id: impl Into<SessionId>) -> Self {
         self.session_id = Some(id.into());
         self
     }
@@ -143,7 +146,7 @@ impl AdkContextBuilder {
         AdkContext {
             invocation_id: self.invocation_id.unwrap_or_default(),
             agent_name: self.agent_name.unwrap_or_default(),
-            user_id: self.user_id.unwrap_or_else(|| "anonymous".to_string()),
+            user_id: self.user_id.unwrap_or_default(),
             app_name: self.app_name.unwrap_or_else(|| "adk-app".to_string()),
             session_id: self.session_id.unwrap_or_default(),
             branch: self.branch.unwrap_or_else(|| "main".to_string()),
@@ -154,7 +157,7 @@ impl AdkContextBuilder {
 }
 
 impl ReadonlyContext for AdkContext {
-    fn invocation_id(&self) -> &str {
+    fn invocation_id(&self) -> &InvocationId {
         &self.invocation_id
     }
 
@@ -162,7 +165,7 @@ impl ReadonlyContext for AdkContext {
         &self.agent_name
     }
 
-    fn user_id(&self) -> &str {
+    fn user_id(&self) -> &UserId {
         &self.user_id
     }
 
@@ -170,7 +173,7 @@ impl ReadonlyContext for AdkContext {
         &self.app_name
     }
 
-    fn session_id(&self) -> &str {
+    fn session_id(&self) -> &SessionId {
         &self.session_id
     }
 

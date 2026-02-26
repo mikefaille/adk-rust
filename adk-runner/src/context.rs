@@ -1,6 +1,7 @@
 use adk_core::{
     Agent, Artifacts, CallbackContext, Content, Event, InvocationContext as InvocationContextTrait,
     Memory, ReadonlyContext, RunConfig,
+    types::{InvocationId, SessionId, UserId},
 };
 use adk_session::Session as AdkSession;
 use async_trait::async_trait;
@@ -261,7 +262,10 @@ impl RunnerContext {
     /// Create a RunnerContext with an existing MutableSession.
     /// This allows sharing the same mutable session across multiple contexts
     /// (e.g., for agent transfers).
-    #[deprecated(since = "0.4.0", note = "Use RunnerContext::builder() with mutable_session() instead")]
+    #[deprecated(
+        since = "0.4.0",
+        note = "Use RunnerContext::builder() with mutable_session() instead"
+    )]
     pub fn with_mutable_session(
         invocation_id: String,
         agent: Arc<dyn Agent>,
@@ -312,7 +316,7 @@ impl RunnerContext {
 
 #[async_trait]
 impl ReadonlyContext for RunnerContext {
-    fn invocation_id(&self) -> &str {
+    fn invocation_id(&self) -> &InvocationId {
         self.base.invocation_id()
     }
 
@@ -320,7 +324,7 @@ impl ReadonlyContext for RunnerContext {
         self.base.agent_name()
     }
 
-    fn user_id(&self) -> &str {
+    fn user_id(&self) -> &UserId {
         self.base.user_id()
     }
 
@@ -328,7 +332,7 @@ impl ReadonlyContext for RunnerContext {
         self.base.app_name()
     }
 
-    fn session_id(&self) -> &str {
+    fn session_id(&self) -> &SessionId {
         self.base.session_id()
     }
 
@@ -453,11 +457,17 @@ impl RunnerContextBuilder {
     }
 
     pub fn build(self) -> adk_core::Result<RunnerContext> {
-        let invocation_id = self.invocation_id.ok_or_else(|| adk_core::AdkError::Config("Invocation ID is required".into()))?;
-        let agent = self.agent.ok_or_else(|| adk_core::AdkError::Config("Agent is required".into()))?;
-        let user_id = self.user_id.ok_or_else(|| adk_core::AdkError::Config("User ID is required".into()))?;
+        let invocation_id = self
+            .invocation_id
+            .ok_or_else(|| adk_core::AdkError::Config("Invocation ID is required".into()))?;
+        let agent =
+            self.agent.ok_or_else(|| adk_core::AdkError::Config("Agent is required".into()))?;
+        let user_id =
+            self.user_id.ok_or_else(|| adk_core::AdkError::Config("User ID is required".into()))?;
         let app_name = self.app_name.unwrap_or_else(|| "adk-app".to_string());
-        let session_id = self.session_id.ok_or_else(|| adk_core::AdkError::Config("Session ID is required".into()))?;
+        let session_id = self
+            .session_id
+            .ok_or_else(|| adk_core::AdkError::Config("Session ID is required".into()))?;
         let user_content = self.user_content.unwrap_or_default();
 
         let session = if let Some(ms) = self.mutable_session {
