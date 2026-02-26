@@ -10,7 +10,7 @@ pub struct FunctionResponseData {
     pub response: serde_json::Value,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Content {
     pub role: String,
     pub parts: Vec<Part>,
