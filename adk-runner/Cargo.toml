@@ -31,3 +31,7 @@ tracing.workspace = true
 [dev-dependencies]
 chrono = "0.4"
 tempfile = "3"
+
+[features]
+default = []
+telemetry = ["dep:adk-telemetry"]
