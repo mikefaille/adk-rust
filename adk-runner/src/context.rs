@@ -284,7 +284,7 @@ impl RunnerContext {
     }
 
     pub fn with_branch(mut self, branch: String) -> Self {
-        self.base.branch = branch;
+        self.base.set_branch(branch);
         self
     }
 
@@ -313,31 +313,31 @@ impl RunnerContext {
 #[async_trait]
 impl ReadonlyContext for RunnerContext {
     fn invocation_id(&self) -> &str {
-        &self.base.invocation_id
+        self.base.invocation_id()
     }
 
     fn agent_name(&self) -> &str {
-        &self.base.agent_name
+        self.base.agent_name()
     }
 
     fn user_id(&self) -> &str {
-        &self.base.user_id
+        self.base.user_id()
     }
 
     fn app_name(&self) -> &str {
-        &self.base.app_name
+        self.base.app_name()
     }
 
     fn session_id(&self) -> &str {
-        &self.base.session_id
+        self.base.session_id()
     }
 
     fn branch(&self) -> &str {
-        &self.base.branch
+        self.base.branch()
     }
 
     fn user_content(&self) -> &Content {
-        &self.base.user_content
+        self.base.user_content()
     }
 }
 

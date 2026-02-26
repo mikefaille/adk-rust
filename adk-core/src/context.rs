@@ -57,21 +57,31 @@ impl<T: ?Sized + ReadonlyContext> ReadonlyContext for Arc<T> {
 /// Tracing capabilities are provided as extension traits in `adk-telemetry`.
 #[derive(Debug, Clone, Default)]
 pub struct AdkContext {
-    pub invocation_id: String,
-    pub agent_name: String,
-    pub user_id: String,
-    pub app_name: String,
-    pub session_id: String,
-    pub branch: String,
-    pub user_content: Content,
+    invocation_id: String,
+    agent_name: String,
+    user_id: String,
+    app_name: String,
+    session_id: String,
+    branch: String,
+    user_content: Content,
     /// Extensible metadata for any framework-specific attributes.
-    pub metadata: HashMap<String, String>,
+    metadata: HashMap<String, String>,
 }
 
 impl AdkContext {
     /// Create a new builder for `AdkContext`.
     pub fn builder() -> AdkContextBuilder {
         AdkContextBuilder::default()
+    }
+
+    /// Returns the metadata map.
+    pub fn metadata(&self) -> &HashMap<String, String> {
+        &self.metadata
+    }
+
+    /// Update the branch name.
+    pub fn set_branch(&mut self, branch: impl Into<String>) {
+        self.branch = branch.into();
     }
 }
 
@@ -442,11 +452,11 @@ mod tests {
             .metadata("custom.key", "custom-value")
             .build();
 
-        assert_eq!(ctx.invocation_id, "inv-123");
-        assert_eq!(ctx.agent_name, "test-agent");
-        assert_eq!(ctx.user_id, "user-456");
-        assert_eq!(ctx.session_id, "sess-789");
-        assert_eq!(ctx.app_name, "adk-app"); // Default
-        assert_eq!(ctx.metadata.get("custom.key").unwrap(), "custom-value");
+        assert_eq!(ctx.invocation_id(), "inv-123");
+        assert_eq!(ctx.agent_name(), "test-agent");
+        assert_eq!(ctx.user_id(), "user-456");
+        assert_eq!(ctx.session_id(), "sess-789");
+        assert_eq!(ctx.app_name(), "adk-app"); // Default
+        assert_eq!(ctx.metadata().get("custom.key").unwrap(), "custom-value");
     }
 }
