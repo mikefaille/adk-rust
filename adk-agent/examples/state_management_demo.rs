@@ -9,16 +9,31 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-struct TestSession;
+use adk_core::types::{SessionId, UserId};
+
+struct TestSession {
+    id: SessionId,
+    user_id: UserId,
+}
+
+impl TestSession {
+    fn new() -> Self {
+        Self {
+            id: SessionId::from("test-session".to_string()),
+            user_id: UserId::from("test-user".to_string()),
+        }
+    }
+}
+
 impl Session for TestSession {
-    fn id(&self) -> &str {
-        "test-session"
+    fn id(&self) -> &SessionId {
+        &self.id
     }
     fn app_name(&self) -> &str {
         "test-app"
     }
-    fn user_id(&self) -> &str {
-        "test-user"
+    fn user_id(&self) -> &UserId {
+        &self.user_id
     }
     fn state(&self) -> &dyn State {
         &TestState
@@ -51,7 +66,7 @@ impl TestContext {
     fn new(text: &str) -> Self {
         Self {
             identity: AdkIdentity::default(),
-            session: TestSession,
+            session: TestSession::new(),
             user_content: Content {
                 role: "user".to_string(),
                 parts: vec![Part::Text { text: text.to_string() }],

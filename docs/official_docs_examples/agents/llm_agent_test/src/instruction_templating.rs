@@ -49,7 +49,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let session = session_service
         .create(CreateRequest {
             app_name: "templating_demo".to_string(),
-            user_id: "user123".to_string(),
+            user_id: "user123".to_string().into(),
             session_id: None,
             state,
         })
@@ -64,8 +64,8 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     // Run the agent with templated instruction
     let mut response_stream = runner
         .run(
-            "user123".to_string(),
-            session.id().to_string(),
+            "user123".to_string().into(),
+            session.id().clone(),
             Content::new("user").with_text("Explain async/await in Rust"),
         )
         .await?;

@@ -1,6 +1,6 @@
 use adk_core::{
     Agent, CallbackContext, Content, Event, FunctionResponseData, Part, ReadonlyContext, RunConfig,
-    RunnerContext as RunnerContextTrait, Session as CoreSession, StreamingMode,
+    InvocationContext as RunnerContextTrait, Session as CoreSession, StreamingMode,
 };
 use adk_runner::{MutableSession, RunnerContext};
 use adk_session::{Events, Session, State};
@@ -37,31 +37,43 @@ impl State for MockSessionStateView {
 }
 
 // MockSession that supports returning a reference to state
+use adk_core::types::{SessionId, UserId};
+
 struct MockSessionWithState {
+    session_id: SessionId,
+    user_identity: UserId,
     state_view: MockSessionStateView,
 }
 
 impl MockSessionWithState {
     fn new() -> Self {
         let state_arc = std::sync::Arc::new(std::sync::RwLock::new(HashMap::new()));
-        Self { state_view: MockSessionStateView(state_arc) }
+        Self {
+            session_id: SessionId::from("session-789".to_string()),
+            user_identity: UserId::from("user-456".to_string()),
+            state_view: MockSessionStateView(state_arc),
+        }
     }
 
     fn with_state(state: HashMap<String, serde_json::Value>) -> Self {
         let state_arc = std::sync::Arc::new(std::sync::RwLock::new(state));
-        Self { state_view: MockSessionStateView(state_arc) }
+        Self {
+            session_id: SessionId::from("session-789".to_string()),
+            user_identity: UserId::from("user-456".to_string()),
+            state_view: MockSessionStateView(state_arc),
+        }
     }
 }
 
 impl Session for MockSessionWithState {
-    fn id(&self) -> &str {
-        "session-789"
+    fn id(&self) -> &SessionId {
+        &self.session_id
     }
     fn app_name(&self) -> &str {
         "test-app"
     }
-    fn user_id(&self) -> &str {
-        "user-456"
+    fn user_id(&self) -> &UserId {
+        &self.user_identity
     }
     fn state(&self) -> &dyn State {
         &self.state_view
@@ -112,9 +124,9 @@ fn test_context_creation() {
     let ctx = RunnerContext::new(
         "inv-123".to_string(),
         agent.clone(),
-        "user-456".to_string(),
+        "user-456".to_string().into(),
         "test-app".to_string(),
-        "session-789".to_string(),
+        "session-789".to_string().into(),
         content.clone(),
         Arc::new(MockSessionWithState::new()),
     );
@@ -124,7 +136,7 @@ fn test_context_creation() {
     assert_eq!(ctx.user_id().as_ref(), "user-456");
     assert_eq!(ctx.app_name(), "test-app");
     assert_eq!(ctx.session_id().as_ref(), "session-789");
-    assert_eq!(ctx.branch(), "");
+    assert_eq!(ctx.branch(), "main");
     assert_eq!(ctx.user_content().role, "user");
 }
 
@@ -137,9 +149,9 @@ fn test_context_with_branch() {
     let ctx = RunnerContext::new(
         "inv-123".to_string(),
         agent,
-        "user-456".to_string(),
+        "user-456".to_string().into(),
         "test-app".to_string(),
-        "session-789".to_string(),
+        "session-789".to_string().into(),
         content,
         Arc::new(MockSessionWithState::new()),
     )
@@ -159,9 +171,9 @@ fn test_context_with_run_config() {
     let ctx = RunnerContext::new(
         "inv-123".to_string(),
         agent,
-        "user-456".to_string(),
+        "user-456".to_string().into(),
         "test-app".to_string(),
-        "session-789".to_string(),
+        "session-789".to_string().into(),
         content,
         Arc::new(MockSessionWithState::new()),
     )
@@ -179,9 +191,9 @@ fn test_context_end_invocation() {
     let ctx = RunnerContext::new(
         "inv-123".to_string(),
         agent,
-        "user-456".to_string(),
+        "user-456".to_string().into(),
         "test-app".to_string(),
-        "session-789".to_string(),
+        "session-789".to_string().into(),
         content,
         Arc::new(MockSessionWithState::new()),
     );
@@ -200,9 +212,9 @@ fn test_context_agent_access() {
     let ctx = RunnerContext::new(
         "inv-123".to_string(),
         agent.clone(),
-        "user-456".to_string(),
+        "user-456".to_string().into(),
         "test-app".to_string(),
-        "session-789".to_string(),
+        "session-789".to_string().into(),
         content,
         Arc::new(MockSessionWithState::new()),
     );
@@ -220,9 +232,9 @@ fn test_context_optional_services() {
     let ctx = RunnerContext::new(
         "inv-123".to_string(),
         agent,
-        "user-456".to_string(),
+        "user-456".to_string().into(),
         "test-app".to_string(),
-        "session-789".to_string(),
+        "session-789".to_string().into(),
         content,
         Arc::new(MockSessionWithState::new()),
     );
@@ -289,9 +301,9 @@ fn test_mutable_session_shared_across_contexts() {
     let ctx1 = RunnerContext::new(
         "inv-1".to_string(),
         agent.clone(),
-        "user-456".to_string(),
+        "user-456".to_string().into(),
         "test-app".to_string(),
-        "session-789".to_string(),
+        "session-789".to_string().into(),
         content.clone(),
         Arc::new(MockSessionWithState::new()),
     );
@@ -305,9 +317,9 @@ fn test_mutable_session_shared_across_contexts() {
     let ctx2 = RunnerContext::with_mutable_session(
         "inv-2".to_string(),
         agent.clone(),
-        "user-456".to_string(),
+        "user-456".to_string().into(),
         "test-app".to_string(),
-        "session-789".to_string(),
+        "session-789".to_string().into(),
         content,
         ctx1.mutable_session().clone(),
     );

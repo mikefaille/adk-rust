@@ -148,7 +148,7 @@ impl Launcher {
         let session = session_service
             .create(CreateRequest {
                 app_name: app_name.clone(),
-                user_id: user_id.clone(),
+                user_id: user_id.clone().into(),
                 session_id: None,
                 state: HashMap::new(),
             })
@@ -200,7 +200,7 @@ impl Launcher {
             }
 
             let content = adk_core::Content::new("user").with_text(input);
-            let mut events = runner.run(user_id.clone(), session_id.clone(), content).await?;
+            let mut events = runner.run(user_id.clone().into(), session_id.clone().into(), content).await?;
 
             print!("Assistant: ");
             stdout.flush()?;

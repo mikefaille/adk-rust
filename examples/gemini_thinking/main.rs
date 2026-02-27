@@ -193,7 +193,7 @@ async fn demo_thought_signature(model: Arc<GeminiModel>) -> Result<(), Box<dyn s
     let session = session_service
         .create(CreateRequest {
             app_name: "gemini_thinking".to_string(),
-            user_id: "user_1".to_string(),
+            user_id: "user_1".to_string().into(),
             session_id: None,
             state: HashMap::new(),
         })
@@ -220,7 +220,8 @@ async fn demo_thought_signature(model: Arc<GeminiModel>) -> Result<(), Box<dyn s
          What is its average speed in miles per hour?",
     );
 
-    let mut stream = runner.run("user_1".to_string(), session_id.clone(), content).await?;
+    let mut stream =
+        runner.run("user_1".to_string().into(), session_id.clone().into(), content).await?;
 
     let mut saw_thinking = false;
     let mut saw_tool_call = false;
@@ -283,7 +284,8 @@ async fn demo_thought_signature(model: Arc<GeminiModel>) -> Result<(), Box<dyn s
     println!("\n>> Turn 2: Follow-up (history includes thought_signature)\n");
     let content = Content::new("user").with_text("Now convert that speed to km/h as well.");
 
-    let mut stream = runner.run("user_1".to_string(), session_id.clone(), content).await?;
+    let mut stream =
+        runner.run("user_1".to_string().into(), session_id.clone().into(), content).await?;
 
     while let Some(event) = stream.next().await {
         if let Ok(e) = event

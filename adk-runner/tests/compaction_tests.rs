@@ -79,22 +79,24 @@ impl State for MockState {
     }
 }
 
+use adk_core::types::{SessionId, UserId};
+
 struct MockSession {
-    id: String,
+    id: SessionId,
     app_name: String,
-    user_id: String,
+    user_id: UserId,
     events: MockEvents,
     state: MockState,
 }
 
 impl Session for MockSession {
-    fn id(&self) -> &str {
+    fn id(&self) -> &SessionId {
         &self.id
     }
     fn app_name(&self) -> &str {
         &self.app_name
     }
-    fn user_id(&self) -> &str {
+    fn user_id(&self) -> &UserId {
         &self.user_id
     }
     fn state(&self) -> &dyn State {
@@ -143,7 +145,7 @@ impl SessionService for TrackingSessionService {
     async fn delete(&self, _req: adk_session::DeleteRequest) -> Result<()> {
         Ok(())
     }
-    async fn append_event(&self, _session_id: &str, event: Event) -> Result<()> {
+    async fn append_event(&self, _session_id: &SessionId, event: Event) -> Result<()> {
         self.appended_events.lock().unwrap().push(event);
         Ok(())
     }
@@ -249,9 +251,9 @@ fn test_conversation_history_respects_compaction() {
 
     // Create a mock session with these events
     let mock_session: Arc<dyn adk_session::Session> = Arc::new(MockSession {
-        id: "sess-1".to_string(),
+        id: "sess-1".to_string().into(),
         app_name: "test".to_string(),
-        user_id: "user-1".to_string(),
+        user_id: "user-1".to_string().into(),
         events: MockEvents {
             events: vec![
                 old_event_1,
@@ -303,9 +305,9 @@ fn test_conversation_history_without_compaction() {
     event_2.set_content(Content::new("model").with_text("Hi there"));
 
     let mock_session: Arc<dyn adk_session::Session> = Arc::new(MockSession {
-        id: "sess-1".to_string(),
+        id: "sess-1".to_string().into(),
         app_name: "test".to_string(),
-        user_id: "user-1".to_string(),
+        user_id: "user-1".to_string().into(),
         events: MockEvents { events: vec![event_1, event_2] },
         state: MockState,
     });
@@ -350,7 +352,10 @@ async fn test_runner_triggers_compaction_at_interval() {
     .unwrap();
 
     let content = Content::new("user").with_text("Hello");
-    let mut stream = runner.run("user-1".to_string(), "sess-1".to_string(), content).await.unwrap();
+    let mut stream = runner
+        .run("user-1".to_string().into(), "sess-1".to_string().into(), content)
+        .await
+        .unwrap();
 
     // Drain the stream
     while let Some(result) = stream.next().await {
@@ -407,7 +412,10 @@ async fn test_runner_no_compaction_before_interval() {
     .unwrap();
 
     let content = Content::new("user").with_text("Hello");
-    let mut stream = runner.run("user-1".to_string(), "sess-1".to_string(), content).await.unwrap();
+    let mut stream = runner
+        .run("user-1".to_string().into(), "sess-1".to_string().into(), content)
+        .await
+        .unwrap();
 
     while let Some(result) = stream.next().await {
         assert!(result.is_ok());

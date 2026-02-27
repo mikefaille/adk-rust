@@ -80,8 +80,8 @@ pub async fn create_session(
         .session_service
         .create(adk_session::CreateRequest {
             app_name: req.app_name.clone(),
-            user_id: req.user_id.clone(),
-            session_id: Some(session_id),
+            user_id: req.user_id.clone().into(),
+            session_id: Some(session_id.into()),
             state: std::collections::HashMap::new(),
         })
         .await
@@ -102,8 +102,8 @@ pub async fn get_session(
         .session_service
         .get(adk_session::GetRequest {
             app_name,
-            user_id,
-            session_id,
+            user_id: user_id.into(),
+            session_id: session_id.into(),
             num_recent_events: None,
             after: None,
         })
@@ -119,7 +119,11 @@ pub async fn delete_session(
 ) -> Result<StatusCode, StatusCode> {
     controller
         .session_service
-        .delete(adk_session::DeleteRequest { app_name, user_id, session_id })
+        .delete(adk_session::DeleteRequest {
+            app_name,
+            user_id: user_id.into(),
+            session_id: session_id.into(),
+        })
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -192,8 +196,8 @@ pub async fn create_session_from_path(
         .session_service
         .create(adk_session::CreateRequest {
             app_name: params.app_name.clone(),
-            user_id: params.user_id.clone(),
-            session_id: Some(session_id),
+            user_id: params.user_id.clone().into(),
+            session_id: Some(session_id.into()),
             state: match body {
                 Some(b) => {
                     let s = b.0.state;
@@ -223,8 +227,8 @@ pub async fn get_session_from_path(
         .session_service
         .get(adk_session::GetRequest {
             app_name: params.app_name,
-            user_id: params.user_id,
-            session_id,
+            user_id: params.user_id.into(),
+            session_id: session_id.into(),
             num_recent_events: None,
             after: None,
         })
@@ -245,8 +249,8 @@ pub async fn delete_session_from_path(
         .session_service
         .delete(adk_session::DeleteRequest {
             app_name: params.app_name,
-            user_id: params.user_id,
-            session_id,
+            user_id: params.user_id.into(),
+            session_id: session_id.into(),
         })
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -269,7 +273,7 @@ pub async fn list_sessions(
         .session_service
         .list(adk_session::ListRequest {
             app_name: params.app_name.clone(),
-            user_id: params.user_id.clone(),
+            user_id: params.user_id.clone().into(),
         })
         .await
         .map_err(|e| {
