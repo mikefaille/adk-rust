@@ -216,9 +216,9 @@ pub trait ReadonlyState: Send + Sync {
 
 // Session trait
 pub trait Session: Send + Sync {
-    fn id(&self) -> &str;
+    fn id(&self) -> &SessionId;
     fn app_name(&self) -> &str;
-    fn user_id(&self) -> &str;
+    fn user_id(&self) -> &UserId;
     fn state(&self) -> &dyn State;
     /// Returns the conversation history from this session as Content items
     fn conversation_history(&self) -> Vec<Content>;

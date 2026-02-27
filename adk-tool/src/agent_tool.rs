@@ -300,27 +300,35 @@ impl InvocationContext for AgentToolInvocationContext {
 }
 
 // Minimal session for sub-agent execution
+use adk_core::types::{SessionId, UserId};
+
 struct AgentToolSession {
+    id: SessionId,
+    user_id: UserId,
     state: std::sync::RwLock<HashMap<String, Value>>,
 }
 
 impl AgentToolSession {
     fn new() -> Self {
-        Self { state: std::sync::RwLock::new(HashMap::new()) }
+        Self {
+            id: SessionId::from("sub-session".to_string()),
+            user_id: UserId::from("system".to_string()),
+            state: std::sync::RwLock::new(HashMap::new()),
+        }
     }
 }
 
 impl Session for AgentToolSession {
-    fn id(&self) -> &str {
-        "sub-session"
+    fn id(&self) -> &SessionId {
+        &self.id
     }
 
     fn app_name(&self) -> &str {
         "adk-tool"
     }
 
-    fn user_id(&self) -> &str {
-        "system"
+    fn user_id(&self) -> &UserId {
+        &self.user_id
     }
 
     fn state(&self) -> &dyn State {

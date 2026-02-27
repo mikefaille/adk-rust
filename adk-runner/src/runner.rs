@@ -95,8 +95,8 @@ impl Runner {
 
     pub async fn run(
         &self,
-        user_id: String,
-        session_id: String,
+        user_id: adk_core::types::UserId,
+        session_id: adk_core::types::SessionId,
         user_content: Content,
     ) -> Result<EventStream> {
         let app_name = self.app_name.clone();
@@ -172,8 +172,8 @@ impl Runner {
                 let scoped = adk_artifact::ScopedArtifacts::new(
                     service,
                     app_name.clone(),
-                    user_id.clone(),
-                    session_id.clone(),
+                    user_id.to_string(),
+                    session_id.to_string(),
                 );
                 runner_ctx = runner_ctx.with_artifacts(Arc::new(scoped));
             }
@@ -238,8 +238,8 @@ impl Runner {
                             let scoped = adk_artifact::ScopedArtifacts::new(
                                 service,
                                 app_name.clone(),
-                                user_id.clone(),
-                                session_id.clone(),
+                                user_id.to_string(),
+                                session_id.to_string(),
                             );
                             refreshed_ctx = refreshed_ctx.with_artifacts(Arc::new(scoped));
                         }
@@ -332,8 +332,8 @@ impl Runner {
                             let scoped = adk_artifact::ScopedArtifacts::new(
                                 service,
                                 app_name.clone(),
-                                user_id.clone(),
-                                session_id.clone(),
+                                user_id.to_string(),
+                                session_id.to_string(),
                             );
                             refreshed_ctx = refreshed_ctx.with_artifacts(Arc::new(scoped));
                         }
@@ -458,8 +458,8 @@ impl Runner {
                         let scoped = adk_artifact::ScopedArtifacts::new(
                             service,
                             app_name.clone(),
-                            user_id.clone(),
-                            session_id.clone(),
+                            user_id.to_string(),
+                            session_id.to_string(),
                         );
                         transfer_ctx = transfer_ctx.with_artifacts(Arc::new(scoped));
                     }
