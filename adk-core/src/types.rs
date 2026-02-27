@@ -4,6 +4,101 @@ use serde::{Deserialize, Serialize};
 /// Prevents accidental or malicious embedding of oversized payloads in Content parts.
 pub const MAX_INLINE_DATA_SIZE: usize = 10 * 1024 * 1024;
 
+macro_rules! define_id_type {
+    ($name:ident) => {
+        #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+        pub struct $name(String);
+
+        impl $name {
+            pub fn new(id: impl Into<String>) -> Result<Self, &'static str> {
+                let id = id.into();
+                if id.is_empty() {
+                    return Err(concat!(stringify!($name), " cannot be empty"));
+                }
+                if id.contains(':') {
+                    return Err(concat!(stringify!($name), " cannot contain ':'"));
+                }
+                Ok(Self(id))
+            }
+
+            pub fn as_str(&self) -> &str {
+                &self.0
+            }
+        }
+
+        impl std::fmt::Display for $name {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "{}", self.0)
+            }
+        }
+
+        impl AsRef<str> for $name {
+            fn as_ref(&self) -> &str {
+                &self.0
+            }
+        }
+
+        impl std::ops::Deref for $name {
+            type Target = str;
+
+            fn deref(&self) -> &Self::Target {
+                &self.0
+            }
+        }
+    };
+}
+
+define_id_type!(UserId);
+define_id_type!(SessionId);
+
+/// Strongly typed Role to prevent "Stringly-Typed" logic errors.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "String", into = "String")]
+pub enum Role {
+    User,
+    Model,
+    System,
+    Tool,
+    Custom(String),
+}
+
+impl From<String> for Role {
+    fn from(s: String) -> Self {
+        match s.to_lowercase().as_str() {
+            "user" | "human" => Role::User,
+            "model" | "assistant" => Role::Model,
+            "system" | "developer" => Role::System,
+            "tool" | "function" => Role::Tool,
+            _ => Role::Custom(s),
+        }
+    }
+}
+
+impl From<&str> for Role {
+    fn from(s: &str) -> Self {
+        Role::from(s.to_string())
+    }
+}
+
+impl From<Role> for String {
+    fn from(role: Role) -> Self {
+        match role {
+            Role::User => "user".to_string(),
+            Role::Model => "model".to_string(),
+            Role::System => "system".to_string(),
+            Role::Tool => "tool".to_string(),
+            Role::Custom(s) => s,
+        }
+    }
+}
+
+impl std::fmt::Display for Role {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s: String = self.clone().into();
+        write!(f, "{}", s)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FunctionResponseData {
     pub name: String,
@@ -12,7 +107,7 @@ pub struct FunctionResponseData {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Content {
-    pub role: String,
+    pub role: Role,
     pub parts: Vec<Part>,
 }
 
@@ -33,6 +128,8 @@ pub enum Part {
     },
     InlineData {
         mime_type: String,
+        // Ensures Vec<u8> serializes to a base64 string, not an integer array.
+        #[serde(with = "base64_serde")]
         data: Vec<u8>,
     },
     /// File data referenced by URI (URL or cloud storage path).
@@ -78,7 +175,8 @@ pub enum Part {
 }
 
 impl Content {
-    pub fn new(role: impl Into<String>) -> Self {
+    /// Safely instantiate Content with a strongly-typed Role
+    pub fn new(role: impl Into<Role>) -> Self {
         Self { role: role.into(), parts: Vec::new() }
     }
 
@@ -91,6 +189,10 @@ impl Content {
     ///
     /// # Panics
     /// Panics if `data` exceeds [`MAX_INLINE_DATA_SIZE`] (10 MB).
+    ///
+    /// # Deprecated
+    /// Use `try_with_inline_data` instead.
+    #[deprecated(note = "Use try_with_inline_data instead")]
     pub fn with_inline_data(mut self, mime_type: impl Into<String>, data: Vec<u8>) -> Self {
         assert!(
             data.len() <= MAX_INLINE_DATA_SIZE,
@@ -100,6 +202,20 @@ impl Content {
         );
         self.parts.push(Part::InlineData { mime_type: mime_type.into(), data });
         self
+    }
+
+    /// Add inline binary data safely.
+    /// Returns an Error instead of panicking if the payload exceeds 10MB.
+    pub fn try_with_inline_data(
+        mut self,
+        mime_type: impl Into<String>,
+        data: Vec<u8>,
+    ) -> Result<Self, &'static str> {
+        if data.len() > MAX_INLINE_DATA_SIZE {
+             return Err("Inline data size exceeds maximum allowed size of 10 MB");
+        }
+        self.parts.push(Part::InlineData { mime_type: mime_type.into(), data });
+        Ok(self)
     }
 
     /// Add a thinking/reasoning trace part.
@@ -172,6 +288,10 @@ impl Part {
     ///
     /// # Panics
     /// Panics if `data` exceeds [`MAX_INLINE_DATA_SIZE`] (10 MB).
+    ///
+    /// # Deprecated
+    /// Use `try_inline_data` instead.
+    #[deprecated(note = "Use try_inline_data instead")]
     pub fn inline_data(mime_type: impl Into<String>, data: Vec<u8>) -> Self {
         assert!(
             data.len() <= MAX_INLINE_DATA_SIZE,
@@ -182,9 +302,32 @@ impl Part {
         Part::InlineData { mime_type: mime_type.into(), data }
     }
 
+    /// Create a new inline data part safely.
+    pub fn try_inline_data(mime_type: impl Into<String>, data: Vec<u8>) -> Result<Self, &'static str> {
+        if data.len() > MAX_INLINE_DATA_SIZE {
+            return Err("Inline data size exceeds maximum allowed size of 10 MB");
+        }
+        Ok(Part::InlineData { mime_type: mime_type.into(), data })
+    }
+
     /// Create a new file data part from URI
     pub fn file_data(mime_type: impl Into<String>, file_uri: impl Into<String>) -> Self {
         Part::FileData { mime_type: mime_type.into(), file_uri: file_uri.into() }
+    }
+}
+
+/// Utility module to enforce Base64 Serialization for Vec<u8>
+mod base64_serde {
+    use serde::{Serializer, Deserialize, Deserializer};
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+
+    pub fn serialize<S: Serializer>(bytes: &[u8], s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&STANDARD.encode(bytes))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
+        let b64 = String::deserialize(d)?;
+        STANDARD.decode(b64.as_bytes()).map_err(serde::de::Error::custom)
     }
 }
 
@@ -193,14 +336,69 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_user_id_validation() {
+        assert!(UserId::new("user123").is_ok());
+        assert!(UserId::new("").is_err());
+        assert!(UserId::new("user:123").is_err());
+    }
+
+    #[test]
+    fn test_session_id_validation() {
+        assert!(SessionId::new("session123").is_ok());
+        assert!(SessionId::new("").is_err());
+        assert!(SessionId::new("session:123").is_err());
+    }
+
+    #[test]
+    fn test_role_enum() {
+        assert_eq!(Role::from("user"), Role::User);
+        assert_eq!(Role::from("User"), Role::User);
+        assert_eq!(Role::from("human"), Role::User);
+        assert_eq!(Role::from("model"), Role::Model);
+        assert_eq!(Role::from("assistant"), Role::Model);
+        assert_eq!(Role::from("system"), Role::System);
+        assert_eq!(Role::from("developer"), Role::System);
+        assert_eq!(Role::from("tool"), Role::Tool);
+        assert_eq!(Role::from("function"), Role::Tool);
+        assert_eq!(Role::from("custom"), Role::Custom("custom".to_string()));
+    }
+
+    #[test]
+    fn test_role_serialization() {
+        let role = Role::User;
+        let json = serde_json::to_string(&role).unwrap();
+        assert_eq!(json, "\"user\"");
+
+        let role = Role::Custom("foo".to_string());
+        let json = serde_json::to_string(&role).unwrap();
+        assert_eq!(json, "\"foo\"");
+    }
+
+    #[test]
+    fn test_role_deserialization() {
+        let json = "\"user\"";
+        let role: Role = serde_json::from_str(json).unwrap();
+        assert_eq!(role, Role::User);
+
+        let json = "\"assistant\"";
+        let role: Role = serde_json::from_str(json).unwrap();
+        assert_eq!(role, Role::Model);
+
+        let json = "\"foo\"";
+        let role: Role = serde_json::from_str(json).unwrap();
+        assert_eq!(role, Role::Custom("foo".to_string()));
+    }
+
+    #[test]
     fn test_content_creation() {
         let content = Content::new("user").with_text("Hello");
-        assert_eq!(content.role, "user");
+        assert_eq!(content.role, Role::User);
         assert_eq!(content.parts.len(), 1);
     }
 
     #[test]
     fn test_content_with_inline_data() {
+        #[allow(deprecated)]
         let content = Content::new("user")
             .with_text("Check this image")
             .with_inline_data("image/png", vec![0x89, 0x50, 0x4E, 0x47]);
@@ -208,6 +406,32 @@ mod tests {
         assert!(
             matches!(&content.parts[1], Part::InlineData { mime_type, .. } if mime_type == "image/png")
         );
+    }
+
+    #[test]
+    fn test_try_with_inline_data() {
+        let content = Content::new("user")
+            .try_with_inline_data("image/png", vec![0x89, 0x50, 0x4E, 0x47])
+            .unwrap();
+        assert_eq!(content.parts.len(), 1);
+
+        let large_data = vec![0u8; MAX_INLINE_DATA_SIZE + 1];
+        let result = Content::new("user").try_with_inline_data("image/png", large_data);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_inline_data_base64_serialization() {
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
+
+        let data = vec![1, 2, 3, 4, 5];
+        let part = Part::try_inline_data("application/octet-stream", data.clone()).unwrap();
+
+        let json = serde_json::to_string(&part).unwrap();
+        // Should contain the base64 string, not an array of numbers
+        assert!(json.contains("data"));
+        assert!(json.contains(&STANDARD.encode(&data)));
+        assert!(!json.contains("[1,2,3,4,5]"));
     }
 
     #[test]
@@ -295,6 +519,7 @@ mod tests {
         let text = Part::text_part("hello");
         assert!(matches!(text, Part::Text { text } if text == "hello"));
 
+        #[allow(deprecated)]
         let inline = Part::inline_data("image/png", vec![1, 2, 3]);
         assert!(
             matches!(inline, Part::InlineData { mime_type, data } if mime_type == "image/png" && data == vec![1, 2, 3])
@@ -307,9 +532,20 @@ mod tests {
     }
 
     #[test]
+    fn test_try_inline_data() {
+        let part = Part::try_inline_data("image/png", vec![1, 2, 3]).unwrap();
+        assert!(part.is_media());
+
+        let large_data = vec![0u8; MAX_INLINE_DATA_SIZE + 1];
+        let result = Part::try_inline_data("image/png", large_data);
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn test_inline_data_within_limit() {
         // Should succeed: small data
         let data = vec![0u8; 1024];
+        #[allow(deprecated)]
         let content = Content::new("user").with_inline_data("image/png", data);
         assert_eq!(content.parts.len(), 1);
     }
@@ -318,6 +554,7 @@ mod tests {
     fn test_inline_data_at_limit() {
         // Should succeed: exactly at limit
         let data = vec![0u8; MAX_INLINE_DATA_SIZE];
+        #[allow(deprecated)]
         let part = Part::inline_data("image/png", data);
         assert!(part.is_media());
     }
@@ -326,6 +563,7 @@ mod tests {
     #[should_panic(expected = "exceeds maximum allowed size")]
     fn test_inline_data_exceeds_limit_content() {
         let data = vec![0u8; MAX_INLINE_DATA_SIZE + 1];
+        #[allow(deprecated)]
         let _ = Content::new("user").with_inline_data("image/png", data);
     }
 
@@ -333,6 +571,7 @@ mod tests {
     #[should_panic(expected = "exceeds maximum allowed size")]
     fn test_inline_data_exceeds_limit_part() {
         let data = vec![0u8; MAX_INLINE_DATA_SIZE + 1];
+        #[allow(deprecated)]
         let _ = Part::inline_data("image/png", data);
     }
 

@@ -227,7 +227,7 @@ mod tests {
     fn test_is_final_response_text_only() {
         let mut event = Event::new("inv-123");
         event.llm_response.content = Some(Content {
-            role: "model".to_string(),
+            role: crate::types::Role::Model,
             parts: vec![Part::Text { text: "Hello!".to_string() }],
         });
         // Text only, no function calls -> final
@@ -238,7 +238,7 @@ mod tests {
     fn test_is_final_response_with_function_call() {
         let mut event = Event::new("inv-123");
         event.llm_response.content = Some(Content {
-            role: "model".to_string(),
+            role: crate::types::Role::Model,
             parts: vec![Part::FunctionCall {
                 name: "get_weather".to_string(),
                 args: serde_json::json!({"city": "NYC"}),
@@ -254,7 +254,7 @@ mod tests {
     fn test_is_final_response_with_function_response() {
         let mut event = Event::new("inv-123");
         event.llm_response.content = Some(Content {
-            role: "function".to_string(),
+            role: crate::types::Role::Tool,
             parts: vec![Part::FunctionResponse {
                 function_response: crate::FunctionResponseData {
                     name: "get_weather".to_string(),
@@ -272,7 +272,7 @@ mod tests {
         let mut event = Event::new("inv-123");
         event.llm_response.partial = true;
         event.llm_response.content = Some(Content {
-            role: "model".to_string(),
+            role: crate::types::Role::Model,
             parts: vec![Part::Text { text: "Hello...".to_string() }],
         });
         // Partial response -> NOT final
@@ -284,7 +284,7 @@ mod tests {
         let mut event = Event::new("inv-123");
         event.actions.skip_summarization = true;
         event.llm_response.content = Some(Content {
-            role: "function".to_string(),
+            role: crate::types::Role::Tool,
             parts: vec![Part::FunctionResponse {
                 function_response: crate::FunctionResponseData {
                     name: "tool".to_string(),
@@ -302,7 +302,7 @@ mod tests {
         let mut event = Event::new("inv-123");
         event.long_running_tool_ids = vec!["process_video".to_string()];
         event.llm_response.content = Some(Content {
-            role: "model".to_string(),
+            role: crate::types::Role::Model,
             parts: vec![Part::FunctionCall {
                 name: "process_video".to_string(),
                 args: serde_json::json!({"file": "video.mp4"}),
@@ -318,7 +318,7 @@ mod tests {
     fn test_function_call_ids() {
         let mut event = Event::new("inv-123");
         event.llm_response.content = Some(Content {
-            role: "model".to_string(),
+            role: crate::types::Role::Model,
             parts: vec![
                 Part::FunctionCall {
                     name: "get_weather".to_string(),
@@ -347,7 +347,7 @@ mod tests {
     fn test_function_call_ids_falls_back_to_name() {
         let mut event = Event::new("inv-123");
         event.llm_response.content = Some(Content {
-            role: "model".to_string(),
+            role: crate::types::Role::Model,
             parts: vec![Part::FunctionCall {
                 name: "get_weather".to_string(),
                 args: serde_json::json!({}),
@@ -374,7 +374,7 @@ mod tests {
         // has_function_responses also catches it.
         let mut event = Event::new("inv-123");
         event.llm_response.content = Some(Content {
-            role: "model".to_string(),
+            role: crate::types::Role::Model,
             parts: vec![
                 Part::Text { text: "Running code...".to_string() },
                 Part::FunctionResponse {
@@ -397,7 +397,7 @@ mod tests {
         // has_function_responses is still true.
         let mut event = Event::new("inv-123");
         event.llm_response.content = Some(Content {
-            role: "model".to_string(),
+            role: crate::types::Role::Model,
             parts: vec![
                 Part::FunctionResponse {
                     function_response: crate::FunctionResponseData {
