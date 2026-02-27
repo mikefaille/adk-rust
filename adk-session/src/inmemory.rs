@@ -34,8 +34,19 @@ impl CompositeSessionKey {
     }
 }
 
+// Helper functions to validate IDs
+fn validate_user_id(id: impl Into<String>) -> Result<UserId> {
+    UserId::new(id).map_err(|e| adk_core::AdkError::Session(format!("Invalid user ID: {}", e)))
+}
+
+fn validate_session_id(id: impl Into<String>) -> Result<SessionId> {
+    SessionId::new(id).map_err(|e| adk_core::AdkError::Session(format!("Invalid session ID: {}", e)))
+}
+
 pub struct InMemorySessionService {
     sessions: Arc<RwLock<HashMap<String, SessionData>>>,
+    // Secondary index: session_id -> composite_key
+    session_id_to_key: Arc<RwLock<HashMap<String, String>>>,
     app_state: Arc<RwLock<HashMap<String, StateMap>>>,
     user_state: Arc<RwLock<HashMap<String, HashMap<String, StateMap>>>>,
 }
@@ -44,6 +55,7 @@ impl InMemorySessionService {
     pub fn new() -> Self {
         Self {
             sessions: Arc::new(RwLock::new(HashMap::new())),
+            session_id_to_key: Arc::new(RwLock::new(HashMap::new())),
             app_state: Arc::new(RwLock::new(HashMap::new())),
             user_state: Arc::new(RwLock::new(HashMap::new())),
         }
@@ -90,11 +102,8 @@ impl SessionService for InMemorySessionService {
     async fn create(&self, req: CreateRequest) -> Result<Box<dyn Session>> {
         let session_id_str = req.session_id.unwrap_or_else(|| Uuid::new_v4().to_string());
 
-        // Validate IDs
-        let user_id = UserId::new(req.user_id)
-            .map_err(|e| adk_core::AdkError::Session(format!("Invalid user ID: {}", e)))?;
-        let session_id = SessionId::new(session_id_str)
-            .map_err(|e| adk_core::AdkError::Session(format!("Invalid session ID: {}", e)))?;
+        let user_id = validate_user_id(req.user_id)?;
+        let session_id = validate_session_id(session_id_str)?;
 
         let id = CompositeSessionKey {
             app_name: req.app_name.clone(),
@@ -126,9 +135,15 @@ impl SessionService for InMemorySessionService {
             updated_at: Utc::now(),
         };
 
+        let key = id.key();
+
         let mut sessions = self.sessions.write().unwrap();
-        sessions.insert(id.key(), data);
+        sessions.insert(key.clone(), data);
         drop(sessions);
+
+        let mut session_index = self.session_id_to_key.write().unwrap();
+        session_index.insert(session_id.to_string(), key);
+        drop(session_index);
 
         Ok(Box::new(InMemorySession {
             id,
@@ -139,10 +154,8 @@ impl SessionService for InMemorySessionService {
     }
 
     async fn get(&self, req: GetRequest) -> Result<Box<dyn Session>> {
-        let user_id = UserId::new(req.user_id.clone())
-            .map_err(|e| adk_core::AdkError::Session(format!("Invalid user ID: {}", e)))?;
-        let session_id = SessionId::new(req.session_id.clone())
-            .map_err(|e| adk_core::AdkError::Session(format!("Invalid session ID: {}", e)))?;
+        let user_id = validate_user_id(req.user_id.clone())?;
+        let session_id = validate_session_id(req.session_id.clone())?;
 
         let id = CompositeSessionKey {
             app_name: req.app_name.clone(),
@@ -187,9 +200,7 @@ impl SessionService for InMemorySessionService {
     }
 
     async fn list(&self, req: ListRequest) -> Result<Vec<Box<dyn Session>>> {
-        // Validate user_id even for listing to ensure consistency
-        let user_id = UserId::new(req.user_id.clone())
-            .map_err(|e| adk_core::AdkError::Session(format!("Invalid user ID: {}", e)))?;
+        let user_id = validate_user_id(req.user_id.clone())?;
 
         let sessions = self.sessions.read().unwrap();
         let mut result = Vec::new();
@@ -209,31 +220,37 @@ impl SessionService for InMemorySessionService {
     }
 
     async fn delete(&self, req: DeleteRequest) -> Result<()> {
-        let user_id = UserId::new(req.user_id)
-            .map_err(|e| adk_core::AdkError::Session(format!("Invalid user ID: {}", e)))?;
-        let session_id = SessionId::new(req.session_id)
-            .map_err(|e| adk_core::AdkError::Session(format!("Invalid session ID: {}", e)))?;
+        let user_id = validate_user_id(req.user_id)?;
+        let session_id = validate_session_id(req.session_id)?;
 
         let id =
-            CompositeSessionKey { app_name: req.app_name, user_id, session_id };
+            CompositeSessionKey { app_name: req.app_name, user_id, session_id: session_id.clone() };
 
         let mut sessions = self.sessions.write().unwrap();
         sessions.remove(&id.key());
+        drop(sessions);
+
+        let mut session_index = self.session_id_to_key.write().unwrap();
+        session_index.remove(session_id.as_str());
+        drop(session_index);
+
         Ok(())
     }
 
     async fn append_event(&self, session_id_str: &str, mut event: Event) -> Result<()> {
         event.actions.state_delta.retain(|k, _| !k.starts_with(KEY_PREFIX_TEMP));
 
-        // We need to find the session first because the service method only takes a string session_id,
-        // but our internal map keys are composite. This implies we need to search or change the API.
-        // Assuming the current implementation was scanning:
+        let session_index = self.session_id_to_key.read().unwrap();
+        let composite_key = session_index
+            .get(session_id_str)
+            .ok_or_else(|| adk_core::AdkError::Session("session not found".into()))?
+            .clone();
+        drop(session_index);
 
         let (app_name, user_id, app_delta, user_delta, _session_delta) = {
             let mut sessions = self.sessions.write().unwrap();
             let data = sessions
-                .values_mut()
-                .find(|d| d.id.session_id.as_str() == session_id_str)
+                .get_mut(&composite_key)
                 .ok_or_else(|| adk_core::AdkError::Session("session not found".into()))?;
 
             data.events.push(event.clone());
