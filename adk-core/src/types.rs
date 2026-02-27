@@ -4,6 +4,86 @@ use serde::{Deserialize, Serialize};
 /// Prevents accidental or malicious embedding of oversized payloads in Content parts.
 pub const MAX_INLINE_DATA_SIZE: usize = 10 * 1024 * 1024;
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct UserId(String);
+
+impl UserId {
+    pub fn new(id: impl Into<String>) -> Result<Self, &'static str> {
+        let id = id.into();
+        if id.is_empty() {
+            return Err("UserId cannot be empty");
+        }
+        if id.contains(':') {
+            return Err("UserId cannot contain ':'");
+        }
+        Ok(Self(id))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for UserId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl AsRef<str> for UserId {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::ops::Deref for UserId {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct SessionId(String);
+
+impl SessionId {
+    pub fn new(id: impl Into<String>) -> Result<Self, &'static str> {
+        let id = id.into();
+        if id.is_empty() {
+            return Err("SessionId cannot be empty");
+        }
+        if id.contains(':') {
+            return Err("SessionId cannot contain ':'");
+        }
+        Ok(Self(id))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for SessionId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl AsRef<str> for SessionId {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::ops::Deref for SessionId {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FunctionResponseData {
     pub name: String,
@@ -191,6 +271,20 @@ impl Part {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_user_id_validation() {
+        assert!(UserId::new("user123").is_ok());
+        assert!(UserId::new("").is_err());
+        assert!(UserId::new("user:123").is_err());
+    }
+
+    #[test]
+    fn test_session_id_validation() {
+        assert!(SessionId::new("session123").is_ok());
+        assert!(SessionId::new("").is_err());
+        assert!(SessionId::new("session:123").is_err());
+    }
 
     #[test]
     fn test_content_creation() {
