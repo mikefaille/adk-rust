@@ -38,16 +38,31 @@ use std::time::Duration;
 use tokio::process::Command;
 
 // Mock session for the example
-struct MockSession;
+use adk_core::types::{SessionId, UserId};
+
+struct MockSession {
+    id: SessionId,
+    user_id: UserId,
+}
+
+impl MockSession {
+    fn new() -> Self {
+        Self {
+            id: SessionId::from("mcp-session".to_string()),
+            user_id: UserId::from("user".to_string()),
+        }
+    }
+}
+
 impl Session for MockSession {
-    fn id(&self) -> &str {
-        "mcp-session"
+    fn id(&self) -> &SessionId {
+        &self.id
     }
     fn app_name(&self) -> &str {
         "mcp-example"
     }
-    fn user_id(&self) -> &str {
-        "user"
+    fn user_id(&self) -> &UserId {
+        &self.user_id
     }
     fn state(&self) -> &dyn State {
         &MockState
@@ -79,7 +94,7 @@ impl MockContext {
     fn new(text: &str) -> Self {
         Self {
             identity: AdkIdentity::default(),
-            session: MockSession,
+            session: MockSession::new(),
             user_content: Content {
                 role: "user".to_string(),
                 parts: vec![Part::Text { text: text.to_string() }],

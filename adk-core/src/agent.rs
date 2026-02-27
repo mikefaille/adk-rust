@@ -68,14 +68,16 @@ mod tests {
 
     struct MockSession;
     impl Session for MockSession {
-        fn id(&self) -> &str {
-            "session"
+        fn id(&self) -> &crate::types::SessionId {
+            static ID: std::sync::OnceLock<crate::types::SessionId> = std::sync::OnceLock::new();
+            ID.get_or_init(|| "session".to_string().into())
         }
         fn app_name(&self) -> &str {
             "app"
         }
-        fn user_id(&self) -> &str {
-            "user"
+        fn user_id(&self) -> &crate::types::UserId {
+            static ID: std::sync::OnceLock<crate::types::UserId> = std::sync::OnceLock::new();
+            ID.get_or_init(|| "user".to_string().into())
         }
         fn state(&self) -> &dyn State {
             &MockState

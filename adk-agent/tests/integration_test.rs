@@ -10,16 +10,31 @@ use std::sync::Arc;
 
 // --- Mocks ---
 
-struct MockSession;
+use adk_core::types::{SessionId, UserId};
+
+struct MockSession {
+    id: SessionId,
+    user_id: UserId,
+}
+
+impl MockSession {
+    fn new() -> Self {
+        Self {
+            id: SessionId::from("session-real".to_string()),
+            user_id: UserId::from("user-real".to_string()),
+        }
+    }
+}
+
 impl Session for MockSession {
-    fn id(&self) -> &str {
-        "session-real"
+    fn id(&self) -> &SessionId {
+        &self.id
     }
     fn app_name(&self) -> &str {
         "test-app"
     }
-    fn user_id(&self) -> &str {
-        "user-real"
+    fn user_id(&self) -> &UserId {
+        &self.user_id
     }
     fn state(&self) -> &dyn State {
         &MockState
@@ -58,7 +73,7 @@ impl MockContext {
 
         Self {
             identity,
-            session: MockSession,
+            session: MockSession::new(),
             user_content: Content {
                 role: "user".to_string(),
                 parts: vec![Part::Text { text: text.to_string() }],

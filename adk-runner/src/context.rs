@@ -72,7 +72,7 @@ impl MutableSession {
 }
 
 impl adk_core::Session for MutableSession {
-    fn id(&self) -> &str {
+    fn id(&self) -> &SessionId {
         self.inner.id()
     }
 
@@ -80,7 +80,7 @@ impl adk_core::Session for MutableSession {
         self.inner.app_name()
     }
 
-    fn user_id(&self) -> &str {
+    fn user_id(&self) -> &UserId {
         self.inner.user_id()
     }
 
@@ -174,18 +174,18 @@ impl RunnerContext {
     pub fn new(
         invocation_id: String,
         agent: Arc<dyn Agent>,
-        user_id: String,
+        user_id: UserId,
         app_name: String,
-        session_id: String,
+        session_id: SessionId,
         user_content: Content,
         session: Arc<dyn AdkSession>,
     ) -> Self {
         let base = adk_core::AdkContext::builder()
             .invocation_id(InvocationId::from(invocation_id))
             .agent_name(agent.name())
-            .user_id(UserId::from(user_id))
+            .user_id(user_id)
             .app_name(app_name)
-            .session_id(SessionId::from(session_id))
+            .session_id(session_id)
             .user_content(user_content)
             .build();
         Self {
@@ -205,18 +205,18 @@ impl RunnerContext {
     pub fn with_mutable_session(
         invocation_id: String,
         agent: Arc<dyn Agent>,
-        user_id: String,
+        user_id: UserId,
         app_name: String,
-        session_id: String,
+        session_id: SessionId,
         user_content: Content,
         session: Arc<MutableSession>,
     ) -> Self {
         let base = adk_core::AdkContext::builder()
             .invocation_id(InvocationId::from(invocation_id))
             .agent_name(agent.name())
-            .user_id(UserId::from(user_id))
+            .user_id(user_id)
             .app_name(app_name)
-            .session_id(SessionId::from(session_id))
+            .session_id(session_id)
             .user_content(user_content)
             .build();
         Self {

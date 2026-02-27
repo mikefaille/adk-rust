@@ -2,11 +2,12 @@ use adk_core::{
     CallbackContext, Content, EventActions, MemoryEntry, ReadonlyContext, Result, Tool, ToolContext,
 };
 use std::collections::HashMap;
-use adk_tool::BuiltinTool;
+use adk_tool::FunctionTool;
 use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use serde_json::Value;
 use std::sync::{Arc, Mutex};
 
 // Mock context for testing
@@ -74,10 +75,11 @@ struct TestArgs {
 
 #[tokio::test]
 async fn test_builtin_tool_execution() {
-    let tool = BuiltinTool::new(
+    let tool = FunctionTool::new(
         "test_tool",
         "A test tool",
-        |ctx: Arc<dyn ToolContext>, args: TestArgs| async move {
+        |ctx: Arc<dyn ToolContext>, args: Value| async move {
+            let args: TestArgs = serde_json::from_value(args).unwrap();
             let mut actions = ctx.actions();
             actions.state_delta.insert("result".to_string(), json!(args.message));
             ctx.set_actions(actions);

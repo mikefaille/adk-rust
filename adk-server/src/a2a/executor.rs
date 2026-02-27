@@ -80,7 +80,7 @@ impl Executor {
             .ok_or_else(|| adk_core::AdkError::Agent("Event has no content".to_string()))?;
 
         let mut event_stream =
-            runner.run(meta.user_id.clone(), meta.session_id.clone(), content).await?;
+            runner.run(meta.user_id.clone().into(), meta.session_id.clone().into(), content).await?;
 
         // Process events
         while let Some(result) = event_stream.next().await {
@@ -130,8 +130,8 @@ impl Executor {
         let get_result = session_service
             .get(GetRequest {
                 app_name: self.config.app_name.clone(),
-                user_id: user_id.to_string(),
-                session_id: session_id.to_string(),
+                user_id: user_id.to_string().into(),
+                session_id: session_id.to_string().into(),
                 num_recent_events: None,
                 after: None,
             })
@@ -145,8 +145,8 @@ impl Executor {
         session_service
             .create(CreateRequest {
                 app_name: self.config.app_name.clone(),
-                user_id: user_id.to_string(),
-                session_id: Some(session_id.to_string()),
+                user_id: user_id.to_string().into(),
+                session_id: Some(session_id.to_string().into()),
                 state: std::collections::HashMap::new(),
             })
             .await?;

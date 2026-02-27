@@ -78,16 +78,18 @@ impl adk_session::State for MockState {
 }
 
 // Mock Session
+use adk_core::types::{SessionId, UserId};
+
 struct MockSession {
-    id: String,
+    id: SessionId,
     app_name: String,
-    user_id: String,
+    user_id: UserId,
     events: MockEvents,
     state: MockState,
 }
 
 impl Session for MockSession {
-    fn id(&self) -> &str {
+    fn id(&self) -> &SessionId {
         &self.id
     }
 
@@ -95,7 +97,7 @@ impl Session for MockSession {
         &self.app_name
     }
 
-    fn user_id(&self) -> &str {
+    fn user_id(&self) -> &UserId {
         &self.user_id
     }
 
@@ -139,7 +141,7 @@ impl SessionService for MockSessionService {
         Ok(())
     }
 
-    async fn append_event(&self, _session_id: &str, _event: Event) -> Result<()> {
+    async fn append_event(&self, _session_id: &SessionId, _event: Event) -> Result<()> {
         Ok(())
     }
 }
@@ -189,7 +191,9 @@ async fn test_runner_run() {
     let content =
         Content { role: "user".to_string(), parts: vec![Part::Text { text: "Hello".to_string() }] };
 
-    let result = runner.run("user123".to_string(), "session456".to_string(), content).await;
+    let result = runner
+        .run("user123".to_string().into(), "session456".to_string().into(), content)
+        .await;
 
     assert!(result.is_ok());
 }
@@ -234,9 +238,9 @@ async fn test_find_agent_to_run_with_history() {
     events.push(event);
 
     let session = MockSession {
-        id: "session1".to_string(),
+        id: "session1".to_string().into(),
         app_name: "test".to_string(),
-        user_id: "user1".to_string(),
+        user_id: "user1".to_string().into(),
         events: MockEvents { events },
         state: MockState,
     };
@@ -251,9 +255,9 @@ async fn test_find_agent_to_run_defaults_to_root() {
 
     // Empty session
     let session = MockSession {
-        id: "session1".to_string(),
+        id: "session1".to_string().into(),
         app_name: "test".to_string(),
-        user_id: "user1".to_string(),
+        user_id: "user1".to_string().into(),
         events: MockEvents { events: vec![] },
         state: MockState,
     };
@@ -273,9 +277,9 @@ async fn test_find_agent_to_run_skips_user_events() {
     events.push(event);
 
     let session = MockSession {
-        id: "session1".to_string(),
+        id: "session1".to_string().into(),
         app_name: "test".to_string(),
-        user_id: "user1".to_string(),
+        user_id: "user1".to_string().into(),
         events: MockEvents { events },
         state: MockState,
     };
@@ -408,8 +412,10 @@ async fn test_plugin_callback_order_and_mutation() {
     .unwrap();
 
     let content = Content::new("user").with_text("hello");
-    let mut stream =
-        runner.run("user123".to_string(), "session456".to_string(), content).await.unwrap();
+    let mut stream = runner
+        .run("user123".to_string().into(), "session456".to_string().into(), content)
+        .await
+        .unwrap();
 
     let mut events = Vec::new();
     while let Some(event) = stream.next().await {
@@ -465,8 +471,8 @@ async fn test_plugin_error_propagates_from_on_user_message() {
 
     let mut stream = runner
         .run(
-            "user123".to_string(),
-            "session456".to_string(),
+            "user123".to_string().into(),
+            "session456".to_string().into(),
             Content::new("user").with_text("hello"),
         )
         .await
@@ -513,8 +519,8 @@ async fn test_skill_injector_plugin_mutates_user_prompt() {
 
     let mut stream = runner
         .run(
-            "user123".to_string(),
-            "session456".to_string(),
+            "user123".to_string().into(),
+            "session456".to_string().into(),
             Content::new("user").with_text("Please search this repository quickly"),
         )
         .await
@@ -570,8 +576,8 @@ async fn test_runner_with_auto_skills_mutates_user_prompt() {
 
     let mut stream = runner
         .run(
-            "user123".to_string(),
-            "session456".to_string(),
+            "user123".to_string().into(),
+            "session456".to_string().into(),
             Content::new("user").with_text("Please search this repository quickly"),
         )
         .await

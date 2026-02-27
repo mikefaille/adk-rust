@@ -8,17 +8,31 @@ use futures::StreamExt;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-struct MockSession;
+use adk_core::types::{SessionId, UserId};
+
+struct MockSession {
+    id: SessionId,
+    user_id: UserId,
+}
+
+impl MockSession {
+    fn new() -> Self {
+        Self {
+            id: SessionId::from("test-session".to_string()),
+            user_id: UserId::from("test-user".to_string()),
+        }
+    }
+}
 
 impl Session for MockSession {
-    fn id(&self) -> &str {
-        "test-session"
+    fn id(&self) -> &SessionId {
+        &self.id
     }
     fn app_name(&self) -> &str {
         "test-app"
     }
-    fn user_id(&self) -> &str {
-        "test-user"
+    fn user_id(&self) -> &UserId {
+        &self.user_id
     }
     fn state(&self) -> &dyn adk_core::State {
         unimplemented!()
@@ -44,7 +58,7 @@ impl MockContext {
                 role: "user".to_string(),
                 parts: vec![Part::Text { text: "test".to_string() }],
             },
-            session: MockSession,
+            session: MockSession::new(),
             user_content: Content {
                 role: "user".to_string(),
                 parts: vec![Part::Text { text: "test".to_string() }],

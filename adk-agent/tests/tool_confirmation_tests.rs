@@ -120,21 +120,35 @@ impl State for MockState {
     }
 }
 
+use adk_core::types::{SessionId, UserId};
+
 struct MockSession {
+    id: SessionId,
+    user_id: UserId,
     state: MockState,
 }
 
+impl MockSession {
+    fn new() -> Self {
+        Self {
+            id: SessionId::from("session-1".to_string()),
+            user_id: UserId::from("user-1".to_string()),
+            state: MockState,
+        }
+    }
+}
+
 impl Session for MockSession {
-    fn id(&self) -> &str {
-        "session-1"
+    fn id(&self) -> &SessionId {
+        &self.id
     }
 
     fn app_name(&self) -> &str {
         "test-app"
     }
 
-    fn user_id(&self) -> &str {
-        "user-1"
+    fn user_id(&self) -> &UserId {
+        &self.user_id
     }
 
     fn state(&self) -> &dyn State {
@@ -165,7 +179,7 @@ impl MockContext {
 
         Self {
             identity,
-            session: MockSession { state: MockState },
+            session: MockSession::new(),
             user_content: Content::new("user").with_text("start"),
             run_config,
         }

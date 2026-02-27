@@ -98,7 +98,7 @@ async fn main() -> Result<()> {
     let session = session_service
         .create(CreateRequest {
             app_name: "demo".into(),
-            user_id: user_id.clone(),
+            user_id: user_id.clone().into(),
             session_id: None,
             state: HashMap::new(),
         })
@@ -109,7 +109,11 @@ async fn main() -> Result<()> {
     for query in queries {
         println!("\nUser: {}", query);
         let mut stream = runner
-            .run(user_id.clone(), session.id().to_string(), Content::new("user").with_text(query))
+            .run(
+                user_id.clone().into(),
+                session.id().clone().into(),
+                Content::new("user").with_text(query),
+            )
             .await?;
 
         while let Some(event) = stream.next().await {

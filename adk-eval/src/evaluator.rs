@@ -695,20 +695,27 @@ impl adk_core::InvocationContext for EvalInvocationContext {
     }
 }
 
+use adk_core::types::{SessionId, UserId};
+
 /// Minimal Session implementation for evaluation
 struct EvalSession {
-    id: String,
+    id: SessionId,
+    user_id: UserId,
     state: EvalState,
 }
 
 impl EvalSession {
     fn new(id: String) -> Self {
-        Self { id, state: EvalState::new() }
+        Self {
+            id: SessionId::from(id),
+            user_id: UserId::from("eval_user".to_string()),
+            state: EvalState::new(),
+        }
     }
 }
 
 impl adk_core::Session for EvalSession {
-    fn id(&self) -> &str {
+    fn id(&self) -> &SessionId {
         &self.id
     }
 
@@ -716,8 +723,8 @@ impl adk_core::Session for EvalSession {
         "eval_app"
     }
 
-    fn user_id(&self) -> &str {
-        "eval_user"
+    fn user_id(&self) -> &UserId {
+        &self.user_id
     }
 
     fn state(&self) -> &dyn adk_core::State {

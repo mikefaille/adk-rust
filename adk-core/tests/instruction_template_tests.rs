@@ -48,14 +48,16 @@ impl MockSession {
 }
 
 impl Session for MockSession {
-    fn id(&self) -> &str {
-        "session-1"
+    fn id(&self) -> &adk_core::types::SessionId {
+        static ID: std::sync::OnceLock<adk_core::types::SessionId> = std::sync::OnceLock::new();
+        ID.get_or_init(|| "session-1".to_string().into())
     }
     fn app_name(&self) -> &str {
         "test-app"
     }
-    fn user_id(&self) -> &str {
-        "user-1"
+    fn user_id(&self) -> &adk_core::types::UserId {
+        static ID: std::sync::OnceLock<adk_core::types::UserId> = std::sync::OnceLock::new();
+        ID.get_or_init(|| "user-1".to_string().into())
     }
     fn state(&self) -> &dyn State {
         &self.state

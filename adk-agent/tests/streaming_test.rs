@@ -3,6 +3,7 @@ use adk_core::{
     Agent, Content, FinishReason, InvocationContext, Llm, LlmRequest, LlmResponse,
     LlmResponseStream, Part, Result, RunConfig, Session, State,
 };
+use adk_core::types::{SessionId, UserId};
 use async_stream::stream;
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -59,16 +60,29 @@ impl Llm for MockModel {
     }
 }
 
-struct MockSession;
+struct MockSession {
+    session_id: SessionId,
+    user_id: UserId,
+}
+
+impl MockSession {
+    fn new() -> Self {
+        Self {
+            session_id: "session-1".to_string().into(),
+            user_id: "user-1".to_string().into(),
+        }
+    }
+}
+
 impl Session for MockSession {
-    fn id(&self) -> &str {
-        "session-1"
+    fn id(&self) -> &SessionId {
+        &self.session_id
     }
     fn app_name(&self) -> &str {
         "test-app"
     }
-    fn user_id(&self) -> &str {
-        "user-1"
+    fn user_id(&self) -> &UserId {
+        &self.user_id
     }
     fn state(&self) -> &dyn State {
         &MockState
@@ -104,7 +118,7 @@ impl MockContext {
         identity.session_id = "session-1".to_string().into();
         identity.branch = "main".to_string();
 
-        Self { identity, session: MockSession }
+        Self { identity, session: MockSession::new() }
     }
 }
 
@@ -183,7 +197,7 @@ async fn test_streaming_chunks() {
 
             Self {
                 identity,
-                session: MockSession,
+                session: MockSession::new(),
                 user_content: Content {
                     role: "user".to_string(),
                     parts: vec![Part::Text { text: "Hi".to_string() }],

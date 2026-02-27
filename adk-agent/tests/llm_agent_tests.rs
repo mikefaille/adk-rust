@@ -101,6 +101,7 @@ struct TestContext {
     config: RunConfig,
     identity: AdkIdentity,
     metadata: std::collections::HashMap<String, String>,
+    session: DummySession,
 }
 
 impl TestContext {
@@ -113,6 +114,7 @@ impl TestContext {
             config: RunConfig::default(),
             identity: AdkIdentity::default(),
             metadata: std::collections::HashMap::new(),
+            session: DummySession::new(),
         }
     }
 }
@@ -153,22 +155,36 @@ impl InvocationContext for TestContext {
         false
     }
     fn session(&self) -> &dyn adk_core::Session {
-        &DummySession
+        &self.session
     }
 }
 
 // Dummy session for testing
-struct DummySession;
+use adk_core::types::{SessionId, UserId};
+
+struct DummySession {
+    id: SessionId,
+    user_id: UserId,
+}
+
+impl DummySession {
+    fn new() -> Self {
+        Self {
+            id: SessionId::from("test-session".to_string()),
+            user_id: UserId::from("test-user".to_string()),
+        }
+    }
+}
 
 impl adk_core::Session for DummySession {
-    fn id(&self) -> &str {
-        "test-session"
+    fn id(&self) -> &SessionId {
+        &self.id
     }
     fn app_name(&self) -> &str {
         "test-app"
     }
-    fn user_id(&self) -> &str {
-        "test-user"
+    fn user_id(&self) -> &UserId {
+        &self.user_id
     }
     fn state(&self) -> &dyn adk_core::State {
         &DummyState

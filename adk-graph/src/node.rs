@@ -510,13 +510,19 @@ impl adk_core::InvocationContext for GraphInvocationContext {
 /// Minimal Session implementation for graph execution
 struct GraphSession {
     id: SessionId,
+    user_id: UserId,
     state: GraphState,
     history: std::sync::RwLock<Vec<adk_core::Content>>,
 }
 
 impl GraphSession {
     fn new(id: SessionId) -> Self {
-        Self { id, state: GraphState::new(), history: std::sync::RwLock::new(Vec::new()) }
+        Self {
+            id,
+            user_id: UserId::from("graph_user".to_string()),
+            state: GraphState::new(),
+            history: std::sync::RwLock::new(Vec::new()),
+        }
     }
 
     fn append_content(&self, content: adk_core::Content) {
@@ -527,16 +533,16 @@ impl GraphSession {
 }
 
 impl adk_core::Session for GraphSession {
-    fn id(&self) -> &str {
-        self.id.as_ref()
+    fn id(&self) -> &SessionId {
+        &self.id
     }
 
     fn app_name(&self) -> &str {
         "graph_app"
     }
 
-    fn user_id(&self) -> &str {
-        "graph_user"
+    fn user_id(&self) -> &UserId {
+        &self.user_id
     }
 
     fn state(&self) -> &dyn adk_core::State {

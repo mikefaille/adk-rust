@@ -287,8 +287,8 @@ pub async fn run_sse(
             .session_service
             .get(adk_session::GetRequest {
                 app_name: app_name.clone(),
-                user_id: user_id.clone(),
-                session_id: session_id.clone(),
+                user_id: user_id.clone().into(),
+                session_id: session_id.clone().into(),
                 num_recent_events: None,
                 after: None,
             })
@@ -326,7 +326,7 @@ pub async fn run_sse(
 
         // Run agent
         let event_stream = runner
-            .run(user_id, session_id, content)
+            .run(user_id.into(), session_id.into(), content)
             .await
             .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "failed to run agent".to_string()))?;
 
@@ -390,8 +390,8 @@ pub async fn run_sse_compat(
         .session_service
         .get(adk_session::GetRequest {
             app_name: app_name.clone(),
-            user_id: user_id.clone(),
-            session_id: session_id.clone(),
+            user_id: user_id.clone().into(),
+            session_id: session_id.clone().into(),
             num_recent_events: None,
             after: None,
         })
@@ -404,8 +404,8 @@ pub async fn run_sse_compat(
             .session_service
             .create(adk_session::CreateRequest {
                 app_name: app_name.clone(),
-                user_id: user_id.clone(),
-                session_id: Some(session_id.clone()),
+                user_id: user_id.clone().into(),
+                session_id: Some(session_id.clone().into()),
                 state: std::collections::HashMap::new(),
             })
             .await
@@ -442,7 +442,7 @@ pub async fn run_sse_compat(
 
     // Run agent with full content (text + inline data)
     let event_stream = runner
-        .run(user_id, session_id, content)
+        .run(user_id.into(), session_id.into(), content)
         .await
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "failed to run agent".to_string()))?;
 
