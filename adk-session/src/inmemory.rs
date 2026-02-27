@@ -153,7 +153,7 @@ impl SessionService for InMemorySessionService {
         let user_state_lock = self.user_state.read().unwrap();
         let user_state = user_state_lock
             .get(&req.app_name)
-            .and_then(|m| m.get(&req.user_id.to_string()))
+            .and_then(|m| m.get(req.user_id.as_ref()))
             .cloned()
             .unwrap_or_default();
         drop(user_state_lock);
