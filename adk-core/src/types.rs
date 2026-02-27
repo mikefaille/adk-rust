@@ -65,9 +65,9 @@ pub enum Role {
 impl From<String> for Role {
     fn from(s: String) -> Self {
         match s.to_lowercase().as_str() {
-            "user" => Role::User,
+            "user" | "human" => Role::User,
             "model" | "assistant" => Role::Model,
-            "system" => Role::System,
+            "system" | "developer" => Role::System,
             "tool" | "function" => Role::Tool,
             _ => Role::Custom(s),
         }
@@ -128,6 +128,8 @@ pub enum Part {
     },
     InlineData {
         mime_type: String,
+        // Ensures Vec<u8> serializes to a base64 string, not an integer array.
+        #[serde(with = "base64_serde")]
         data: Vec<u8>,
     },
     /// File data referenced by URI (URL or cloud storage path).
@@ -314,6 +316,21 @@ impl Part {
     }
 }
 
+/// Utility module to enforce Base64 Serialization for Vec<u8>
+mod base64_serde {
+    use serde::{Serializer, Deserialize, Deserializer};
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+
+    pub fn serialize<S: Serializer>(bytes: &[u8], s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&STANDARD.encode(bytes))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
+        let b64 = String::deserialize(d)?;
+        STANDARD.decode(b64.as_bytes()).map_err(serde::de::Error::custom)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -336,9 +353,11 @@ mod tests {
     fn test_role_enum() {
         assert_eq!(Role::from("user"), Role::User);
         assert_eq!(Role::from("User"), Role::User);
+        assert_eq!(Role::from("human"), Role::User);
         assert_eq!(Role::from("model"), Role::Model);
         assert_eq!(Role::from("assistant"), Role::Model);
         assert_eq!(Role::from("system"), Role::System);
+        assert_eq!(Role::from("developer"), Role::System);
         assert_eq!(Role::from("tool"), Role::Tool);
         assert_eq!(Role::from("function"), Role::Tool);
         assert_eq!(Role::from("custom"), Role::Custom("custom".to_string()));
@@ -399,6 +418,20 @@ mod tests {
         let large_data = vec![0u8; MAX_INLINE_DATA_SIZE + 1];
         let result = Content::new("user").try_with_inline_data("image/png", large_data);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_inline_data_base64_serialization() {
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
+
+        let data = vec![1, 2, 3, 4, 5];
+        let part = Part::try_inline_data("application/octet-stream", data.clone()).unwrap();
+
+        let json = serde_json::to_string(&part).unwrap();
+        // Should contain the base64 string, not an array of numbers
+        assert!(json.contains("data"));
+        assert!(json.contains(&STANDARD.encode(&data)));
+        assert!(!json.contains("[1,2,3,4,5]"));
     }
 
     #[test]
