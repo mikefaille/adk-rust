@@ -46,7 +46,7 @@ fn validate_session_id(id: impl Into<String>) -> Result<SessionId> {
 pub struct InMemorySessionService {
     sessions: Arc<RwLock<HashMap<String, SessionData>>>,
     // Secondary index: session_id -> composite_key
-    session_id_to_key: Arc<RwLock<HashMap<String, String>>>,
+    session_id_to_key: Arc<RwLock<HashMap<SessionId, String>>>,
     app_state: Arc<RwLock<HashMap<String, StateMap>>>,
     user_state: Arc<RwLock<HashMap<String, HashMap<String, StateMap>>>>,
 }
@@ -142,7 +142,7 @@ impl SessionService for InMemorySessionService {
         drop(sessions);
 
         let mut session_index = self.session_id_to_key.write().unwrap();
-        session_index.insert(session_id.to_string(), key);
+        session_index.insert(session_id.clone(), key);
         drop(session_index);
 
         Ok(Box::new(InMemorySession {
@@ -231,7 +231,7 @@ impl SessionService for InMemorySessionService {
         drop(sessions);
 
         let mut session_index = self.session_id_to_key.write().unwrap();
-        session_index.remove(session_id.as_str());
+        session_index.remove(&session_id);
         drop(session_index);
 
         Ok(())
@@ -240,9 +240,11 @@ impl SessionService for InMemorySessionService {
     async fn append_event(&self, session_id_str: &str, mut event: Event) -> Result<()> {
         event.actions.state_delta.retain(|k, _| !k.starts_with(KEY_PREFIX_TEMP));
 
+        let session_id = validate_session_id(session_id_str)?;
+
         let session_index = self.session_id_to_key.read().unwrap();
         let composite_key = session_index
-            .get(session_id_str)
+            .get(&session_id)
             .ok_or_else(|| adk_core::AdkError::Session("session not found".into()))?
             .clone();
         drop(session_index);
