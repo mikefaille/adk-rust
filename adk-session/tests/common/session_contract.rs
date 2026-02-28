@@ -177,7 +177,10 @@ pub async fn assert_session_contract_with_users(
     assert!(!sessions_primary_app.iter().any(|session| session.id() == &other_app_session_id));
 
     let sessions_other_app = service
-        .list(ListRequest { app_name: other_app_name.to_string(), user_id: user_1.to_string().into() })
+        .list(ListRequest {
+            app_name: other_app_name.to_string(),
+            user_id: user_1.to_string().into(),
+        })
         .await
         .expect("list secondary app should succeed");
 

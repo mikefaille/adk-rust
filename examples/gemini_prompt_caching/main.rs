@@ -255,9 +255,8 @@ async fn ask(
     println!(">> Turn {turn}: {question}\n");
 
     let content = Content::new("user").with_text(question);
-    let mut stream = runner
-        .run("user_1".to_string().into(), session_id.to_string().into(), content)
-        .await?;
+    let mut stream =
+        runner.run("user_1".to_string().into(), session_id.to_string().into(), content).await?;
 
     print!("   Assistant: ");
     let mut last_usage = None;

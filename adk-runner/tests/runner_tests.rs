@@ -191,9 +191,8 @@ async fn test_runner_run() {
     let content =
         Content { role: "user".to_string(), parts: vec![Part::Text { text: "Hello".to_string() }] };
 
-    let result = runner
-        .run("user123".to_string().into(), "session456".to_string().into(), content)
-        .await;
+    let result =
+        runner.run("user123".to_string().into(), "session456".to_string().into(), content).await;
 
     assert!(result.is_ok());
 }

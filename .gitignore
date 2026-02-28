@@ -83,3 +83,4 @@ docs/ADK-STUDIO-*.md
 # Vendor / Patches
 CLAUDE.md
 mistral-rs-ref/
+target/

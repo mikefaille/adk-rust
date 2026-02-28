@@ -2,7 +2,10 @@ use crate::{
     CreateRequest, DeleteRequest, Event, Events, GetRequest, KEY_PREFIX_TEMP, ListRequest, Session,
     SessionService, State,
 };
-use adk_core::{AdkError, Result};
+use adk_core::{
+    AdkError, Result,
+    types::{SessionId, UserId},
+};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use google_cloud_auth::credentials::{self, CacheableResource, Credentials};
@@ -63,7 +66,7 @@ impl VertexAiSessionConfig {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct SessionScope {
     app_name: String,
-    user_id: String,
+    user_id: UserId,
 }
 
 pub struct VertexAiSessionService {
@@ -180,7 +183,8 @@ impl VertexAiSessionService {
     fn remember_session_scope(&self, session_id: &str, app_name: &str, user_id: &str) {
         let mut scopes = self.session_scopes.write().expect("vertex session scope lock poisoned");
         let entry = scopes.entry(session_id.to_string()).or_default();
-        let scope = SessionScope { app_name: app_name.to_string(), user_id: user_id.to_string() };
+        let scope =
+            SessionScope { app_name: app_name.to_string(), user_id: user_id.to_string().into() };
         if !entry.contains(&scope) {
             entry.push(scope);
         }
@@ -189,7 +193,8 @@ impl VertexAiSessionService {
     fn forget_session_scope(&self, session_id: &str, app_name: &str, user_id: &str) {
         let mut scopes = self.session_scopes.write().expect("vertex session scope lock poisoned");
         if let Some(existing) = scopes.get_mut(session_id) {
-            existing.retain(|scope| !(scope.app_name == app_name && scope.user_id == user_id));
+            existing
+                .retain(|scope| !(scope.app_name == app_name && scope.user_id.as_str() == user_id));
             if existing.is_empty() {
                 scopes.remove(session_id);
             }
@@ -392,7 +397,7 @@ impl SessionService for VertexAiSessionService {
         Ok(Box::new(VertexSession {
             app_name: req.app_name,
             user_id: req.user_id,
-            session_id,
+            session_id: session_id.into(),
             state: sanitized_state,
             events: Vec::new(),
             updated_at: Utc::now(),
@@ -501,7 +506,7 @@ impl SessionService for VertexAiSessionService {
                 sessions.push(Box::new(VertexSession {
                     app_name: req.app_name.clone(),
                     user_id: payload.user_id,
-                    session_id,
+                    session_id: session_id.into(),
                     state: sanitize_state_map(payload.session_state),
                     events: Vec::new(),
                     updated_at,
@@ -538,7 +543,7 @@ impl SessionService for VertexAiSessionService {
         Ok(())
     }
 
-    async fn append_event(&self, session_id: &str, mut event: Event) -> Result<()> {
+    async fn append_event(&self, session_id: &SessionId, mut event: Event) -> Result<()> {
         if session_id.trim().is_empty() {
             return Err(Self::session_error("session_id is required for append_event"));
         }
@@ -560,15 +565,15 @@ impl SessionService for VertexAiSessionService {
 
 struct VertexSession {
     app_name: String,
-    user_id: String,
-    session_id: String,
+    user_id: UserId,
+    session_id: SessionId,
     state: HashMap<String, Value>,
     events: Vec<Event>,
     updated_at: DateTime<Utc>,
 }
 
 impl Session for VertexSession {
-    fn id(&self) -> &str {
+    fn id(&self) -> &SessionId {
         &self.session_id
     }
 
@@ -576,7 +581,7 @@ impl Session for VertexSession {
         &self.app_name
     }
 
-    fn user_id(&self) -> &str {
+    fn user_id(&self) -> &UserId {
         &self.user_id
     }
 
@@ -629,7 +634,7 @@ struct VertexCreateSessionRequest {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct VertexCreateSession {
-    user_id: String,
+    user_id: UserId,
     #[serde(skip_serializing_if = "Option::is_none")]
     session_state: Option<HashMap<String, Value>>,
 }
@@ -639,7 +644,7 @@ struct VertexCreateSession {
 struct VertexSessionPayload {
     name: String,
     #[serde(default)]
-    user_id: String,
+    user_id: UserId,
     #[serde(default)]
     session_state: HashMap<String, Value>,
     #[serde(default)]

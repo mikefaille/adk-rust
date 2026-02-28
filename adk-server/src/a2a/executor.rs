@@ -79,8 +79,9 @@ impl Executor {
             .content
             .ok_or_else(|| adk_core::AdkError::Agent("Event has no content".to_string()))?;
 
-        let mut event_stream =
-            runner.run(meta.user_id.clone().into(), meta.session_id.clone().into(), content).await?;
+        let mut event_stream = runner
+            .run(meta.user_id.clone().into(), meta.session_id.clone().into(), content)
+            .await?;
 
         // Process events
         while let Some(result) = event_stream.next().await {
