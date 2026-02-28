@@ -216,7 +216,7 @@ async fn main() -> anyhow::Result<()> {
         let mut input = State::new();
         input.insert("topic".to_string(), json!(topic));
 
-        let result = graph.invoke(input, ExecutionConfig::new(format!("research-{}", i))).await?;
+        let result = graph.invoke(input, ExecutionConfig::new(adk_core::types::SessionId::new(format!("research-{}", i)).unwrap())).await?;
 
         println!("\n{}\n", result.get("result").and_then(|v| v.as_str()).unwrap_or("No result"));
     }

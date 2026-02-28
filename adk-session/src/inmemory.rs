@@ -38,6 +38,7 @@ impl CompositeSessionKey {
 
 pub struct InMemorySessionService {
     sessions: Arc<RwLock<HashMap<String, SessionData>>>,
+    session_id_to_key: Arc<RwLock<HashMap<SessionId, String>>>,
     app_state: Arc<RwLock<HashMap<String, StateMap>>>,
     user_state: Arc<RwLock<HashMap<String, HashMap<String, StateMap>>>>,
 }
@@ -46,6 +47,7 @@ impl InMemorySessionService {
     pub fn new() -> Self {
         Self {
             sessions: Arc::new(RwLock::new(HashMap::new())),
+            session_id_to_key: Arc::new(RwLock::new(HashMap::new())),
             app_state: Arc::new(RwLock::new(HashMap::new())),
             user_state: Arc::new(RwLock::new(HashMap::new())),
         }
@@ -90,7 +92,7 @@ impl Default for InMemorySessionService {
 #[async_trait]
 impl SessionService for InMemorySessionService {
     async fn create(&self, req: CreateRequest) -> Result<Box<dyn Session>> {
-        let session_id = req.session_id.unwrap_or_else(|| SessionId::from(Uuid::new_v4().to_string()));
+        let session_id = req.session_id.unwrap_or_else(|| SessionId::new(Uuid::new_v4().to_string()).expect("valid id"));
 
         let id = CompositeSessionKey {
             app_name: req.app_name.clone(),
@@ -125,6 +127,10 @@ impl SessionService for InMemorySessionService {
         let mut sessions = self.sessions.write().unwrap();
         sessions.insert(id.key(), data);
         drop(sessions);
+
+        let mut id_map = self.session_id_to_key.write().unwrap();
+        id_map.insert(id.session_id.clone(), id.key());
+        drop(id_map);
 
         Ok(Box::new(InMemorySession {
             id,
@@ -197,10 +203,13 @@ impl SessionService for InMemorySessionService {
 
     async fn delete(&self, req: DeleteRequest) -> Result<()> {
         let id =
-            CompositeSessionKey { app_name: req.app_name, user_id: req.user_id, session_id: req.session_id };
+            CompositeSessionKey { app_name: req.app_name, user_id: req.user_id, session_id: req.session_id.clone() };
 
         let mut sessions = self.sessions.write().unwrap();
         sessions.remove(&id.key());
+
+        let mut id_map = self.session_id_to_key.write().unwrap();
+        id_map.remove(&req.session_id);
         Ok(())
     }
 
@@ -208,10 +217,16 @@ impl SessionService for InMemorySessionService {
         event.actions.state_delta.retain(|k, _| !k.starts_with(KEY_PREFIX_TEMP));
 
         let (app_name, user_id, app_delta, user_delta, _session_delta) = {
+            let session_key = {
+                let id_map = self.session_id_to_key.read().unwrap();
+                id_map.get(session_id).cloned()
+            };
+
+            let session_key = session_key.ok_or_else(|| adk_core::AdkError::Session("session not found".into()))?;
+
             let mut sessions = self.sessions.write().unwrap();
             let data = sessions
-                .values_mut()
-                .find(|d| d.id.session_id == *session_id)
+                .get_mut(&session_key)
                 .ok_or_else(|| adk_core::AdkError::Session("session not found".into()))?;
 
             data.events.push(event.clone());

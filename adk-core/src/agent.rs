@@ -70,14 +70,14 @@ mod tests {
     impl Session for MockSession {
         fn id(&self) -> &crate::types::SessionId {
             static ID: std::sync::OnceLock<crate::types::SessionId> = std::sync::OnceLock::new();
-            ID.get_or_init(|| "session".to_string().into())
+            ID.get_or_init(|| crate::types::SessionId::new("session").unwrap())
         }
         fn app_name(&self) -> &str {
             "app"
         }
         fn user_id(&self) -> &crate::types::UserId {
             static ID: std::sync::OnceLock<crate::types::UserId> = std::sync::OnceLock::new();
-            ID.get_or_init(|| "user".to_string().into())
+            ID.get_or_init(|| crate::types::UserId::new("user").unwrap())
         }
         fn state(&self) -> &dyn State {
             &MockState

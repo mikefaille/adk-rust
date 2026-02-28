@@ -80,7 +80,11 @@ impl Executor {
             .ok_or_else(|| adk_core::AdkError::Agent("Event has no content".to_string()))?;
 
         let mut event_stream =
-            runner.run(meta.user_id.clone().into(), meta.session_id.clone().into(), content).await?;
+            runner.run(
+                adk_core::types::UserId::new(meta.user_id.clone()).unwrap(),
+                adk_core::types::SessionId::new(meta.session_id.clone()).unwrap(),
+                content
+            ).await?;
 
         // Process events
         while let Some(result) = event_stream.next().await {
@@ -130,8 +134,8 @@ impl Executor {
         let get_result = session_service
             .get(GetRequest {
                 app_name: self.config.app_name.clone(),
-                user_id: user_id.to_string().into(),
-                session_id: session_id.to_string().into(),
+                user_id: adk_core::types::UserId::new(user_id.to_string()).unwrap(),
+                session_id: adk_core::types::SessionId::new(session_id.to_string()).unwrap(),
                 num_recent_events: None,
                 after: None,
             })
@@ -145,8 +149,8 @@ impl Executor {
         session_service
             .create(CreateRequest {
                 app_name: self.config.app_name.clone(),
-                user_id: user_id.to_string().into(),
-                session_id: Some(session_id.to_string().into()),
+                user_id: adk_core::types::UserId::new(user_id.to_string()).unwrap(),
+                session_id: Some(adk_core::types::SessionId::new(session_id.to_string()).unwrap()),
                 state: std::collections::HashMap::new(),
             })
             .await?;

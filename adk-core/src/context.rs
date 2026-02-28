@@ -435,10 +435,10 @@ mod tests {
     #[test]
     fn test_adk_context_builder() {
         let ctx = AdkContext::builder()
-            .invocation_id("inv-123".to_string())
+            .invocation_id(crate::types::InvocationId::new("inv-123").unwrap())
             .agent_name("test-agent")
-            .user_id("user-456".to_string())
-            .session_id("sess-789".to_string())
+            .user_id(crate::types::UserId::new("user-456").unwrap())
+            .session_id(crate::types::SessionId::new("sess-789").unwrap())
             .metadata("custom.key", "custom-value")
             .build();
 

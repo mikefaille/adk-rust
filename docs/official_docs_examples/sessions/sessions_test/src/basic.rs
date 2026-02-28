@@ -29,7 +29,7 @@ async fn main() -> anyhow::Result<()> {
     let session = service
         .create(CreateRequest {
             app_name: "demo".to_string(),
-            user_id: "alice".to_string().into(),
+            user_id: adk_core::types::UserId::new("alice").unwrap(),
             session_id: None, // Auto-generate
             state: initial_state,
         })
@@ -56,7 +56,7 @@ async fn main() -> anyhow::Result<()> {
     let session = service
         .get(GetRequest {
             app_name: "demo".to_string(),
-            user_id: "alice".to_string().into(),
+            user_id: adk_core::types::UserId::new("alice").unwrap(),
             session_id: session.id().clone(),
             num_recent_events: None,
             after: None,
@@ -69,7 +69,7 @@ async fn main() -> anyhow::Result<()> {
     // 5. List all sessions
     println!("\n5. Listing sessions...");
     let sessions = service
-        .list(ListRequest { app_name: "demo".to_string(), user_id: "alice".to_string().into() })
+        .list(ListRequest { app_name: "demo".to_string(), user_id: adk_core::types::UserId::new("alice").unwrap() })
         .await?;
 
     println!("   Total sessions: {}", sessions.len());
@@ -83,7 +83,7 @@ async fn main() -> anyhow::Result<()> {
     service
         .delete(DeleteRequest {
             app_name: "demo".to_string(),
-            user_id: "alice".to_string().into(),
+            user_id: adk_core::types::UserId::new("alice").unwrap(),
             session_id,
         })
         .await?;
@@ -91,7 +91,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Verify deletion
     let sessions = service
-        .list(ListRequest { app_name: "demo".to_string(), user_id: "alice".to_string().into() })
+        .list(ListRequest { app_name: "demo".to_string(), user_id: adk_core::types::UserId::new("alice").unwrap() })
         .await?;
     println!("   Remaining sessions: {}", sessions.len());
 

@@ -106,8 +106,8 @@ struct MockSession {
 impl MockSession {
     fn new() -> Self {
         Self {
-            id: SessionId::from("session-456".to_string()),
-            user_id: UserId::from("user-123".to_string()),
+            id: adk_core::types::SessionId::new("session-456").unwrap(),
+            user_id: adk_core::types::UserId::new("user-123").unwrap(),
         }
     }
 }
@@ -150,11 +150,11 @@ struct MockContext {
 impl MockContext {
     fn new() -> Self {
         let mut identity = adk_core::types::AdkIdentity::default();
-        identity.invocation_id = "inv-1".to_string().into();
+        identity.invocation_id = adk_core::types::InvocationId::new("inv-1").unwrap();
         identity.agent_name = "test-agent".to_string();
-        identity.user_id = "user-123".to_string().into();
+        identity.user_id = adk_core::types::UserId::new("user-123").unwrap();
         identity.app_name = "test-app".to_string();
-        identity.session_id = "session-456".to_string().into();
+        identity.session_id = adk_core::types::SessionId::new("session-456").unwrap();
         identity.branch = "main".to_string();
 
         Self {

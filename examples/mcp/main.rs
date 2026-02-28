@@ -48,8 +48,8 @@ struct MockSession {
 impl MockSession {
     fn new() -> Self {
         Self {
-            id: SessionId::from("mcp-session".to_string()),
-            user_id: UserId::from("user".to_string()),
+            id: SessionId::new("mcp-session").unwrap(),
+            user_id: UserId::new("user").unwrap(),
         }
     }
 }

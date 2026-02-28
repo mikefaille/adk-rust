@@ -98,7 +98,7 @@ async fn main() -> Result<()> {
     let session = session_service
         .create(CreateRequest {
             app_name: "demo".into(),
-            user_id: user_id.clone().into(),
+            user_id: adk_core::types::UserId::new(user_id.clone()).unwrap(),
             session_id: None,
             state: HashMap::new(),
         })
@@ -110,7 +110,7 @@ async fn main() -> Result<()> {
         println!("\nUser: {}", query);
         let mut stream = runner
             .run(
-                user_id.clone().into(),
+                adk_core::types::UserId::new(user_id.clone()).unwrap(),
                 session.id().clone().into(),
                 Content::new("user").with_text(query),
             )

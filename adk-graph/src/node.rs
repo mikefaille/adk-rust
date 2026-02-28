@@ -59,7 +59,7 @@ impl ExecutionConfig {
 
 impl Default for ExecutionConfig {
     fn default() -> Self {
-        Self::new(uuid::Uuid::new_v4().to_string())
+        Self::new(SessionId::new(uuid::Uuid::new_v4().to_string()).expect("valid id"))
     }
 }
 
@@ -435,11 +435,11 @@ impl GraphInvocationContext {
         agent: Arc<dyn adk_core::Agent>,
     ) -> Self {
         let identity = AdkIdentity {
-            invocation_id: InvocationId::from(uuid::Uuid::new_v4().to_string()),
+            invocation_id: InvocationId::new(uuid::Uuid::new_v4().to_string()).expect("valid id"),
             session_id: session_id.clone(),
             agent_name: agent.name().to_string(),
             app_name: "graph_app".to_string(),
-            user_id: UserId::from("graph_user".to_string()),
+            user_id: UserId::new("graph_user".to_string()).expect("valid id"),
             ..Default::default()
         };
 
@@ -519,7 +519,7 @@ impl GraphSession {
     fn new(id: SessionId) -> Self {
         Self {
             id,
-            user_id: UserId::from("graph_user".to_string()),
+            user_id: UserId::new("graph_user".to_string()).expect("valid id"),
             state: GraphState::new(),
             history: std::sync::RwLock::new(Vec::new()),
         }

@@ -251,9 +251,9 @@ fn test_conversation_history_respects_compaction() {
 
     // Create a mock session with these events
     let mock_session: Arc<dyn adk_session::Session> = Arc::new(MockSession {
-        id: "sess-1".to_string().into(),
+        id: adk_core::types::SessionId::new("sess-1").unwrap(),
         app_name: "test".to_string(),
-        user_id: "user-1".to_string().into(),
+        user_id: adk_core::types::UserId::new("user-1").unwrap(),
         events: MockEvents {
             events: vec![
                 old_event_1,
@@ -305,9 +305,9 @@ fn test_conversation_history_without_compaction() {
     event_2.set_content(Content::new("model").with_text("Hi there"));
 
     let mock_session: Arc<dyn adk_session::Session> = Arc::new(MockSession {
-        id: "sess-1".to_string().into(),
+        id: adk_core::types::SessionId::new("sess-1").unwrap(),
         app_name: "test".to_string(),
-        user_id: "user-1".to_string().into(),
+        user_id: adk_core::types::UserId::new("user-1").unwrap(),
         events: MockEvents { events: vec![event_1, event_2] },
         state: MockState,
     });
@@ -353,7 +353,7 @@ async fn test_runner_triggers_compaction_at_interval() {
 
     let content = Content::new("user").with_text("Hello");
     let mut stream = runner
-        .run("user-1".to_string().into(), "sess-1".to_string().into(), content)
+        .run(adk_core::types::UserId::new("user-1").unwrap(), adk_core::types::SessionId::new("sess-1").unwrap(), content)
         .await
         .unwrap();
 
@@ -413,7 +413,7 @@ async fn test_runner_no_compaction_before_interval() {
 
     let content = Content::new("user").with_text("Hello");
     let mut stream = runner
-        .run("user-1".to_string().into(), "sess-1".to_string().into(), content)
+        .run(adk_core::types::UserId::new("user-1").unwrap(), adk_core::types::SessionId::new("sess-1").unwrap(), content)
         .await
         .unwrap();
 

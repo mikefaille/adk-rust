@@ -148,7 +148,7 @@ impl Launcher {
         let session = session_service
             .create(CreateRequest {
                 app_name: app_name.clone(),
-                user_id: user_id.clone().into(),
+                user_id: adk_core::types::UserId::new(user_id.clone()).expect("valid"),
                 session_id: None,
                 state: HashMap::new(),
             })
@@ -200,7 +200,7 @@ impl Launcher {
             }
 
             let content = adk_core::Content::new("user").with_text(input);
-            let mut events = runner.run(user_id.clone().into(), session_id.clone().into(), content).await?;
+            let mut events = runner.run(adk_core::types::UserId::new(user_id.clone()).expect("valid"), adk_core::types::SessionId::new(session_id.clone()).expect("valid"), content).await?;
 
             print!("Assistant: ");
             stdout.flush()?;
