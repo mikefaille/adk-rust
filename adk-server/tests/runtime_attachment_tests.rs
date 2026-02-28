@@ -85,7 +85,11 @@ impl SessionService for MockSessionService {
         Ok(())
     }
 
-    async fn append_event(&self, _session_id: &adk_core::types::SessionId, _event: Event) -> adk_core::Result<()> {
+    async fn append_event(
+        &self,
+        _session_id: &adk_core::types::SessionId,
+        _event: Event,
+    ) -> adk_core::Result<()> {
         Ok(())
     }
 }

@@ -1,6 +1,7 @@
 use adk_core::{
-    Agent, CallbackContext, Content, Event, FunctionResponseData, Part, ReadonlyContext, RunConfig,
-    InvocationContext as RunnerContextTrait, Session as CoreSession, StreamingMode,
+    Agent, CallbackContext, Content, Event, FunctionResponseData,
+    InvocationContext as RunnerContextTrait, Part, ReadonlyContext, RunConfig,
+    Session as CoreSession, StreamingMode,
 };
 use adk_runner::{MutableSession, RunnerContext};
 use adk_session::{Events, Session, State};

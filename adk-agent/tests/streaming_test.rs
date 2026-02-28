@@ -1,9 +1,9 @@
 use adk_agent::LlmAgentBuilder;
+use adk_core::types::{SessionId, UserId};
 use adk_core::{
     Agent, Content, FinishReason, InvocationContext, Llm, LlmRequest, LlmResponse,
     LlmResponseStream, Part, Result, RunConfig, Session, State,
 };
-use adk_core::types::{SessionId, UserId};
 use async_stream::stream;
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -67,10 +67,7 @@ struct MockSession {
 
 impl MockSession {
     fn new() -> Self {
-        Self {
-            session_id: "session-1".to_string().into(),
-            user_id: "user-1".to_string().into(),
-        }
+        Self { session_id: "session-1".to_string().into(), user_id: "user-1".to_string().into() }
     }
 }
 

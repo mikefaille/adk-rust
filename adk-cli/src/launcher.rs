@@ -200,7 +200,8 @@ impl Launcher {
             }
 
             let content = adk_core::Content::new("user").with_text(input);
-            let mut events = runner.run(user_id.clone().into(), session_id.clone().into(), content).await?;
+            let mut events =
+                runner.run(user_id.clone().into(), session_id.clone().into(), content).await?;
 
             print!("Assistant: ");
             stdout.flush()?;
