@@ -69,7 +69,7 @@ pub trait TraceContextExt: ReadonlyContext {
         {
             use opentelemetry::{baggage::BaggageExt, Context, KeyValue};
 
-            // ✅ Zero-cost references injected directly into W3C Baggage
+            // ✅ ADK identity attributes injected directly into W3C Baggage
             let cx = Context::current().with_baggage(vec![
                 KeyValue::new("adk.invocation_id", id.invocation_id.as_str().to_owned()),
                 KeyValue::new("adk.session_id", id.session_id.as_str().to_owned()),

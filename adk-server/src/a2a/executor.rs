@@ -81,8 +81,8 @@ impl Executor {
 
         let mut event_stream =
             runner.run(
-                adk_core::types::UserId::new(meta.user_id.clone()).unwrap(),
-                adk_core::types::SessionId::new(meta.session_id.clone()).unwrap(),
+                adk_core::types::UserId::new(meta.user_id.clone())?,
+                adk_core::types::SessionId::new(meta.session_id.clone())?,
                 content
             ).await?;
 

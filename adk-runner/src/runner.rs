@@ -178,8 +178,8 @@ impl Runner {
                 let scoped = adk_artifact::ScopedArtifacts::new(
                     service,
                     app_name.clone(),
-                    user_id.clone().into(),
-                    session_id.clone().into(),
+                    user_id.clone(),
+                    session_id.clone(),
                 );
                 runner_ctx = runner_ctx.with_artifacts(Arc::new(scoped));
             }
@@ -241,8 +241,8 @@ impl Runner {
                             let scoped = adk_artifact::ScopedArtifacts::new(
                                 service,
                                 app_name.clone(),
-                                user_id.clone().into(),
-                                session_id.clone().into(),
+                                user_id.clone(),
+                                session_id.clone(),
                             );
                             refreshed_ctx = refreshed_ctx.with_artifacts(Arc::new(scoped));
                         }
@@ -332,8 +332,8 @@ impl Runner {
                             let scoped = adk_artifact::ScopedArtifacts::new(
                                 service,
                                 app_name.clone(),
-                                user_id.clone().into(),
-                                session_id.clone().into(),
+                                user_id.clone(),
+                                session_id.clone(),
                             );
                             refreshed_ctx = refreshed_ctx.with_artifacts(Arc::new(scoped));
                         }
@@ -459,8 +459,8 @@ impl Runner {
                         let scoped = adk_artifact::ScopedArtifacts::new(
                             service,
                             app_name.clone(),
-                            user_id.clone().into(),
-                            session_id.clone().into(),
+                            user_id.clone(),
+                            session_id.clone(),
                         );
                         transfer_ctx = transfer_ctx.with_artifacts(Arc::new(scoped));
                     }

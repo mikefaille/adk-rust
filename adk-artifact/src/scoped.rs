@@ -116,14 +116,14 @@ mod tests {
         let sess1 = ScopedArtifacts::new(
             service.clone(),
             "app".to_string(),
-            "user".to_string(),
-            "sess1".to_string(),
+            adk_core::types::UserId::new("user").unwrap(),
+            adk_core::types::SessionId::new("sess1").unwrap(),
         );
         let sess2 = ScopedArtifacts::new(
             service.clone(),
             "app".to_string(),
-            "user".to_string(),
-            "sess2".to_string(),
+            adk_core::types::UserId::new("user").unwrap(),
+            adk_core::types::SessionId::new("sess2").unwrap(),
         );
 
         // Save different data to same filename in different sessions
@@ -150,14 +150,14 @@ mod tests {
         let sess1 = ScopedArtifacts::new(
             service.clone(),
             "app".to_string(),
-            "user".to_string(),
-            "sess1".to_string(),
+            adk_core::types::UserId::new("user").unwrap(),
+            adk_core::types::SessionId::new("sess1").unwrap(),
         );
         let sess2 = ScopedArtifacts::new(
             service.clone(),
             "app".to_string(),
-            "user".to_string(),
-            "sess2".to_string(),
+            adk_core::types::UserId::new("user").unwrap(),
+            adk_core::types::SessionId::new("sess2").unwrap(),
         );
 
         // Save files in different sessions
@@ -179,14 +179,14 @@ mod tests {
         let sess1 = ScopedArtifacts::new(
             service.clone(),
             "app".to_string(),
-            "user1".to_string(),
-            "sess1".to_string(),
+            adk_core::types::UserId::new("user1").unwrap(),
+            adk_core::types::SessionId::new("sess1").unwrap(),
         );
         let sess2 = ScopedArtifacts::new(
             service.clone(),
             "app".to_string(),
-            "user1".to_string(),
-            "sess2".to_string(),
+            adk_core::types::UserId::new("user1").unwrap(),
+            adk_core::types::SessionId::new("sess2").unwrap(),
         );
 
         // Save user-scoped artifact (with "user:" prefix)
