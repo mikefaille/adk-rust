@@ -48,18 +48,30 @@ impl<H: EventHandler> EventHandler for LiveKitEventHandler<H> {
         self.inner.on_audio(audio, item_id).await?;
 
         // Convert PCM bytes to i16 samples and push to LiveKit
-        // Using manual loop for safety instead of bytemuck::cast_slice which requires alignment
-        let mut samples = Vec::with_capacity(audio.len() / 2);
-        for chunk in audio.chunks_exact(2) {
-            samples.push(i16::from_le_bytes([chunk[0], chunk[1]]));
-        }
-
-        let samples_per_channel = samples.len() as u32 / self.num_channels;
-        let frame = AudioFrame {
-            data: Cow::Owned(samples),
-            sample_rate: self.sample_rate,
-            num_channels: self.num_channels,
-            samples_per_channel,
+        debug_assert!(cfg!(target_endian = "little"), "Audio casting assumes little-endian architecture");
+        let frame = match bytemuck::try_cast_slice::<u8, i16>(audio) {
+            Ok(samples) => {
+                let samples_per_channel = samples.len() as u32 / self.num_channels;
+                AudioFrame {
+                    data: Cow::Borrowed(samples),
+                    sample_rate: self.sample_rate,
+                    num_channels: self.num_channels,
+                    samples_per_channel,
+                }
+            }
+            Err(_) => {
+                let mut samples = Vec::with_capacity(audio.len() / 2);
+                for chunk in audio.chunks_exact(2) {
+                    samples.push(i16::from_le_bytes([chunk[0], chunk[1]]));
+                }
+                let samples_per_channel = samples.len() as u32 / self.num_channels;
+                AudioFrame {
+                    data: Cow::Owned(samples),
+                    sample_rate: self.sample_rate,
+                    num_channels: self.num_channels,
+                    samples_per_channel,
+                }
+            }
         };
         if let Err(e) = self.audio_source.capture_frame(&frame).await {
             tracing::warn!(error = %e, "Failed to push audio to LiveKit NativeAudioSource");
