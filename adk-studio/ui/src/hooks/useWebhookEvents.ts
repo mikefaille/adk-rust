@@ -88,7 +88,7 @@ export function useWebhookEvents(
         setLastWebhook(notification);
         onWebhookRef.current?.(notification);
       } catch (e) {
-        // Silently ignore parse errors for webhook notifications
+        console.warn('[WebhookEvents] Failed to parse webhook notification:', e);
       }
     });
     
