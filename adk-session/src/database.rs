@@ -138,7 +138,7 @@ impl DatabaseSessionService {
 #[async_trait]
 impl SessionService for DatabaseSessionService {
     async fn create(&self, req: CreateRequest) -> Result<Box<dyn Session>> {
-        let session_id = req.session_id.unwrap_or_else(|| adk_core::types::SessionId::new(Uuid::new_v4().to_string()).unwrap());
+        let session_id = req.session_id.unwrap_or_else(|| adk_core::types::SessionId::new(Uuid::new_v4().to_string()).expect("Generated UUIDs are valid SessionIds"));
         let now = Utc::now();
 
         let (app_delta, user_delta, session_state) = Self::extract_state_deltas(&req.state);

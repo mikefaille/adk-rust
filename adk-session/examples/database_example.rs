@@ -17,8 +17,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _session = service
         .create(CreateRequest {
             app_name: "test_app".to_string(),
-            user_id: adk_core::types::UserId::new("user1".to_string()).unwrap(),
-            session_id: Some(adk_core::types::SessionId::new("session1".to_string()).unwrap()),
+            user_id: adk_core::types::UserId::new("user1".to_string())?,
+            session_id: Some(adk_core::types::SessionId::new("session1".to_string())?),
             state: HashMap::new(),
         })
         .await?;
@@ -31,8 +31,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _retrieved = service
         .get(GetRequest {
             app_name: "test_app".to_string(),
-            user_id: adk_core::types::UserId::new("user1".to_string()).unwrap(),
-            session_id: adk_core::types::SessionId::new("session1".to_string()).unwrap(),
+            user_id: adk_core::types::UserId::new("user1".to_string())?,
+            session_id: adk_core::types::SessionId::new("session1".to_string())?,
             num_recent_events: None,
             after: None,
         })
@@ -42,7 +42,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // List sessions
     let sessions = service
-        .list(ListRequest { app_name: "test_app".to_string(), user_id: adk_core::types::UserId::new("user1".to_string()).unwrap() })
+        .list(ListRequest { app_name: "test_app".to_string(), user_id: adk_core::types::UserId::new("user1".to_string())? })
         .await?;
 
     println!("✅ Found {} session(s)", sessions.len());
