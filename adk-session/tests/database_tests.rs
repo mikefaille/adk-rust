@@ -12,15 +12,15 @@ mod tests {
 
         let req = CreateRequest {
             app_name: "test_app".to_string(),
-            user_id: "user1".to_string(),
-            session_id: Some("session1".to_string()),
+            user_id: adk_core::types::UserId::new("user1".to_string()).unwrap(),
+            session_id: Some(adk_core::types::SessionId::new("session1".to_string()).unwrap()),
             state: HashMap::new(),
         };
 
         let session = service.create(req).await.unwrap();
-        assert_eq!(session.id(), "session1");
+        assert_eq!(session.id().as_str(), "session1");
         assert_eq!(session.app_name(), "test_app");
-        assert_eq!(session.user_id(), "user1");
+        assert_eq!(session.user_id().as_str(), "user1");
     }
 
     #[tokio::test]
@@ -31,8 +31,8 @@ mod tests {
         service
             .create(CreateRequest {
                 app_name: "test_app".to_string(),
-                user_id: "user1".to_string(),
-                session_id: Some("session1".to_string()),
+                user_id: adk_core::types::UserId::new("user1".to_string()).unwrap(),
+                session_id: Some(adk_core::types::SessionId::new("session1".to_string()).unwrap()),
                 state: HashMap::new(),
             })
             .await
@@ -41,15 +41,15 @@ mod tests {
         let session = service
             .get(GetRequest {
                 app_name: "test_app".to_string(),
-                user_id: "user1".to_string(),
-                session_id: "session1".to_string(),
+                user_id: adk_core::types::UserId::new("user1".to_string()).unwrap(),
+                session_id: adk_core::types::SessionId::new("session1".to_string()).unwrap(),
                 num_recent_events: None,
                 after: None,
             })
             .await
             .unwrap();
 
-        assert_eq!(session.id(), "session1");
+        assert_eq!(session.id().as_str(), "session1");
     }
 
     #[tokio::test]
@@ -60,8 +60,8 @@ mod tests {
         service
             .create(CreateRequest {
                 app_name: "test_app".to_string(),
-                user_id: "user1".to_string(),
-                session_id: Some("session1".to_string()),
+                user_id: adk_core::types::UserId::new("user1".to_string()).unwrap(),
+                session_id: Some(adk_core::types::SessionId::new("session1".to_string()).unwrap()),
                 state: HashMap::new(),
             })
             .await
@@ -70,15 +70,15 @@ mod tests {
         service
             .create(CreateRequest {
                 app_name: "test_app".to_string(),
-                user_id: "user1".to_string(),
-                session_id: Some("session2".to_string()),
+                user_id: adk_core::types::UserId::new("user1".to_string()).unwrap(),
+                session_id: Some(adk_core::types::SessionId::new("session2".to_string()).unwrap()),
                 state: HashMap::new(),
             })
             .await
             .unwrap();
 
         let sessions = service
-            .list(ListRequest { app_name: "test_app".to_string(), user_id: "user1".to_string() })
+            .list(ListRequest { app_name: "test_app".to_string(), user_id: adk_core::types::UserId::new("user1".to_string()).unwrap() })
             .await
             .unwrap();
 
@@ -93,8 +93,8 @@ mod tests {
         service
             .create(CreateRequest {
                 app_name: "test_app".to_string(),
-                user_id: "user1".to_string(),
-                session_id: Some("session1".to_string()),
+                user_id: adk_core::types::UserId::new("user1".to_string()).unwrap(),
+                session_id: Some(adk_core::types::SessionId::new("session1".to_string()).unwrap()),
                 state: HashMap::new(),
             })
             .await
@@ -103,8 +103,8 @@ mod tests {
         service
             .delete(DeleteRequest {
                 app_name: "test_app".to_string(),
-                user_id: "user1".to_string(),
-                session_id: "session1".to_string(),
+                user_id: adk_core::types::UserId::new("user1".to_string()).unwrap(),
+                session_id: adk_core::types::SessionId::new("session1".to_string()).unwrap(),
             })
             .await
             .unwrap();
@@ -112,8 +112,8 @@ mod tests {
         let result = service
             .get(GetRequest {
                 app_name: "test_app".to_string(),
-                user_id: "user1".to_string(),
-                session_id: "session1".to_string(),
+                user_id: adk_core::types::UserId::new("user1".to_string()).unwrap(),
+                session_id: adk_core::types::SessionId::new("session1".to_string()).unwrap(),
                 num_recent_events: None,
                 after: None,
             })
@@ -130,8 +130,8 @@ mod tests {
         service
             .create(CreateRequest {
                 app_name: "test_app".to_string(),
-                user_id: "user1".to_string(),
-                session_id: Some("session1".to_string()),
+                user_id: adk_core::types::UserId::new("user1".to_string()).unwrap(),
+                session_id: Some(adk_core::types::SessionId::new("session1".to_string()).unwrap()),
                 state: HashMap::new(),
             })
             .await
@@ -140,8 +140,8 @@ mod tests {
         let before = service
             .get(GetRequest {
                 app_name: "test_app".to_string(),
-                user_id: "user1".to_string(),
-                session_id: "session1".to_string(),
+                user_id: adk_core::types::UserId::new("user1".to_string()).unwrap(),
+                session_id: adk_core::types::SessionId::new("session1".to_string()).unwrap(),
                 num_recent_events: None,
                 after: None,
             })
@@ -160,13 +160,13 @@ mod tests {
             .state_delta
             .insert(format!("{}scratch", KEY_PREFIX_TEMP), json!("do-not-persist"));
 
-        service.append_event("session1", event).await.unwrap();
+        service.append_event(&adk_core::types::SessionId::new("session1".to_string()).unwrap(), event).await.unwrap();
 
         let after = service
             .get(GetRequest {
                 app_name: "test_app".to_string(),
-                user_id: "user1".to_string(),
-                session_id: "session1".to_string(),
+                user_id: adk_core::types::UserId::new("user1".to_string()).unwrap(),
+                session_id: adk_core::types::SessionId::new("session1".to_string()).unwrap(),
                 num_recent_events: None,
                 after: None,
             })
@@ -189,8 +189,8 @@ mod tests {
         service
             .create(CreateRequest {
                 app_name: "test_app".to_string(),
-                user_id: "user1".to_string(),
-                session_id: Some("session1".to_string()),
+                user_id: adk_core::types::UserId::new("user1".to_string()).unwrap(),
+                session_id: Some(adk_core::types::SessionId::new("session1".to_string()).unwrap()),
                 state: HashMap::new(),
             })
             .await
@@ -199,13 +199,13 @@ mod tests {
         let mut event = Event::new("inv-1");
         event.author = "agent".to_string();
         event.actions.state_delta.insert("result".to_string(), json!("ok"));
-        service.append_event("session1", event).await.unwrap();
+        service.append_event(&adk_core::types::SessionId::new("session1".to_string()).unwrap(), event).await.unwrap();
 
         let with_event = service
             .get(GetRequest {
                 app_name: "test_app".to_string(),
-                user_id: "user1".to_string(),
-                session_id: "session1".to_string(),
+                user_id: adk_core::types::UserId::new("user1".to_string()).unwrap(),
+                session_id: adk_core::types::SessionId::new("session1".to_string()).unwrap(),
                 num_recent_events: None,
                 after: None,
             })
@@ -216,8 +216,8 @@ mod tests {
         service
             .delete(DeleteRequest {
                 app_name: "test_app".to_string(),
-                user_id: "user1".to_string(),
-                session_id: "session1".to_string(),
+                user_id: adk_core::types::UserId::new("user1".to_string()).unwrap(),
+                session_id: adk_core::types::SessionId::new("session1".to_string()).unwrap(),
             })
             .await
             .unwrap();
@@ -225,8 +225,8 @@ mod tests {
         service
             .create(CreateRequest {
                 app_name: "test_app".to_string(),
-                user_id: "user1".to_string(),
-                session_id: Some("session1".to_string()),
+                user_id: adk_core::types::UserId::new("user1".to_string()).unwrap(),
+                session_id: Some(adk_core::types::SessionId::new("session1".to_string()).unwrap()),
                 state: HashMap::new(),
             })
             .await
@@ -235,8 +235,8 @@ mod tests {
         let recreated = service
             .get(GetRequest {
                 app_name: "test_app".to_string(),
-                user_id: "user1".to_string(),
-                session_id: "session1".to_string(),
+                user_id: adk_core::types::UserId::new("user1".to_string()).unwrap(),
+                session_id: adk_core::types::SessionId::new("session1".to_string()).unwrap(),
                 num_recent_events: None,
                 after: None,
             })
