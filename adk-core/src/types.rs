@@ -1,56 +1,39 @@
-use derive_more::{AsRef, Deref, Display, From, Into};
+use derive_more::{AsRef, Deref, Display};
 use serde::{Deserialize, Serialize};
 
-#[derive(
-    Debug,
-    Clone,
-    PartialEq,
-    Eq,
-    Hash,
-    Display,
-    From,
-    AsRef,
-    Deref,
-    Into,
-    Serialize,
-    Deserialize,
-    Default,
-)]
-pub struct SessionId(String);
+macro_rules! define_id_type {
+    ($name:ident, $err_name:ident) => {
+        #[derive(
+            Debug, Clone, PartialEq, Eq, Hash, Display, AsRef, Deref, Serialize, Deserialize, Default,
+        )]
+        pub struct $name(String);
 
-#[derive(
-    Debug,
-    Clone,
-    PartialEq,
-    Eq,
-    Hash,
-    Display,
-    From,
-    AsRef,
-    Deref,
-    Into,
-    Serialize,
-    Deserialize,
-    Default,
-)]
-pub struct InvocationId(String);
+        impl $name {
+            /// Creates a new ID, ensuring it does not contain invalid characters (like colons).
+            pub fn new(id: impl Into<String>) -> Result<Self, crate::AdkError> {
+                let id_str = id.into();
+                if id_str.contains(':') {
+                    return Err(crate::AdkError::$err_name(format!(
+                        "{} cannot contain a colon (':')",
+                        stringify!($name)
+                    )));
+                }
+                Ok(Self(id_str))
+            }
+        }
 
-#[derive(
-    Debug,
-    Clone,
-    PartialEq,
-    Eq,
-    Hash,
-    Display,
-    From,
-    AsRef,
-    Deref,
-    Into,
-    Serialize,
-    Deserialize,
-    Default,
-)]
-pub struct UserId(String);
+        // Allow explicit string conversions but no implicit From to enforce validation at edges.
+        impl From<$name> for String {
+            fn from(id: $name) -> String {
+                id.0
+            }
+        }
+    };
+}
+
+define_id_type!(SessionId, Session);
+define_id_type!(InvocationId, Agent);
+define_id_type!(UserId, Agent);
 
 /// A consolidated identity capsule for ADK execution.
 ///
@@ -72,7 +55,7 @@ impl Default for AdkIdentity {
         Self {
             invocation_id: InvocationId::default(),
             session_id: SessionId::default(),
-            user_id: UserId::from("anonymous".to_string()),
+            user_id: UserId("anonymous".to_string()),
             app_name: "adk-app".to_string(),
             branch: "main".to_string(),
             agent_name: "generic-agent".to_string(),

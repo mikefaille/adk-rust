@@ -16,7 +16,7 @@ struct MockCallbackContext {
 impl MockCallbackContext {
     fn new(id: &str) -> Self {
         let mut identity = AdkIdentity::default();
-        identity.invocation_id = id.to_string().into();
+        identity.invocation_id = adk_core::types::InvocationId::new(id.to_string()).unwrap();
         Self { content: Content::new("user"), identity, metadata: std::collections::HashMap::new() }
     }
 }

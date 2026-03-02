@@ -16,7 +16,7 @@ pub async fn run_console(agent: Arc<dyn Agent>, app_name: String, user_id: Strin
     let session = session_service
         .create(CreateRequest {
             app_name: app_name.clone(),
-            user_id: user_id.clone().into(),
+            user_id: adk_core::types::UserId::new(user_id.clone()).expect("valid"),
             session_id: None,
             state: HashMap::new(),
         })
@@ -57,7 +57,7 @@ pub async fn run_console(agent: Arc<dyn Agent>, app_name: String, user_id: Strin
 
                 let session_id = session.id().to_string();
                 let mut events =
-                    runner.run(user_id.clone().into(), session_id.into(), user_content).await?;
+                    runner.run(adk_core::types::UserId::new(user_id.clone()).expect("valid"), adk_core::types::SessionId::new(session_id.clone()).expect("valid"), user_content).await?;
 
                 let mut stream_printer = StreamPrinter::default();
 

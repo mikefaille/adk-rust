@@ -50,14 +50,14 @@ impl MockSession {
 impl Session for MockSession {
     fn id(&self) -> &adk_core::types::SessionId {
         static ID: std::sync::OnceLock<adk_core::types::SessionId> = std::sync::OnceLock::new();
-        ID.get_or_init(|| "session-1".to_string().into())
+        ID.get_or_init(|| adk_core::types::SessionId::new("session-1").unwrap())
     }
     fn app_name(&self) -> &str {
         "test-app"
     }
     fn user_id(&self) -> &adk_core::types::UserId {
         static ID: std::sync::OnceLock<adk_core::types::UserId> = std::sync::OnceLock::new();
-        ID.get_or_init(|| "user-1".to_string().into())
+        ID.get_or_init(|| adk_core::types::UserId::new("user-1").unwrap())
     }
     fn state(&self) -> &dyn State {
         &self.state
@@ -111,11 +111,11 @@ impl ReadonlyContext for MockContext {
             std::sync::OnceLock::new();
         IDENTITY.get_or_init(|| {
             let mut id = adk_core::types::AdkIdentity::default();
-            id.invocation_id = "inv-1".to_string().into();
+            id.invocation_id = adk_core::types::InvocationId::new("inv-1").unwrap();
             id.agent_name = "test-agent".to_string();
-            id.user_id = "user-1".to_string().into();
+            id.user_id = adk_core::types::UserId::new("user-1").unwrap();
             id.app_name = "test-app".to_string();
-            id.session_id = "session-1".to_string().into();
+            id.session_id = adk_core::types::SessionId::new("session-1").unwrap();
             id.branch = "main".to_string();
             id
         })

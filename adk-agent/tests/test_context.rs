@@ -80,8 +80,8 @@ struct DummySession {
 impl DummySession {
     fn new() -> Self {
         Self {
-            id: SessionId::from("test-session".to_string()),
-            user_id: UserId::from("test-user".to_string()),
+            id: SessionId::new("test-session").unwrap(),
+            user_id: UserId::new("test-user").unwrap(),
         }
     }
 }

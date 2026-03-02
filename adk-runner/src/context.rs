@@ -1,7 +1,7 @@
 use adk_core::{
     Agent, Artifacts, CallbackContext, Content, Event, InvocationContext as InvocationContextTrait,
     Memory, ReadonlyContext, RunConfig,
-    types::{AdkIdentity, InvocationId, SessionId, UserId},
+    types::{AdkIdentity, SessionId, UserId},
 };
 use adk_session::Session as AdkSession;
 use async_trait::async_trait;
@@ -172,20 +172,17 @@ pub struct RunnerContext {
 
 impl RunnerContext {
     pub fn new(
-        invocation_id: String,
+        identity: AdkIdentity,
         agent: Arc<dyn Agent>,
-        user_id: UserId,
-        app_name: String,
-        session_id: SessionId,
         user_content: Content,
         session: Arc<dyn AdkSession>,
     ) -> Self {
         let base = adk_core::AdkContext::builder()
-            .invocation_id(InvocationId::from(invocation_id))
-            .agent_name(agent.name())
-            .user_id(user_id)
-            .app_name(app_name)
-            .session_id(session_id)
+            .invocation_id(identity.invocation_id)
+            .agent_name(identity.agent_name)
+            .user_id(identity.user_id)
+            .app_name(identity.app_name)
+            .session_id(identity.session_id)
             .user_content(user_content)
             .build();
         Self {
@@ -203,20 +200,17 @@ impl RunnerContext {
     /// This allows sharing the same mutable session across multiple contexts
     /// (e.g., for agent transfers).
     pub fn with_mutable_session(
-        invocation_id: String,
+        identity: AdkIdentity,
         agent: Arc<dyn Agent>,
-        user_id: UserId,
-        app_name: String,
-        session_id: SessionId,
         user_content: Content,
         session: Arc<MutableSession>,
     ) -> Self {
         let base = adk_core::AdkContext::builder()
-            .invocation_id(InvocationId::from(invocation_id))
-            .agent_name(agent.name())
-            .user_id(user_id)
-            .app_name(app_name)
-            .session_id(session_id)
+            .invocation_id(identity.invocation_id)
+            .agent_name(identity.agent_name)
+            .user_id(identity.user_id)
+            .app_name(identity.app_name)
+            .session_id(identity.session_id)
             .user_content(user_content)
             .build();
         Self {

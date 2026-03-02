@@ -51,7 +51,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let session = session_service
         .create(CreateRequest {
             app_name: app_name.to_string(),
-            user_id: user_id.to_string().into(),
+            user_id: adk_core::types::UserId::new(user_id.to_string()).unwrap(),
             session_id: None,
             state,
         })
@@ -99,7 +99,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 
         let content = Content::new("user").with_text(input);
         let mut events =
-            runner.run(user_id.to_string().into(), session_id.clone().into(), content).await?;
+            runner.run(adk_core::types::UserId::new(user_id.to_string()).unwrap(), adk_core::types::SessionId::new(session_id.clone()).unwrap(), content).await?;
 
         print!("Assistant: ");
         stdout.flush()?;

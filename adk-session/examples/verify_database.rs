@@ -10,7 +10,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // List all sessions
     let sessions = service
-        .list(ListRequest { app_name: "test_app".to_string(), user_id: "user1".to_string() })
+        .list(ListRequest { app_name: "test_app".to_string(), user_id: adk_core::types::UserId::new("user1".to_string())? })
         .await?;
 
     println!("📊 Found {} session(s) in database:", sessions.len());

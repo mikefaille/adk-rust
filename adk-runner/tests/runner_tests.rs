@@ -192,7 +192,7 @@ async fn test_runner_run() {
         Content { role: "user".to_string(), parts: vec![Part::Text { text: "Hello".to_string() }] };
 
     let result = runner
-        .run("user123".to_string().into(), "session456".to_string().into(), content)
+        .run(adk_core::types::UserId::new("user123").unwrap(), adk_core::types::SessionId::new("session456").unwrap(), content)
         .await;
 
     assert!(result.is_ok());
@@ -238,9 +238,9 @@ async fn test_find_agent_to_run_with_history() {
     events.push(event);
 
     let session = MockSession {
-        id: "session1".to_string().into(),
+        id: adk_core::types::SessionId::new("session1").unwrap(),
         app_name: "test".to_string(),
-        user_id: "user1".to_string().into(),
+        user_id: adk_core::types::UserId::new("user1").unwrap(),
         events: MockEvents { events },
         state: MockState,
     };
@@ -255,9 +255,9 @@ async fn test_find_agent_to_run_defaults_to_root() {
 
     // Empty session
     let session = MockSession {
-        id: "session1".to_string().into(),
+        id: adk_core::types::SessionId::new("session1").unwrap(),
         app_name: "test".to_string(),
-        user_id: "user1".to_string().into(),
+        user_id: adk_core::types::UserId::new("user1").unwrap(),
         events: MockEvents { events: vec![] },
         state: MockState,
     };
@@ -277,9 +277,9 @@ async fn test_find_agent_to_run_skips_user_events() {
     events.push(event);
 
     let session = MockSession {
-        id: "session1".to_string().into(),
+        id: adk_core::types::SessionId::new("session1").unwrap(),
         app_name: "test".to_string(),
-        user_id: "user1".to_string().into(),
+        user_id: adk_core::types::UserId::new("user1").unwrap(),
         events: MockEvents { events },
         state: MockState,
     };
@@ -413,7 +413,7 @@ async fn test_plugin_callback_order_and_mutation() {
 
     let content = Content::new("user").with_text("hello");
     let mut stream = runner
-        .run("user123".to_string().into(), "session456".to_string().into(), content)
+        .run(adk_core::types::UserId::new("user123").unwrap(), adk_core::types::SessionId::new("session456").unwrap(), content)
         .await
         .unwrap();
 
@@ -471,8 +471,8 @@ async fn test_plugin_error_propagates_from_on_user_message() {
 
     let mut stream = runner
         .run(
-            "user123".to_string().into(),
-            "session456".to_string().into(),
+            adk_core::types::UserId::new("user123").unwrap(),
+            adk_core::types::SessionId::new("session456").unwrap(),
             Content::new("user").with_text("hello"),
         )
         .await
@@ -519,8 +519,8 @@ async fn test_skill_injector_plugin_mutates_user_prompt() {
 
     let mut stream = runner
         .run(
-            "user123".to_string().into(),
-            "session456".to_string().into(),
+            adk_core::types::UserId::new("user123").unwrap(),
+            adk_core::types::SessionId::new("session456").unwrap(),
             Content::new("user").with_text("Please search this repository quickly"),
         )
         .await
@@ -576,8 +576,8 @@ async fn test_runner_with_auto_skills_mutates_user_prompt() {
 
     let mut stream = runner
         .run(
-            "user123".to_string().into(),
-            "session456".to_string().into(),
+            adk_core::types::UserId::new("user123").unwrap(),
+            adk_core::types::SessionId::new("session456").unwrap(),
             Content::new("user").with_text("Please search this repository quickly"),
         )
         .await

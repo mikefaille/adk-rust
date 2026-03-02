@@ -170,8 +170,8 @@ struct DummySession {
 impl DummySession {
     fn new() -> Self {
         Self {
-            id: SessionId::from("test-session".to_string()),
-            user_id: UserId::from("test-user".to_string()),
+            id: adk_core::types::SessionId::new("test-session").unwrap(),
+            user_id: adk_core::types::UserId::new("test-user").unwrap(),
         }
     }
 }

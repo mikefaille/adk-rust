@@ -21,8 +21,8 @@ struct MockSession {
 impl MockSession {
     fn new() -> Self {
         Self {
-            id: SessionId::from("multi-agent-session".to_string()),
-            user_id: UserId::from("multi-agent-user".to_string()),
+            id: adk_core::types::SessionId::new("multi-agent-session").unwrap(),
+            user_id: adk_core::types::UserId::new("multi-agent-user").unwrap(),
         }
     }
 }

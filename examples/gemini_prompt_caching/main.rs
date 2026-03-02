@@ -256,7 +256,7 @@ async fn ask(
 
     let content = Content::new("user").with_text(question);
     let mut stream = runner
-        .run("user_1".to_string().into(), session_id.to_string().into(), content)
+        .run(adk_core::types::UserId::new("user_1").unwrap(), adk_core::types::SessionId::new(session_id.to_string()).unwrap(), content)
         .await?;
 
     print!("   Assistant: ");
@@ -322,7 +322,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let session = session_service
         .create(CreateRequest {
             app_name: "gemini_prompt_caching".to_string(),
-            user_id: "user_1".to_string().into(),
+            user_id: adk_core::types::UserId::new("user_1").unwrap(),
             session_id: None,
             state: HashMap::new(),
         })
@@ -371,8 +371,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let session = session_service
         .get(GetRequest {
             app_name: "gemini_prompt_caching".to_string(),
-            user_id: "user_1".to_string().into(),
-            session_id: session_id.clone().into(),
+            user_id: adk_core::types::UserId::new("user_1").unwrap(),
+            session_id: adk_core::types::SessionId::new(session_id.clone()).unwrap(),
             num_recent_events: None,
             after: None,
         })

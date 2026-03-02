@@ -27,8 +27,8 @@ struct MockSession {
 impl MockSession {
     fn new() -> Self {
         Self {
-            id: SessionId::from("mcp-session".to_string()),
-            user_id: UserId::from("mcp-user".to_string()),
+            id: adk_core::types::SessionId::new("mcp-session").unwrap(),
+            user_id: adk_core::types::UserId::new("mcp-user").unwrap(),
         }
     }
 }

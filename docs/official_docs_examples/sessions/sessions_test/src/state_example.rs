@@ -25,8 +25,8 @@ async fn main() -> anyhow::Result<()> {
     let _session1 = service
         .create(CreateRequest {
             app_name: "my_app".to_string(),
-            user_id: "alice".to_string().into(),
-            session_id: Some("s1".to_string().into()),
+            user_id: adk_core::types::UserId::new("alice").unwrap(),
+            session_id: Some(adk_core::types::SessionId::new("s1").unwrap()),
             state: state1,
         })
         .await?;
@@ -38,8 +38,8 @@ async fn main() -> anyhow::Result<()> {
     let session2 = service
         .create(CreateRequest {
             app_name: "my_app".to_string(),
-            user_id: "alice".to_string().into(),
-            session_id: Some("s2".to_string().into()),
+            user_id: adk_core::types::UserId::new("alice").unwrap(),
+            session_id: Some(adk_core::types::SessionId::new("s2").unwrap()),
             state: state2,
         })
         .await?;

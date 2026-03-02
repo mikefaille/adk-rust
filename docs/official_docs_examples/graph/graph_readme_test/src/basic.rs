@@ -70,7 +70,7 @@ fn _state_graph_example() {
 
 // Validate: ExecutionConfig
 fn _execution_config_example() {
-    let _config = ExecutionConfig::new("thread-1".to_string())
+    let _config = ExecutionConfig::new(adk_core::types::SessionId::new("thread-1").unwrap())
         .with_recursion_limit(10)
         .with_metadata("key", json!("value"));
 }

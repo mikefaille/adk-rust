@@ -80,8 +80,8 @@ pub async fn create_session(
         .session_service
         .create(adk_session::CreateRequest {
             app_name: req.app_name.clone(),
-            user_id: req.user_id.clone().into(),
-            session_id: Some(session_id.into()),
+            user_id: adk_core::types::UserId::new(req.user_id.clone()).expect("valid"),
+            session_id: Some(adk_core::types::SessionId::new(session_id.clone()).expect("valid session id")),
             state: std::collections::HashMap::new(),
         })
         .await
@@ -102,8 +102,8 @@ pub async fn get_session(
         .session_service
         .get(adk_session::GetRequest {
             app_name,
-            user_id: user_id.into(),
-            session_id: session_id.into(),
+            user_id: adk_core::types::UserId::new(user_id.clone()).expect("valid user id"),
+            session_id: adk_core::types::SessionId::new(session_id.clone()).expect("valid session id"),
             num_recent_events: None,
             after: None,
         })
@@ -121,8 +121,8 @@ pub async fn delete_session(
         .session_service
         .delete(adk_session::DeleteRequest {
             app_name,
-            user_id: user_id.into(),
-            session_id: session_id.into(),
+            user_id: adk_core::types::UserId::new(user_id.clone()).expect("valid user id"),
+            session_id: adk_core::types::SessionId::new(session_id.clone()).expect("valid session id"),
         })
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -196,8 +196,8 @@ pub async fn create_session_from_path(
         .session_service
         .create(adk_session::CreateRequest {
             app_name: params.app_name.clone(),
-            user_id: params.user_id.clone().into(),
-            session_id: Some(session_id.into()),
+            user_id: adk_core::types::UserId::new(params.user_id.clone()).expect("valid"),
+            session_id: Some(adk_core::types::SessionId::new(session_id.clone()).expect("valid session id")),
             state: match body {
                 Some(b) => {
                     let s = b.0.state;
@@ -227,8 +227,8 @@ pub async fn get_session_from_path(
         .session_service
         .get(adk_session::GetRequest {
             app_name: params.app_name,
-            user_id: params.user_id.into(),
-            session_id: session_id.into(),
+            user_id: adk_core::types::UserId::new(params.user_id.clone()).expect("valid user id"),
+            session_id: adk_core::types::SessionId::new(session_id.clone()).expect("valid session id"),
             num_recent_events: None,
             after: None,
         })
@@ -249,8 +249,8 @@ pub async fn delete_session_from_path(
         .session_service
         .delete(adk_session::DeleteRequest {
             app_name: params.app_name,
-            user_id: params.user_id.into(),
-            session_id: session_id.into(),
+            user_id: adk_core::types::UserId::new(params.user_id.clone()).expect("valid user id"),
+            session_id: adk_core::types::SessionId::new(session_id.clone()).expect("valid session id"),
         })
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -273,7 +273,7 @@ pub async fn list_sessions(
         .session_service
         .list(adk_session::ListRequest {
             app_name: params.app_name.clone(),
-            user_id: params.user_id.clone().into(),
+            user_id: adk_core::types::UserId::new(params.user_id.clone()).expect("valid"),
         })
         .await
         .map_err(|e| {

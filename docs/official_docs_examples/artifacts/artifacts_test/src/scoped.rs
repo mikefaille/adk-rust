@@ -21,15 +21,15 @@ async fn main() -> anyhow::Result<()> {
     let session1 = ScopedArtifacts::new(
         service.clone(),
         "my_app".to_string(),
-        "user_123".to_string(),
-        "session_1".to_string(),
+        adk_rust::types::UserId::new("user_123").unwrap(),
+        adk_rust::types::SessionId::new("session_1").unwrap(),
     );
 
     let session2 = ScopedArtifacts::new(
         service.clone(),
         "my_app".to_string(),
-        "user_123".to_string(),
-        "session_2".to_string(),
+        adk_rust::types::UserId::new("user_123").unwrap(),
+        adk_rust::types::SessionId::new("session_2").unwrap(),
     );
 
     // --- Session-scoped artifacts (default) ---
@@ -85,8 +85,8 @@ async fn main() -> anyhow::Result<()> {
     let artifacts = ScopedArtifacts::new(
         service.clone(),
         "demo_app".to_string(),
-        "demo_user".to_string(),
-        "demo_session".to_string(),
+        adk_rust::types::UserId::new("demo_user").unwrap(),
+        adk_rust::types::SessionId::new("demo_session").unwrap(),
     );
 
     // Save - just name and data
