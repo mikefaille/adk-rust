@@ -1,7 +1,7 @@
 use adk_core::{
     Agent, Artifacts, CallbackContext, Content, Event, InvocationContext, Memory, ReadonlyContext,
     Result, RunConfig, Session, State, Tool, ToolContext,
-    types::{AdkIdentity, InvocationId},
+    types::{AdkIdentity, InvocationId, SessionId, UserId},
 };
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -300,7 +300,6 @@ impl InvocationContext for AgentToolInvocationContext {
 }
 
 // Minimal session for sub-agent execution
-use adk_core::types::{SessionId, UserId};
 
 struct AgentToolSession {
     id: SessionId,
