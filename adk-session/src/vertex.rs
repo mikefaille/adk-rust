@@ -372,14 +372,14 @@ impl SessionService for VertexAiSessionService {
 
         let body = VertexCreateSessionRequest {
             session: VertexCreateSession {
-                user_id: req.user_id.clone(),
+                user_id: req.user_id.to_string(),
                 session_state: (!sanitized_state.is_empty()).then_some(sanitized_state.clone()),
             },
         };
 
         let request = self.apply_auth(self.http_client.post(url).json(&body)).await?;
         let create_response = self.send_value(request).await?;
-        let session_id =
+        let session_id_str =
             extract_session_id_from_create_response(&create_response).ok_or_else(|| {
                 Self::session_error(format!(
                     "failed to extract session_id from create session response: {}",
@@ -387,7 +387,10 @@ impl SessionService for VertexAiSessionService {
                 ))
             })?;
 
-        self.remember_session_scope(&session_id, &req.app_name, &req.user_id);
+        let session_id = adk_core::types::SessionId::new(session_id_str)
+            .map_err(|e| adk_core::AdkError::Session(format!("invalid session id: {}", e)))?;
+
+        self.remember_session_scope(&session_id.to_string(), &req.app_name, req.user_id.as_str());
 
         Ok(Box::new(VertexSession {
             app_name: req.app_name,
@@ -416,14 +419,14 @@ impl SessionService for VertexAiSessionService {
             .await?
             .ok_or_else(|| Self::session_error("session not found"))?;
 
-        if payload.user_id != req.user_id {
+        if payload.user_id != req.user_id.as_str() {
             return Err(Self::session_error(format!(
                 "session '{}' does not belong to user '{}'",
                 req.session_id, req.user_id,
             )));
         }
 
-        self.remember_session_scope(&req.session_id, &req.app_name, &req.user_id);
+        self.remember_session_scope(req.session_id.as_str(), &req.app_name, req.user_id.as_str());
 
         let mut events = self.list_session_events(&session_name).await?;
 
@@ -479,18 +482,18 @@ impl SessionService for VertexAiSessionService {
                 })?;
 
             for payload in response.sessions {
-                if !req.user_id.trim().is_empty() && payload.user_id != req.user_id {
+                if !req.user_id.as_str().trim().is_empty() && payload.user_id != req.user_id.as_str() {
                     continue;
                 }
 
-                let session_id = session_id_from_session_name(&payload.name).ok_or_else(|| {
+                let session_id_str = session_id_from_session_name(&payload.name).ok_or_else(|| {
                     Self::session_error(format!(
                         "failed to parse session id from vertex session resource name '{}'",
                         payload.name,
                     ))
                 })?;
 
-                self.remember_session_scope(&session_id, &req.app_name, &payload.user_id);
+                self.remember_session_scope(&session_id_str, &req.app_name, &payload.user_id);
 
                 let updated_at = payload
                     .update_time
@@ -498,9 +501,14 @@ impl SessionService for VertexAiSessionService {
                     .and_then(parse_rfc3339_utc)
                     .unwrap_or_else(Utc::now);
 
+                let session_id = adk_core::types::SessionId::new(session_id_str)
+                    .map_err(|e| adk_core::AdkError::Session(format!("invalid session id: {}", e)))?;
+                let user_id = adk_core::types::UserId::new(payload.user_id)
+                    .map_err(|e| adk_core::AdkError::Session(format!("invalid user id: {}", e)))?;
+
                 sessions.push(Box::new(VertexSession {
                     app_name: req.app_name.clone(),
-                    user_id: payload.user_id,
+                    user_id,
                     session_id,
                     state: sanitize_state_map(payload.session_state),
                     events: Vec::new(),
@@ -538,14 +546,14 @@ impl SessionService for VertexAiSessionService {
         Ok(())
     }
 
-    async fn append_event(&self, session_id: &str, mut event: Event) -> Result<()> {
-        if session_id.trim().is_empty() {
+    async fn append_event(&self, session_id: &adk_core::types::SessionId, mut event: Event) -> Result<()> {
+        if session_id.as_str().trim().is_empty() {
             return Err(Self::session_error("session_id is required for append_event"));
         }
 
         event.actions.state_delta = sanitize_state_map(event.actions.state_delta);
 
-        let session_name = self.resolve_session_name_for_append(session_id)?;
+        let session_name = self.resolve_session_name_for_append(session_id.as_str())?;
         let url =
             self.build_url(&format!("{}/{}:appendEvent", SESSION_API_VERSION, session_name,))?;
 
@@ -560,15 +568,15 @@ impl SessionService for VertexAiSessionService {
 
 struct VertexSession {
     app_name: String,
-    user_id: String,
-    session_id: String,
+    user_id: adk_core::types::UserId,
+    session_id: adk_core::types::SessionId,
     state: HashMap<String, Value>,
     events: Vec<Event>,
     updated_at: DateTime<Utc>,
 }
 
 impl Session for VertexSession {
-    fn id(&self) -> &str {
+    fn id(&self) -> &adk_core::types::SessionId {
         &self.session_id
     }
 
@@ -576,7 +584,7 @@ impl Session for VertexSession {
         &self.app_name
     }
 
-    fn user_id(&self) -> &str {
+    fn user_id(&self) -> &adk_core::types::UserId {
         &self.user_id
     }
 
