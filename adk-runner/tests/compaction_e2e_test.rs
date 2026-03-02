@@ -108,8 +108,8 @@ async fn test_e2e_compaction_with_inmemory_session() {
     session_service
         .create(adk_session::CreateRequest {
             app_name: "test_app".to_string(),
-            user_id: "user-1".to_string().into(),
-            session_id: Some("sess-e2e".to_string().into()),
+            user_id: adk_core::types::UserId::new("user-1").unwrap(),
+            session_id: Some(adk_core::types::SessionId::new("sess-e2e").unwrap()),
             state: Default::default(),
         })
         .await
@@ -136,7 +136,7 @@ async fn test_e2e_compaction_with_inmemory_session() {
     // Invocation 1
     let content1 = Content::new("user").with_text("Hello");
     let mut stream = runner
-        .run("user-1".to_string().into(), "sess-e2e".to_string().into(), content1)
+        .run(adk_core::types::UserId::new("user-1").unwrap(), adk_core::types::SessionId::new("sess-e2e").unwrap(), content1)
         .await
         .unwrap();
     while let Some(r) = stream.next().await {
@@ -146,7 +146,7 @@ async fn test_e2e_compaction_with_inmemory_session() {
     // Invocation 2 — should trigger compaction (interval=2)
     let content2 = Content::new("user").with_text("How are you?");
     let mut stream = runner
-        .run("user-1".to_string().into(), "sess-e2e".to_string().into(), content2)
+        .run(adk_core::types::UserId::new("user-1").unwrap(), adk_core::types::SessionId::new("sess-e2e").unwrap(), content2)
         .await
         .unwrap();
     while let Some(r) = stream.next().await {
@@ -164,8 +164,8 @@ async fn test_e2e_compaction_with_inmemory_session() {
     let session = session_service
         .get(adk_session::GetRequest {
             app_name: "test_app".to_string(),
-            user_id: "user-1".to_string().into(),
-            session_id: "sess-e2e".to_string().into(),
+            user_id: adk_core::types::UserId::new("user-1").unwrap(),
+            session_id: adk_core::types::SessionId::new("sess-e2e").unwrap(),
             num_recent_events: None,
             after: None,
         })

@@ -22,8 +22,8 @@ use std::sync::Arc;
 /// let artifacts = ScopedArtifacts::new(
 ///     service,
 ///     "my_app".to_string(),
-///     "user_123".to_string(),
-///     "session_456".to_string(),
+///     adk_core::types::UserId::new("user_123").unwrap(),
+///     adk_core::types::SessionId::new("session_456").unwrap(),
 /// );
 ///
 /// // Simple API - scoping is automatic
@@ -37,8 +37,8 @@ use std::sync::Arc;
 pub struct ScopedArtifacts {
     service: Arc<dyn ArtifactService>,
     app_name: String,
-    user_id: String,
-    session_id: String,
+    user_id: adk_core::types::UserId,
+    session_id: adk_core::types::SessionId,
 }
 
 impl ScopedArtifacts {
@@ -53,8 +53,8 @@ impl ScopedArtifacts {
     pub fn new(
         service: Arc<dyn ArtifactService>,
         app_name: String,
-        user_id: String,
-        session_id: String,
+        user_id: adk_core::types::UserId,
+        session_id: adk_core::types::SessionId,
     ) -> Self {
         Self { service, app_name, user_id, session_id }
     }
@@ -67,8 +67,8 @@ impl Artifacts for ScopedArtifacts {
             .service
             .save(SaveRequest {
                 app_name: self.app_name.clone(),
-                user_id: self.user_id.clone(),
-                session_id: self.session_id.clone(),
+                user_id: self.user_id.to_string(),
+                session_id: self.session_id.to_string(),
                 file_name: name.to_string(),
                 part: data.clone(),
                 version: None,
@@ -82,8 +82,8 @@ impl Artifacts for ScopedArtifacts {
             .service
             .load(LoadRequest {
                 app_name: self.app_name.clone(),
-                user_id: self.user_id.clone(),
-                session_id: self.session_id.clone(),
+                user_id: self.user_id.to_string(),
+                session_id: self.session_id.to_string(),
                 file_name: name.to_string(),
                 version: None,
             })
@@ -96,8 +96,8 @@ impl Artifacts for ScopedArtifacts {
             .service
             .list(ListRequest {
                 app_name: self.app_name.clone(),
-                user_id: self.user_id.clone(),
-                session_id: self.session_id.clone(),
+                user_id: self.user_id.to_string(),
+                session_id: self.session_id.to_string(),
             })
             .await?;
         Ok(resp.file_names)
@@ -116,14 +116,14 @@ mod tests {
         let sess1 = ScopedArtifacts::new(
             service.clone(),
             "app".to_string(),
-            "user".to_string(),
-            "sess1".to_string(),
+            adk_core::types::UserId::new("user").unwrap(),
+            adk_core::types::SessionId::new("sess1").unwrap(),
         );
         let sess2 = ScopedArtifacts::new(
             service.clone(),
             "app".to_string(),
-            "user".to_string(),
-            "sess2".to_string(),
+            adk_core::types::UserId::new("user").unwrap(),
+            adk_core::types::SessionId::new("sess2").unwrap(),
         );
 
         // Save different data to same filename in different sessions
@@ -150,14 +150,14 @@ mod tests {
         let sess1 = ScopedArtifacts::new(
             service.clone(),
             "app".to_string(),
-            "user".to_string(),
-            "sess1".to_string(),
+            adk_core::types::UserId::new("user").unwrap(),
+            adk_core::types::SessionId::new("sess1").unwrap(),
         );
         let sess2 = ScopedArtifacts::new(
             service.clone(),
             "app".to_string(),
-            "user".to_string(),
-            "sess2".to_string(),
+            adk_core::types::UserId::new("user").unwrap(),
+            adk_core::types::SessionId::new("sess2").unwrap(),
         );
 
         // Save files in different sessions
@@ -179,14 +179,14 @@ mod tests {
         let sess1 = ScopedArtifacts::new(
             service.clone(),
             "app".to_string(),
-            "user1".to_string(),
-            "sess1".to_string(),
+            adk_core::types::UserId::new("user1").unwrap(),
+            adk_core::types::SessionId::new("sess1").unwrap(),
         );
         let sess2 = ScopedArtifacts::new(
             service.clone(),
             "app".to_string(),
-            "user1".to_string(),
-            "sess2".to_string(),
+            adk_core::types::UserId::new("user1").unwrap(),
+            adk_core::types::SessionId::new("sess2").unwrap(),
         );
 
         // Save user-scoped artifact (with "user:" prefix)

@@ -169,7 +169,7 @@ async fn main() -> anyhow::Result<()> {
     println!("[summarizer] Processing...");
 
     // Execute using GraphAgent's invoke method
-    let result = agent.invoke(input, ExecutionConfig::new("processor-thread".to_string())).await?;
+    let result = agent.invoke(input, ExecutionConfig::new(adk_core::types::SessionId::new("processor-thread").unwrap())).await?;
 
     println!("\n{}", "=".repeat(60));
     println!("\n{}", result.get("result").and_then(|v| v.as_str()).unwrap_or("No result"));

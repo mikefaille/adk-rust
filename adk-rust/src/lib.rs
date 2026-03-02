@@ -228,7 +228,7 @@
 //! // Create a session
 //! let session = session_service.create(CreateRequest {
 //!     app_name: "my_app".to_string(),
-//!     user_id: "user_123".to_string().into(),
+//!     user_id: adk_core::types::UserId::new("user_123").unwrap(),
 //!     session_id: None,
 //!     state: HashMap::new(),
 //! }).await?;

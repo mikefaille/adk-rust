@@ -49,8 +49,8 @@ impl MockSessionWithState {
     fn new() -> Self {
         let state_arc = std::sync::Arc::new(std::sync::RwLock::new(HashMap::new()));
         Self {
-            session_id: SessionId::from("session-789".to_string()),
-            user_identity: UserId::from("user-456".to_string()),
+            session_id: adk_core::types::SessionId::new("session-789").unwrap(),
+            user_identity: adk_core::types::UserId::new("user-456").unwrap(),
             state_view: MockSessionStateView(state_arc),
         }
     }
@@ -58,8 +58,8 @@ impl MockSessionWithState {
     fn with_state(state: HashMap<String, serde_json::Value>) -> Self {
         let state_arc = std::sync::Arc::new(std::sync::RwLock::new(state));
         Self {
-            session_id: SessionId::from("session-789".to_string()),
-            user_identity: UserId::from("user-456".to_string()),
+            session_id: adk_core::types::SessionId::new("session-789").unwrap(),
+            user_identity: adk_core::types::UserId::new("user-456").unwrap(),
             state_view: MockSessionStateView(state_arc),
         }
     }
@@ -122,13 +122,18 @@ fn test_context_creation() {
         Content { role: "user".to_string(), parts: vec![Part::Text { text: "Hello".to_string() }] };
 
     let ctx = RunnerContext::new(
-        "inv-123".to_string(),
+        adk_core::types::AdkIdentity {
+            invocation_id: adk_core::types::InvocationId::new("inv-123").unwrap(),
+            session_id: adk_core::types::SessionId::new("session-789").unwrap(),
+            user_id: adk_core::types::UserId::new("user-456").unwrap(),
+            app_name: "test-app".to_string(),
+            branch: "main".to_string(),
+            agent_name: agent.clone().name().to_string(),
+        },
         agent.clone(),
-        "user-456".to_string().into(),
-        "test-app".to_string(),
-        "session-789".to_string().into(),
         content.clone(),
-        Arc::new(MockSessionWithState::new()),
+        Arc::new(MockSessionWithState::new(
+    )),
     );
 
     assert_eq!(ctx.invocation_id().as_ref(), "inv-123");
@@ -147,13 +152,18 @@ fn test_context_with_branch() {
     let content = Content::new("user");
 
     let ctx = RunnerContext::new(
-        "inv-123".to_string(),
+        adk_core::types::AdkIdentity {
+            invocation_id: adk_core::types::InvocationId::new("inv-123").unwrap(),
+            session_id: adk_core::types::SessionId::new("session-789").unwrap(),
+            user_id: adk_core::types::UserId::new("user-456").unwrap(),
+            app_name: "test-app".to_string(),
+            branch: "main".to_string(),
+            agent_name: agent.name().to_string(),
+        },
         agent,
-        "user-456".to_string().into(),
-        "test-app".to_string(),
-        "session-789".to_string().into(),
         content,
-        Arc::new(MockSessionWithState::new()),
+        Arc::new(MockSessionWithState::new(
+    )),
     )
     .with_branch("main.sub".to_string());
 
@@ -169,13 +179,18 @@ fn test_context_with_run_config() {
     let config = RunConfig { streaming_mode: StreamingMode::SSE, ..RunConfig::default() };
 
     let ctx = RunnerContext::new(
-        "inv-123".to_string(),
+        adk_core::types::AdkIdentity {
+            invocation_id: adk_core::types::InvocationId::new("inv-123").unwrap(),
+            session_id: adk_core::types::SessionId::new("session-789").unwrap(),
+            user_id: adk_core::types::UserId::new("user-456").unwrap(),
+            app_name: "test-app".to_string(),
+            branch: "main".to_string(),
+            agent_name: agent.name().to_string(),
+        },
         agent,
-        "user-456".to_string().into(),
-        "test-app".to_string(),
-        "session-789".to_string().into(),
         content,
-        Arc::new(MockSessionWithState::new()),
+        Arc::new(MockSessionWithState::new(
+    )),
     )
     .with_run_config(config);
 
@@ -189,13 +204,18 @@ fn test_context_end_invocation() {
     let content = Content::new("user");
 
     let ctx = RunnerContext::new(
-        "inv-123".to_string(),
+        adk_core::types::AdkIdentity {
+            invocation_id: adk_core::types::InvocationId::new("inv-123").unwrap(),
+            session_id: adk_core::types::SessionId::new("session-789").unwrap(),
+            user_id: adk_core::types::UserId::new("user-456").unwrap(),
+            app_name: "test-app".to_string(),
+            branch: "main".to_string(),
+            agent_name: agent.name().to_string(),
+        },
         agent,
-        "user-456".to_string().into(),
-        "test-app".to_string(),
-        "session-789".to_string().into(),
         content,
-        Arc::new(MockSessionWithState::new()),
+        Arc::new(MockSessionWithState::new(
+    )),
     );
 
     assert!(!ctx.ended());
@@ -210,13 +230,18 @@ fn test_context_agent_access() {
     let content = Content::new("user");
 
     let ctx = RunnerContext::new(
-        "inv-123".to_string(),
+        adk_core::types::AdkIdentity {
+            invocation_id: adk_core::types::InvocationId::new("inv-123").unwrap(),
+            session_id: adk_core::types::SessionId::new("session-789").unwrap(),
+            user_id: adk_core::types::UserId::new("user-456").unwrap(),
+            app_name: "test-app".to_string(),
+            branch: "main".to_string(),
+            agent_name: agent.clone().name().to_string(),
+        },
         agent.clone(),
-        "user-456".to_string().into(),
-        "test-app".to_string(),
-        "session-789".to_string().into(),
         content,
-        Arc::new(MockSessionWithState::new()),
+        Arc::new(MockSessionWithState::new(
+    )),
     );
 
     let retrieved_agent = ctx.agent();
@@ -230,13 +255,18 @@ fn test_context_optional_services() {
     let content = Content::new("user");
 
     let ctx = RunnerContext::new(
-        "inv-123".to_string(),
+        adk_core::types::AdkIdentity {
+            invocation_id: adk_core::types::InvocationId::new("inv-123").unwrap(),
+            session_id: adk_core::types::SessionId::new("session-789").unwrap(),
+            user_id: adk_core::types::UserId::new("user-456").unwrap(),
+            app_name: "test-app".to_string(),
+            branch: "main".to_string(),
+            agent_name: agent.name().to_string(),
+        },
         agent,
-        "user-456".to_string().into(),
-        "test-app".to_string(),
-        "session-789".to_string().into(),
         content,
-        Arc::new(MockSessionWithState::new()),
+        Arc::new(MockSessionWithState::new(
+    )),
     );
 
     assert!(ctx.artifacts().is_none());
@@ -299,13 +329,18 @@ fn test_mutable_session_shared_across_contexts() {
 
     // Create first context
     let ctx1 = RunnerContext::new(
-        "inv-1".to_string(),
+        adk_core::types::AdkIdentity {
+            invocation_id: adk_core::types::InvocationId::new("inv-1").unwrap(),
+            session_id: adk_core::types::SessionId::new("session-789").unwrap(),
+            user_id: adk_core::types::UserId::new("user-456").unwrap(),
+            app_name: "test-app".to_string(),
+            branch: "main".to_string(),
+            agent_name: agent.clone().name().to_string(),
+        },
         agent.clone(),
-        "user-456".to_string().into(),
-        "test-app".to_string(),
-        "session-789".to_string().into(),
         content.clone(),
-        Arc::new(MockSessionWithState::new()),
+        Arc::new(MockSessionWithState::new(
+    )),
     );
 
     // Get the mutable session from ctx1 and apply a state delta
@@ -315,13 +350,18 @@ fn test_mutable_session_shared_across_contexts() {
 
     // Create second context sharing the same MutableSession
     let ctx2 = RunnerContext::with_mutable_session(
-        "inv-2".to_string(),
+        adk_core::types::AdkIdentity {
+            invocation_id: adk_core::types::InvocationId::new("inv-2").unwrap(),
+            session_id: adk_core::types::SessionId::new("session-789").unwrap(),
+            user_id: adk_core::types::UserId::new("user-456").unwrap(),
+            app_name: "test-app".to_string(),
+            branch: "main".to_string(),
+            agent_name: agent.clone().name().to_string(),
+        },
         agent.clone(),
-        "user-456".to_string().into(),
-        "test-app".to_string(),
-        "session-789".to_string().into(),
         content,
-        ctx1.mutable_session().clone(),
+        ctx1.mutable_session(
+    ).clone(),
     );
 
     // ctx2 should see the state set by ctx1

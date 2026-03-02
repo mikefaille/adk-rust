@@ -468,7 +468,7 @@ mod tests {
 
         // Test direct invocation
         let result =
-            agent.invoke(State::new(), ExecutionConfig::new("test".to_string())).await.unwrap();
+            agent.invoke(State::new(), ExecutionConfig::new(adk_core::types::SessionId::new("test").unwrap())).await.unwrap();
 
         assert_eq!(result.get("value"), Some(&json!(42)));
     }

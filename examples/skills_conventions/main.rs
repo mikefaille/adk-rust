@@ -74,7 +74,7 @@ async fn main() -> Result<()> {
     let session = session_service
         .create(CreateRequest {
             app_name: app_name.clone(),
-            user_id: user_id.clone().into(),
+            user_id: adk_core::types::UserId::new(user_id.clone()).unwrap(),
             session_id: None,
             state: HashMap::new(),
         })
@@ -96,8 +96,8 @@ async fn main() -> Result<()> {
 
     let mut stream = runner
         .run(
-            user_id.into(),
-            session_id.into(),
+            adk_core::types::UserId::new(user_id.clone()).unwrap(),
+            adk_core::types::SessionId::new(session_id.clone()).unwrap(),
             Content::new("user")
                 .with_text("How should I configure Gemini access for this project?"),
         )

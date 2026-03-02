@@ -193,7 +193,7 @@ async fn demo_thought_signature(model: Arc<GeminiModel>) -> Result<(), Box<dyn s
     let session = session_service
         .create(CreateRequest {
             app_name: "gemini_thinking".to_string(),
-            user_id: "user_1".to_string().into(),
+            user_id: adk_core::types::UserId::new("user_1").unwrap(),
             session_id: None,
             state: HashMap::new(),
         })
@@ -221,7 +221,7 @@ async fn demo_thought_signature(model: Arc<GeminiModel>) -> Result<(), Box<dyn s
     );
 
     let mut stream =
-        runner.run("user_1".to_string().into(), session_id.clone().into(), content).await?;
+        runner.run(adk_core::types::UserId::new("user_1").unwrap(), adk_core::types::SessionId::new(session_id.clone()).unwrap(), content).await?;
 
     let mut saw_thinking = false;
     let mut saw_tool_call = false;
@@ -285,7 +285,7 @@ async fn demo_thought_signature(model: Arc<GeminiModel>) -> Result<(), Box<dyn s
     let content = Content::new("user").with_text("Now convert that speed to km/h as well.");
 
     let mut stream =
-        runner.run("user_1".to_string().into(), session_id.clone().into(), content).await?;
+        runner.run(adk_core::types::UserId::new("user_1").unwrap(), adk_core::types::SessionId::new(session_id.clone()).unwrap(), content).await?;
 
     while let Some(event) = stream.next().await {
         if let Ok(e) = event

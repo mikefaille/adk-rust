@@ -165,7 +165,7 @@ async fn main() -> anyhow::Result<()> {
     println!("[Running analyzer agent...]");
     println!("[Running formatter agent...]");
 
-    let result = graph.invoke(input, ExecutionConfig::new("workflow-thread".to_string())).await?;
+    let result = graph.invoke(input, ExecutionConfig::new(adk_core::types::SessionId::new("workflow-thread").unwrap())).await?;
 
     println!("\n{}", "=".repeat(60));
     println!("\nEntities:\n{}", result.get("entities").and_then(|v| v.as_str()).unwrap_or("None"));

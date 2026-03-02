@@ -49,11 +49,11 @@ struct MockContext {
 impl MockContext {
     fn create(user_id: &str) -> Arc<dyn ToolContext> {
         let mut identity = adk_core::types::AdkIdentity::default();
-        identity.invocation_id = "test-invocation".to_string().into();
+        identity.invocation_id = adk_core::types::InvocationId::new("test-invocation").unwrap();
         identity.agent_name = "test-agent".to_string();
-        identity.user_id = user_id.to_string().into();
+        identity.user_id = adk_core::types::UserId::new(user_id.to_string()).unwrap();
         identity.app_name = "test-app".to_string();
-        identity.session_id = "test-session".to_string().into();
+        identity.session_id = adk_core::types::SessionId::new("test-session").unwrap();
 
         Arc::new(Self {
             identity,

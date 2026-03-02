@@ -139,7 +139,15 @@ impl Runner {
             let memory_service_clone = memory_service.clone();
 
             // Create invocation context with MutableSession
-            let invocation_id = format!("inv-{}", uuid::Uuid::new_v4());
+            let invocation_id = adk_core::types::InvocationId::new(format!("inv-{}", uuid::Uuid::new_v4())).expect("valid id");
+            let mut base_identity = adk_core::types::AdkIdentity {
+                invocation_id: invocation_id.clone(),
+                session_id: session_id.clone(),
+                user_id: user_id.clone(),
+                app_name: app_name.clone(),
+                branch: "main".to_string(),
+                agent_name: "".to_string(), // Will be set per-agent below
+            };
             let mut effective_user_content = user_content.clone();
             let mut selected_skill_name = String::new();
             let mut selected_skill_id = String::new();
@@ -156,12 +164,10 @@ impl Runner {
                 }
             }
 
+            base_identity.agent_name = agent_to_run.name().to_string();
             let mut runner_ctx = RunnerContext::new(
-                invocation_id.clone(),
+                base_identity.clone(),
                 agent_to_run.clone(),
-                user_id.clone(),
-                app_name.clone(),
-                session_id.clone(),
                 effective_user_content.clone(),
                 Arc::from(session),
             );
@@ -172,8 +178,8 @@ impl Runner {
                 let scoped = adk_artifact::ScopedArtifacts::new(
                     service,
                     app_name.clone(),
-                    user_id.to_string(),
-                    session_id.to_string(),
+                    user_id.clone(),
+                    session_id.clone(),
                 );
                 runner_ctx = runner_ctx.with_artifacts(Arc::new(scoped));
             }
@@ -192,7 +198,7 @@ impl Runner {
                     .await
                 {
                     Ok(Some(content)) => {
-                        let mut early_event = adk_core::Event::new(&invocation_id);
+                        let mut early_event = adk_core::Event::new(invocation_id.clone());
                         early_event.author = agent_to_run.name().to_string();
                         early_event.llm_response.content = Some(content);
 
@@ -225,11 +231,8 @@ impl Runner {
                         effective_user_content = modified;
 
                         let mut refreshed_ctx = RunnerContext::with_mutable_session(
-                            invocation_id.clone(),
+                            base_identity.clone(),
                             agent_to_run.clone(),
-                            user_id.clone(),
-                            app_name.clone(),
-                            session_id.clone(),
                             effective_user_content.clone(),
                             ctx.mutable_session().clone(),
                         );
@@ -238,8 +241,8 @@ impl Runner {
                             let scoped = adk_artifact::ScopedArtifacts::new(
                                 service,
                                 app_name.clone(),
-                                user_id.to_string(),
-                                session_id.to_string(),
+                                user_id.clone(),
+                                session_id.clone(),
                             );
                             refreshed_ctx = refreshed_ctx.with_artifacts(Arc::new(scoped));
                         }
@@ -261,7 +264,7 @@ impl Runner {
             }
 
             // Append user message to session service (persistent storage)
-            let mut user_event = adk_core::Event::new(&invocation_id);
+            let mut user_event = adk_core::Event::new(invocation_id.clone());
             user_event.author = "user".to_string();
             user_event.llm_response.content = Some(effective_user_content.clone());
 
@@ -320,11 +323,8 @@ impl Runner {
                         run_config.cached_content = Some(cache_name.to_string());
                         // Rebuild the invocation context with the updated run config
                         let mut refreshed_ctx = RunnerContext::with_mutable_session(
-                            invocation_id.clone(),
+                            base_identity.clone(),
                             agent_to_run.clone(),
-                            user_id.clone(),
-                            app_name.clone(),
-                            session_id.clone(),
                             effective_user_content.clone(),
                             ctx.mutable_session().clone(),
                         );
@@ -332,8 +332,8 @@ impl Runner {
                             let scoped = adk_artifact::ScopedArtifacts::new(
                                 service,
                                 app_name.clone(),
-                                user_id.to_string(),
-                                session_id.to_string(),
+                                user_id.clone(),
+                                session_id.clone(),
                             );
                             refreshed_ctx = refreshed_ctx.with_artifacts(Arc::new(scoped));
                         }
@@ -443,13 +443,14 @@ impl Runner {
             if let Some(target_name) = transfer_target {
                 if let Some(target_agent) = Self::find_agent(&root_agent, &target_name) {
                     // For transfers, we reuse the same mutable session to preserve state
-                    let transfer_invocation_id = format!("inv-{}", uuid::Uuid::new_v4());
+                    let transfer_invocation_id = adk_core::types::InvocationId::new(format!("inv-{}", uuid::Uuid::new_v4())).expect("valid id");
+                    let mut transfer_identity = base_identity.clone();
+                    transfer_identity.invocation_id = transfer_invocation_id;
+                    transfer_identity.agent_name = target_agent.name().to_string();
+
                     let mut transfer_ctx = RunnerContext::with_mutable_session(
-                        transfer_invocation_id.clone(),
+                        transfer_identity,
                         target_agent.clone(),
-                        user_id.clone(),
-                        app_name.clone(),
-                        session_id.clone(),
                         effective_user_content.clone(),
                         ctx.mutable_session().clone(),
                     );
@@ -458,8 +459,8 @@ impl Runner {
                         let scoped = adk_artifact::ScopedArtifacts::new(
                             service,
                             app_name.clone(),
-                            user_id.to_string(),
-                            session_id.to_string(),
+                            user_id.clone(),
+                            session_id.clone(),
                         );
                         transfer_ctx = transfer_ctx.with_artifacts(Arc::new(scoped));
                     }

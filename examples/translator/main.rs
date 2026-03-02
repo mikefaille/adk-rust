@@ -290,7 +290,7 @@ async fn run_batch_mode(
         let session = session_service
             .create(CreateRequest {
                 app_name: "translator".to_string(),
-                user_id: "batch_user".to_string().into(),
+                user_id: adk_core::types::UserId::new("batch_user").unwrap(),
                 session_id: None,
                 state: initial_state,
             })
@@ -334,7 +334,7 @@ async fn run_translation(
     user_content: Content,
 ) -> anyhow::Result<String> {
     let mut stream =
-        runner.run("batch_user".to_string().into(), session_id.to_string().into(), user_content).await?;
+        runner.run(adk_core::types::UserId::new("batch_user").unwrap(), adk_core::types::SessionId::new(session_id.to_string()).unwrap(), user_content).await?;
 
     // Process stream and collect any errors
     let mut last_text = String::new();
@@ -367,8 +367,8 @@ async fn run_translation(
     let updated_session = session_service
         .get(GetRequest {
             app_name: "translator".to_string(),
-            user_id: "batch_user".to_string().into(),
-            session_id: session_id.to_string().into(),
+            user_id: adk_core::types::UserId::new("batch_user").unwrap(),
+            session_id: adk_core::types::SessionId::new(session_id.to_string()).unwrap(),
             num_recent_events: None,
             after: None,
         })

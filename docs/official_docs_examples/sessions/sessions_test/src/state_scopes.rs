@@ -30,8 +30,8 @@ async fn main() -> anyhow::Result<()> {
     let session1 = service
         .create(CreateRequest {
             app_name: "my_app".to_string(),
-            user_id: "alice".to_string().into(),
-            session_id: Some("s1".to_string().into()),
+            user_id: adk_core::types::UserId::new("alice").unwrap(),
+            session_id: Some(adk_core::types::SessionId::new("s1").unwrap()),
             state: state1,
         })
         .await?;
@@ -49,8 +49,8 @@ async fn main() -> anyhow::Result<()> {
     let session2 = service
         .create(CreateRequest {
             app_name: "my_app".to_string(),
-            user_id: "alice".to_string().into(),
-            session_id: Some("s2".to_string().into()),
+            user_id: adk_core::types::UserId::new("alice").unwrap(),
+            session_id: Some(adk_core::types::SessionId::new("s2").unwrap()),
             state: state2,
         })
         .await?;
@@ -69,8 +69,8 @@ async fn main() -> anyhow::Result<()> {
     let session3 = service
         .create(CreateRequest {
             app_name: "my_app".to_string(),
-            user_id: "bob".to_string().into(),
-            session_id: Some("s3".to_string().into()),
+            user_id: adk_core::types::UserId::new("bob").unwrap(),
+            session_id: Some(adk_core::types::SessionId::new("s3").unwrap()),
             state: state3,
         })
         .await?;
@@ -87,8 +87,8 @@ async fn main() -> anyhow::Result<()> {
     let session1_refetch = service
         .get(GetRequest {
             app_name: "my_app".to_string(),
-            user_id: "alice".to_string().into(),
-            session_id: "s1".to_string().into(),
+            user_id: adk_core::types::UserId::new("alice").unwrap(),
+            session_id: adk_core::types::SessionId::new("s1").unwrap(),
             num_recent_events: None,
             after: None,
         })
