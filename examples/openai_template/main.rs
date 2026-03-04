@@ -56,13 +56,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let session = session_service
         .create(CreateRequest {
             app_name: app_name.to_string(),
-            user_id: UserId::new( user_id.to_string(),
-            session_id: SessionId::new( None,
+            user_id: UserId::new(user_id).unwrap(),
+            session_id: None,
             state,
         })
         .await?;
 
-    let session_id = session.id().to_string();
+    let session_id = session.id().clone();
 
     let runner = Runner::new(RunnerConfig {
         app_name: app_name.to_string(),
@@ -96,7 +96,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         let content = Content::new("user").with_text(&input);
-        let mut events = runner.run(user_id.to_string(, session_id.clone(, content).await?;
+        let mut events =
+            runner.run(UserId::new(user_id).unwrap(), session_id.clone(), content).await?;
 
         print!("Assistant: ");
         stdout.flush()?;

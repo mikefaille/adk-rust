@@ -37,7 +37,8 @@ impl OidcProvider {
         issuer_url: impl Into<String>,
         client_id: impl Into<String>,
     ) -> Result<Self, TokenError> {
-        let issuer = issuer_url.into();        let discovery_url =
+        let issuer = issuer_url.into();
+        let discovery_url =
             format!("{}/.well-known/openid-configuration", issuer.trim_end_matches('/'));
 
         let client = reqwest::Client::new();
@@ -71,7 +72,7 @@ impl TokenValidator for OidcProvider {
     async fn validate(&self, token: &str) -> Result<TokenClaims, TokenError> {
         // Decode header to get key ID
         let header = jsonwebtoken::decode_header(token)?;
-        let kid = header.kid.ok_or_else(|| TokenError::MissingClaim("kid")))?;
+        let kid = header.kid.ok_or_else(|| TokenError::MissingClaim("kid".to_string()))?;
 
         // Get decoding key from JWKS cache
         let key = self.jwks_cache.get_key(&kid).await?;

@@ -2,8 +2,7 @@
 
 use super::error::ConversionError;
 use crate::attachment;
-use adk_core::{Content, FinishReason, LlmResponse, Part, UsageMetadata, types::Role};
-use bytes::Bytes;
+use adk_core::{Content, FinishReason, LlmResponse, Part, UsageMetadata};
 use claudius::ImageMediaType;
 use claudius::{
     Base64ImageSource, Base64PdfSource, CacheControlEphemeral, ContentBlock, DocumentBlock,
@@ -56,7 +55,7 @@ pub fn content_to_message(
                 }
                 Some(ContentBlock::ToolUse(block))
             }
-            Part::FunctionResponse { name, response, id } => {
+            Part::FunctionResponse { name: _, response, id } => {
                 Some(ContentBlock::ToolResult(ToolResultBlock {
                     tool_use_id: id.clone().unwrap_or_else(|| "unknown".to_string()),
                     content: Some(ToolResultBlockContent::String(

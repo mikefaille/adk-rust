@@ -34,7 +34,11 @@ async fn main() -> Result<()> {
         .model(Arc::new(model))
         .build()?;
 
-    adk_cli::console::run_console(Arc::new(agent), "groq_basic".to_string(), "user1".to_string())
+    adk_cli::console::run_console(
+        Arc::new(agent),
+        "groq_basic".to_string(),
+        adk_core::types::UserId::new("user1").unwrap(),
+    )
         .await?;
 
     Ok(())

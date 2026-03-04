@@ -144,6 +144,8 @@ pub enum Role {
     Model,
     #[display("system")]
     System,
+    #[display("tool")]
+    Tool,
     #[display("{_0}")]
     Custom(String),
 }
@@ -153,9 +155,10 @@ impl std::str::FromStr for Role {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         Ok(match s {
-            "user" => Role::User,
+            "user" | "human" => Role::User,
             "model" | "assistant" => Role::Model,
             "system" | "developer" => Role::System,
+            "tool" | "function" => Role::Tool,
             _ => Role::Custom(s.to_string()),
         })
     }
@@ -201,6 +204,7 @@ impl Role {
 
     pub fn is_tool(&self) -> bool {
         match self {
+            Role::Tool => true,
             Role::Custom(s) => s == "tool" || s == "function",
             _ => false,
         }

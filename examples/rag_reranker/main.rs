@@ -77,7 +77,7 @@ fn policy_documents() -> Vec<Document> {
                    beyond the carryover limit expire on December 31. Employees are \
                    encouraged to use their PTO throughout the year.",
             metadata: HashMap::from([("policy", "pto".to_string())]),
-            source_uri: Some("policies/pto.md")),
+            source_uri: Some("policies/pto.md"),
         },
         Document {
             id: "remote_work",
@@ -95,7 +95,7 @@ fn policy_documents() -> Vec<Document> {
                    for remote-eligible employees. Equipment must be returned upon separation. \
                    IT support is available via Slack #it-help or the IT portal.",
             metadata: HashMap::from([("policy", "remote_work".to_string())]),
-            source_uri: Some("policies/remote_work.md")),
+            source_uri: Some("policies/remote_work.md"),
         },
         Document {
             id: "expense_policy",
@@ -114,7 +114,7 @@ fn policy_documents() -> Vec<Document> {
                    cities (NYC, SF, London). Flights: economy class for trips under 6 hours, \
                    business class for longer flights with VP approval.",
             metadata: HashMap::from([("policy", "expenses".to_string())]),
-            source_uri: Some("policies/expenses.md")),
+            source_uri: Some("policies/expenses.md"),
         },
         Document {
             id: "benefits",
@@ -133,7 +133,7 @@ fn policy_documents() -> Vec<Document> {
                    books, and conferences. Unused budget does not carry over. Submit \
                    requests through the Learning Portal for pre-approval.",
             metadata: HashMap::from([("policy", "benefits".to_string())]),
-            source_uri: Some("policies/benefits.md")),
+            source_uri: Some("policies/benefits.md"),
         },
     ]
 }
@@ -193,8 +193,12 @@ async fn main() -> anyhow::Result<()> {
         .build()?;
 
     println!("\nHR Policy Agent ready. Ask about PTO, remote work, expenses, or benefits.\n");
-    adk_cli::console::run_console(Arc::new(agent), "rag_reranker"), "employee1"))
-        .await?;
+    adk_cli::console::run_console(
+        Arc::new(agent),
+        "rag_reranker".to_string(),
+        UserId::new("employee1").unwrap(),
+    )
+    .await?;
 
     Ok(())
 }

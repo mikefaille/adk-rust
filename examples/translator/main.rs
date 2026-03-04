@@ -112,7 +112,12 @@ async fn main() -> anyhow::Result<()> {
         // Build pipeline without language pre-set (user specifies in message)
         let pipeline = build_translation_pipeline(model, None)?;
 
-        run_console(Arc::new(pipeline), "translator_app".to_string(), "user".to_string()).await?;
+        run_console(
+            Arc::new(pipeline),
+            "translator_app".to_string(),
+            adk_core::types::UserId::new("user").unwrap(),
+        )
+        .await?;
     }
 
     Ok(())
@@ -290,8 +295,8 @@ async fn run_batch_mode(
         let session = session_service
             .create(CreateRequest {
                 app_name: "translator".to_string(),
-                user_id: UserId::new("batch_user".to_string()),
-                session_id: SessionId::new(None),
+                user_id: UserId::new("batch_user").unwrap(),
+                session_id: None,
                 state: initial_state,
             })
             .await?;
@@ -302,7 +307,7 @@ async fn run_batch_mode(
         let user_content = Content { role: adk_core::Role::User, parts: vec![Part::text(prompt)] };
 
         // Run pipeline
-        let session_id = session.id().to_string();
+        let session_id = session.id().clone();
         let result = run_translation(&runner, &session_service, &session_id, user_content).await;
 
         match result {
@@ -332,7 +337,9 @@ async fn run_translation(
     session_id: &SessionId,
     user_content: Content,
 ) -> anyhow::Result<String> {
-    let mut stream = runner.run("batch_user".to_string(), session_id, user_content).await?;
+    let mut stream = runner
+        .run(UserId::new("batch_user").unwrap(), session_id.clone(), user_content)
+        .await?;
 
     // Process stream and collect any errors
     let mut last_text = String::new();
@@ -365,8 +372,8 @@ async fn run_translation(
     let updated_session = session_service
         .get(GetRequest {
             app_name: "translator".to_string(),
-            user_id: UserId::new("batch_user".to_string()),
-            session_id: SessionId::new(session_id.to_string()),
+            user_id: UserId::new("batch_user").unwrap(),
+            session_id: session_id.clone(),
             num_recent_events: None,
             after: None,
         })

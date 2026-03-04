@@ -99,7 +99,7 @@ async fn main() -> anyhow::Result<()> {
                    through its ownership system. The borrow checker enforces strict rules \
                    at compile time to prevent data races and dangling pointers.",
             metadata: HashMap::from([("topic", "rust".to_string())]),
-            source_uri: Some("https://www.rust-lang.org")),
+            source_uri: Some("https://www.rust-lang.org"),
         },
         Document {
             id: "doc2",
@@ -108,7 +108,7 @@ async fn main() -> anyhow::Result<()> {
                    web development, and automation. Libraries like NumPy, pandas, and \
                    scikit-learn make it the go-to language for machine learning.",
             metadata: HashMap::from([("topic", "python".to_string())]),
-            source_uri: Some("https://www.python.org")),
+            source_uri: Some("https://www.python.org"),
         },
         Document {
             id: "doc3",
@@ -117,7 +117,7 @@ async fn main() -> anyhow::Result<()> {
                    indexing enables fast approximate nearest-neighbor search for embeddings. \
                    It can run embedded (in-process) or as a distributed server.",
             metadata: HashMap::from([("topic", "surrealdb".to_string())]),
-            source_uri: Some("https://surrealdb.com")),
+            source_uri: Some("https://surrealdb.com"),
         },
         Document {
             id: "doc4",
@@ -174,7 +174,7 @@ async fn main() -> anyhow::Result<()> {
                        improved pattern matching. The language continues to evolve while \
                        maintaining its zero-cost abstractions and memory safety guarantees.",
                 metadata: HashMap::from([("topic", "rust".to_string())]),
-                source_uri: Some("https://www.rust-lang.org")),
+                source_uri: Some("https://www.rust-lang.org"),
             },
         )
         .await?;

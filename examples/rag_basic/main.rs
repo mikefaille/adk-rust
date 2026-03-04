@@ -93,7 +93,7 @@ async fn main() -> anyhow::Result<()> {
                    and concurrency. It achieves memory safety without a garbage collector \
                    through its ownership system.",
             metadata: HashMap::from([("topic", "rust".to_string())]),
-            source_uri: Some("https://www.rust-lang.org")),
+            source_uri: Some("https://www.rust-lang.org"),
         },
         Document {
             id: "doc2",
@@ -101,7 +101,7 @@ async fn main() -> anyhow::Result<()> {
                    its readability and versatility. It is widely used in data science, \
                    web development, and automation.",
             metadata: HashMap::from([("topic", "python".to_string())]),
-            source_uri: Some("https://www.python.org")),
+            source_uri: Some("https://www.python.org"),
         },
         Document {
             id: "doc3",

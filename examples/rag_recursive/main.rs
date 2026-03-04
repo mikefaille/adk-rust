@@ -35,7 +35,7 @@ fn codebase_docs() -> Vec<Document> {
                    signing key stored in environment variables.",
             metadata: HashMap::from([
                 ("file", "docs/architecture.md".to_string()),("area", "architecture".to_string()),]),
-            source_uri: Some("docs/architecture.md")),
+            source_uri: Some("docs/architecture.md"),
         },
         Document {
             id: "database",
@@ -50,7 +50,7 @@ fn codebase_docs() -> Vec<Document> {
                    use DATABASE_URL_TEST which creates an isolated test database.",
             metadata: HashMap::from([
                 ("file", "docs/database.md".to_string()),("area", "database".to_string()),]),
-            source_uri: Some("docs/database.md")),
+            source_uri: Some("docs/database.md"),
         },
         Document {
             id: "api_endpoints",
@@ -66,7 +66,7 @@ fn codebase_docs() -> Vec<Document> {
                    The assignee defaults to the creating user.",
             metadata: HashMap::from([
                 ("file", "docs/api.md".to_string()),("area", "api".to_string()),]),
-            source_uri: Some("docs/api.md")),
+            source_uri: Some("docs/api.md"),
         },
         Document {
             id: "deployment",
@@ -82,7 +82,7 @@ fn codebase_docs() -> Vec<Document> {
                    interval of 30 seconds with a 5-second timeout.",
             metadata: HashMap::from([
                 ("file", "docs/deployment.md".to_string()),("area", "deployment".to_string()),]),
-            source_uri: Some("docs/deployment.md")),
+            source_uri: Some("docs/deployment.md"),
         },
     ]
 }
@@ -140,7 +140,12 @@ async fn main() -> anyhow::Result<()> {
         .build()?;
 
     println!("Codebase Q&A agent ready. Ask about architecture, database, API, or deployment.\n");
-    adk_cli::console::run_console(Arc::new(agent), "rag_recursive"), "dev1")).await?;
+    adk_cli::console::run_console(
+        Arc::new(agent),
+        "rag_recursive".to_string(),
+        adk_core::types::UserId::new("dev1").unwrap(),
+    )
+    .await?;
 
     Ok(())
 }

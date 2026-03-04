@@ -31,7 +31,11 @@ async fn main() -> Result<()> {
     println!("Try: \"Create a welcome screen\"");
     println!();
 
-    adk_cli::console::run_console(Arc::new(agent), "a2ui_demo".to_string(), "user1".to_string())
+    adk_cli::console::run_console(
+        Arc::new(agent),
+        "a2ui_demo".to_string(),
+        adk_core::types::UserId::new("user1").unwrap(),
+    )
         .await?;
 
     Ok(())

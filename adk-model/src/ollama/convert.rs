@@ -1,8 +1,6 @@
 //! Type conversions between ADK core types and ollama-rs types.
 
-use crate::attachment;
-use adk_core::{Content, FinishReason, LlmResponse, Part, UsageMetadata, types::Role};
-use bytes::Bytes;
+use adk_core::{Content, FinishReason, LlmResponse, Part, Role, UsageMetadata};
 use ollama_rs::generation::chat::{ChatMessage, ChatMessageResponse};
 
 /// Convert ADK Content to Ollama ChatMessage.

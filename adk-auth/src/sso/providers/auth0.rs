@@ -21,7 +21,8 @@ impl Auth0Provider {
     /// * `audience` - API audience/identifier
     #[cfg(feature = "sso")]
     pub fn new(domain: impl Into<String>, audience: impl Into<String>) -> Self {
-        let domain = domain.into();        let issuer = format!("https://{}/", domain);
+        let domain = domain.into();
+        let issuer = format!("https://{}/", domain);
         let jwks_uri = format!("https://{}/.well-known/jwks.json", domain);
 
         Self {
@@ -48,7 +49,7 @@ impl Auth0Provider {
 impl TokenValidator for Auth0Provider {
     async fn validate(&self, token: &str) -> Result<TokenClaims, TokenError> {
         let header = jsonwebtoken::decode_header(token)?;
-        let kid = header.kid.ok_or_else(|| TokenError::MissingClaim("kid")))?;
+        let kid = header.kid.ok_or_else(|| TokenError::MissingClaim("kid".to_string()))?;
 
         let key = self.jwks_cache.get_key(&kid).await?;
 

@@ -2,16 +2,14 @@
 //!
 //! Groq uses OpenAI-compatible API format, so we can reuse most types from DeepSeek.
 
-use crate::attachment;
-use adk_core::{Content, FinishReason, LlmResponse, Part, UsageMetadata, types::Role};
-use bytes::Bytes;
+use adk_core::{Content, FinishReason, LlmResponse, Part, Role, UsageMetadata};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// Groq chat message.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
-    pub role: String,
+    pub role: Role,
     pub content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
@@ -161,7 +159,11 @@ pub struct Usage {
 
 /// Convert ADK Content to Groq Message.
 pub fn content_to_message(content: &Content) -> Message {
-    let role = if content.role.is_model() { "assistant" } else { "user" };
+    let role = match content.role {
+        Role::Model | Role::System => Role::Model,
+        Role::Tool => Role::Tool,
+        _ => Role::User,
+    };
 
     let mut text_parts = Vec::new();
     let mut tool_calls = Vec::new();
@@ -170,7 +172,7 @@ pub fn content_to_message(content: &Content) -> Message {
     for part in &content.parts {
         match part {
             Part::Text { text } => text_parts.push(text.clone()),
-            Part::Thinking { thought: thinking, .. } => text_parts.push(thinking.clone()),
+            Part::Thinking { thought, .. } => text_parts.push(thought.clone()),
             Part::FunctionCall { name, args, id, .. } => {
                 tool_calls.push(ToolCall {
                     id: id.clone().unwrap_or_else(|| format!("call_{}", tool_calls.len())),
@@ -181,7 +183,7 @@ pub fn content_to_message(content: &Content) -> Message {
                     },
                 });
             }
-            Part::FunctionResponse { name, response, id } => {
+            Part::FunctionResponse { name: _, response, id } => {
                 tool_call_id = id.clone();
                 text_parts.push(serde_json::to_string(&response).unwrap_or_default());
             }
@@ -192,7 +194,7 @@ pub fn content_to_message(content: &Content) -> Message {
     let content_str = if text_parts.is_empty() { None } else { Some(text_parts.join("\n")) };
 
     Message {
-        role: role.to_string(),
+        role,
         content: content_str,
         name: None,
         tool_calls: if tool_calls.is_empty() { None } else { Some(tool_calls) },

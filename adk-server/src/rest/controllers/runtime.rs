@@ -1,5 +1,8 @@
 use crate::ServerConfig;
-use adk_core::types::{SessionId, UserId};
+use adk_core::{
+    Role,
+    types::{SessionId, UserId},
+};
 use adk_ui::{SUPPORTED_UI_PROTOCOLS, UI_PROTOCOL_CAPABILITIES, normalize_runtime_ui_protocol};
 use axum::{
     Json,
@@ -70,7 +73,7 @@ pub struct RunSseRequest {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct NewMessage {
-    pub role: String,
+    pub role: Role,
     pub parts: Vec<MessagePart>,
 }
 

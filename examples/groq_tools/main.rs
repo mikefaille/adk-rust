@@ -79,7 +79,11 @@ async fn main() -> anyhow::Result<()> {
         .tool(Arc::new(calc_tool))
         .build()?;
 
-    adk_cli::console::run_console(Arc::new(agent), "groq_tools".to_string(), "user1".to_string())
+    adk_cli::console::run_console(
+        Arc::new(agent),
+        "groq_tools".to_string(),
+        adk_core::types::UserId::new("user1").unwrap(),
+    )
         .await?;
 
     Ok(())

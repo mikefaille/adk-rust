@@ -22,23 +22,24 @@ fn test_token_claims_defaults() {
 #[test]
 fn test_token_claims_user_id() {
     let claims = TokenClaims {
-        sub: "user-123"),
-        email: Some("alice@example.com")),
+        sub: "user-123".to_string(),
+        email: Some("alice@example.com".to_string()),
         ..Default::default()
     };
 
     // Prefers email over sub
-    assert_eq!(claims.user_id(), "alice@example.com");
+    assert_eq!(&*claims.user_id(), "alice@example.com");
 
-    let claims_no_email = TokenClaims { sub: "user-123"), email: None, ..Default::default() };
-    assert_eq!(claims_no_email.user_id(), "user-123");
+    let claims_no_email =
+        TokenClaims { sub: "user-123".to_string(), email: None, ..Default::default() };
+    assert_eq!(&*claims_no_email.user_id(), "user-123");
 }
 
 #[test]
 fn test_token_claims_all_groups() {
     let claims = TokenClaims {
-        groups: vec!["group1"), "group2")],
-        roles: vec!["role1")],
+        groups: vec!["group1".to_string(), "group2".to_string()],
+        roles: vec!["role1".to_string()],
         ..Default::default()
     };
 
@@ -73,7 +74,7 @@ fn test_claims_mapper_group_to_role() {
     let mapper =
         ClaimsMapper::builder().map_group("AdminGroup", "admin").map_group("Users", "user").build();
 
-    let claims = TokenClaims { groups: vec!["AdminGroup")], ..Default::default() };
+    let claims = TokenClaims { groups: vec!["AdminGroup".to_string()], ..Default::default() };
 
     let roles = mapper.map_to_roles(&claims);
     assert_eq!(roles, vec!["admin"]);
@@ -84,8 +85,10 @@ fn test_claims_mapper_multiple_groups() {
     let mapper =
         ClaimsMapper::builder().map_group("Group1", "role1").map_group("Group2", "role2").build();
 
-    let claims =
-        TokenClaims { groups: vec!["Group1"), "Group2")], ..Default::default() };
+    let claims = TokenClaims {
+        groups: vec!["Group1".to_string(), "Group2".to_string()],
+        ..Default::default()
+    };
 
     let roles = mapper.map_to_roles(&claims);
     assert!(roles.contains(&"role1".to_string()));
@@ -97,7 +100,7 @@ fn test_claims_mapper_default_role() {
     let mapper = ClaimsMapper::builder().map_group("Admin", "admin").default_role("guest").build();
 
     // No matching groups - should get default
-    let claims = TokenClaims { groups: vec!["Unknown")], ..Default::default() };
+    let claims = TokenClaims { groups: vec!["Unknown".to_string()], ..Default::default() };
 
     let roles = mapper.map_to_roles(&claims);
     assert_eq!(roles, vec!["guest"]);
@@ -108,12 +111,12 @@ fn test_claims_mapper_user_id_from_email() {
     let mapper = ClaimsMapper::builder().user_id_from_email().build();
 
     let claims = TokenClaims {
-        sub: "user-123"),
-        email: Some("alice@example.com")),
+        sub: "user-123".to_string(),
+        email: Some("alice@example.com".to_string()),
         ..Default::default()
     };
 
-    assert_eq!(mapper.get_user_id(&claims), "alice@example.com");
+    assert_eq!(&*mapper.get_user_id(&claims), "alice@example.com");
 }
 
 #[test]
@@ -121,12 +124,12 @@ fn test_claims_mapper_user_id_from_sub() {
     let mapper = ClaimsMapper::builder().user_id_from_sub().build();
 
     let claims = TokenClaims {
-        sub: "user-123"),
-        email: Some("alice@example.com")),
+        sub: "user-123".to_string(),
+        email: Some("alice@example.com".to_string()),
         ..Default::default()
     };
 
-    assert_eq!(mapper.get_user_id(&claims), "user-123");
+    assert_eq!(&*mapper.get_user_id(&claims), "user-123");
 }
 
 #[test]
@@ -134,12 +137,12 @@ fn test_claims_mapper_user_id_from_preferred_username() {
     let mapper = ClaimsMapper::builder().user_id_from_preferred_username().build();
 
     let claims = TokenClaims {
-        sub: "user-123"),
-        preferred_username: Some("alice")),
+        sub: "user-123".to_string(),
+        preferred_username: Some("alice".to_string()),
         ..Default::default()
     };
 
-    assert_eq!(mapper.get_user_id(&claims), "alice");
+    assert_eq!(&*mapper.get_user_id(&claims), "alice");
 }
 
 // =============================================================================
@@ -168,7 +171,7 @@ fn test_oidc_provider_manual_construction() {
 
 #[test]
 fn test_sso_access_control_builder() {
-    let role = Role::new("user").allow(Permission::Tool("search")));
+    let role = Role::new("user").allow(Permission::Tool("search".into()));
 
     let ac = AccessControl::builder().role(role).build().unwrap();
 
@@ -230,9 +233,9 @@ fn test_complete_sso_flow_setup() {
     // Step 1: Define roles
     let admin = Role::new("admin").allow(Permission::AllTools);
     let analyst = Role::new("analyst")
-        .allow(Permission::Tool("search")))
-        .deny(Permission::Tool("admin")));
-    let viewer = Role::new("viewer").allow(Permission::Tool("view")));
+        .allow(Permission::Tool("search".into()))
+        .deny(Permission::Tool("admin".into()));
+    let viewer = Role::new("viewer").allow(Permission::Tool("view".into()));
 
     // Step 2: Build AccessControl
     let ac = AccessControl::builder().role(admin).role(analyst).role(viewer).build().unwrap();

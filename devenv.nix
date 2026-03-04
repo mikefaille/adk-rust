@@ -37,6 +37,11 @@ let
       pkgs.dbus
       pkgs.libcap
       pkgs.systemd
+      pkgs.bzip2
+      pkgs.zlib
+      pkgs.lz4
+      pkgs.zstd
+      pkgs.snappy
       # Lower priority for xorgproto to avoid header collisions with libX11
       (lib.lowPrio pkgs.xorg.xorgproto)
     ];
@@ -108,9 +113,12 @@ in {
     PROTOC = "${adkBuildEnv}/bin/protoc";
     
     # Global Sccache Wrappers (C, C++, Assembly)
-    CC = "sccache clang";
-    CXX = "sccache clang++";
+    CC = "sccache ${llvm.clang}/bin/clang";
+    CXX = "sccache ${llvm.clang}/bin/clang++";
     
+    # Provide clang with the correct include paths for C++ headers
+    BINDGEN_EXTRA_CLANG_ARGS = "-I${llvm.libclang.lib}/lib/clang/${lib.getVersion llvm.clang}/include";
+
     # CMake Sccache Integration
     CMAKE_C_COMPILER_LAUNCHER = "sccache";
     CMAKE_CXX_COMPILER_LAUNCHER = "sccache";

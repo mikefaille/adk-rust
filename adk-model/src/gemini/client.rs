@@ -112,7 +112,7 @@ impl GeminiModel {
         if let Some(parts) = resp.candidates.first().and_then(|c| c.content.parts.as_ref()) {
             for p in parts {
                 match p {
-                    adk_gemini::Part::Text { text, thought, thought_signature } => {
+                    adk_gemini::Part::Text { text, thought, thought_signature: _ } => {
                         if thought == &Some(true) {
                             converted_parts.push(Part::Thinking { thought: text.clone() });
                         } else {

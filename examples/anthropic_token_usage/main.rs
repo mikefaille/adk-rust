@@ -155,7 +155,7 @@ async fn demo_prompt_caching(api_key: &str) -> Result<(), Box<dyn std::error::Er
         let response = result?;
         if let Some(content) = &response.content {
             for part in &content.parts {
-                if let Part::text(t) = part {
+                if let Part::Text { text: t } = part {
                     text.push_str(t);
                 }
             }
@@ -191,7 +191,7 @@ async fn demo_prompt_caching(api_key: &str) -> Result<(), Box<dyn std::error::Er
         let response = result?;
         if let Some(content) = &response.content {
             for part in &content.parts {
-                if let Part::text(t) = part {
+                if let Part::Text { text: t } = part {
                     text.push_str(t);
                 }
             }

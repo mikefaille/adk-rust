@@ -1,6 +1,7 @@
 //! Claims mapping for SSO integration.
 
 use super::TokenClaims;
+use adk_core::types::UserId;
 use std::collections::HashMap;
 
 /// Maps IdP claims to adk-auth roles.
@@ -46,8 +47,8 @@ impl ClaimsMapper {
     }
 
     /// Get user ID from claims based on configured claim.
-    pub fn get_user_id(&self, claims: &TokenClaims) -> String {
-        match &self.user_id_claim {
+    pub fn get_user_id(&self, claims: &TokenClaims) -> UserId {
+        let raw_id = match &self.user_id_claim {
             UserIdClaim::Sub => claims.sub.clone(),
             UserIdClaim::Email => claims.email.clone().unwrap_or_else(|| claims.sub.clone()),
             UserIdClaim::PreferredUsername => {
@@ -56,7 +57,8 @@ impl ClaimsMapper {
             UserIdClaim::Custom(key) => {
                 claims.get_custom::<String>(key).unwrap_or_else(|| claims.sub.clone())
             }
-        }
+        };
+        UserId::new(raw_id).unwrap_or_else(|_| UserId::new("anonymous").unwrap())
     }
 
     /// Map claims to adk-auth role names.
@@ -103,13 +105,14 @@ pub struct ClaimsMapperBuilder {
 impl ClaimsMapperBuilder {
     /// Map an IdP group to an adk-auth role.
     pub fn map_group(mut self, group: impl Into<String>, role: impl Into<String>) -> Self {
-        self.group_to_role.insert(group), role));
+        self.group_to_role.insert(group.into(), role.into());
         self
     }
 
     /// Set the default role for users without matching groups.
     pub fn default_role(mut self, role: impl Into<String>) -> Self {
-        self.default_role = Some(role.into());        self
+        self.default_role = Some(role.into());
+        self
     }
 
     /// Use 'sub' claim as user ID.
@@ -132,7 +135,7 @@ impl ClaimsMapperBuilder {
 
     /// Use a custom claim as user ID.
     pub fn user_id_from_claim(mut self, claim: impl Into<String>) -> Self {
-        self.user_id_claim = UserIdClaim::Custom(claim));
+        self.user_id_claim = UserIdClaim::Custom(claim.into());
         self
     }
 
@@ -152,10 +155,10 @@ mod tests {
 
     fn test_claims() -> TokenClaims {
         TokenClaims {
-            sub: "user-123"),
-            email: Some("alice@example.com")),
-            preferred_username: Some("alice")),
-            groups: vec!["AdminGroup"), "Users")],
+            sub: "user-123".to_string(),
+            email: Some("alice@example.com".to_string()),
+            preferred_username: Some("alice".to_string()),
+            groups: vec!["AdminGroup".to_string(), "Users".to_string()],
             ..Default::default()
         }
     }
@@ -186,12 +189,12 @@ mod tests {
     #[test]
     fn test_user_id_from_email() {
         let mapper = ClaimsMapper::builder().user_id_from_email().build();
-        assert_eq!(mapper.get_user_id(&test_claims()), "alice@example.com");
+        assert_eq!(&*mapper.get_user_id(&test_claims()), "alice@example.com");
     }
 
     #[test]
     fn test_user_id_from_sub() {
         let mapper = ClaimsMapper::builder().user_id_from_sub().build();
-        assert_eq!(mapper.get_user_id(&test_claims()), "user-123");
+        assert_eq!(&*mapper.get_user_id(&test_claims()), "user-123");
     }
 }

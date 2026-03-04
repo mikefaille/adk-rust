@@ -20,7 +20,7 @@ impl TestSession {
     fn new() -> Self {
         Self {
             id: SessionId::new("test-session".to_string()).unwrap(),
-            user_id: UserId::new( UserId::new("test-user".to_string()).unwrap(),
+            user_id: UserId::new("test-user".to_string()).unwrap(),
         }
     }
 }
@@ -242,10 +242,8 @@ async fn main() -> Result<()> {
                     text.push_str(&format!("- {}: {}\n", key, value));
                 }
 
-                event.llm_response.content = Some(Content {
-                    role: "assistant".to_string(),
-                    parts: vec![Part::text(text)],
-                });
+                event.llm_response.content =
+                    Some(Content { role: "assistant".to_string(), parts: vec![Part::text(text)] });
 
                 Ok(Box::pin(futures::stream::iter(vec![Ok(event)])) as adk_core::EventStream)
             }

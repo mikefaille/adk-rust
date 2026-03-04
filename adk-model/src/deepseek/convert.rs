@@ -1,15 +1,14 @@
 //! Type conversion utilities for DeepSeek API.
 
 use crate::attachment;
-use adk_core::{Content, FinishReason, LlmResponse, Part, UsageMetadata, types::Role};
-use bytes::Bytes;
+use adk_core::{Content, FinishReason, LlmResponse, Part, Role, UsageMetadata};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// DeepSeek chat message.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
-    pub role: String,
+    pub role: Role,
     pub content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
@@ -184,10 +183,11 @@ pub struct Usage {
 /// Convert ADK Content to DeepSeek Message.
 pub fn content_to_message(content: &Content) -> Message {
     let role = match content.role {
-        Role::User => "user",
-        Role::Model | Role::System => "assistant",
-        Role::Custom(ref s) if s == "assistant" => "assistant",
-        _ => "user",
+        Role::User => Role::User,
+        Role::Model | Role::System => Role::Model,
+        Role::Custom(ref s) if s == "assistant" => Role::Model,
+        Role::Tool => Role::Tool,
+        _ => Role::User,
     };
 
     let mut text_parts = Vec::new();
@@ -207,7 +207,7 @@ pub fn content_to_message(content: &Content) -> Message {
                     },
                 });
             }
-            Part::FunctionResponse { name, response, id } => {
+            Part::FunctionResponse { name: _, response, id } => {
                 // Tool response - set tool_call_id and content
                 tool_call_id = id.clone();
                 text_parts.push(serde_json::to_string(&response).unwrap_or_default());
@@ -218,8 +218,8 @@ pub fn content_to_message(content: &Content) -> Message {
             Part::FileData { mime_type, file_uri } => {
                 text_parts.push(attachment::file_attachment_to_text(mime_type, file_uri));
             }
-            Part::Thinking { thought: thinking, .. } => {
-                text_parts.push(thinking.clone());
+            Part::Thinking { thought, .. } => {
+                text_parts.push(thought.clone());
             }
         }
     }
@@ -227,7 +227,7 @@ pub fn content_to_message(content: &Content) -> Message {
     let content_str = if text_parts.is_empty() { None } else { Some(text_parts.join("\n")) };
 
     Message {
-        role: role.to_string(),
+        role,
         content: content_str,
         name: None,
         tool_calls: if tool_calls.is_empty() { None } else { Some(tool_calls) },

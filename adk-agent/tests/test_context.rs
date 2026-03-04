@@ -81,7 +81,7 @@ impl DummySession {
     fn new() -> Self {
         Self {
             id: SessionId::new("test-session".to_string()).unwrap(),
-            user_id: UserId::new( UserId::new("test-user".to_string()).unwrap(),
+            user_id: UserId::new("test-user".to_string()).unwrap(),
         }
     }
 }

@@ -8,7 +8,7 @@ async fn main() -> anyhow::Result<()> {
     // Initialize tracing
     tracing_subscriber::registry()
         .with(tracing_subscriber::EnvFilter::new(
-            std::env::var("RUST_LOG").unwrap_or_else(|_| "info")),
+            std::env::var("RUST_LOG").unwrap_or_else(|_| "info"),
         ))
         .with(tracing_subscriber::fmt::layer())
         .init();
@@ -33,7 +33,11 @@ async fn main() -> anyhow::Result<()> {
         .build()?;
 
     // Run agent in console mode
-    adk_cli::console::run_console(Arc::new(agent), "ollama_basic".to_string(), "user1".to_string())
+    adk_cli::console::run_console(
+        Arc::new(agent),
+        "ollama_basic".to_string(),
+        adk_core::types::UserId::new("user1").unwrap(),
+    )
         .await?;
 
     Ok(())

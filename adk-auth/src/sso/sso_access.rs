@@ -2,6 +2,7 @@
 
 use super::{ClaimsMapper, TokenClaims, TokenError, TokenValidator};
 use crate::{AccessControl, AuditEvent, AuditOutcome, AuditSink, Permission};
+use adk_core::types::UserId;
 use std::sync::Arc;
 
 /// Combines SSO token validation with adk-auth access control.
@@ -18,7 +19,7 @@ use std::sync::Arc;
 ///     .access_control(ac)
 ///     .build()?;
 ///
-/// let claims = sso.check_token(token, &Permission::Tool("search"))).await?;
+/// let claims = sso.check_token(token, &Permission::Tool("search".into())).await?;
 /// ```
 pub struct SsoAccessControl {
     validator: Arc<dyn TokenValidator>,

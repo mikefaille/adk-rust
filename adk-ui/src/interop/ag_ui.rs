@@ -1,4 +1,5 @@
 use super::surface::UiSurface;
+use adk_core::types::Role;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -77,7 +78,7 @@ pub struct AgUiTextMessageStartEvent {
     pub thread_id: String,
     pub run_id: String,
     pub message_id: String,
-    pub role: String,
+    pub role: Role,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

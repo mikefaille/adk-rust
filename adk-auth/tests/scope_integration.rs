@@ -11,6 +11,7 @@ use adk_auth::{
 use adk_core::{
     Artifacts, CallbackContext, Content, EventActions, MemoryEntry, ReadonlyContext, Tool,
     ToolContext,
+    types::{InvocationId, SessionId, UserId},
 };
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -106,7 +107,7 @@ impl ScopedMockContext {
         identity.agent_name = "test-agent".to_string();
         identity.user_id = user_id.clone();
         identity.app_name = "test-app".to_string();
-        identity.session_id = Some(SessionId::new("test-session").unwrap());
+        identity.session_id = SessionId::new("test-session").unwrap();
 
         Arc::new(Self {
             identity,
@@ -435,7 +436,7 @@ struct UserDatabaseResolver {
 #[async_trait]
 impl ScopeResolver for UserDatabaseResolver {
     async fn resolve(&self, ctx: &dyn ToolContext) -> Vec<String> {
-        self.user_scopes.get(ctx.user_id().as_ref()).cloned().unwrap_or_default()
+        self.user_scopes.get(ctx.user_id().as_str()).cloned().unwrap_or_default()
     }
 }
 

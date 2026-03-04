@@ -90,7 +90,8 @@ impl Default for InMemorySessionService {
 #[async_trait]
 impl SessionService for InMemorySessionService {
     async fn create(&self, req: CreateRequest) -> Result<Box<dyn Session>> {
-        let session_id = req.session_id.unwrap_or_else(|| SessionId::new(Uuid::new_v4().to_string()).unwrap());
+        let session_id =
+            req.session_id.unwrap_or_else(|| SessionId::new(Uuid::new_v4().to_string()).unwrap());
 
         let id = CompositeSessionKey {
             app_name: req.app_name.clone(),
@@ -196,8 +197,11 @@ impl SessionService for InMemorySessionService {
     }
 
     async fn delete(&self, req: DeleteRequest) -> Result<()> {
-        let id =
-            CompositeSessionKey { app_name: req.app_name, user_id: UserId::new(req.user_id).unwrap(), session_id: SessionId::new(req.session_id).unwrap() };
+        let id = CompositeSessionKey {
+            app_name: req.app_name,
+            user_id: UserId::new(req.user_id).unwrap(),
+            session_id: SessionId::new(req.session_id).unwrap(),
+        };
 
         let mut sessions = self.sessions.write().unwrap();
         sessions.remove(&id.key());

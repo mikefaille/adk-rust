@@ -520,7 +520,7 @@ fn generate_main_rs(project: &ProjectSchema) -> String {
         code.push_str("    fn new() -> Self {\n");
         code.push_str("        Self {\n");
         code.push_str("            identity: AdkIdentity::default(),\n");
-        code.push_str("            content: Content { role: String::new(), parts: vec![] },\n");
+        code.push_str("            content: Content { role: Role::User, parts: vec![] },\n");
         code.push_str("            metadata: std::collections::HashMap::new(),\n");
         code.push_str("        }\n");
         code.push_str("    }\n");

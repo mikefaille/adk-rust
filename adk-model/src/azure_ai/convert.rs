@@ -109,7 +109,7 @@ fn content_to_message(content: &Content) -> Value {
             })
         }
         "function" | "tool" => {
-            if let Some(Part::FunctionResponse { name, response, id }) = content.parts.first() {
+            if let Some(Part::FunctionResponse { name: _, response, id }) = content.parts.first() {
                 let tool_call_id = id.clone().unwrap_or_else(|| "unknown".to_string());
                 serde_json::json!({
                     "role": "tool",

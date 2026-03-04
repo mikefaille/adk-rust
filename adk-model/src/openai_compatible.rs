@@ -2,7 +2,7 @@
 
 use crate::openai::convert;
 use crate::retry::{RetryConfig, execute_with_retry, is_retryable_model_error};
-use adk_core::{AdkError, Content, Llm, LlmRequest, LlmResponseStream, Part, types::Role};
+use adk_core::{AdkError, Llm, LlmRequest, LlmResponseStream, Part};
 use async_openai::{
     Client,
     config::OpenAIConfig as AsyncOpenAIConfig,

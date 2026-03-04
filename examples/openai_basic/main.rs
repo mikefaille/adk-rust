@@ -12,6 +12,7 @@ use adk_agent::LlmAgentBuilder;
 use adk_core::Content;
 use adk_model::openai::{OpenAIClient, OpenAIConfig};
 use adk_runner::{Runner, RunnerConfig};
+use adk_core::types::UserId;
 use adk_session::{CreateRequest, InMemorySessionService, SessionService};
 use futures::StreamExt;
 use std::sync::Arc;
@@ -37,8 +38,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let session = session_service
         .create(CreateRequest {
             app_name: "openai_basic".to_string(),
-            user_id: UserId::new( "user_1".to_string(),
-            session_id: SessionId::new(None),
+            user_id: UserId::new("user_1").unwrap(),
+            session_id: None,
             state: std::collections::HashMap::new(),
         })
         .await?;
@@ -66,7 +67,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("User: What is the capital of France?\n");
     print!("Assistant: ");
 
-    let mut stream = runner.run("user_1".to_string(), session_id, user_content).await?;
+    let mut stream = runner
+        .run(
+            UserId::new("user_1").unwrap(),
+            adk_core::types::SessionId::new(session_id).unwrap(),
+            user_content,
+        )
+        .await?;
 
     while let Some(event) = stream.next().await {
         match event {

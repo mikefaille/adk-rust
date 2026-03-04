@@ -29,7 +29,7 @@ fn product_docs() -> Vec<Document> {
                    initialize a project with `cloudsync init` in your repository root. This \
                    creates a .cloudsync.yaml config file.",
             metadata: HashMap::from([("section", "getting_started".to_string())]),
-            source_uri: Some("docs/getting-started.md")),
+            source_uri: Some("docs/getting-started.md"),
         },
         Document {
             id: "sync_config",
@@ -40,7 +40,7 @@ fn product_docs() -> Vec<Document> {
                    'manual' (default). `max_file_size` limits individual file sync to 100MB \
                    by default. Set `encryption: true` to enable AES-256 encryption at rest.",
             metadata: HashMap::from([("section", "configuration".to_string())]),
-            source_uri: Some("docs/configuration.md")),
+            source_uri: Some("docs/configuration.md"),
         },
         Document {
             id: "teams",
@@ -50,7 +50,7 @@ fn product_docs() -> Vec<Document> {
                    modify), or viewer (read-only). Team storage is pooled — the team plan \
                    determines total storage available across all members.",
             metadata: HashMap::from([("section", "teams".to_string())]),
-            source_uri: Some("docs/teams.md")),
+            source_uri: Some("docs/teams.md"),
         },
     ]
 }
@@ -67,7 +67,7 @@ fn troubleshooting_docs() -> Vec<Document> {
                    queue without losing data. 5) If the issue persists, run `cloudsync doctor` \
                    which diagnoses common problems.",
             metadata: HashMap::from([("issue", "sync_stuck".to_string())]),
-            source_uri: Some("troubleshooting/sync-stuck.md")),
+            source_uri: Some("troubleshooting/sync-stuck.md"),
         },
         Document {
             id: "auth_expired",
@@ -78,7 +78,7 @@ fn troubleshooting_docs() -> Vec<Document> {
                    API token generated from the dashboard under Settings > API Tokens. \
                    API tokens don't expire but can be revoked from the dashboard.",
             metadata: HashMap::from([("issue", "auth_expired".to_string())]),
-            source_uri: Some("troubleshooting/auth-expired.md")),
+            source_uri: Some("troubleshooting/auth-expired.md"),
         },
         Document {
             id: "conflict_errors",
@@ -90,7 +90,7 @@ fn troubleshooting_docs() -> Vec<Document> {
                    4) For teams, consider using file locking: `cloudsync lock <file>` \
                    prevents others from editing until you `cloudsync unlock <file>`.",
             metadata: HashMap::from([("issue", "conflicts".to_string())]),
-            source_uri: Some("troubleshooting/conflicts.md")),
+            source_uri: Some("troubleshooting/conflicts.md"),
         },
     ]
 }
@@ -105,7 +105,7 @@ fn changelog_docs() -> Vec<Document> {
                    Improved upload speed by 40% with parallel chunk uploads. Fixed a bug \
                    where ignore_patterns with double-star globs were not matching correctly.",
             metadata: HashMap::from([("version", "3.2.0".to_string())]),
-            source_uri: Some("changelog/v3.2.0.md")),
+            source_uri: Some("changelog/v3.2.0.md"),
         },
         Document {
             id: "v3_1_0",
@@ -115,7 +115,7 @@ fn changelog_docs() -> Vec<Document> {
                    with file-level detail. Fixed memory leak in the file watcher on Linux \
                    when monitoring directories with 10,000+ files.",
             metadata: HashMap::from([("version", "3.1.0".to_string())]),
-            source_uri: Some("changelog/v3.1.0.md")),
+            source_uri: Some("changelog/v3.1.0.md"),
         },
         Document {
             id: "v3_0_0",
@@ -125,7 +125,7 @@ fn changelog_docs() -> Vec<Document> {
                    workspaces with shared storage pools. CLI now requires Node.js 18+. \
                    Dropped support for the legacy v1 API — migrate with `cloudsync migrate`.",
             metadata: HashMap::from([("version", "3.0.0".to_string())]),
-            source_uri: Some("changelog/v3.0.0.md")),
+            source_uri: Some("changelog/v3.0.0.md"),
         },
     ]
 }
@@ -209,8 +209,8 @@ async fn main() -> anyhow::Result<()> {
     println!("CloudSync Support Agent ready. Ask about setup, troubleshooting, or features.\n");
     adk_cli::console::run_console(
         Arc::new(agent),
-        "rag_multi_collection"),
-        "customer1"),
+        "rag_multi_collection".to_string(),
+        adk_core::types::UserId::new("customer1").unwrap(),
     )
     .await?;
 

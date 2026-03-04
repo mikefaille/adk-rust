@@ -51,11 +51,11 @@ pub(crate) fn adk_request_to_bedrock(
             "system" => {
                 for part in &content.parts {
                     match part {
-                        Part::text(text) if !text.is_empty() => {
+                        Part::Text { text } if !text.is_empty() => {
                             system.push(SystemContentBlock::Text(text.clone()));
                         }
-                        Part::Thinking { thought: thinking, .. } if !thinking.is_empty() => {
-                            system.push(SystemContentBlock::Text(thinking.clone()));
+                        Part::Thinking { thought, .. } if !thought.is_empty() => {
+                            system.push(SystemContentBlock::Text(thought.clone()));
                         }
                         _ => {}
                     }
@@ -128,7 +128,7 @@ fn adk_parts_to_bedrock(parts: &[Part]) -> Vec<ContentBlock> {
                     .ok()?;
                 Some(ContentBlock::ToolUse(tool_use))
             }
-            Part::FunctionResponse { name, response, id } => {
+            Part::FunctionResponse { name: _, response, id } => {
                 let tool_result = ToolResultBlock::builder()
                     .tool_use_id(id.clone().unwrap_or_else(|| "unknown".to_string()))
                     .content(ToolResultContentBlock::Text(
@@ -283,7 +283,7 @@ fn bedrock_content_blocks_to_parts(blocks: &[ContentBlock]) -> Vec<Part> {
             }),
             ContentBlock::ReasoningContent(reasoning) => {
                 if let Ok(reasoning_text) = reasoning.as_reasoning_text() {
-                    let text = reasoning_text.as_text().to_string();
+                    let text = reasoning_text.text().to_string();
                     if text.is_empty() { None } else { Some(Part::Thinking { thought: text }) }
                 } else {
                     None

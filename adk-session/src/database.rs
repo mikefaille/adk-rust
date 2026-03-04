@@ -2,7 +2,10 @@ use crate::{
     CreateRequest, DeleteRequest, Event, Events, GetRequest, KEY_PREFIX_APP, KEY_PREFIX_TEMP,
     KEY_PREFIX_USER, ListRequest, Session, SessionService, State,
 };
-use adk_core::Result;
+use adk_core::{
+    Result,
+    types::{SessionId, UserId},
+};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde_json::Value;
@@ -138,7 +141,8 @@ impl DatabaseSessionService {
 #[async_trait]
 impl SessionService for DatabaseSessionService {
     async fn create(&self, req: CreateRequest) -> Result<Box<dyn Session>> {
-        let session_id = req.session_id.unwrap_or_else(|| SessionId::new(Uuid::new_v4().to_string()).unwrap());
+        let session_id =
+            req.session_id.unwrap_or_else(|| SessionId::new(Uuid::new_v4().to_string()).unwrap());
         let now = Utc::now();
 
         let (app_delta, user_delta, session_state) = Self::extract_state_deltas(&req.state);

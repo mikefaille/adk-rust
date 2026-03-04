@@ -145,13 +145,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let session = session_service
         .create(CreateRequest {
             app_name: "deepseek_caching".to_string(),
-            user_id: UserId::new( "user_1".to_string(),
-            session_id: SessionId::new(None),
+            user_id: UserId::new("user_1").unwrap(),
+            session_id: None,
             state: std::collections::HashMap::new(),
         })
         .await?;
 
-    let session_id = session.id().to_string();
+    let session_id = session.id().clone();
 
     let runner = Runner::new(RunnerConfig {
         app_name: "deepseek_caching".to_string(),

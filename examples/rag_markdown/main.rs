@@ -143,7 +143,7 @@ async fn main() -> anyhow::Result<()> {
         id: "user_guide",
         text: SAMPLE_MARKDOWN.into(),
         metadata: HashMap::from([("source", "README.md".to_string())]),
-        source_uri: Some("https://github.com/example/adk-rust/README.md")),
+        source_uri: Some("https://github.com/example/adk-rust/README.md"),
     };
 
     let chunks = pipeline.ingest(collection, &doc).await?;

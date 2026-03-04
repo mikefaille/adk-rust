@@ -280,7 +280,7 @@ impl BedrockClient {
                         // If we accumulated a reasoning signature, emit it as a
                         // Part::Thinking with the signature so downstream consumers
                         // can attach it to the reasoning block.
-                        if let Some(sig) = reasoning_signature.take() {
+                        if let Some(_sig) = reasoning_signature.take() {
                             yield LlmResponse {
                                 content: Some(adk_core::Content {
                                     role: adk_core::types::Role::Model,
