@@ -71,7 +71,7 @@ pub(crate) fn build_request_body(
 
 /// Convert a single ADK `Content` to an Azure AI message JSON object.
 fn content_to_message(content: &Content) -> Value {
-    match content.role.as_str() {
+    match content.role.to_string().as_str() {
         "user" => {
             let text = extract_text(&content.parts);
             serde_json::json!({
@@ -109,12 +109,12 @@ fn content_to_message(content: &Content) -> Value {
             })
         }
         "function" | "tool" => {
-            if let Some(Part::FunctionResponse { function_response, id }) = content.parts.first() {
+            if let Some(Part::FunctionResponse { name, response, id }) = content.parts.first() {
                 let tool_call_id = id.clone().unwrap_or_else(|| "unknown".to_string());
                 serde_json::json!({
                     "role": "tool",
                     "tool_call_id": tool_call_id,
-                    "content": serde_json::to_string(&function_response.response).unwrap_or_default(),
+                    "content": serde_json::to_string(&response).unwrap_or_default(),
                 })
             } else {
                 serde_json::json!({
@@ -139,7 +139,7 @@ fn extract_text(parts: &[Part]) -> String {
         .iter()
         .filter_map(|p| match p {
             Part::Text { text } => Some(text.clone()),
-            Part::Thinking { thinking, .. } => Some(thinking.clone()),
+            Part::Thinking { thought: thinking, .. } => Some(thinking.clone()),
             _ => None,
         })
         .collect::<Vec<_>>()
@@ -190,14 +190,14 @@ pub(crate) fn parse_response(body: &Value) -> LlmResponse {
         // Extract reasoning content (for Azure AI reasoning models)
         if let Some(reasoning) = message.get("reasoning_content").and_then(|r| r.as_str()) {
             if !reasoning.is_empty() {
-                parts.push(Part::Thinking { thinking: reasoning.to_string(), signature: None });
+                parts.push(Part::Thinking { thought: reasoning.to_string() });
             }
         }
 
         // Extract text content
         if let Some(text) = message.get("content").and_then(|c| c.as_str()) {
             if !text.is_empty() {
-                parts.push(Part::Text { text: text.to_string() });
+                parts.push(Part::text(text.to_string()));
             }
         }
 
@@ -218,7 +218,11 @@ pub(crate) fn parse_response(body: &Value) -> LlmResponse {
             }
         }
 
-        if parts.is_empty() { None } else { Some(Content { role: "model".to_string(), parts }) }
+        if parts.is_empty() {
+            None
+        } else {
+            Some(Content { role: adk_core::types::Role::Model, parts })
+        }
     });
 
     let finish_reason = body
@@ -274,14 +278,14 @@ pub(crate) fn parse_sse_chunk(chunk: &Value) -> LlmResponse {
         // Extract reasoning content delta (for Azure AI reasoning models)
         if let Some(reasoning) = delta.get("reasoning_content").and_then(|r| r.as_str()) {
             if !reasoning.is_empty() {
-                parts.push(Part::Thinking { thinking: reasoning.to_string(), signature: None });
+                parts.push(Part::Thinking { thought: reasoning.to_string() });
             }
         }
 
         // Extract text delta
         if let Some(text) = delta.get("content").and_then(|c| c.as_str()) {
             if !text.is_empty() {
-                parts.push(Part::Text { text: text.to_string() });
+                parts.push(Part::text(text.to_string()));
             }
         }
 
@@ -312,7 +316,11 @@ pub(crate) fn parse_sse_chunk(chunk: &Value) -> LlmResponse {
             }
         }
 
-        if parts.is_empty() { None } else { Some(Content { role: "model".to_string(), parts }) }
+        if parts.is_empty() {
+            None
+        } else {
+            Some(Content { role: adk_core::types::Role::Model, parts })
+        }
     });
 
     let finish_reason = chunk
@@ -356,8 +364,8 @@ mod tests {
     #[test]
     fn test_build_request_body_basic() {
         let contents = vec![Content {
-            role: "user".to_string(),
-            parts: vec![Part::Text { text: "Hello".to_string() }],
+            role: adk_core::types::Role::User,
+            parts: vec![Part::text("Hello".to_string())],
         }];
         let body = build_request_body("my-model", &contents, &HashMap::new(), None, false);
 
@@ -413,8 +421,8 @@ mod tests {
     #[test]
     fn test_content_to_message_user() {
         let content = Content {
-            role: "user".to_string(),
-            parts: vec![Part::Text { text: "Hi there".to_string() }],
+            role: adk_core::types::Role::User,
+            parts: vec![Part::text("Hi there".to_string())],
         };
         let msg = content_to_message(&content);
         assert_eq!(msg["role"], "user");
@@ -424,8 +432,8 @@ mod tests {
     #[test]
     fn test_content_to_message_system() {
         let content = Content {
-            role: "system".to_string(),
-            parts: vec![Part::Text { text: "You are helpful.".to_string() }],
+            role: adk_core::types::Role::System,
+            parts: vec![Part::text("You are helpful.".to_string())],
         };
         let msg = content_to_message(&content);
         assert_eq!(msg["role"], "system");
@@ -435,8 +443,8 @@ mod tests {
     #[test]
     fn test_content_to_message_model_role() {
         let content = Content {
-            role: "model".to_string(),
-            parts: vec![Part::Text { text: "Hello!".to_string() }],
+            role: adk_core::types::Role::Model,
+            parts: vec![Part::text("Hello!".to_string())],
         };
         let msg = content_to_message(&content);
         assert_eq!(msg["role"], "assistant");
@@ -445,10 +453,8 @@ mod tests {
 
     #[test]
     fn test_content_to_message_assistant_role() {
-        let content = Content {
-            role: "assistant".to_string(),
-            parts: vec![Part::Text { text: "Sure".to_string() }],
-        };
+        let content =
+            Content { role: "assistant".to_string(), parts: vec![Part::text("Sure".to_string())] };
         let msg = content_to_message(&content);
         assert_eq!(msg["role"], "assistant");
     }
@@ -456,7 +462,7 @@ mod tests {
     #[test]
     fn test_content_to_message_with_tool_calls() {
         let content = Content {
-            role: "model".to_string(),
+            role: adk_core::types::Role::Model,
             parts: vec![Part::FunctionCall {
                 name: "get_weather".to_string(),
                 args: serde_json::json!({"city": "Seattle"}),
@@ -493,7 +499,7 @@ mod tests {
 
     #[test]
     fn test_content_to_message_empty_assistant_gets_placeholder() {
-        let content = Content { role: "model".to_string(), parts: vec![] };
+        let content = Content { role: adk_core::types::Role::Model, parts: vec![] };
         let msg = content_to_message(&content);
         assert_eq!(msg["role"], "assistant");
         assert_eq!(msg["content"], " ");
@@ -524,7 +530,7 @@ mod tests {
         let content = resp.content.unwrap();
         assert_eq!(content.role, "model");
         assert_eq!(content.parts.len(), 1);
-        assert_eq!(content.parts[0].text().unwrap(), "Hello world");
+        assert_eq!(content.parts[0].as_text().unwrap(), "Hello world");
 
         let usage = resp.usage_metadata.unwrap();
         assert_eq!(usage.prompt_token_count, 10);
@@ -610,7 +616,7 @@ mod tests {
         assert!(resp.finish_reason.is_none());
 
         let content = resp.content.unwrap();
-        assert_eq!(content.parts[0].text().unwrap(), "Hello");
+        assert_eq!(content.parts[0].as_text().unwrap(), "Hello");
     }
 
     #[test]
@@ -684,18 +690,15 @@ mod tests {
 
     #[test]
     fn test_multiple_text_parts_joined() {
-        let parts = vec![
-            Part::Text { text: "Hello".to_string() },
-            Part::Text { text: "World".to_string() },
-        ];
+        let parts = vec![Part::text("Hello".to_string()), Part::text("World".to_string())];
         assert_eq!(extract_text(&parts), "Hello\nWorld");
     }
 
     #[test]
     fn test_round_trip_text_content() {
         let contents = vec![Content {
-            role: "user".to_string(),
-            parts: vec![Part::Text { text: "What is Rust?".to_string() }],
+            role: adk_core::types::Role::User,
+            parts: vec![Part::text("What is Rust?".to_string())],
         }];
         let body = build_request_body("test-model", &contents, &HashMap::new(), None, false);
 
@@ -724,7 +727,7 @@ mod tests {
     #[test]
     fn test_function_call_id_defaults() {
         let content = Content {
-            role: "model".to_string(),
+            role: adk_core::types::Role::Model,
             parts: vec![Part::FunctionCall {
                 name: "my_func".to_string(),
                 args: serde_json::json!({}),
@@ -756,11 +759,8 @@ mod tests {
     #[test]
     fn test_content_to_message_thinking_as_text() {
         let content = Content {
-            role: "user".to_string(),
-            parts: vec![Part::Thinking {
-                thinking: "Let me reason about this...".to_string(),
-                signature: None,
-            }],
+            role: adk_core::types::Role::User,
+            parts: vec![Part::Thinking { thought: "Let me reason about this...".to_string() }],
         };
         let msg = content_to_message(&content);
         assert_eq!(msg["role"], "user");
@@ -770,13 +770,10 @@ mod tests {
     #[test]
     fn test_content_to_message_assistant_thinking_as_text() {
         let content = Content {
-            role: "model".to_string(),
+            role: adk_core::types::Role::Model,
             parts: vec![
-                Part::Thinking {
-                    thinking: "Step 1: analyze the question".to_string(),
-                    signature: Some("sig123".to_string()),
-                },
-                Part::Text { text: "Here is my answer.".to_string() },
+                Part::Thinking { thought: "Step 1: analyze the question".to_string() },
+                Part::text("Here is my answer.".to_string()),
             ],
         };
         let msg = content_to_message(&content);
@@ -808,7 +805,7 @@ mod tests {
         assert_eq!(content.parts.len(), 2);
         assert!(content.parts[0].is_thinking());
         assert_eq!(content.parts[0].thinking_text().unwrap(), "Let me think step by step...");
-        assert_eq!(content.parts[1].text().unwrap(), "The answer is 42.");
+        assert_eq!(content.parts[1].as_text().unwrap(), "The answer is 42.");
     }
 
     #[test]
@@ -827,7 +824,7 @@ mod tests {
         let resp = parse_response(&body);
         let content = resp.content.unwrap();
         assert_eq!(content.parts.len(), 1);
-        assert_eq!(content.parts[0].text().unwrap(), "Just the answer.");
+        assert_eq!(content.parts[0].as_text().unwrap(), "Just the answer.");
     }
 
     #[test]
@@ -845,7 +842,7 @@ mod tests {
         let resp = parse_response(&body);
         let content = resp.content.unwrap();
         assert_eq!(content.parts.len(), 1);
-        assert_eq!(content.parts[0].text().unwrap(), "No reasoning here.");
+        assert_eq!(content.parts[0].as_text().unwrap(), "No reasoning here.");
         assert!(!content.parts[0].is_thinking());
     }
 
@@ -886,7 +883,7 @@ mod tests {
         assert_eq!(content.parts.len(), 2);
         assert!(content.parts[0].is_thinking());
         assert_eq!(content.parts[0].thinking_text().unwrap(), "Step 1...");
-        assert_eq!(content.parts[1].text().unwrap(), "Here's the result");
+        assert_eq!(content.parts[1].as_text().unwrap(), "Here's the result");
     }
 
     #[test]

@@ -47,7 +47,7 @@ fn convert_text_to_parts(text: String) -> Vec<Part> {
     const TOOL_CALL_END: &str = "</tool_call>";
 
     if !text.contains(TOOL_CALL_START) {
-        return vec![Part::Text { text }];
+        return vec![Part::text(text)];
     }
 
     let mut parts = Vec::new();
@@ -56,7 +56,7 @@ fn convert_text_to_parts(text: String) -> Vec<Part> {
     while let Some(start_idx) = remainder.find(TOOL_CALL_START) {
         let (before, after_start_tag) = remainder.split_at(start_idx);
         if !before.is_empty() {
-            parts.push(Part::Text { text: before.to_string() });
+            parts.push(Part::text(before.to_string()));
         }
 
         let after_start = &after_start_tag[TOOL_CALL_START.len()..];
@@ -66,24 +66,22 @@ fn convert_text_to_parts(text: String) -> Vec<Part> {
                 parts.push(call_part);
             } else {
                 // Failed to parse - keep as text
-                parts.push(Part::Text {
-                    text: format!("{}{}{}", TOOL_CALL_START, block, TOOL_CALL_END),
-                });
+                parts.push(Part::text(format!("{}{}{}", TOOL_CALL_START, block, TOOL_CALL_END)));
             }
             remainder = &after_start[end_idx + TOOL_CALL_END.len()..];
         } else {
             // Unclosed tag - keep remainder as text
-            parts.push(Part::Text { text: format!("{}{}", TOOL_CALL_START, after_start) });
+            parts.push(Part::text(format!("{}{}", TOOL_CALL_START, after_start)));
             remainder = "";
             break;
         }
     }
 
     if !remainder.is_empty() {
-        parts.push(Part::Text { text: remainder.to_string() });
+        parts.push(Part::text(remainder.to_string()));
     }
 
-    if parts.is_empty() { vec![Part::Text { text }] } else { parts }
+    if parts.is_empty() { vec![Part::text(text)] } else { parts }
 }
 
 /// Parse a tool call block into a FunctionCall part.
@@ -254,15 +252,15 @@ process
     #[test]
     fn test_normalize_content() {
         let mut content = Content {
-            role: "model".to_string(),
-            parts: vec![Part::Text {
-                text: r#"<tool_call>
+            role: adk_core::types::Role::Model,
+            parts: vec![Part::Text(
+                r#"<tool_call>
 test_tool
 <arg_key>param</arg_key>
 <arg_value>value</arg_value>
 </tool_call>"#
                     .to_string(),
-            }],
+            )],
         };
 
         normalize_content(&mut content);

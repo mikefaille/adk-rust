@@ -34,13 +34,11 @@ impl VertexAiSessionConfig {
     }
 
     pub fn with_reasoning_engine(mut self, reasoning_engine: impl Into<String>) -> Self {
-        self.reasoning_engine = Some(reasoning_engine.into());
-        self
+        self.reasoning_engine = Some(reasoning_engine.into());        self
     }
 
     pub fn with_endpoint(mut self, endpoint: impl Into<String>) -> Self {
-        self.endpoint = Some(endpoint.into());
-        self
+        self.endpoint = Some(endpoint.into());        self
     }
 
     fn endpoint(&self) -> String {
@@ -63,7 +61,7 @@ impl VertexAiSessionConfig {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct SessionScope {
     app_name: String,
-    user_id: String,
+    user_id: UserId,
 }
 
 pub struct VertexAiSessionService {
@@ -103,7 +101,7 @@ impl VertexAiSessionService {
     }
 
     fn session_error(message: impl Into<String>) -> AdkError {
-        AdkError::Session(message.into())
+        AdkError::Session(message))
     }
 
     fn endpoint_base(&self) -> &str {
@@ -162,47 +160,47 @@ impl VertexAiSessionService {
         ))
     }
 
-    fn session_name_from_app(&self, app_name: &str, session_id: &str) -> Result<String> {
-        if session_id.trim().is_empty() {
+    fn session_name_from_app(&self, app_name: &str, session_id: SessionId::new( &SessionId) -> Result<String> {
+        if session_id.as_str().trim().is_empty() {
             return Err(Self::session_error("session_id cannot be empty"));
         }
 
         Ok(format!("{}/sessions/{session_id}", self.session_parent(app_name)?))
     }
 
-    fn session_name_from_engine_id(&self, reasoning_engine: &str, session_id: &str) -> String {
+    fn session_name_from_engine_id(&self, reasoning_engine: &str, session_id: SessionId::new( &SessionId) -> String {
         format!(
             "projects/{}/locations/{}/reasoningEngines/{reasoning_engine}/sessions/{session_id}",
             self.project_id, self.location,
         )
     }
 
-    fn remember_session_scope(&self, session_id: &str, app_name: &str, user_id: &str) {
+    fn remember_session_scope(&self, session_id: &SessionId, app_name: &str, user_id: UserId::new( &UserId) {
         let mut scopes = self.session_scopes.write().expect("vertex session scope lock poisoned");
         let entry = scopes.entry(session_id.to_string()).or_default();
-        let scope = SessionScope { app_name: app_name.to_string(), user_id: user_id.to_string() };
+        let scope = SessionScope { app_name: app_name.to_string(), user_id: UserId::new( user_id.clone() };
         if !entry.contains(&scope) {
             entry.push(scope);
         }
     }
 
-    fn forget_session_scope(&self, session_id: &str, app_name: &str, user_id: &str) {
+    fn forget_session_scope(&self, session_id: &SessionId, app_name: &str, user_id: UserId::new( &UserId) {
         let mut scopes = self.session_scopes.write().expect("vertex session scope lock poisoned");
-        if let Some(existing) = scopes.get_mut(session_id) {
-            existing.retain(|scope| !(scope.app_name == app_name && scope.user_id == user_id));
+        if let Some(existing) = scopes.get_mut(session_id.as_str()) {
+            existing.retain(|scope| !(scope.app_name == app_name && scope.user_id == *user_id));
             if existing.is_empty() {
-                scopes.remove(session_id);
+                scopes.remove(session_id.as_str());
             }
         }
     }
 
-    fn resolve_session_name_for_append(&self, session_id: &str) -> Result<String> {
+    fn resolve_session_name_for_append(&self, session_id: SessionId::new( &SessionId) -> Result<String> {
         if let Some(reasoning_engine) = &self.reasoning_engine {
             return Ok(self.session_name_from_engine_id(reasoning_engine, session_id));
         }
 
         let scopes = self.session_scopes.read().expect("vertex session scope lock poisoned");
-        let candidates = scopes.get(session_id).ok_or_else(|| {
+        let candidates = scopes.get(session_id.as_str()).ok_or_else(|| {
             Self::session_error(format!(
                 "session '{session_id}' is not in the vertex session scope cache. Call create/get/list first.",
             ))
@@ -351,15 +349,15 @@ impl VertexAiSessionService {
 #[async_trait]
 impl SessionService for VertexAiSessionService {
     async fn create(&self, req: CreateRequest) -> Result<Box<dyn Session>> {
-        if req.app_name.trim().is_empty() || req.user_id.trim().is_empty() {
+        if req.app_name.trim().is_empty() || req.user_id.as_str().trim().is_empty() {
             return Err(Self::session_error(format!(
-                "app_name and user_id are required, got app_name: '{}' user_id: '{}'",
+                "app_name and user_id are required, got app_name: '{}' user_id: UserId::new( '{}'",
                 req.app_name, req.user_id,
             )));
         }
 
         if let Some(session_id) =
-            req.session_id.as_ref().filter(|session_id| !session_id.is_empty())
+            req.session_id.as_ref().filter(|session_id| !session_id.as_str().is_empty())
         {
             return Err(Self::session_error(format!(
                 "user-provided session_id is not supported for VertexAiSessionService: '{session_id}'",
@@ -372,7 +370,7 @@ impl SessionService for VertexAiSessionService {
 
         let body = VertexCreateSessionRequest {
             session: VertexCreateSession {
-                user_id: req.user_id.clone(),
+                user_id: UserId::new( req.user_id.as_str().to_string(),
                 session_state: (!sanitized_state.is_empty()).then_some(sanitized_state.clone()),
             },
         };
@@ -386,6 +384,8 @@ impl SessionService for VertexAiSessionService {
                     truncate_for_error(&create_response.to_string()),
                 ))
             })?;
+
+        let session_id = SessionId::new(session_id).unwrap();
 
         self.remember_session_scope(&session_id, &req.app_name, &req.user_id);
 
@@ -401,11 +401,11 @@ impl SessionService for VertexAiSessionService {
 
     async fn get(&self, req: GetRequest) -> Result<Box<dyn Session>> {
         if req.app_name.trim().is_empty()
-            || req.user_id.trim().is_empty()
-            || req.session_id.trim().is_empty()
+            || req.user_id.as_str().trim().is_empty()
+            || req.session_id.as_str().trim().is_empty()
         {
             return Err(Self::session_error(format!(
-                "app_name, user_id, and session_id are required, got app_name: '{}' user_id: '{}' session_id: '{}'",
+                "app_name, user_id, and session_id are required, got app_name: '{}' user_id: UserId::new( '{}' session_id: SessionId::new( '{}'",
                 req.app_name, req.user_id, req.session_id,
             )));
         }
@@ -416,7 +416,7 @@ impl SessionService for VertexAiSessionService {
             .await?
             .ok_or_else(|| Self::session_error("session not found"))?;
 
-        if payload.user_id != req.user_id {
+        if payload.user_id != req.user_id.as_str() {
             return Err(Self::session_error(format!(
                 "session '{}' does not belong to user '{}'",
                 req.session_id, req.user_id,
@@ -441,7 +441,7 @@ impl SessionService for VertexAiSessionService {
         Ok(Box::new(VertexSession {
             app_name: req.app_name,
             user_id: req.user_id,
-            session_id: req.session_id,
+            session_id: SessionId::new( req.session_id,
             state: sanitize_state_map(payload.session_state),
             events,
             updated_at,
@@ -461,7 +461,7 @@ impl SessionService for VertexAiSessionService {
             let url = self.build_url(&format!("{}/{}/sessions", SESSION_API_VERSION, parent))?;
             let mut request = self.http_client.get(url);
 
-            if !req.user_id.trim().is_empty() {
+            if !req.user_id.as_str().trim().is_empty() {
                 let filter = format!("userId=\"{}\"", req.user_id);
                 request = request.query(&[("filter", filter)]);
             }
@@ -479,7 +479,7 @@ impl SessionService for VertexAiSessionService {
                 })?;
 
             for payload in response.sessions {
-                if !req.user_id.trim().is_empty() && payload.user_id != req.user_id {
+                if !req.user_id.as_str().trim().is_empty() && payload.user_id != req.user_id.as_str() {
                     continue;
                 }
 
@@ -490,7 +490,10 @@ impl SessionService for VertexAiSessionService {
                     ))
                 })?;
 
-                self.remember_session_scope(&session_id, &req.app_name, &payload.user_id);
+                let session_id = SessionId::new(session_id).unwrap();
+                let payload_user_id = UserId::new(payload.user_id).unwrap();
+
+                self.remember_session_scope(&session_id, &req.app_name, &payload_user_id);
 
                 let updated_at = payload
                     .update_time
@@ -500,7 +503,7 @@ impl SessionService for VertexAiSessionService {
 
                 sessions.push(Box::new(VertexSession {
                     app_name: req.app_name.clone(),
-                    user_id: payload.user_id,
+                    user_id: UserId::new( payload_user_id,
                     session_id,
                     state: sanitize_state_map(payload.session_state),
                     events: Vec::new(),
@@ -519,8 +522,8 @@ impl SessionService for VertexAiSessionService {
 
     async fn delete(&self, req: DeleteRequest) -> Result<()> {
         if req.app_name.trim().is_empty()
-            || req.user_id.trim().is_empty()
-            || req.session_id.trim().is_empty()
+            || req.user_id.as_str().trim().is_empty()
+            || req.session_id.as_str().trim().is_empty()
         {
             return Err(Self::session_error(
                 "app_name, user_id, and session_id are all required and must be non-empty",
@@ -538,8 +541,8 @@ impl SessionService for VertexAiSessionService {
         Ok(())
     }
 
-    async fn append_event(&self, session_id: &str, mut event: Event) -> Result<()> {
-        if session_id.trim().is_empty() {
+    async fn append_event(&self, session_id: &SessionId, mut event: Event) -> Result<()> {
+        if session_id.as_str().trim().is_empty() {
             return Err(Self::session_error("session_id is required for append_event"));
         }
 
@@ -560,15 +563,15 @@ impl SessionService for VertexAiSessionService {
 
 struct VertexSession {
     app_name: String,
-    user_id: String,
-    session_id: String,
+    user_id: UserId,
+    session_id: SessionId::new( SessionId,
     state: HashMap<String, Value>,
     events: Vec<Event>,
     updated_at: DateTime<Utc>,
 }
 
 impl Session for VertexSession {
-    fn id(&self) -> &str {
+    fn id(&self) -> &SessionId {
         &self.session_id
     }
 
@@ -576,7 +579,7 @@ impl Session for VertexSession {
         &self.app_name
     }
 
-    fn user_id(&self) -> &str {
+    fn user_id(&self) -> &UserId {
         &self.user_id
     }
 
@@ -629,7 +632,7 @@ struct VertexCreateSessionRequest {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct VertexCreateSession {
-    user_id: String,
+    user_id: UserId,
     #[serde(skip_serializing_if = "Option::is_none")]
     session_state: Option<HashMap<String, Value>>,
 }
@@ -639,7 +642,7 @@ struct VertexCreateSession {
 struct VertexSessionPayload {
     name: String,
     #[serde(default)]
-    user_id: String,
+    user_id: UserId,
     #[serde(default)]
     session_state: HashMap<String, Value>,
     #[serde(default)]

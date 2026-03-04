@@ -59,15 +59,15 @@ impl Llm for MockModel {
 }
 
 struct MockTool {
-    captured_user_id: Arc<Mutex<Option<String>>>,
-    captured_session_id: Arc<Mutex<Option<String>>>,
+    captured_user_id: UserId::new( Arc<Mutex<Option<String>>>,
+    captured_session_id: SessionId::new( Arc<Mutex<Option<String>>>,
 }
 
 impl MockTool {
     fn new() -> Self {
         Self {
-            captured_user_id: Arc::new(Mutex::new(None)),
-            captured_session_id: Arc::new(Mutex::new(None)),
+            captured_user_id: UserId::new( Arc::new(Mutex::new(None)),
+            captured_session_id: SessionId::new( Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -106,8 +106,8 @@ struct MockSession {
 impl MockSession {
     fn new() -> Self {
         Self {
-            id: SessionId::from("session-456".to_string()),
-            user_id: UserId::from("user-123".to_string()),
+            id: SessionId::new("session-456".to_string()).unwrap(),
+            user_id: UserId::new( UserId::new("user-123".to_string()).unwrap(),
         }
     }
 }
@@ -150,11 +150,11 @@ struct MockContext {
 impl MockContext {
     fn new() -> Self {
         let mut identity = adk_core::types::AdkIdentity::default();
-        identity.invocation_id = "inv-1".to_string().into();
+        identity.invocation_id = "inv-1".to_string());
         identity.agent_name = "test-agent".to_string();
-        identity.user_id = "user-123".to_string().into();
+        identity.user_id = "user-123".to_string());
         identity.app_name = "test-app".to_string();
-        identity.session_id = "session-456".to_string().into();
+        identity.session_id = "session-456".to_string());
         identity.branch = "main".to_string();
 
         Self {
@@ -162,7 +162,7 @@ impl MockContext {
             session: MockSession::new(),
             user_content: Content {
                 role: "user".to_string(),
-                parts: vec![Part::Text { text: "call tool".to_string() }],
+                parts: vec![Part::text("call tool".to_string())],
             },
         }
     }

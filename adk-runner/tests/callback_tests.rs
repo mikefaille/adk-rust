@@ -72,7 +72,7 @@ async fn test_execute_before_model_callbacks() {
             *count.lock().unwrap() += 1;
             Ok(Some(Content {
                 role: "system".to_string(),
-                parts: vec![Part::Text { text: "Before model 1".to_string() }],
+                parts: vec![Part::text("Before model 1".to_string())],
             }))
         })
     }));
@@ -84,7 +84,7 @@ async fn test_execute_before_model_callbacks() {
             *count.lock().unwrap() += 1;
             Ok(Some(Content {
                 role: "system".to_string(),
-                parts: vec![Part::Text { text: "Before model 2".to_string() }],
+                parts: vec![Part::text("Before model 2".to_string())],
             }))
         })
     }));
@@ -104,7 +104,7 @@ async fn test_execute_after_model_callbacks() {
         Box::pin(async move {
             Ok(Some(Content {
                 role: "assistant".to_string(),
-                parts: vec![Part::Text { text: "After model".to_string() }],
+                parts: vec![Part::text("After model".to_string())],
             }))
         })
     }));
@@ -124,7 +124,7 @@ async fn test_execute_before_tool_callbacks() {
         Box::pin(async move {
             Ok(Some(Content {
                 role: "system".to_string(),
-                parts: vec![Part::Text { text: "Before tool".to_string() }],
+                parts: vec![Part::text("Before tool".to_string())],
             }))
         })
     }));
@@ -143,7 +143,7 @@ async fn test_execute_after_tool_callbacks() {
         Box::pin(async move {
             Ok(Some(Content {
                 role: "function".to_string(),
-                parts: vec![Part::Text { text: "After tool".to_string() }],
+                parts: vec![Part::text("After tool".to_string())],
             }))
         })
     }));

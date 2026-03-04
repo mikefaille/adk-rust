@@ -1,6 +1,6 @@
 //! Memory doc-test - validates memory.md documentation
 
-use adk_core::Content;
+use adk_core::{Content, types::UserId};
 use adk_memory::{InMemoryMemoryService, MemoryEntry, MemoryService, SearchRequest};
 use chrono::Utc;
 
@@ -10,7 +10,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // From docs: MemoryEntry creation
     let entry = MemoryEntry {
-        content: Content::new("user").with_text("I prefer dark mode"),
+        content: Content::user().with_text("I prefer dark mode"),
         author: "user".to_string(),
         timestamp: Utc::now(),
     };
@@ -23,12 +23,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // From docs: Store memories from a session
     let entries = vec![
         MemoryEntry {
-            content: Content::new("user").with_text("I like Rust programming"),
+            content: Content::user().with_text("I like Rust programming"),
             author: "user".to_string(),
             timestamp: Utc::now(),
         },
         MemoryEntry {
-            content: Content::new("assistant").with_text("Rust is great for systems programming"),
+            content: Content::model().with_text("Rust is great for systems programming"),
             author: "assistant".to_string(),
             timestamp: Utc::now(),
         },
@@ -40,7 +40,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // From docs: Search memories
     let request = SearchRequest {
         query: "Rust".to_string(),
-        user_id: "user-123".to_string(),
+        user_id: UserId::new("user-123").unwrap().to_string(),
         app_name: "my_app".to_string(),
     };
 
@@ -50,12 +50,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // From docs: Memory isolation by user
     let entries_a = vec![MemoryEntry {
-        content: Content::new("user").with_text("User A topic"),
+        content: Content::user().with_text("User A topic"),
         author: "user".to_string(),
         timestamp: Utc::now(),
     }];
     let entries_b = vec![MemoryEntry {
-        content: Content::new("user").with_text("User B topic"),
+        content: Content::user().with_text("User B topic"),
         author: "user".to_string(),
         timestamp: Utc::now(),
     }];
@@ -66,21 +66,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Search only returns user-a's memories
     let request = SearchRequest {
         query: "topic".to_string(),
-        user_id: "user-a".to_string(),
+        user_id: UserId::new("user-a").unwrap().to_string(),
         app_name: "app".to_string(),
     };
     let response = memory.search(request).await?;
     assert_eq!(response.memories.len(), 1);
 
     // Verify it's user-a's memory
-    let text: String = response.memories[0].content.parts.iter().filter_map(|p| p.text()).collect();
+    let text: String =
+        response.memories[0].content.parts.iter().filter_map(|p| p.as_text()).collect();
     assert!(text.contains("User A"));
     println!("✓ Memory isolation by user works");
 
     // From docs: Memory isolation by app
     let request = SearchRequest {
         query: "Rust".to_string(),
-        user_id: "user-123".to_string(),
+        user_id: UserId::new("user-123").unwrap().to_string(),
         app_name: "different_app".to_string(), // Different app
     };
     let response = memory.search(request).await?;

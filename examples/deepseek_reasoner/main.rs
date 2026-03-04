@@ -42,8 +42,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let session = session_service
         .create(CreateRequest {
             app_name: "deepseek_reasoner".to_string(),
-            user_id: "user_1".to_string(),
-            session_id: None,
+            user_id: UserId::new( "user_1".to_string(),
+            session_id: SessionId::new(None),
             state: std::collections::HashMap::new(),
         })
         .await?;

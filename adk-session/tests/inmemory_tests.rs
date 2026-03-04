@@ -8,8 +8,8 @@ async fn test_create_session() {
 
     let req = CreateRequest {
         app_name: "test_app".to_string(),
-        user_id: "user1".to_string().into(),
-        session_id: Some("session1".to_string().into()),
+        user_id: UserId::new("user1".to_string(),
+        session_id: SessionId::new(Some("session1".to_string(),
         state: HashMap::new(),
     };
 
@@ -26,8 +26,8 @@ async fn test_get_session() {
     service
         .create(CreateRequest {
             app_name: "test_app".to_string(),
-            user_id: "user1".to_string().into(),
-            session_id: Some("session1".to_string().into()),
+            user_id: UserId::new("user1".to_string(),
+            session_id: SessionId::new(Some("session1".to_string(),
             state: HashMap::new(),
         })
         .await
@@ -36,8 +36,8 @@ async fn test_get_session() {
     let session = service
         .get(GetRequest {
             app_name: "test_app".to_string(),
-            user_id: "user1".to_string().into(),
-            session_id: "session1".to_string().into(),
+            user_id: UserId::new("user1".to_string(),
+            session_id: SessionId::new("session1".to_string(),
             num_recent_events: None,
             after: None,
         })
@@ -59,8 +59,8 @@ async fn test_state_scoping() {
     let session = service
         .create(CreateRequest {
             app_name: "test_app".to_string(),
-            user_id: "user1".to_string().into(),
-            session_id: Some("session1".to_string().into()),
+            user_id: UserId::new("user1".to_string(),
+            session_id: SessionId::new(Some("session1".to_string(),
             state,
         })
         .await
@@ -78,21 +78,25 @@ async fn test_append_event() {
     service
         .create(CreateRequest {
             app_name: "test_app".to_string(),
-            user_id: "user1".to_string().into(),
-            session_id: Some("session1".to_string().into()),
+            user_id: UserId::new("user1".to_string(),
+            session_id: SessionId::new(Some("session1".to_string(),
             state: HashMap::new(),
         })
         .await
         .unwrap();
 
     let event = Event::new("inv1");
-    service.append_event(&adk_core::types::SessionId::from("session1".to_string()), event).await.unwrap();
+    service
+        .append_event(&adk_core::types::SessionId::new("session1".to_string(), event)
+        .await
+        .unwrap()
+        .unwrap();
 
     let session = service
         .get(GetRequest {
             app_name: "test_app".to_string(),
-            user_id: "user1".to_string().into(),
-            session_id: "session1".to_string().into(),
+            user_id: UserId::new("user1".to_string(),
+            session_id: SessionId::new("session1".to_string(),
             num_recent_events: None,
             after: None,
         })
@@ -109,8 +113,8 @@ async fn test_list_sessions() {
     service
         .create(CreateRequest {
             app_name: "test_app".to_string(),
-            user_id: "user1".to_string().into(),
-            session_id: Some("session1".to_string().into()),
+            user_id: UserId::new("user1".to_string(),
+            session_id: SessionId::new(Some("session1".to_string(),
             state: HashMap::new(),
         })
         .await
@@ -119,15 +123,18 @@ async fn test_list_sessions() {
     service
         .create(CreateRequest {
             app_name: "test_app".to_string(),
-            user_id: "user1".to_string().into(),
-            session_id: Some("session2".to_string().into()),
+            user_id: UserId::new("user1".to_string(),
+            session_id: SessionId::new(Some("session2".to_string(),
             state: HashMap::new(),
         })
         .await
         .unwrap();
 
     let sessions = service
-        .list(ListRequest { app_name: "test_app".to_string(), user_id: "user1".to_string().into() })
+        .list(ListRequest {
+            app_name: "test_app".to_string(),
+            user_id: UserId::new("user1".to_string(),
+        })
         .await
         .unwrap();
 
@@ -141,8 +148,8 @@ async fn test_delete_session() {
     service
         .create(CreateRequest {
             app_name: "test_app".to_string(),
-            user_id: "user1".to_string().into(),
-            session_id: Some("session1".to_string().into()),
+            user_id: UserId::new("user1".to_string(),
+            session_id: SessionId::new(Some("session1".to_string(),
             state: HashMap::new(),
         })
         .await
@@ -151,8 +158,8 @@ async fn test_delete_session() {
     service
         .delete(DeleteRequest {
             app_name: "test_app".to_string(),
-            user_id: "user1".to_string().into(),
-            session_id: "session1".to_string().into(),
+            user_id: UserId::new("user1".to_string(),
+            session_id: SessionId::new("session1".to_string(),
         })
         .await
         .unwrap();
@@ -160,8 +167,8 @@ async fn test_delete_session() {
     let result = service
         .get(GetRequest {
             app_name: "test_app".to_string(),
-            user_id: "user1".to_string().into(),
-            session_id: "session1".to_string().into(),
+            user_id: UserId::new("user1".to_string(),
+            session_id: SessionId::new("session1".to_string(),
             num_recent_events: None,
             after: None,
         })

@@ -63,6 +63,7 @@ version = "0.3.2"
 dependencies = [
  "adk-core",
  "async-trait",
+ "moka",
  "tokio",
 ]
 
@@ -129,6 +130,8 @@ version = "0.3.2"
 dependencies = [
  "async-stream",
  "async-trait",
+ "base64 0.21.7",
+ "bytes",
  "chrono",
  "derive_more",
  "futures",
@@ -326,6 +329,7 @@ dependencies = [
  "aws-sdk-bedrockruntime",
  "aws-smithy-types",
  "base64 0.21.7",
+ "bytes",
  "claudius",
  "futures",
  "ollama-rs",
@@ -7544,6 +7548,8 @@ dependencies = [
 name = "llm_agent_test"
 version = "0.1.0"
 dependencies = [
+ "adk-agent",
+ "adk-core",
  "adk-rust",
  "dotenvy",
  "serde_json",

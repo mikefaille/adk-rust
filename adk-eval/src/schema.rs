@@ -144,7 +144,7 @@ impl ContentData {
         self.parts
             .iter()
             .filter_map(|p| match p {
-                Part::Text { text } => Some(text.as_str()),
+                Part::Text { text, .. } => Some(text.as_str()),
                 _ => None,
             })
             .collect::<Vec<_>>()
@@ -153,10 +153,12 @@ impl ContentData {
 
     /// Convert to ADK Content
     pub fn to_adk_content(&self) -> adk_core::Content {
-        let mut content = adk_core::Content::new(&self.role);
+        let mut content = adk_core::Content::new(
+            std::str::FromStr::from_str(&self.role).unwrap_or(adk_core::types::Role::Model),
+        );
         for part in &self.parts {
             match part {
-                Part::Text { text } => {
+                Part::Text { text, .. } => {
                     content = content.with_text(text);
                 }
                 Part::FunctionCall { .. } | Part::FunctionResponse { .. } => {

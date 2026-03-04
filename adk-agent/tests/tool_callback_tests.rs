@@ -45,7 +45,7 @@ impl SequencedModel {
         LlmResponse {
             content: Some(Content {
                 role: "model".to_string(),
-                parts: vec![Part::Text { text: text.to_string() }],
+                parts: vec![Part::text(text.to_string())],
             }),
             usage_metadata: None,
             finish_reason: Some(FinishReason::Stop),
@@ -123,8 +123,8 @@ struct MockSession {
 impl MockSession {
     fn new() -> Self {
         Self {
-            id: SessionId::from("session-1".to_string()),
-            user_id: UserId::from("user-1".to_string()),
+            id: SessionId::new("session-1".to_string()).unwrap(),
+            user_id: UserId::new( UserId::new("user-1".to_string()).unwrap(),
         }
     }
 }
@@ -174,11 +174,11 @@ struct MockContext {
 impl MockContext {
     fn new() -> Self {
         let mut identity = adk_core::types::AdkIdentity::default();
-        identity.invocation_id = "inv-1".to_string().into();
+        identity.invocation_id = "inv-1".to_string());
         identity.agent_name = "test-agent".to_string();
-        identity.user_id = "user-1".to_string().into();
+        identity.user_id = "user-1".to_string());
         identity.app_name = "test-app".to_string();
-        identity.session_id = "session-1".to_string().into();
+        identity.session_id = "session-1".to_string());
         identity.branch = "main".to_string();
 
         Self {
@@ -255,7 +255,7 @@ async fn test_before_tool_callback_short_circuits_tool_execution() {
             Box::pin(async move {
                 Ok(Some(Content {
                     role: "function".to_string(),
-                    parts: vec![Part::Text { text: "blocked".to_string() }],
+                    parts: vec![Part::text("blocked".to_string())],
                 }))
             })
         }))
@@ -311,7 +311,7 @@ async fn test_after_tool_callback_overrides_result_and_order() {
                 after_order.lock().unwrap().push("after_tool".to_string());
                 Ok(Some(Content {
                     role: "function".to_string(),
-                    parts: vec![Part::Text { text: "after-override".to_string() }],
+                    parts: vec![Part::text("after-override".to_string())],
                 }))
             })
         }))

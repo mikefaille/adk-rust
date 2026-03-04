@@ -7,6 +7,7 @@ use adk_core::{
 use adk_gemini::Gemini;
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
+use bytes::Bytes;
 use futures::TryStreamExt;
 
 pub struct GeminiModel {
@@ -16,28 +17,24 @@ pub struct GeminiModel {
 }
 
 impl GeminiModel {
-    pub fn new(api_key: impl Into<String>, model: impl Into<String>) -> Result<Self> {
+    pub fn new(api_key: impl AsRef<str>, model: impl Into<String>) -> Result<Self> {
         let model_name = model.into();
-        let client = Gemini::with_model(api_key.into(), model_name.clone())
+        let client = Gemini::with_model(api_key, model_name.clone())
             .map_err(|e| adk_core::AdkError::Model(e.to_string()))?;
 
         Ok(Self { client, model_name, retry_config: RetryConfig::default() })
     }
 
     pub fn new_google_cloud(
-        api_key: impl Into<String>,
+        api_key: impl AsRef<str>,
         project_id: impl AsRef<str>,
         location: impl AsRef<str>,
         model: impl Into<String>,
     ) -> Result<Self> {
         let model_name = model.into();
-        let client = Gemini::with_google_cloud_model(
-            api_key.into(),
-            project_id,
-            location,
-            model_name.clone(),
-        )
-        .map_err(|e| adk_core::AdkError::Model(e.to_string()))?;
+        let client =
+            Gemini::with_google_cloud_model(api_key, project_id, location, model_name.clone())
+                .map_err(|e| adk_core::AdkError::Model(e.to_string()))?;
 
         Ok(Self { client, model_name, retry_config: RetryConfig::default() })
     }
@@ -117,12 +114,9 @@ impl GeminiModel {
                 match p {
                     adk_gemini::Part::Text { text, thought, thought_signature } => {
                         if thought == &Some(true) {
-                            converted_parts.push(Part::Thinking {
-                                thinking: text.clone(),
-                                signature: thought_signature.clone(),
-                            });
+                            converted_parts.push(Part::Thinking { thought: text.clone() });
                         } else {
-                            converted_parts.push(Part::Text { text: text.clone() });
+                            converted_parts.push(Part::text(text.clone()));
                         }
                     }
                     adk_gemini::Part::InlineData { inline_data } => {
@@ -134,7 +128,7 @@ impl GeminiModel {
                             })?;
                         converted_parts.push(Part::InlineData {
                             mime_type: inline_data.mime_type.clone(),
-                            data: decoded,
+                            data: Bytes::from(decoded),
                         });
                     }
                     adk_gemini::Part::FunctionCall { function_call, thought_signature } => {
@@ -147,13 +141,11 @@ impl GeminiModel {
                     }
                     adk_gemini::Part::FunctionResponse { function_response } => {
                         converted_parts.push(Part::FunctionResponse {
-                            function_response: adk_core::FunctionResponseData {
-                                name: function_response.name.clone(),
-                                response: function_response
-                                    .response
-                                    .clone()
-                                    .unwrap_or(serde_json::Value::Null),
-                            },
+                            name: function_response.name.clone(),
+                            response: function_response
+                                .response
+                                .clone()
+                                .unwrap_or(serde_json::Value::Null),
                             id: None,
                         });
                     }
@@ -167,7 +159,7 @@ impl GeminiModel {
             if let Some(queries) = &grounding.web_search_queries {
                 if !queries.is_empty() {
                     let search_info = format!("\n\n🔍 **Searched:** {}", queries.join(", "));
-                    converted_parts.push(Part::Text { text: search_info });
+                    converted_parts.push(Part::text(search_info));
                 }
             }
             if let Some(chunks) = &grounding.grounding_chunks {
@@ -184,7 +176,7 @@ impl GeminiModel {
                     .collect();
                 if !sources.is_empty() {
                     let sources_info = format!("\n📚 **Sources:** {}", sources.join(" | "));
-                    converted_parts.push(Part::Text { text: sources_info });
+                    converted_parts.push(Part::text(sources_info));
                 }
             }
         }
@@ -192,7 +184,7 @@ impl GeminiModel {
         let content = if converted_parts.is_empty() {
             None
         } else {
-            Some(Content { role: "model".to_string(), parts: converted_parts })
+            Some(Content { role: adk_core::types::Role::Model, parts: converted_parts })
         };
 
         let usage_metadata = resp.usage_metadata.as_ref().map(|u| UsageMetadata {
@@ -299,7 +291,7 @@ impl GeminiModel {
 
         // Add contents using proper builder methods
         for content in &req.contents {
-            match content.role.as_str() {
+            match content.role.to_string().as_str() {
                 "user" => {
                     // For user messages, build gemini Content with potentially multiple parts
                     let mut gemini_parts = Vec::new();
@@ -312,11 +304,11 @@ impl GeminiModel {
                                     thought_signature: None,
                                 });
                             }
-                            Part::Thinking { thinking, signature } => {
+                            Part::Thinking { thought: thinking } => {
                                 gemini_parts.push(adk_gemini::Part::Text {
                                     text: thinking.clone(),
                                     thought: Some(true),
-                                    thought_signature: signature.clone(),
+                                    thought_signature: None,
                                 });
                             }
                             Part::InlineData { data, mime_type } => {
@@ -361,11 +353,11 @@ impl GeminiModel {
                                     thought_signature: None,
                                 });
                             }
-                            Part::Thinking { thinking, signature } => {
+                            Part::Thinking { thought: thinking } => {
                                 gemini_parts.push(adk_gemini::Part::Text {
                                     text: thinking.clone(),
                                     thought: Some(true),
-                                    thought_signature: signature.clone(),
+                                    thought_signature: None,
                                 });
                             }
                             Part::FunctionCall { name, args, thought_signature, .. } => {
@@ -395,12 +387,9 @@ impl GeminiModel {
                 "function" => {
                     // For function responses
                     for part in &content.parts {
-                        if let Part::FunctionResponse { function_response, .. } = part {
+                        if let Part::FunctionResponse { name, response, .. } = part {
                             builder = builder
-                                .with_function_response(
-                                    &function_response.name,
-                                    function_response.response.clone(),
-                                )
+                                .with_function_response(&*name, response.clone())
                                 .map_err(|e| adk_core::AdkError::Model(e.to_string()))?;
                         }
                     }
@@ -640,7 +629,7 @@ mod tests {
     #[test]
     fn stream_chunks_from_response_injects_partial_before_lone_final_chunk() {
         let response = LlmResponse {
-            content: Some(Content::new("model").with_text("hello")),
+            content: Some(Content::model().with_text("hello")),
             usage_metadata: None,
             finish_reason: Some(FinishReason::Stop),
             citation_metadata: None,
@@ -664,7 +653,7 @@ mod tests {
     #[test]
     fn stream_chunks_from_response_keeps_final_only_when_partial_already_seen() {
         let response = LlmResponse {
-            content: Some(Content::new("model").with_text("done")),
+            content: Some(Content::model().with_text("done")),
             usage_metadata: None,
             finish_reason: Some(FinishReason::Stop),
             citation_metadata: None,

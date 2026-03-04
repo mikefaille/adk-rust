@@ -144,7 +144,7 @@ impl Agent for GraphAgent {
                 Err(GraphError::Interrupted(interrupt)) => {
                     // Create an interrupt event
                     let mut event = Event::new("graph_interrupted");
-                    event.set_content(Content::new("assistant").with_text(format!(
+                    event.set_content(Content::model().with_text(format!(
                         "Graph interrupted: {:?}\nThread: {}\nCheckpoint: {}",
                         interrupt.interrupt,
                         interrupt.thread_id,
@@ -168,7 +168,8 @@ fn default_input_mapper(ctx: &dyn InvocationContext) -> State {
 
     // Get user content
     let content = ctx.user_content();
-    let text: String = content.parts.iter().filter_map(|p| p.text()).collect::<Vec<_>>().join("\n");
+    let text: String =
+        content.parts.iter().filter_map(|p| p.as_text()).collect::<Vec<_>>().join("\n");
 
     if !text.is_empty() {
         state.insert("input".to_string(), json!(text));
@@ -207,7 +208,7 @@ fn default_output_mapper(state: &State) -> Vec<Event> {
     };
 
     let mut event = Event::new("graph_output");
-    event.set_content(Content::new("assistant").with_text(&text));
+    event.set_content(Content::model().with_text(&text));
     events.push(event);
 
     events

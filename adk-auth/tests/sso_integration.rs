@@ -22,23 +22,23 @@ fn test_token_claims_defaults() {
 #[test]
 fn test_token_claims_user_id() {
     let claims = TokenClaims {
-        sub: "user-123".into(),
-        email: Some("alice@example.com".into()),
+        sub: "user-123"),
+        email: Some("alice@example.com")),
         ..Default::default()
     };
 
     // Prefers email over sub
     assert_eq!(claims.user_id(), "alice@example.com");
 
-    let claims_no_email = TokenClaims { sub: "user-123".into(), email: None, ..Default::default() };
+    let claims_no_email = TokenClaims { sub: "user-123"), email: None, ..Default::default() };
     assert_eq!(claims_no_email.user_id(), "user-123");
 }
 
 #[test]
 fn test_token_claims_all_groups() {
     let claims = TokenClaims {
-        groups: vec!["group1".into(), "group2".into()],
-        roles: vec!["role1".into()],
+        groups: vec!["group1"), "group2")],
+        roles: vec!["role1")],
         ..Default::default()
     };
 
@@ -73,7 +73,7 @@ fn test_claims_mapper_group_to_role() {
     let mapper =
         ClaimsMapper::builder().map_group("AdminGroup", "admin").map_group("Users", "user").build();
 
-    let claims = TokenClaims { groups: vec!["AdminGroup".into()], ..Default::default() };
+    let claims = TokenClaims { groups: vec!["AdminGroup")], ..Default::default() };
 
     let roles = mapper.map_to_roles(&claims);
     assert_eq!(roles, vec!["admin"]);
@@ -85,7 +85,7 @@ fn test_claims_mapper_multiple_groups() {
         ClaimsMapper::builder().map_group("Group1", "role1").map_group("Group2", "role2").build();
 
     let claims =
-        TokenClaims { groups: vec!["Group1".into(), "Group2".into()], ..Default::default() };
+        TokenClaims { groups: vec!["Group1"), "Group2")], ..Default::default() };
 
     let roles = mapper.map_to_roles(&claims);
     assert!(roles.contains(&"role1".to_string()));
@@ -97,7 +97,7 @@ fn test_claims_mapper_default_role() {
     let mapper = ClaimsMapper::builder().map_group("Admin", "admin").default_role("guest").build();
 
     // No matching groups - should get default
-    let claims = TokenClaims { groups: vec!["Unknown".into()], ..Default::default() };
+    let claims = TokenClaims { groups: vec!["Unknown")], ..Default::default() };
 
     let roles = mapper.map_to_roles(&claims);
     assert_eq!(roles, vec!["guest"]);
@@ -108,8 +108,8 @@ fn test_claims_mapper_user_id_from_email() {
     let mapper = ClaimsMapper::builder().user_id_from_email().build();
 
     let claims = TokenClaims {
-        sub: "user-123".into(),
-        email: Some("alice@example.com".into()),
+        sub: "user-123"),
+        email: Some("alice@example.com")),
         ..Default::default()
     };
 
@@ -121,8 +121,8 @@ fn test_claims_mapper_user_id_from_sub() {
     let mapper = ClaimsMapper::builder().user_id_from_sub().build();
 
     let claims = TokenClaims {
-        sub: "user-123".into(),
-        email: Some("alice@example.com".into()),
+        sub: "user-123"),
+        email: Some("alice@example.com")),
         ..Default::default()
     };
 
@@ -134,8 +134,8 @@ fn test_claims_mapper_user_id_from_preferred_username() {
     let mapper = ClaimsMapper::builder().user_id_from_preferred_username().build();
 
     let claims = TokenClaims {
-        sub: "user-123".into(),
-        preferred_username: Some("alice".into()),
+        sub: "user-123"),
+        preferred_username: Some("alice")),
         ..Default::default()
     };
 
@@ -168,7 +168,7 @@ fn test_oidc_provider_manual_construction() {
 
 #[test]
 fn test_sso_access_control_builder() {
-    let role = Role::new("user").allow(Permission::Tool("search".into()));
+    let role = Role::new("user").allow(Permission::Tool("search")));
 
     let ac = AccessControl::builder().role(role).build().unwrap();
 
@@ -230,9 +230,9 @@ fn test_complete_sso_flow_setup() {
     // Step 1: Define roles
     let admin = Role::new("admin").allow(Permission::AllTools);
     let analyst = Role::new("analyst")
-        .allow(Permission::Tool("search".into()))
-        .deny(Permission::Tool("admin".into()));
-    let viewer = Role::new("viewer").allow(Permission::Tool("view".into()));
+        .allow(Permission::Tool("search")))
+        .deny(Permission::Tool("admin")));
+    let viewer = Role::new("viewer").allow(Permission::Tool("view")));
 
     // Step 2: Build AccessControl
     let ac = AccessControl::builder().role(admin).role(analyst).role(viewer).build().unwrap();

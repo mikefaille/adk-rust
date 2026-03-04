@@ -11,6 +11,7 @@ use adk_artifact::{
     VersionsRequest,
 };
 use adk_core::Part;
+use adk_core::types::{SessionId, UserId};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -24,8 +25,8 @@ async fn main() -> anyhow::Result<()> {
     let response = service
         .save(SaveRequest {
             app_name: "my_app".to_string(),
-            user_id: "user_123".to_string(),
-            session_id: "session_456".to_string(),
+            user_id: UserId::new("user_123").unwrap(),
+            session_id: SessionId::new("session_456").unwrap(),
             file_name: "notes.txt".to_string(),
             part: Part::Text { text: "First version of notes".to_string() },
             version: None, // Auto-increment
@@ -39,10 +40,10 @@ async fn main() -> anyhow::Result<()> {
     let response = service
         .save(SaveRequest {
             app_name: "my_app".to_string(),
-            user_id: "user_123".to_string(),
-            session_id: "session_456".to_string(),
+            user_id: UserId::new("user_123").unwrap(),
+            session_id: SessionId::new("session_456").unwrap(),
             file_name: "image.jpg".to_string(),
-            part: Part::InlineData { mime_type: "image/jpeg".to_string(), data: image_data },
+            part: Part::InlineData { mime_type: "image/jpeg".to_string(), data: image_data.into() },
             version: None,
         })
         .await?;
@@ -53,8 +54,8 @@ async fn main() -> anyhow::Result<()> {
     let response = service
         .save(SaveRequest {
             app_name: "my_app".to_string(),
-            user_id: "user_123".to_string(),
-            session_id: "session_456".to_string(),
+            user_id: UserId::new("user_123").unwrap(),
+            session_id: SessionId::new("session_456").unwrap(),
             file_name: "notes.txt".to_string(),
             part: Part::Text { text: "Updated notes - version 2".to_string() },
             version: None,
@@ -67,8 +68,8 @@ async fn main() -> anyhow::Result<()> {
     let list_response = service
         .list(ListRequest {
             app_name: "my_app".to_string(),
-            user_id: "user_123".to_string(),
-            session_id: "session_456".to_string(),
+            user_id: UserId::new("user_123").unwrap(),
+            session_id: SessionId::new("session_456").unwrap(),
         })
         .await?;
     for name in &list_response.file_names {
@@ -80,8 +81,8 @@ async fn main() -> anyhow::Result<()> {
     let load_response = service
         .load(LoadRequest {
             app_name: "my_app".to_string(),
-            user_id: "user_123".to_string(),
-            session_id: "session_456".to_string(),
+            user_id: UserId::new("user_123").unwrap(),
+            session_id: SessionId::new("session_456").unwrap(),
             file_name: "notes.txt".to_string(),
             version: None, // Latest
         })
@@ -95,8 +96,8 @@ async fn main() -> anyhow::Result<()> {
     let load_response = service
         .load(LoadRequest {
             app_name: "my_app".to_string(),
-            user_id: "user_123".to_string(),
-            session_id: "session_456".to_string(),
+            user_id: UserId::new("user_123").unwrap(),
+            session_id: SessionId::new("session_456").unwrap(),
             file_name: "notes.txt".to_string(),
             version: Some(1),
         })
@@ -110,8 +111,8 @@ async fn main() -> anyhow::Result<()> {
     let versions_response = service
         .versions(VersionsRequest {
             app_name: "my_app".to_string(),
-            user_id: "user_123".to_string(),
-            session_id: "session_456".to_string(),
+            user_id: UserId::new("user_123").unwrap(),
+            session_id: SessionId::new("session_456").unwrap(),
             file_name: "notes.txt".to_string(),
         })
         .await?;
@@ -122,8 +123,8 @@ async fn main() -> anyhow::Result<()> {
     service
         .delete(DeleteRequest {
             app_name: "my_app".to_string(),
-            user_id: "user_123".to_string(),
-            session_id: "session_456".to_string(),
+            user_id: UserId::new("user_123").unwrap(),
+            session_id: SessionId::new("session_456").unwrap(),
             file_name: "notes.txt".to_string(),
             version: Some(1),
         })
@@ -134,8 +135,8 @@ async fn main() -> anyhow::Result<()> {
     let versions_response = service
         .versions(VersionsRequest {
             app_name: "my_app".to_string(),
-            user_id: "user_123".to_string(),
-            session_id: "session_456".to_string(),
+            user_id: UserId::new("user_123").unwrap(),
+            session_id: SessionId::new("session_456").unwrap(),
             file_name: "notes.txt".to_string(),
         })
         .await?;

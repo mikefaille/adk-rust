@@ -94,7 +94,7 @@ impl Guardrail for PiiRedactor {
                     if !found.is_empty() {
                         any_redacted = true;
                         redacted_types.extend(found);
-                        new_parts.push(Part::Text { text: redacted });
+                        new_parts.push(Part::text(redacted));
                     } else {
                         new_parts.push(part.clone());
                     }

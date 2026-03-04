@@ -24,7 +24,7 @@ async fn test_add_and_search() {
     let search_resp = service
         .search(SearchRequest {
             query: "weather sunny".to_string(),
-            user_id: "user1".to_string(),
+            user_id: UserId::new( "user1".to_string(),
             app_name: "app1".to_string(),
         })
         .await
@@ -51,7 +51,7 @@ async fn test_search_no_results() {
     let search_resp = service
         .search(SearchRequest {
             query: "programming rust".to_string(),
-            user_id: "user1".to_string(),
+            user_id: UserId::new( "user1".to_string(),
             app_name: "app1".to_string(),
         })
         .await
@@ -95,7 +95,7 @@ async fn test_multiple_sessions() {
     let search_resp = service
         .search(SearchRequest {
             query: "session content".to_string(),
-            user_id: "user1".to_string(),
+            user_id: UserId::new( "user1".to_string(),
             app_name: "app1".to_string(),
         })
         .await
@@ -139,7 +139,7 @@ async fn test_user_isolation() {
     let search_resp = service
         .search(SearchRequest {
             query: "data".to_string(),
-            user_id: "user1".to_string(),
+            user_id: UserId::new( "user1".to_string(),
             app_name: "app1".to_string(),
         })
         .await
@@ -166,7 +166,7 @@ async fn test_empty_content_filtered() {
     let search_resp = service
         .search(SearchRequest {
             query: "anything".to_string(),
-            user_id: "user1".to_string(),
+            user_id: UserId::new( "user1".to_string(),
             app_name: "app1".to_string(),
         })
         .await

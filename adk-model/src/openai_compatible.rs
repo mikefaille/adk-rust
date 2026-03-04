@@ -2,7 +2,7 @@
 
 use crate::openai::convert;
 use crate::retry::{RetryConfig, execute_with_retry, is_retryable_model_error};
-use adk_core::{AdkError, Llm, LlmRequest, LlmResponseStream, Part};
+use adk_core::{AdkError, Content, Llm, LlmRequest, LlmResponseStream, Part, types::Role};
 use async_openai::{
     Client,
     config::OpenAIConfig as AsyncOpenAIConfig,
@@ -240,7 +240,7 @@ impl Llm for OpenAICompatible {
 
                                 if let Some(text) = &choice.delta.content {
                                     if !text.is_empty() {
-                                        parts.push(Part::Text { text: text.clone() });
+                                        parts.push(Part::text(text.clone()));
                                     }
                                 }
 
@@ -276,7 +276,7 @@ impl Llm for OpenAICompatible {
 
                                 yield adk_core::LlmResponse {
                                     content: Some(adk_core::Content {
-                                        role: "model".to_string(),
+                                        role: adk_core::types::Role::Model,
                                         parts,
                                     }),
                                     usage_metadata: None,
@@ -300,8 +300,8 @@ impl Llm for OpenAICompatible {
                                 if !text.is_empty() {
                                     yield adk_core::LlmResponse {
                                         content: Some(adk_core::Content {
-                                            role: "model".to_string(),
-                                            parts: vec![Part::Text { text: text.clone() }],
+                                            role: adk_core::types::Role::Model,
+                                            parts: vec![Part::text(text.clone())],
                                         }),
                                         usage_metadata: None,
                                         finish_reason: None,

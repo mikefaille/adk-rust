@@ -31,14 +31,14 @@ fn make_event(author: &str, text: &str) -> Event {
     event.author = author.to_string();
     event.set_content(Content {
         role: if author == "user" { "user" } else { "model" }.to_string(),
-        parts: vec![Part::Text { text: text.to_string() }],
+        parts: vec![Part::text(text.to_string())],
     });
     event
 }
 
 #[tokio::test]
 async fn test_summarize_empty_events_returns_none() {
-    let llm = Arc::new(MockSummarizerLlm { summary_text: "summary".into() });
+    let llm = Arc::new(MockSummarizerLlm { summary_text: "summary") });
     let summarizer = LlmEventSummarizer::new(llm);
 
     let result = summarizer.summarize_events(&[]).await.unwrap();
@@ -48,7 +48,7 @@ async fn test_summarize_empty_events_returns_none() {
 #[tokio::test]
 async fn test_summarize_produces_compaction_event() {
     let llm = Arc::new(MockSummarizerLlm {
-        summary_text: "User asked about weather. Agent provided NYC forecast.".into(),
+        summary_text: "User asked about weather. Agent provided NYC forecast."),
     });
     let summarizer = LlmEventSummarizer::new(llm);
 
@@ -81,7 +81,7 @@ async fn test_summarize_produces_compaction_event() {
 
 #[tokio::test]
 async fn test_summarize_with_custom_prompt_template() {
-    let llm = Arc::new(MockSummarizerLlm { summary_text: "Custom summary output".into() });
+    let llm = Arc::new(MockSummarizerLlm { summary_text: "Custom summary output") });
     let summarizer = LlmEventSummarizer::new(llm)
         .with_prompt_template("Summarize briefly: {conversation_history}");
 
@@ -100,7 +100,7 @@ async fn test_summarize_with_custom_prompt_template() {
 
 #[tokio::test]
 async fn test_summarize_skips_non_text_parts() {
-    let llm = Arc::new(MockSummarizerLlm { summary_text: "Summary of tool interaction".into() });
+    let llm = Arc::new(MockSummarizerLlm { summary_text: "Summary of tool interaction") });
     let summarizer = LlmEventSummarizer::new(llm);
 
     // Event with function call (no text) — should be skipped in prompt formatting

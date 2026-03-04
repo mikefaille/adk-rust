@@ -35,7 +35,7 @@ impl adk_core::Llm for MockLlm {
             yield Ok(adk_core::LlmResponse {
                 content: Some(adk_core::Content {
                     role: "model".to_string(),
-                    parts: vec![adk_core::Part::Text { text }],
+                    parts: vec![adk_core::Part::text(text)],
                 }),
                 usage_metadata: None,
                 finish_reason: None,
@@ -80,7 +80,7 @@ impl adk_core::Llm for SpyLlm {
             yield Ok(adk_core::LlmResponse {
                 content: Some(adk_core::Content {
                     role: "model".to_string(),
-                    parts: vec![adk_core::Part::Text { text }],
+                    parts: vec![adk_core::Part::text(text)],
                 }),
                 usage_metadata: None,
                 finish_reason: None,
@@ -109,7 +109,7 @@ impl TestContext {
         Self {
             content: Content {
                 role: "user".to_string(),
-                parts: vec![Part::Text { text: message.to_string() }],
+                parts: vec![Part::text(message.to_string())],
             },
             config: RunConfig::default(),
             identity: AdkIdentity::default(),
@@ -170,8 +170,8 @@ struct DummySession {
 impl DummySession {
     fn new() -> Self {
         Self {
-            id: SessionId::from("test-session".to_string()),
-            user_id: UserId::from("test-user".to_string()),
+            id: SessionId::new("test-session".to_string()).unwrap(),
+            user_id: UserId::new( UserId::new("test-user".to_string()).unwrap(),
         }
     }
 }
@@ -405,7 +405,7 @@ fn test_llm_agent_builder_with_callbacks() {
                 *flag.lock().unwrap() = true;
                 Ok(Some(Content {
                     role: "system".to_string(),
-                    parts: vec![Part::Text { text: "Before callback".to_string() }],
+                    parts: vec![Part::text("Before callback".to_string())],
                 }))
             })
         }))
@@ -415,7 +415,7 @@ fn test_llm_agent_builder_with_callbacks() {
                 *flag.lock().unwrap() = true;
                 Ok(Some(Content {
                     role: "system".to_string(),
-                    parts: vec![Part::Text { text: "After callback".to_string() }],
+                    parts: vec![Part::text("After callback".to_string())],
                 }))
             })
         }))

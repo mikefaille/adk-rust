@@ -69,7 +69,7 @@ impl MockContext {
             session: MockSession,
             user_content: Content {
                 role: "user".to_string(),
-                parts: vec![Part::Text { text: text.to_string() }],
+                parts: vec![Part::text(text.to_string())],
             },
             metadata: HashMap::new(),
         }

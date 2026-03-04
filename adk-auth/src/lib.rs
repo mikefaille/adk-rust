@@ -25,8 +25,8 @@
 //!     .allow(Permission::AllAgents);
 //!
 //! let user = Role::new("user")
-//!     .allow(Permission::Tool("search".into()))
-//!     .deny(Permission::Tool("code_exec".into()));
+//!     .allow(Permission::Tool("search")))
+//!     .deny(Permission::Tool("code_exec")));
 //!
 //! let ac = AccessControl::builder()
 //!     .role(admin)

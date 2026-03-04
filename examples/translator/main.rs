@@ -290,8 +290,8 @@ async fn run_batch_mode(
         let session = session_service
             .create(CreateRequest {
                 app_name: "translator".to_string(),
-                user_id: "batch_user".to_string().into(),
-                session_id: None,
+                user_id: UserId::new("batch_user".to_string()),
+                session_id: SessionId::new(None),
                 state: initial_state,
             })
             .await?;
@@ -299,8 +299,7 @@ async fn run_batch_mode(
         // Build prompt
         let prompt = format!("Translate the following content to {}:\n\n{}", name, content);
 
-        let user_content =
-            Content { role: "user".to_string(), parts: vec![Part::Text { text: prompt }] };
+        let user_content = Content { role: adk_core::Role::User, parts: vec![Part::text(prompt)] };
 
         // Run pipeline
         let session_id = session.id().to_string();
@@ -330,11 +329,10 @@ async fn run_batch_mode(
 async fn run_translation(
     runner: &Runner,
     session_service: &Arc<InMemorySessionService>,
-    session_id: &str,
+    session_id: &SessionId,
     user_content: Content,
 ) -> anyhow::Result<String> {
-    let mut stream =
-        runner.run("batch_user".to_string().into(), session_id.to_string().into(), user_content).await?;
+    let mut stream = runner.run("batch_user".to_string(), session_id, user_content).await?;
 
     // Process stream and collect any errors
     let mut last_text = String::new();
@@ -345,10 +343,10 @@ async fn run_translation(
                 // Track text output for fallback
                 if let Some(content) = &event.llm_response.content {
                     for part in &content.parts {
-                        if let Part::Text { text } = part
-                            && !text.is_empty()
-                        {
-                            last_text = text.clone();
+                        if let Part::Text { text } = part {
+                            if !text.is_empty() {
+                                last_text = text.clone();
+                            }
                         }
                     }
                 }
@@ -367,8 +365,8 @@ async fn run_translation(
     let updated_session = session_service
         .get(GetRequest {
             app_name: "translator".to_string(),
-            user_id: "batch_user".to_string().into(),
-            session_id: session_id.to_string().into(),
+            user_id: UserId::new("batch_user".to_string()),
+            session_id: SessionId::new(session_id.to_string()),
             num_recent_events: None,
             after: None,
         })
@@ -376,17 +374,19 @@ async fn run_translation(
 
     if let Some(serde_json::Value::String(translation)) =
         updated_session.state().get("final_translation")
-        && !translation.is_empty()
     {
-        return Ok(clean_output(&translation));
+        if !translation.is_empty() {
+            return Ok(clean_output(translation));
+        }
     }
 
     // Fallback to current_translation if final not available
     if let Some(serde_json::Value::String(translation)) =
         updated_session.state().get("current_translation")
-        && !translation.is_empty()
     {
-        return Ok(clean_output(&translation));
+        if !translation.is_empty() {
+            return Ok(clean_output(translation));
+        }
     }
 
     // Last resort: use the last text we saw

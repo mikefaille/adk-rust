@@ -1,9 +1,9 @@
 use adk_core::{
     AfterAgentCallback, AfterModelCallback, AfterToolCallback, Agent, BeforeAgentCallback,
     BeforeModelCallback, BeforeModelResult, BeforeToolCallback, CallbackContext, Content, Event,
-    EventActions, FunctionResponseData, GlobalInstructionProvider, InstructionProvider,
-    InvocationContext, Llm, LlmRequest, LlmResponse, MemoryEntry, Part, ReadonlyContext, Result,
-    Tool, ToolConfirmationDecision, ToolConfirmationPolicy, ToolConfirmationRequest, ToolContext,
+    EventActions, GlobalInstructionProvider, InstructionProvider, InvocationContext, Llm,
+    LlmRequest, LlmResponse, MemoryEntry, Part, ReadonlyContext, Result, Tool,
+    ToolConfirmationDecision, ToolConfirmationPolicy, ToolConfirmationRequest, ToolContext,
 };
 use adk_skill::{SelectionPolicy, SkillIndex, load_skill_index, select_skill_prompt_block};
 use async_stream::stream;
@@ -612,8 +612,8 @@ impl Agent for LlmAgent {
                     max_skill_chars,
                 ) {
                     conversation_history.push(Content {
-                        role: "user".to_string(),
-                        parts: vec![Part::Text { text: skill_block }],
+                        role: adk_core::types::Role::User,
+                        parts: vec![Part::text(skill_block)],
                     });
                 }
             }
@@ -625,8 +625,8 @@ impl Agent for LlmAgent {
                 let global_inst = provider(ctx.clone() as Arc<dyn ReadonlyContext>).await?;
                 if !global_inst.is_empty() {
                     conversation_history.push(Content {
-                        role: "user".to_string(),
-                        parts: vec![Part::Text { text: global_inst }],
+                        role: adk_core::types::Role::User,
+                        parts: vec![Part::text(global_inst)],
                     });
                 }
             } else if let Some(ref template) = global_instruction {
@@ -634,8 +634,8 @@ impl Agent for LlmAgent {
                 let processed = adk_core::inject_session_state(ctx.as_ref(), template).await?;
                 if !processed.is_empty() {
                     conversation_history.push(Content {
-                        role: "user".to_string(),
-                        parts: vec![Part::Text { text: processed }],
+                        role: adk_core::types::Role::User,
+                        parts: vec![Part::text(processed)],
                     });
                 }
             }
@@ -647,8 +647,8 @@ impl Agent for LlmAgent {
                 let inst = provider(ctx.clone() as Arc<dyn ReadonlyContext>).await?;
                 if !inst.is_empty() {
                     conversation_history.push(Content {
-                        role: "user".to_string(),
-                        parts: vec![Part::Text { text: inst }],
+                        role: adk_core::types::Role::User,
+                        parts: vec![Part::text(inst)],
                     });
                 }
             } else if let Some(ref template) = instruction {
@@ -656,8 +656,8 @@ impl Agent for LlmAgent {
                 let processed = adk_core::inject_session_state(ctx.as_ref(), template).await?;
                 if !processed.is_empty() {
                     conversation_history.push(Content {
-                        role: "user".to_string(),
-                        parts: vec![Part::Text { text: processed }],
+                        role: adk_core::types::Role::User,
+                        parts: vec![Part::text(processed)],
                     });
                 }
             }
@@ -678,7 +678,7 @@ impl Agent for LlmAgent {
 
                     // Keep global and agent instructions (already added above)
                     let instruction_count = conversation_history.iter()
-                        .take_while(|c| c.role == "user" && c.parts.iter().any(|p| {
+                        .take_while(|c| c.role == adk_core::types::Role::User && c.parts.iter().any(|p| {
                             if let Part::Text { text } = p {
                                 // These are likely instructions, not user queries
                                 !text.is_empty()
@@ -693,7 +693,7 @@ impl Agent for LlmAgent {
 
                     // Take only the last user message (current turn)
                     if let Some(last) = conversation_history.last() {
-                        if last.role == "user" {
+                        if last.role == adk_core::types::Role::User {
                             filtered.push(last.clone());
                         }
                     }
@@ -1108,18 +1108,16 @@ impl Agent for LlmAgent {
                                 if !valid_target {
                                     // Return error to LLM so it can try again
                                     let error_content = Content {
-                                        role: "function".to_string(),
+                                        role: adk_core::types::Role::Custom("tool".to_string()),
                                         parts: vec![Part::FunctionResponse {
-                                            function_response: FunctionResponseData {
-                                                name: name.clone(),
-                                                response: serde_json::json!({
-                                                    "error": format!(
-                                                        "Agent '{}' not found. Available agents: {:?}",
-                                                        target_agent,
-                                                        sub_agents.iter().map(|a| a.name()).collect::<Vec<_>>()
-                                                    )
-                                                }),
-                                            },
+                                            name: name.clone(),
+                                            response: serde_json::json!({
+                                                "error": format!(
+                                                    "Agent '{}' not found. Available agents: {:?}",
+                                                    target_agent,
+                                                    sub_agents.iter().map(|a| a.name()).collect::<Vec<_>>()
+                                                )
+                                            }),
                                             id: id.clone(),
                                         }],
                                     };
@@ -1161,17 +1159,15 @@ impl Agent for LlmAgent {
                                         tool_actions.tool_confirmation_decision =
                                             Some(ToolConfirmationDecision::Deny);
                                         response_content = Some(Content {
-                                            role: "function".to_string(),
+                                            role: adk_core::types::Role::Custom("tool".to_string()),
                                             parts: vec![Part::FunctionResponse {
-                                                function_response: FunctionResponseData {
-                                                    name: name.clone(),
-                                                    response: serde_json::json!({
-                                                        "error": format!(
-                                                            "Tool '{}' execution denied by confirmation policy",
-                                                            name
-                                                        ),
-                                                    }),
-                                                },
+                                                name: name.clone(),
+                                                response: serde_json::json!({
+                                                    "error": format!(
+                                                        "Tool '{}' execution denied by confirmation policy",
+                                                        name
+                                                    ),
+                                                }),
                                                 id: id.clone(),
                                             }],
                                         });
@@ -1183,13 +1179,11 @@ impl Agent for LlmAgent {
                                         confirmation_event.llm_response.interrupted = true;
                                         confirmation_event.llm_response.turn_complete = true;
                                         confirmation_event.llm_response.content = Some(Content {
-                                            role: "model".to_string(),
-                                            parts: vec![Part::Text {
-                                                text: format!(
-                                                    "Tool confirmation required for '{}'. Provide approve/deny decision to continue.",
-                                                    name
-                                                ),
-                                            }],
+                                            role: adk_core::types::Role::Model,
+                                            parts: vec![Part::text(format!(
+                                                "Tool confirmation required for '{}'. Provide approve/deny decision to continue.",
+                                                name
+                                            ))],
                                         });
                                         confirmation_event.actions.tool_confirmation =
                                             Some(ToolConfirmationRequest {
@@ -1279,25 +1273,21 @@ impl Agent for LlmAgent {
                                             confirmation_decision;
                                     }
                                     response_content = Some(Content {
-                                        role: "function".to_string(),
+                                        role: adk_core::types::Role::Custom("tool".to_string()),
                                         parts: vec![Part::FunctionResponse {
-                                            function_response: FunctionResponseData {
-                                                name: name.clone(),
-                                                response: result,
-                                            },
+                                            name: name.clone(),
+                                            response: result,
                                             id: id.clone(),
                                         }],
                                     });
                                 } else {
                                     response_content = Some(Content {
-                                        role: "function".to_string(),
+                                        role: adk_core::types::Role::Custom("tool".to_string()),
                                         parts: vec![Part::FunctionResponse {
-                                            function_response: FunctionResponseData {
-                                                name: name.clone(),
-                                                response: serde_json::json!({
-                                                    "error": format!("Tool {} not found", name)
-                                                }),
-                                            },
+                                            name: name.clone(),
+                                            response: serde_json::json!({
+                                                "error": format!("Tool {} not found", name)
+                                            }),
                                             id: id.clone(),
                                         }],
                                     });

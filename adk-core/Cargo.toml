@@ -20,6 +20,8 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
+bytes = "1.5"
+base64 = "0.21"
 derive_more = { version = "2.1.1", features = ["display", "as_ref", "from", "deref", "into"] }
 
 [dev-dependencies]

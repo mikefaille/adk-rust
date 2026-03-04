@@ -47,14 +47,14 @@ pub(crate) fn adk_request_to_bedrock(
     let mut system = Vec::new();
 
     for content in contents {
-        match content.role.as_str() {
+        match content.role.to_string().as_str() {
             "system" => {
                 for part in &content.parts {
                     match part {
-                        Part::Text { text } if !text.is_empty() => {
+                        Part::text(text) if !text.is_empty() => {
                             system.push(SystemContentBlock::Text(text.clone()));
                         }
-                        Part::Thinking { thinking, .. } if !thinking.is_empty() => {
+                        Part::Thinking { thought: thinking, .. } if !thinking.is_empty() => {
                             system.push(SystemContentBlock::Text(thinking.clone()));
                         }
                         _ => {}
@@ -128,17 +128,17 @@ fn adk_parts_to_bedrock(parts: &[Part]) -> Vec<ContentBlock> {
                     .ok()?;
                 Some(ContentBlock::ToolUse(tool_use))
             }
-            Part::FunctionResponse { function_response, id } => {
+            Part::FunctionResponse { name, response, id } => {
                 let tool_result = ToolResultBlock::builder()
                     .tool_use_id(id.clone().unwrap_or_else(|| "unknown".to_string()))
                     .content(ToolResultContentBlock::Text(
-                        serde_json::to_string(&function_response.response).unwrap_or_default(),
+                        serde_json::to_string(&response).unwrap_or_default(),
                     ))
                     .build()
                     .ok()?;
                 Some(ContentBlock::ToolResult(tool_result))
             }
-            Part::Thinking { thinking, .. } => {
+            Part::Thinking { thought: thinking, .. } => {
                 if thinking.is_empty() {
                     None
                 } else {
@@ -230,7 +230,11 @@ pub(crate) fn bedrock_response_to_adk(
     let content = match output {
         ConverseOutput::Message(message) => {
             let parts = bedrock_content_blocks_to_parts(&message.content);
-            if parts.is_empty() { None } else { Some(Content { role: "model".to_string(), parts }) }
+            if parts.is_empty() {
+                None
+            } else {
+                Some(Content { role: adk_core::types::Role::Model, parts })
+            }
         }
         _ => None,
     };
@@ -268,7 +272,7 @@ fn bedrock_content_blocks_to_parts(blocks: &[ContentBlock]) -> Vec<Part> {
                 if text.is_empty() {
                     None
                 } else {
-                    Some(Part::Text { text: text.clone() })
+                    Some(Part::text(text.clone()))
                 }
             }
             ContentBlock::ToolUse(tool_use) => Some(Part::FunctionCall {
@@ -279,15 +283,8 @@ fn bedrock_content_blocks_to_parts(blocks: &[ContentBlock]) -> Vec<Part> {
             }),
             ContentBlock::ReasoningContent(reasoning) => {
                 if let Ok(reasoning_text) = reasoning.as_reasoning_text() {
-                    let text = reasoning_text.text().to_string();
-                    if text.is_empty() {
-                        None
-                    } else {
-                        Some(Part::Thinking {
-                            thinking: text,
-                            signature: reasoning_text.signature().map(String::from),
-                        })
-                    }
+                    let text = reasoning_text.as_text().to_string();
+                    if text.is_empty() { None } else { Some(Part::Thinking { thought: text }) }
                 } else {
                     None
                 }
@@ -325,7 +322,7 @@ pub(crate) fn bedrock_stream_content_start_to_adk(
             // The actual arguments will come in subsequent delta events.
             Some(LlmResponse {
                 content: Some(Content {
-                    role: "model".to_string(),
+                    role: adk_core::types::Role::Model,
                     parts: vec![Part::FunctionCall {
                         name: tool_start.name.clone(),
                         args: Value::Null,
@@ -358,8 +355,8 @@ pub(crate) fn bedrock_stream_delta_to_adk(delta: &ContentBlockDelta) -> Option<L
             } else {
                 Some(LlmResponse {
                     content: Some(Content {
-                        role: "model".to_string(),
-                        parts: vec![Part::Text { text: text.clone() }],
+                        role: adk_core::types::Role::Model,
+                        parts: vec![Part::text(text.clone())],
                     }),
                     usage_metadata: None,
                     finish_reason: None,
@@ -380,8 +377,8 @@ pub(crate) fn bedrock_stream_delta_to_adk(delta: &ContentBlockDelta) -> Option<L
             } else {
                 Some(LlmResponse {
                     content: Some(Content {
-                        role: "model".to_string(),
-                        parts: vec![Part::Text { text: tool_delta.input.clone() }],
+                        role: adk_core::types::Role::Model,
+                        parts: vec![Part::text(tool_delta.input.clone())],
                     }),
                     usage_metadata: None,
                     finish_reason: None,
@@ -401,8 +398,8 @@ pub(crate) fn bedrock_stream_delta_to_adk(delta: &ContentBlockDelta) -> Option<L
                 } else {
                     Some(LlmResponse {
                         content: Some(Content {
-                            role: "model".to_string(),
-                            parts: vec![Part::Thinking { thinking: text.clone(), signature: None }],
+                            role: adk_core::types::Role::Model,
+                            parts: vec![Part::Thinking { thought: text.clone() }],
                         }),
                         usage_metadata: None,
                         finish_reason: None,
@@ -521,12 +518,12 @@ mod tests {
     fn test_system_message_extraction() {
         let contents = vec![
             Content {
-                role: "system".to_string(),
-                parts: vec![Part::Text { text: "You are helpful.".to_string() }],
+                role: adk_core::types::Role::System,
+                parts: vec![Part::text("You are helpful.".to_string())],
             },
             Content {
-                role: "user".to_string(),
-                parts: vec![Part::Text { text: "Hello".to_string() }],
+                role: adk_core::types::Role::User,
+                parts: vec![Part::text("Hello".to_string())],
             },
         ];
 
@@ -539,16 +536,16 @@ mod tests {
     fn test_role_mapping() {
         let contents = vec![
             Content {
-                role: "user".to_string(),
-                parts: vec![Part::Text { text: "Hi".to_string() }],
+                role: adk_core::types::Role::User,
+                parts: vec![Part::text("Hi".to_string())],
             },
             Content {
-                role: "model".to_string(),
-                parts: vec![Part::Text { text: "Hello".to_string() }],
+                role: adk_core::types::Role::Model,
+                parts: vec![Part::text("Hello".to_string())],
             },
             Content {
                 role: "assistant".to_string(),
-                parts: vec![Part::Text { text: "How can I help?".to_string() }],
+                parts: vec![Part::text("How can I help?".to_string())],
             },
         ];
 
@@ -562,7 +559,7 @@ mod tests {
     #[test]
     fn test_function_call_conversion() {
         let contents = vec![Content {
-            role: "model".to_string(),
+            role: adk_core::types::Role::Model,
             parts: vec![Part::FunctionCall {
                 name: "get_weather".to_string(),
                 args: serde_json::json!({"city": "Seattle"}),
@@ -582,7 +579,7 @@ mod tests {
     #[test]
     fn test_function_response_conversion() {
         let contents = vec![Content {
-            role: "user".to_string(),
+            role: adk_core::types::Role::User,
             parts: vec![Part::FunctionResponse {
                 function_response: FunctionResponseData {
                     name: "get_weather".to_string(),
@@ -659,7 +656,7 @@ mod tests {
         assert!(response.partial);
         assert!(!response.turn_complete);
         let content = response.content.unwrap();
-        let text = content.parts[0].text().unwrap();
+        let text = content.parts[0].as_text().unwrap();
         assert_eq!(text, "Hello world");
     }
 
@@ -716,7 +713,7 @@ mod tests {
         let parts = bedrock_content_blocks_to_parts(&[block]);
         assert_eq!(parts.len(), 1);
         match &parts[0] {
-            Part::Thinking { thinking, signature } => {
+            Part::Thinking { thought: thinking } => {
                 assert_eq!(thinking, "Analyzing the problem...");
                 assert_eq!(signature.as_deref(), Some("sig_abc123"));
             }
@@ -761,7 +758,7 @@ mod tests {
         assert_eq!(parts.len(), 2);
         assert!(parts[0].is_thinking());
         assert_eq!(parts[0].thinking_text().unwrap(), "Thinking...");
-        assert_eq!(parts[1].text().unwrap(), "Final answer");
+        assert_eq!(parts[1].as_text().unwrap(), "Final answer");
     }
 
     #[test]
@@ -828,14 +825,14 @@ mod tests {
             _ => panic!("expected Part::Thinking"),
         }
 
-        assert_eq!(content.parts[1].text().unwrap(), "The answer is 42.");
+        assert_eq!(content.parts[1].as_text().unwrap(), "The answer is 42.");
     }
 
     #[test]
     fn test_cache_point_not_injected_when_none() {
         let contents = vec![Content {
-            role: "system".to_string(),
-            parts: vec![Part::Text { text: "You are helpful.".to_string() }],
+            role: adk_core::types::Role::System,
+            parts: vec![Part::text("You are helpful.".to_string())],
         }];
         let mut tools = HashMap::new();
         tools.insert(
@@ -859,8 +856,8 @@ mod tests {
     #[test]
     fn test_cache_point_injected_after_system_content() {
         let contents = vec![Content {
-            role: "system".to_string(),
-            parts: vec![Part::Text { text: "You are helpful.".to_string() }],
+            role: adk_core::types::Role::System,
+            parts: vec![Part::text("You are helpful.".to_string())],
         }];
         let cache_config = BedrockCacheConfig::default();
 
@@ -875,8 +872,8 @@ mod tests {
     #[test]
     fn test_cache_point_not_injected_when_system_empty() {
         let contents = vec![Content {
-            role: "user".to_string(),
-            parts: vec![Part::Text { text: "Hello".to_string() }],
+            role: adk_core::types::Role::User,
+            parts: vec![Part::text("Hello".to_string())],
         }];
         let cache_config = BedrockCacheConfig::default();
 
@@ -909,8 +906,8 @@ mod tests {
     #[test]
     fn test_cache_point_with_one_hour_ttl() {
         let contents = vec![Content {
-            role: "system".to_string(),
-            parts: vec![Part::Text { text: "You are helpful.".to_string() }],
+            role: adk_core::types::Role::System,
+            parts: vec![Part::text("You are helpful.".to_string())],
         }];
         let cache_config = BedrockCacheConfig { ttl: BedrockCacheTtl::OneHour };
 
@@ -925,8 +922,8 @@ mod tests {
     #[test]
     fn test_cache_point_with_five_minutes_ttl_no_explicit_ttl() {
         let contents = vec![Content {
-            role: "system".to_string(),
-            parts: vec![Part::Text { text: "You are helpful.".to_string() }],
+            role: adk_core::types::Role::System,
+            parts: vec![Part::text("You are helpful.".to_string())],
         }];
         let cache_config = BedrockCacheConfig { ttl: BedrockCacheTtl::FiveMinutes };
 

@@ -237,7 +237,7 @@ impl Agent for LlmConditionalAgent {
 
             let request = LlmRequest {
                 model: model.name().to_string(),
-                contents: vec![Content::new("user").with_text(&classification_prompt)],
+                contents: vec![Content::user().with_text(&classification_prompt)],
                 tools: HashMap::new(),
                 config: None,
             };
@@ -278,7 +278,7 @@ impl Agent for LlmConditionalAgent {
             let mut routing_event = Event::new(&invocation_id);
             routing_event.author = agent_name.clone();
             routing_event.llm_response.content = Some(
-                Content::new("model").with_text(format!("[Routing to: {}]", classification))
+                Content::model().with_text(format!("[Routing to: {}]", classification))
             );
             yield Ok(routing_event);
 
@@ -305,7 +305,7 @@ impl Agent for LlmConditionalAgent {
                 let mut error_event = Event::new(&invocation_id);
                 error_event.author = agent_name;
                 error_event.llm_response.content = Some(
-                    Content::new("model").with_text(format!(
+                    Content::model().with_text(format!(
                         "No route found for classification '{}'. Available routes: {:?}",
                         classification,
                         routes.keys().collect::<Vec<_>>()

@@ -78,7 +78,7 @@ async fn main() -> Result<()> {
 
     let session_service = Arc::new(InMemorySessionService::new());
     let runner = Runner::new(RunnerConfig {
-        app_name: "policy_demo".into(),
+        app_name: "policy_demo",
         agent: Arc::new(agent),
         session_service: session_service.clone(),
         artifact_service: None,
@@ -93,19 +93,16 @@ async fn main() -> Result<()> {
     let user_id = "user".to_string();
     let session = session_service
         .create(CreateRequest {
-            app_name: "demo".into(),
-            user_id: user_id.clone().into(),
-            session_id: None,
+            app_name: "demo",
+            user_id: UserId::new( user_id.clone()),
+            session_id: SessionId::new(None),
             state: HashMap::new(),
         })
         .await?;
 
     println!("Querying with 'Tell me about release notes' (Should NOT find security skill)...");
     let mut stream = runner
-        .run(
-            user_id.clone().into(),
-            session.id().clone(),
-            Content::new("user").with_text("Tell me about release notes"),
+        .run(user_id.clone(), session.id().clone(, Content::new("user").with_text("Tell me about release notes"),
         )
         .await?;
 

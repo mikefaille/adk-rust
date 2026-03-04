@@ -245,7 +245,7 @@ impl MistralRsModel {
     /// ```rust,ignore
     /// let model = MistralRsModel::from_uqff(
     ///     "EricB/Phi-3.5-mini-instruct-UQFF",
-    ///     vec!["phi3.5-mini-instruct-q8_0.uqff".into()]
+    ///     vec!["phi3.5-mini-instruct-q8_0.uqff")]
     /// ).await?;
     /// ```
     pub async fn from_uqff(
@@ -254,8 +254,7 @@ impl MistralRsModel {
     ) -> Result<Self> {
         use mistralrs::UqffTextModelBuilder;
 
-        let model_id = model_id.into();
-        info!("Loading UQFF model: {} with files: {:?}", model_id, uqff_files);
+        let model_id = model_id.into();        info!("Loading UQFF model: {} with files: {:?}", model_id, uqff_files);
 
         if uqff_files.is_empty() {
             return Err(MistralRsError::invalid_config(

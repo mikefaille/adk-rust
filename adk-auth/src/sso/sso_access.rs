@@ -18,7 +18,7 @@ use std::sync::Arc;
 ///     .access_control(ac)
 ///     .build()?;
 ///
-/// let claims = sso.check_token(token, &Permission::Tool("search".into())).await?;
+/// let claims = sso.check_token(token, &Permission::Tool("search"))).await?;
 /// ```
 pub struct SsoAccessControl {
     validator: Arc<dyn TokenValidator>,
@@ -66,7 +66,7 @@ impl SsoAccessControl {
     /// Check permission with pre-mapped roles.
     fn check_with_roles(
         &self,
-        user_id: &str,
+        user_id: &UserId,
         roles: &[String],
         permission: &Permission,
     ) -> Result<(), SsoError> {

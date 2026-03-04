@@ -136,7 +136,7 @@ mod tests {
     fn test_content_to_message_user() {
         let content = Content {
             role: "user".to_string(),
-            parts: vec![Part::Text { text: "Hello, world!".to_string() }],
+            parts: vec![Part::text("Hello, world!".to_string())],
         };
 
         let message = content_to_message(&content);
@@ -148,7 +148,7 @@ mod tests {
     fn test_content_to_message_assistant() {
         let content = Content {
             role: "model".to_string(),
-            parts: vec![Part::Text { text: "Hi there!".to_string() }],
+            parts: vec![Part::text("Hi there!".to_string())],
         };
 
         let message = content_to_message(&content);
@@ -711,13 +711,13 @@ mod image_audio_tests {
 
     #[test]
     fn test_image_part_to_mistralrs_non_image() {
-        let part = Part::Text { text: "hello".to_string() };
+        let part = Part::text("hello".to_string());
         assert!(image_part_to_mistralrs(&part).is_none());
     }
 
     #[test]
     fn test_audio_part_to_mistralrs_non_audio() {
-        let part = Part::Text { text: "hello".to_string() };
+        let part = Part::text("hello".to_string());
         assert!(audio_part_to_mistralrs(&part).is_none());
     }
 
@@ -726,8 +726,8 @@ mod image_audio_tests {
         let content = Content {
             role: "user".to_string(),
             parts: vec![
-                Part::Text { text: "Hello".to_string() },
-                Part::Text { text: "World".to_string() },
+                Part::text("Hello".to_string()),
+                Part::text("World".to_string()),
             ],
         };
         assert_eq!(extract_text_from_content(&content), "Hello\nWorld");

@@ -21,8 +21,8 @@ struct MockSession {
 impl MockSession {
     fn new() -> Self {
         Self {
-            id: SessionId::from("multi-agent-session".to_string()),
-            user_id: UserId::from("multi-agent-user".to_string()),
+            id: SessionId::new("multi-agent-session".to_string()).unwrap(),
+            user_id: UserId::new( UserId::new("multi-agent-user".to_string()).unwrap(),
         }
     }
 }
@@ -69,7 +69,7 @@ impl MockContext {
             session: MockSession::new(),
             user_content: Content {
                 role: "user".to_string(),
-                parts: vec![Part::Text { text: text.to_string() }],
+                parts: vec![Part::text(text.to_string())],
             },
             identity: AdkIdentity::default(),
             metadata: HashMap::new(),

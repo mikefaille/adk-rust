@@ -1,5 +1,5 @@
 use crate::service::*;
-use adk_core::{Part, Result};
+use adk_core::{Part, Result, types::UserId};
 use async_trait::async_trait;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
@@ -7,7 +7,7 @@ use std::sync::{Arc, RwLock};
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct MemoryKey {
     app_name: String,
-    user_id: String,
+    user_id: UserId,
 }
 
 #[derive(Clone)]
@@ -64,7 +64,10 @@ impl MemoryService for InMemoryMemoryService {
         session_id: &str,
         entries: Vec<MemoryEntry>,
     ) -> Result<()> {
-        let key = MemoryKey { app_name: app_name.to_string(), user_id: user_id.to_string() };
+        let key = MemoryKey {
+            app_name: app_name.to_string(),
+            user_id: UserId::new(user_id.to_string()).unwrap(),
+        };
 
         let stored_entries: Vec<StoredEntry> = entries
             .into_iter()
@@ -89,7 +92,7 @@ impl MemoryService for InMemoryMemoryService {
     async fn search(&self, req: SearchRequest) -> Result<SearchResponse> {
         let query_words = Self::extract_words(&req.query);
 
-        let key = MemoryKey { app_name: req.app_name, user_id: req.user_id };
+        let key = MemoryKey { app_name: req.app_name, user_id: UserId::new(req.user_id).unwrap() };
 
         let store = self.store.read().unwrap();
         let sessions = match store.get(&key) {

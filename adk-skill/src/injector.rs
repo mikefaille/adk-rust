@@ -95,7 +95,7 @@ pub fn apply_skill_injection(
     policy: &SelectionPolicy,
     max_injected_chars: usize,
 ) -> Option<SkillMatch> {
-    if content.role != "user" || index.is_empty() {
+    if content.role != adk_core::types::Role::User || index.is_empty() {
         return None;
     }
 
@@ -113,7 +113,7 @@ pub fn apply_skill_injection(
     {
         *text = injected_text;
     } else {
-        content.parts.insert(0, Part::Text { text: injected_text });
+        content.parts.insert(0, Part::text(injected_text));
     }
 
     Some(top)

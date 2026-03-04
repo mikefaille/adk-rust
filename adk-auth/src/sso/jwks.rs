@@ -163,11 +163,11 @@ impl Jwk {
                 let n = self
                     .n
                     .as_ref()
-                    .ok_or_else(|| TokenError::JwksParseError("Missing 'n' in RSA key".into()))?;
+                    .ok_or_else(|| TokenError::JwksParseError("Missing 'n' in RSA key")))?;
                 let e = self
                     .e
                     .as_ref()
-                    .ok_or_else(|| TokenError::JwksParseError("Missing 'e' in RSA key".into()))?;
+                    .ok_or_else(|| TokenError::JwksParseError("Missing 'e' in RSA key")))?;
                 DecodingKey::from_rsa_components(n, e)
                     .map_err(|e| TokenError::JwksParseError(e.to_string()))
             }
@@ -175,11 +175,11 @@ impl Jwk {
                 let x = self
                     .x
                     .as_ref()
-                    .ok_or_else(|| TokenError::JwksParseError("Missing 'x' in EC key".into()))?;
+                    .ok_or_else(|| TokenError::JwksParseError("Missing 'x' in EC key")))?;
                 let y = self
                     .y
                     .as_ref()
-                    .ok_or_else(|| TokenError::JwksParseError("Missing 'y' in EC key".into()))?;
+                    .ok_or_else(|| TokenError::JwksParseError("Missing 'y' in EC key")))?;
                 DecodingKey::from_ec_components(x, y)
                     .map_err(|e| TokenError::JwksParseError(e.to_string()))
             }

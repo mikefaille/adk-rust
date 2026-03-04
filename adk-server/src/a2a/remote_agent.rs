@@ -161,7 +161,7 @@ fn convert_update_event(
                 .parts
                 .iter()
                 .filter_map(|p| match p {
-                    A2aPart::Text { text, .. } => Some(Part::Text { text: text.clone() }),
+                    A2aPart::Text { text, .. } => Some(Part::text(text.clone())),
                     _ => None,
                 })
                 .collect();
@@ -172,7 +172,8 @@ fn convert_update_event(
 
             let mut event = Event::new(invocation_id.to_string());
             event.author = agent_name.to_string();
-            event.llm_response.content = Some(Content { role: "model".to_string(), parts });
+            event.llm_response.content =
+                Some(Content { role: adk_core::types::Role::Model, parts });
             event.llm_response.partial = !artifact_event.last_chunk;
             Some(event)
         }
@@ -183,8 +184,8 @@ fn convert_update_event(
                     let mut event = Event::new(invocation_id.to_string());
                     event.author = agent_name.to_string();
                     event.llm_response.content = Some(Content {
-                        role: "model".to_string(),
-                        parts: vec![Part::Text { text: msg }],
+                        role: adk_core::types::Role::Model,
+                        parts: vec![Part::text(msg)],
                     });
                     event.llm_response.turn_complete = true;
                     return Some(event);

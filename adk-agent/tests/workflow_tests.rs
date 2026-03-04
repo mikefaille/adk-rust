@@ -21,8 +21,8 @@ struct MockSession {
 impl MockSession {
     fn new() -> Self {
         Self {
-            id: SessionId::from("test-session".to_string()),
-            user_id: UserId::from("test-user".to_string()),
+            id: SessionId::new("test-session".to_string()).unwrap(),
+            user_id: UserId::new( UserId::new("test-user".to_string()).unwrap(),
         }
     }
 }
@@ -58,7 +58,7 @@ impl TestContext {
         Self {
             content: Content {
                 role: "user".to_string(),
-                parts: vec![Part::Text { text: message.to_string() }],
+                parts: vec![Part::text(message.to_string())],
             },
             config: RunConfig::default(),
             session: MockSession::new(),
@@ -134,7 +134,7 @@ impl adk_core::Llm for MockRouterLlm {
             yield Ok(adk_core::LlmResponse {
                 content: Some(adk_core::Content {
                     role: "model".to_string(),
-                    parts: vec![adk_core::Part::Text { text }],
+                    parts: vec![adk_core::Part::text(text)],
                 }),
                 usage_metadata: None,
                 finish_reason: None,
@@ -159,7 +159,7 @@ async fn test_sequential_agent_execution_order() {
             event.author = "agent1".to_string();
             event.llm_response.content = Some(Content {
                 role: "assistant".to_string(),
-                parts: vec![Part::Text { text: "Response from agent1".to_string() }],
+                parts: vec![Part::text("Response from agent1".to_string())],
             });
             Ok(Box::pin(stream::iter(vec![Ok(event)])) as adk_core::EventStream)
         })
@@ -173,7 +173,7 @@ async fn test_sequential_agent_execution_order() {
             event.author = "agent2".to_string();
             event.llm_response.content = Some(Content {
                 role: "assistant".to_string(),
-                parts: vec![Part::Text { text: "Response from agent2".to_string() }],
+                parts: vec![Part::text("Response from agent2".to_string())],
             });
             Ok(Box::pin(stream::iter(vec![Ok(event)])) as adk_core::EventStream)
         })

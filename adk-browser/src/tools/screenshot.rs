@@ -86,7 +86,7 @@ impl Tool for ScreenshotTool {
 
                 let part = adk_core::Part::InlineData {
                     mime_type: "image/png".to_string(),
-                    data: image_data,
+                    data: image_data.into(),
                 };
 
                 artifacts.save(artifact_name, &part).await?;

@@ -7,6 +7,7 @@
 //!   cargo run --bin scoped
 
 use adk_artifact::{InMemoryArtifactService, ScopedArtifacts};
+use adk_core::types::{SessionId, UserId};
 use adk_core::{Artifacts, Part};
 use std::sync::Arc;
 
@@ -21,15 +22,15 @@ async fn main() -> anyhow::Result<()> {
     let session1 = ScopedArtifacts::new(
         service.clone(),
         "my_app".to_string(),
-        "user_123".to_string(),
-        "session_1".to_string(),
+        UserId::new("user_123").unwrap(),
+        SessionId::new("session_1").unwrap(),
     );
 
     let session2 = ScopedArtifacts::new(
         service.clone(),
         "my_app".to_string(),
-        "user_123".to_string(),
-        "session_2".to_string(),
+        UserId::new("user_123").unwrap(),
+        SessionId::new("session_2").unwrap(),
     );
 
     // --- Session-scoped artifacts (default) ---
@@ -85,8 +86,8 @@ async fn main() -> anyhow::Result<()> {
     let artifacts = ScopedArtifacts::new(
         service.clone(),
         "demo_app".to_string(),
-        "demo_user".to_string(),
-        "demo_session".to_string(),
+        UserId::new("demo_user").unwrap(),
+        SessionId::new("demo_session").unwrap(),
     );
 
     // Save - just name and data
@@ -95,7 +96,7 @@ async fn main() -> anyhow::Result<()> {
             "report.pdf",
             &Part::InlineData {
                 mime_type: "application/pdf".to_string(),
-                data: vec![0x25, 0x50, 0x44, 0x46], // PDF header
+                data: vec![0x25, 0x50, 0x44, 0x46].into(), // PDF header
             },
         )
         .await?;

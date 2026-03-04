@@ -49,7 +49,7 @@ impl MockSession {
     fn new() -> Self {
         Self {
             id: SessionId::from("mcp-session".to_string()),
-            user_id: UserId::from("user".to_string()),
+            user_id: UserId::new( UserId::from("user".to_string()),
         }
     }
 }
@@ -97,7 +97,7 @@ impl MockContext {
             session: MockSession::new(),
             user_content: Content {
                 role: "user".to_string(),
-                parts: vec![Part::Text { text: text.to_string() }],
+                parts: vec![Part::text(text.to_string())],
             },
             metadata: HashMap::new(),
         }

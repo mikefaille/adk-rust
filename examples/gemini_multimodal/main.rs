@@ -63,7 +63,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         role: "user".to_string(),
         parts: vec![
             Part::InlineData { mime_type: "image/png".to_string(), data: red_pixel_png.clone() },
-            Part::Text { text: "What do you see in this image? It's very small.".to_string() },
+            Part::text("What do you see in this image? It's very small.".to_string()),
         ],
     }]);
     print_response(&model, request).await?;

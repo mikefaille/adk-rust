@@ -30,8 +30,8 @@ pub async fn aggregate_stream(
     })?;
 
     final_response.content = Some(Content {
-        role: "model".to_string(),
-        parts: vec![Part::Text { text: aggregated_text }],
+        role: adk_core::types::Role::Model,
+        parts: vec![Part::text(aggregated_text)],
     });
     final_response.partial = false;
     final_response.turn_complete = true;

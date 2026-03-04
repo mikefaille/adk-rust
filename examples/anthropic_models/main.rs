@@ -49,7 +49,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let short_request = make_request(vec![Content {
         role: "user".to_string(),
-        parts: vec![Part::Text { text: "Hello, Claude!".to_string() }],
+        parts: vec![Part::text("Hello, Claude!".to_string())],
     }]);
 
     let count = client.count_tokens(&short_request).await?;
