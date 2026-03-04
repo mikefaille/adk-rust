@@ -13,7 +13,7 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Console { app_name: _, user_id: _ } => {
+        Commands::Console { app_name: _, user_id: UserId::new( _ } => {
             println!("Console mode requires an agent implementation.");
             println!("Use the quickstart example instead:");
             println!("  cargo run --example quickstart");

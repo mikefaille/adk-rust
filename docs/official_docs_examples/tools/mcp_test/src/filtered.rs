@@ -97,7 +97,7 @@ async fn main() -> anyhow::Result<()> {
     let result = adk_cli::console::run_console(
         Arc::new(agent),
         "mcp_filtered".to_string(),
-        "user".to_string(),
+        UserId::from("user"),
     )
     .await;
 

@@ -90,12 +90,12 @@ impl Default for InMemorySessionService {
 #[async_trait]
 impl SessionService for InMemorySessionService {
     async fn create(&self, req: CreateRequest) -> Result<Box<dyn Session>> {
-        let session_id = req.session_id.unwrap_or_else(|| SessionId::from(Uuid::new_v4().to_string()));
+        let session_id = req.session_id.unwrap_or_else(|| SessionId::new(Uuid::new_v4().to_string()).unwrap());
 
         let id = CompositeSessionKey {
             app_name: req.app_name.clone(),
-            user_id: req.user_id.clone(),
-            session_id: session_id.clone(),
+            user_id: UserId::new(req.user_id.clone()).unwrap(),
+            session_id: SessionId::new(session_id.clone()).unwrap(),
         };
 
         let (app_delta, user_delta, session_state) = Self::extract_state_deltas(&req.state);
@@ -137,8 +137,8 @@ impl SessionService for InMemorySessionService {
     async fn get(&self, req: GetRequest) -> Result<Box<dyn Session>> {
         let id = CompositeSessionKey {
             app_name: req.app_name.clone(),
-            user_id: req.user_id.clone(),
-            session_id: req.session_id.clone(),
+            user_id: UserId::new(req.user_id.clone()).unwrap(),
+            session_id: SessionId::new(req.session_id.clone()).unwrap(),
         };
 
         let sessions = self.sessions.read().unwrap();
@@ -153,7 +153,7 @@ impl SessionService for InMemorySessionService {
         let user_state_lock = self.user_state.read().unwrap();
         let user_state = user_state_lock
             .get(&req.app_name)
-            .and_then(|m| m.get(req.user_id.as_ref()))
+            .and_then(|m| m.get(req.user_id.as_str()))
             .cloned()
             .unwrap_or_default();
         drop(user_state_lock);
@@ -197,7 +197,7 @@ impl SessionService for InMemorySessionService {
 
     async fn delete(&self, req: DeleteRequest) -> Result<()> {
         let id =
-            CompositeSessionKey { app_name: req.app_name, user_id: req.user_id, session_id: req.session_id };
+            CompositeSessionKey { app_name: req.app_name, user_id: UserId::new(req.user_id).unwrap(), session_id: SessionId::new(req.session_id).unwrap() };
 
         let mut sessions = self.sessions.write().unwrap();
         sessions.remove(&id.key());

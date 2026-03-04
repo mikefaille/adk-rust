@@ -21,8 +21,7 @@ impl OktaProvider {
     /// * `client_id` - Application client ID
     #[cfg(feature = "sso")]
     pub fn new(domain: impl Into<String>, client_id: impl Into<String>) -> Self {
-        let domain = domain.into();
-        let issuer = format!("https://{}/oauth2/default", domain);
+        let domain = domain.into();        let issuer = format!("https://{}/oauth2/default", domain);
         let jwks_uri = format!("https://{}/oauth2/default/v1/keys", domain);
 
         Self {
@@ -40,9 +39,7 @@ impl OktaProvider {
         auth_server_id: impl Into<String>,
         client_id: impl Into<String>,
     ) -> Self {
-        let domain = domain.into();
-        let auth_server = auth_server_id.into();
-        let issuer = format!("https://{}/oauth2/{}", domain, auth_server);
+        let domain = domain.into();        let auth_server = auth_server_id.into();        let issuer = format!("https://{}/oauth2/{}", domain, auth_server);
         let jwks_uri = format!("https://{}/oauth2/{}/v1/keys", domain, auth_server);
 
         Self {
@@ -69,7 +66,7 @@ impl OktaProvider {
 impl TokenValidator for OktaProvider {
     async fn validate(&self, token: &str) -> Result<TokenClaims, TokenError> {
         let header = jsonwebtoken::decode_header(token)?;
-        let kid = header.kid.ok_or_else(|| TokenError::MissingClaim("kid".into()))?;
+        let kid = header.kid.ok_or_else(|| TokenError::MissingClaim("kid")))?;
 
         let key = self.jwks_cache.get_key(&kid).await?;
 

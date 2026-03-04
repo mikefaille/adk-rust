@@ -1,5 +1,6 @@
 use crate::ServerConfig;
 use adk_artifact::{ListRequest, LoadRequest};
+use adk_core::types::{SessionId, UserId};
 use axum::{
     Json,
     body::Body,
@@ -21,7 +22,7 @@ impl ArtifactsController {
 
 pub async fn list_artifacts(
     State(controller): State<ArtifactsController>,
-    Path((app_name, user_id, session_id)): Path<(String, String, String)>,
+    Path((app_name, user_id, session_id)): Path<(String, UserId, SessionId)>,
 ) -> Result<Json<Vec<String>>, StatusCode> {
     if let Some(service) = &controller.config.artifact_service {
         let resp = service
@@ -36,7 +37,7 @@ pub async fn list_artifacts(
 
 pub async fn get_artifact(
     State(controller): State<ArtifactsController>,
-    Path((app_name, user_id, session_id, artifact_name)): Path<(String, String, String, String)>,
+    Path((app_name, user_id, session_id, artifact_name)): Path<(String, UserId, SessionId, String)>,
 ) -> Result<impl IntoResponse, StatusCode> {
     if let Some(service) = &controller.config.artifact_service {
         let resp = service

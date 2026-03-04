@@ -21,7 +21,7 @@ use std::sync::Arc;
 /// use std::sync::Arc;
 ///
 /// let ac = AccessControl::builder()
-///     .role(Role::new("user").allow(Permission::Tool("search".into())))
+///     .role(Role::new("user").allow(Permission::Tool("search"))))
 ///     .build()?;
 ///
 /// let protected_search = ProtectedTool::new(search_tool, Arc::new(ac));

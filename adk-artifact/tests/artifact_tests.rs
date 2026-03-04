@@ -7,8 +7,8 @@ async fn test_save_and_load() {
 
     let save_req = SaveRequest {
         app_name: "app1".to_string(),
-        user_id: "user1".to_string(),
-        session_id: "session1".to_string(),
+        user_id: UserId::new( "user1".to_string(),
+        session_id: SessionId::new( "session1".to_string(),
         file_name: "test.txt".to_string(),
         part: Part::Text { text: "Hello World".to_string() },
         version: None,
@@ -19,8 +19,8 @@ async fn test_save_and_load() {
 
     let load_req = LoadRequest {
         app_name: "app1".to_string(),
-        user_id: "user1".to_string(),
-        session_id: "session1".to_string(),
+        user_id: UserId::new( "user1".to_string(),
+        session_id: SessionId::new( "session1".to_string(),
         file_name: "test.txt".to_string(),
         version: None,
     };
@@ -37,8 +37,8 @@ async fn test_versioning() {
     service
         .save(SaveRequest {
             app_name: "app1".to_string(),
-            user_id: "user1".to_string(),
-            session_id: "session1".to_string(),
+            user_id: UserId::new( "user1".to_string(),
+            session_id: SessionId::new( "session1".to_string(),
             file_name: "test.txt".to_string(),
             part: Part::Text { text: "v1".to_string() },
             version: None,
@@ -50,8 +50,8 @@ async fn test_versioning() {
     service
         .save(SaveRequest {
             app_name: "app1".to_string(),
-            user_id: "user1".to_string(),
-            session_id: "session1".to_string(),
+            user_id: UserId::new( "user1".to_string(),
+            session_id: SessionId::new( "session1".to_string(),
             file_name: "test.txt".to_string(),
             part: Part::Text { text: "v2".to_string() },
             version: None,
@@ -63,8 +63,8 @@ async fn test_versioning() {
     let load_resp = service
         .load(LoadRequest {
             app_name: "app1".to_string(),
-            user_id: "user1".to_string(),
-            session_id: "session1".to_string(),
+            user_id: UserId::new( "user1".to_string(),
+            session_id: SessionId::new( "session1".to_string(),
             file_name: "test.txt".to_string(),
             version: None,
         })
@@ -76,8 +76,8 @@ async fn test_versioning() {
     let load_resp = service
         .load(LoadRequest {
             app_name: "app1".to_string(),
-            user_id: "user1".to_string(),
-            session_id: "session1".to_string(),
+            user_id: UserId::new( "user1".to_string(),
+            session_id: SessionId::new( "session1".to_string(),
             file_name: "test.txt".to_string(),
             version: Some(1),
         })
@@ -89,8 +89,8 @@ async fn test_versioning() {
     let versions_resp = service
         .versions(VersionsRequest {
             app_name: "app1".to_string(),
-            user_id: "user1".to_string(),
-            session_id: "session1".to_string(),
+            user_id: UserId::new( "user1".to_string(),
+            session_id: SessionId::new( "session1".to_string(),
             file_name: "test.txt".to_string(),
         })
         .await
@@ -105,8 +105,8 @@ async fn test_list() {
     service
         .save(SaveRequest {
             app_name: "app1".to_string(),
-            user_id: "user1".to_string(),
-            session_id: "session1".to_string(),
+            user_id: UserId::new( "user1".to_string(),
+            session_id: SessionId::new( "session1".to_string(),
             file_name: "file1.txt".to_string(),
             part: Part::Text { text: "content1".to_string() },
             version: None,
@@ -117,8 +117,8 @@ async fn test_list() {
     service
         .save(SaveRequest {
             app_name: "app1".to_string(),
-            user_id: "user1".to_string(),
-            session_id: "session1".to_string(),
+            user_id: UserId::new( "user1".to_string(),
+            session_id: SessionId::new( "session1".to_string(),
             file_name: "file2.txt".to_string(),
             part: Part::Text { text: "content2".to_string() },
             version: None,
@@ -129,8 +129,8 @@ async fn test_list() {
     let list_resp = service
         .list(ListRequest {
             app_name: "app1".to_string(),
-            user_id: "user1".to_string(),
-            session_id: "session1".to_string(),
+            user_id: UserId::new( "user1".to_string(),
+            session_id: SessionId::new( "session1".to_string(),
         })
         .await
         .unwrap();
@@ -145,8 +145,8 @@ async fn test_delete() {
     service
         .save(SaveRequest {
             app_name: "app1".to_string(),
-            user_id: "user1".to_string(),
-            session_id: "session1".to_string(),
+            user_id: UserId::new( "user1".to_string(),
+            session_id: SessionId::new( "session1".to_string(),
             file_name: "test.txt".to_string(),
             part: Part::Text { text: "content".to_string() },
             version: None,
@@ -157,8 +157,8 @@ async fn test_delete() {
     service
         .delete(DeleteRequest {
             app_name: "app1".to_string(),
-            user_id: "user1".to_string(),
-            session_id: "session1".to_string(),
+            user_id: UserId::new( "user1".to_string(),
+            session_id: SessionId::new( "session1".to_string(),
             file_name: "test.txt".to_string(),
             version: None,
         })
@@ -168,8 +168,8 @@ async fn test_delete() {
     let load_result = service
         .load(LoadRequest {
             app_name: "app1".to_string(),
-            user_id: "user1".to_string(),
-            session_id: "session1".to_string(),
+            user_id: UserId::new( "user1".to_string(),
+            session_id: SessionId::new( "session1".to_string(),
             file_name: "test.txt".to_string(),
             version: None,
         })
@@ -186,8 +186,8 @@ async fn test_user_scoped_artifacts() {
     service
         .save(SaveRequest {
             app_name: "app1".to_string(),
-            user_id: "user1".to_string(),
-            session_id: "session1".to_string(),
+            user_id: UserId::new( "user1".to_string(),
+            session_id: SessionId::new( "session1".to_string(),
             file_name: "user:profile.txt".to_string(),
             part: Part::Text { text: "user data".to_string() },
             version: None,
@@ -199,8 +199,8 @@ async fn test_user_scoped_artifacts() {
     let load_resp = service
         .load(LoadRequest {
             app_name: "app1".to_string(),
-            user_id: "user1".to_string(),
-            session_id: "session2".to_string(),
+            user_id: UserId::new( "user1".to_string(),
+            session_id: SessionId::new( "session2".to_string(),
             file_name: "user:profile.txt".to_string(),
             version: None,
         })
@@ -219,8 +219,8 @@ async fn test_reject_invalid_artifact_file_names() {
         let save_result = service
             .save(SaveRequest {
                 app_name: "app1".to_string(),
-                user_id: "user1".to_string(),
-                session_id: "session1".to_string(),
+                user_id: UserId::new( "user1".to_string(),
+                session_id: SessionId::new( "session1".to_string(),
                 file_name: file_name.to_string(),
                 part: Part::Text { text: "blocked".to_string() },
                 version: None,
@@ -231,8 +231,8 @@ async fn test_reject_invalid_artifact_file_names() {
         let load_result = service
             .load(LoadRequest {
                 app_name: "app1".to_string(),
-                user_id: "user1".to_string(),
-                session_id: "session1".to_string(),
+                user_id: UserId::new( "user1".to_string(),
+                session_id: SessionId::new( "session1".to_string(),
                 file_name: file_name.to_string(),
                 version: None,
             })

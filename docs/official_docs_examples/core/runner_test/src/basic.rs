@@ -59,7 +59,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("✓ Content for runner.run() works");
 
     // Validate runner.run() compiles with correct signature
-    // runner.run(user_id: String, session_id: String, user_content: Content)
+    // runner.run(user_id: UserId, session_id: SessionId, user_content: Content)
     // We can't run without a real API key, but we validated the types
 
     println!("\n=== All runner tests passed! ===");

@@ -9,6 +9,7 @@
 //!   GOOGLE_API_KEY=your_key cargo run --bin csv_analysis
 
 use adk_artifact::{ArtifactService, InMemoryArtifactService, LoadRequest, SaveRequest};
+use adk_core::types::{SessionId, UserId};
 use adk_core::{BeforeModelResult, Part};
 use adk_rust::prelude::*;
 use std::sync::Arc;
@@ -32,8 +33,8 @@ async fn main() -> anyhow::Result<()> {
     artifact_service
         .save(SaveRequest {
             app_name: "csv_app".to_string(),
-            user_id: "user".to_string(),
-            session_id: "init".to_string(),
+            user_id: UserId::from("user"),
+            session_id: SessionId::from("init"),
             file_name: "user:sales.csv".to_string(),
             part: Part::Text { text: csv_data },
             version: None,
@@ -52,8 +53,8 @@ async fn main() -> anyhow::Result<()> {
                 if let Ok(response) = service
                     .load(LoadRequest {
                         app_name: "csv_app".to_string(),
-                        user_id: "user".to_string(),
-                        session_id: "init".to_string(),
+                        user_id: UserId::from("user"),
+                        session_id: SessionId::from("init"),
                         file_name: "user:sales.csv".to_string(),
                         version: None,
                     })
@@ -79,7 +80,7 @@ async fn main() -> anyhow::Result<()> {
 
     println!("Ask questions about the sales data:\n");
 
-    adk_cli::console::run_console(Arc::new(agent), "csv_demo".to_string(), "user".to_string())
+    adk_cli::console::run_console(Arc::new(agent), "csv_demo".to_string(), UserId::from("user"))
         .await?;
 
     Ok(())

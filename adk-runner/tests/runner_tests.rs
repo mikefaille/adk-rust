@@ -83,7 +83,7 @@ use adk_core::types::{SessionId, UserId};
 struct MockSession {
     id: SessionId,
     app_name: String,
-    user_id: UserId,
+    user_id: UserId::new( UserId,
     events: MockEvents,
     state: MockState,
 }
@@ -127,7 +127,7 @@ impl SessionService for MockSessionService {
         Ok(Box::new(MockSession {
             id: req.session_id,
             app_name: req.app_name,
-            user_id: req.user_id,
+            user_id: UserId::new( req.user_id,
             events: MockEvents { events: vec![] },
             state: MockState,
         }))
@@ -141,7 +141,7 @@ impl SessionService for MockSessionService {
         Ok(())
     }
 
-    async fn append_event(&self, _session_id: &SessionId, _event: Event) -> Result<()> {
+    async fn append_event(&self, _session_id: SessionId::new( &SessionId, _event: Event) -> Result<()> {
         Ok(())
     }
 }
@@ -192,7 +192,7 @@ async fn test_runner_run() {
         Content { role: "user".to_string(), parts: vec![Part::Text { text: "Hello".to_string() }] };
 
     let result = runner
-        .run("user123".to_string().into(), "session456".to_string().into(), content)
+        .run("user123".to_string()), "session456".to_string()), content)
         .await;
 
     assert!(result.is_ok());
@@ -238,9 +238,9 @@ async fn test_find_agent_to_run_with_history() {
     events.push(event);
 
     let session = MockSession {
-        id: "session1".to_string().into(),
+        id: "session1".to_string()),
         app_name: "test".to_string(),
-        user_id: "user1".to_string().into(),
+        user_id: UserId::new( "user1".to_string()),
         events: MockEvents { events },
         state: MockState,
     };
@@ -255,9 +255,9 @@ async fn test_find_agent_to_run_defaults_to_root() {
 
     // Empty session
     let session = MockSession {
-        id: "session1".to_string().into(),
+        id: "session1".to_string()),
         app_name: "test".to_string(),
-        user_id: "user1".to_string().into(),
+        user_id: UserId::new( "user1".to_string()),
         events: MockEvents { events: vec![] },
         state: MockState,
     };
@@ -277,9 +277,9 @@ async fn test_find_agent_to_run_skips_user_events() {
     events.push(event);
 
     let session = MockSession {
-        id: "session1".to_string().into(),
+        id: "session1".to_string()),
         app_name: "test".to_string(),
-        user_id: "user1".to_string().into(),
+        user_id: UserId::new( "user1".to_string()),
         events: MockEvents { events },
         state: MockState,
     };
@@ -413,7 +413,7 @@ async fn test_plugin_callback_order_and_mutation() {
 
     let content = Content::new("user").with_text("hello");
     let mut stream = runner
-        .run("user123".to_string().into(), "session456".to_string().into(), content)
+        .run("user123".to_string()), "session456".to_string()), content)
         .await
         .unwrap();
 
@@ -471,8 +471,8 @@ async fn test_plugin_error_propagates_from_on_user_message() {
 
     let mut stream = runner
         .run(
-            "user123".to_string().into(),
-            "session456".to_string().into(),
+            "user123".to_string()),
+            "session456".to_string()),
             Content::new("user").with_text("hello"),
         )
         .await
@@ -519,8 +519,8 @@ async fn test_skill_injector_plugin_mutates_user_prompt() {
 
     let mut stream = runner
         .run(
-            "user123".to_string().into(),
-            "session456".to_string().into(),
+            "user123".to_string()),
+            "session456".to_string()),
             Content::new("user").with_text("Please search this repository quickly"),
         )
         .await
@@ -576,8 +576,8 @@ async fn test_runner_with_auto_skills_mutates_user_prompt() {
 
     let mut stream = runner
         .run(
-            "user123".to_string().into(),
-            "session456".to_string().into(),
+            "user123".to_string()),
+            "session456".to_string()),
             Content::new("user").with_text("Please search this repository quickly"),
         )
         .await

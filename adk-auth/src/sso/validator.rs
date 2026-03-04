@@ -54,7 +54,7 @@ impl TokenValidator for JwtValidator {
     async fn validate(&self, token: &str) -> Result<TokenClaims, TokenError> {
         // Decode header to get key ID
         let header = jsonwebtoken::decode_header(token)?;
-        let kid = header.kid.ok_or_else(|| TokenError::MissingClaim("kid".into()))?;
+        let kid = header.kid.ok_or_else(|| TokenError::MissingClaim("kid")))?;
 
         // Get decoding key from JWKS cache
         let key = self.jwks_cache.get_key(&kid).await?;
@@ -85,20 +85,17 @@ pub struct JwtValidatorBuilder {
 impl JwtValidatorBuilder {
     /// Set the expected issuer.
     pub fn issuer(mut self, issuer: impl Into<String>) -> Self {
-        self.issuer = Some(issuer.into());
-        self
+        self.issuer = Some(issuer.into());        self
     }
 
     /// Set the expected audience.
     pub fn audience(mut self, audience: impl Into<String>) -> Self {
-        self.audience = Some(audience.into());
-        self
+        self.audience = Some(audience.into());        self
     }
 
     /// Set the JWKS URI.
     pub fn jwks_uri(mut self, uri: impl Into<String>) -> Self {
-        self.jwks_uri = Some(uri.into());
-        self
+        self.jwks_uri = Some(uri.into());        self
     }
 
     /// Add an allowed algorithm.
@@ -110,10 +107,10 @@ impl JwtValidatorBuilder {
     /// Build the validator.
     pub fn build(self) -> Result<JwtValidator, TokenError> {
         let issuer =
-            self.issuer.ok_or_else(|| TokenError::ValidationError("issuer is required".into()))?;
+            self.issuer.ok_or_else(|| TokenError::ValidationError("issuer is required")))?;
         let jwks_uri = self
             .jwks_uri
-            .ok_or_else(|| TokenError::ValidationError("jwks_uri is required".into()))?;
+            .ok_or_else(|| TokenError::ValidationError("jwks_uri is required")))?;
 
         let algorithms = if self.algorithms.is_empty() {
             vec![jsonwebtoken::Algorithm::RS256]
@@ -156,6 +153,6 @@ impl JwtValidatorBuilder {
         self
     }
     pub fn build(self) -> Result<JwtValidator, TokenError> {
-        Err(TokenError::ValidationError("SSO feature not enabled".into()))
+        Err(TokenError::ValidationError("SSO feature not enabled")))
     }
 }

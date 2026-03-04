@@ -103,14 +103,13 @@ pub struct ClaimsMapperBuilder {
 impl ClaimsMapperBuilder {
     /// Map an IdP group to an adk-auth role.
     pub fn map_group(mut self, group: impl Into<String>, role: impl Into<String>) -> Self {
-        self.group_to_role.insert(group.into(), role.into());
+        self.group_to_role.insert(group), role));
         self
     }
 
     /// Set the default role for users without matching groups.
     pub fn default_role(mut self, role: impl Into<String>) -> Self {
-        self.default_role = Some(role.into());
-        self
+        self.default_role = Some(role.into());        self
     }
 
     /// Use 'sub' claim as user ID.
@@ -133,7 +132,7 @@ impl ClaimsMapperBuilder {
 
     /// Use a custom claim as user ID.
     pub fn user_id_from_claim(mut self, claim: impl Into<String>) -> Self {
-        self.user_id_claim = UserIdClaim::Custom(claim.into());
+        self.user_id_claim = UserIdClaim::Custom(claim));
         self
     }
 
@@ -153,10 +152,10 @@ mod tests {
 
     fn test_claims() -> TokenClaims {
         TokenClaims {
-            sub: "user-123".into(),
-            email: Some("alice@example.com".into()),
-            preferred_username: Some("alice".into()),
-            groups: vec!["AdminGroup".into(), "Users".into()],
+            sub: "user-123"),
+            email: Some("alice@example.com")),
+            preferred_username: Some("alice")),
+            groups: vec!["AdminGroup"), "Users")],
             ..Default::default()
         }
     }

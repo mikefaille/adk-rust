@@ -1,3 +1,4 @@
+use adk_core::types::{SessionId, UserId};
 use adk_core::{Agent, Content, Part};
 use adk_runner::{Runner, RunnerConfig};
 use adk_session::{CreateRequest, InMemorySessionService, SessionService};
@@ -10,14 +11,14 @@ use std::io::{self, Write};
 use std::sync::Arc;
 
 #[allow(dead_code)] // Part of CLI API, not currently used
-pub async fn run_console(agent: Arc<dyn Agent>, app_name: String, user_id: String) -> Result<()> {
+pub async fn run_console(agent: Arc<dyn Agent>, app_name: String, user_id: UserId) -> Result<()> {
     let session_service = Arc::new(InMemorySessionService::new());
 
     let session = session_service
         .create(CreateRequest {
             app_name: app_name.clone(),
-            user_id: user_id.clone().into(),
-            session_id: None,
+            user_id: user_id.clone(),
+            session_id: None, // auto-generated
             state: HashMap::new(),
         })
         .await?;
@@ -57,7 +58,7 @@ pub async fn run_console(agent: Arc<dyn Agent>, app_name: String, user_id: Strin
 
                 let session_id = session.id().to_string();
                 let mut events =
-                    runner.run(user_id.clone().into(), session_id.into(), user_content).await?;
+                    runner.run(user_id.clone(), session.id().clone(), user_content).await?;
 
                 let mut stream_printer = StreamPrinter::default();
 

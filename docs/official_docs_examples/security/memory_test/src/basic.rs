@@ -1,6 +1,6 @@
 //! Memory doc-test - validates memory.md documentation
 
-use adk_core::Content;
+use adk_core::{Content, types::UserId};
 use adk_memory::{InMemoryMemoryService, MemoryEntry, MemoryService, SearchRequest};
 use chrono::Utc;
 
@@ -40,7 +40,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // From docs: Search memories
     let request = SearchRequest {
         query: "Rust".to_string(),
-        user_id: "user-123".to_string(),
+        user_id: UserId::from("user-123").to_string(),
         app_name: "my_app".to_string(),
     };
 
@@ -66,7 +66,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Search only returns user-a's memories
     let request = SearchRequest {
         query: "topic".to_string(),
-        user_id: "user-a".to_string(),
+        user_id: UserId::from("user-a").to_string(),
         app_name: "app".to_string(),
     };
     let response = memory.search(request).await?;
@@ -80,7 +80,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // From docs: Memory isolation by app
     let request = SearchRequest {
         query: "Rust".to_string(),
-        user_id: "user-123".to_string(),
+        user_id: UserId::from("user-123").to_string(),
         app_name: "different_app".to_string(), // Different app
     };
     let response = memory.search(request).await?;

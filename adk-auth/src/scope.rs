@@ -371,7 +371,7 @@ mod tests {
     #[test]
     fn test_scope_denied_display() {
         let denied =
-            ScopeDenied { required: vec!["a".into(), "b".into()], missing: vec!["b".into()] };
+            ScopeDenied { required: vec!["a".to_string(), "b".to_string()], missing: vec!["b".to_string()] };
         let msg = denied.to_string();
         assert!(msg.contains("missing required scopes"));
         assert!(msg.contains("b"));

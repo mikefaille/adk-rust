@@ -100,13 +100,13 @@ struct ScopedMockContext {
 }
 
 impl ScopedMockContext {
-    fn create(user_id: &str, scopes: Vec<&str>) -> Arc<dyn ToolContext> {
+    fn create(user_id: &UserId, scopes: Vec<&str>) -> Arc<dyn ToolContext> {
         let mut identity = adk_core::types::AdkIdentity::default();
-        identity.invocation_id = "test-invocation".to_string().into();
+        identity.invocation_id = "test-invocation".to_string());
         identity.agent_name = "test-agent".to_string();
-        identity.user_id = user_id.to_string().into();
+        identity.user_id = user_id.to_string());
         identity.app_name = "test-app".to_string();
-        identity.session_id = "test-session".to_string().into();
+        identity.session_id = "test-session".to_string());
 
         Arc::new(Self {
             identity,
@@ -168,25 +168,25 @@ impl ToolContext for ScopedMockContext {
 fn test_check_scopes_no_requirements() {
     // Tools with no scope requirements always pass
     assert!(check_scopes(&[], &[]).is_ok());
-    assert!(check_scopes(&[], &["admin".into()]).is_ok());
+    assert!(check_scopes(&[], &["admin")]).is_ok());
 }
 
 #[test]
 fn test_check_scopes_all_satisfied() {
-    let granted = vec!["finance:read".into(), "finance:write".into(), "verified".into()];
+    let granted = vec!["finance:read"), "finance:write"), "verified")];
     assert!(check_scopes(&["finance:write", "verified"], &granted).is_ok());
 }
 
 #[test]
 fn test_check_scopes_superset_granted() {
     // User has more scopes than required — should pass
-    let granted = vec!["admin".into(), "finance:write".into(), "verified".into()];
+    let granted = vec!["admin"), "finance:write"), "verified")];
     assert!(check_scopes(&["finance:write"], &granted).is_ok());
 }
 
 #[test]
 fn test_check_scopes_partial_missing() {
-    let granted = vec!["finance:read".into()];
+    let granted = vec!["finance:read")];
     let err = check_scopes(&["finance:read", "finance:write"], &granted).unwrap_err();
     assert_eq!(err.missing, vec!["finance:write"]);
     assert_eq!(err.required, vec!["finance:read", "finance:write"]);
@@ -203,8 +203,8 @@ fn test_check_scopes_all_missing() {
 #[test]
 fn test_scope_denied_display_message() {
     let denied = ScopeDenied {
-        required: vec!["finance:write".into(), "verified".into()],
-        missing: vec!["verified".into()],
+        required: vec!["finance:write"), "verified")],
+        missing: vec!["verified")],
     };
     let msg = denied.to_string();
     assert!(msg.contains("missing required scopes"));

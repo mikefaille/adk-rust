@@ -44,7 +44,7 @@ async fn main() -> anyhow::Result<()> {
     adk_cli::console::run_console(
         Arc::new(agent),
         "callbacks_demo".to_string(),
-        "user".to_string(),
+        UserId::from("user"),
     )
     .await?;
 

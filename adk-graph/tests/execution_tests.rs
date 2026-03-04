@@ -13,7 +13,7 @@ async fn test_simple_execution() {
     let graph = StateGraph::with_channels(&["value"])
         .add_node_fn("double", |ctx| async move {
             let value = ctx.get("value").and_then(|v| v.as_i64()).unwrap_or(0);
-            Ok(NodeOutput::new().with_update("value", json!(value * 2)))
+            Ok(NodeOutput::new().with_update("value", json!(value * 2))
         })
         .add_edge(START, "double")
         .add_edge("double", END)
@@ -21,12 +21,12 @@ async fn test_simple_execution() {
         .unwrap();
 
     let mut input = State::new();
-    input.insert("value".to_string(), json!(21));
+    input.insert("value".to_string(), json!(21);
 
     let result =
         graph.invoke(input, ExecutionConfig::new("test-thread".to_string())).await.unwrap();
 
-    assert_eq!(result.get("value"), Some(&json!(42)));
+    assert_eq!(result.get("value"), Some(&json!(42));
 }
 
 #[tokio::test]
@@ -34,15 +34,15 @@ async fn test_sequential_execution() {
     let graph = StateGraph::with_channels(&["value"])
         .add_node_fn("add_one", |ctx| async move {
             let value = ctx.get("value").and_then(|v| v.as_i64()).unwrap_or(0);
-            Ok(NodeOutput::new().with_update("value", json!(value + 1)))
+            Ok(NodeOutput::new().with_update("value", json!(value + 1))
         })
         .add_node_fn("double", |ctx| async move {
             let value = ctx.get("value").and_then(|v| v.as_i64()).unwrap_or(0);
-            Ok(NodeOutput::new().with_update("value", json!(value * 2)))
+            Ok(NodeOutput::new().with_update("value", json!(value * 2))
         })
         .add_node_fn("add_three", |ctx| async move {
             let value = ctx.get("value").and_then(|v| v.as_i64()).unwrap_or(0);
-            Ok(NodeOutput::new().with_update("value", json!(value + 3)))
+            Ok(NodeOutput::new().with_update("value", json!(value + 3))
         })
         .add_edge(START, "add_one")
         .add_edge("add_one", "double")
@@ -52,13 +52,13 @@ async fn test_sequential_execution() {
         .unwrap();
 
     let mut input = State::new();
-    input.insert("value".to_string(), json!(5));
+    input.insert("value".to_string(), json!(5);
 
     // (5 + 1) * 2 + 3 = 15
     let result =
         graph.invoke(input, ExecutionConfig::new("test-thread".to_string())).await.unwrap();
 
-    assert_eq!(result.get("value"), Some(&json!(15)));
+    assert_eq!(result.get("value"), Some(&json!(15));
 }
 
 #[tokio::test]
@@ -67,15 +67,15 @@ async fn test_conditional_routing() {
         .add_node_fn("classify", |ctx| async move {
             let value = ctx.get("value").and_then(|v| v.as_i64()).unwrap_or(0);
             let route = if value > 10 { "high" } else { "low" };
-            Ok(NodeOutput::new().with_update("route", json!(route)))
+            Ok(NodeOutput::new().with_update("route", json!(route))
         })
         .add_node_fn("high_handler", |ctx| async move {
             let value = ctx.get("value").and_then(|v| v.as_i64()).unwrap_or(0);
-            Ok(NodeOutput::new().with_update("result", json!(format!("HIGH: {}", value))))
+            Ok(NodeOutput::new().with_update("result", json!(format!("HIGH: {}", value)))
         })
         .add_node_fn("low_handler", |ctx| async move {
             let value = ctx.get("value").and_then(|v| v.as_i64()).unwrap_or(0);
-            Ok(NodeOutput::new().with_update("result", json!(format!("LOW: {}", value))))
+            Ok(NodeOutput::new().with_update("result", json!(format!("LOW: {}", value)))
         })
         .add_edge(START, "classify")
         .add_conditional_edges(
@@ -90,21 +90,21 @@ async fn test_conditional_routing() {
 
     // Test high value
     let mut input_high = State::new();
-    input_high.insert("value".to_string(), json!(50));
+    input_high.insert("value".to_string(), json!(50);
 
     let result_high =
         graph.invoke(input_high, ExecutionConfig::new("test-high".to_string())).await.unwrap();
 
-    assert_eq!(result_high.get("result"), Some(&json!("HIGH: 50")));
+    assert_eq!(result_high.get("result"), Some(&json!("HIGH: 50"));
 
     // Test low value
     let mut input_low = State::new();
-    input_low.insert("value".to_string(), json!(5));
+    input_low.insert("value".to_string(), json!(5);
 
     let result_low =
         graph.invoke(input_low, ExecutionConfig::new("test-low".to_string())).await.unwrap();
 
-    assert_eq!(result_low.get("result"), Some(&json!("LOW: 5")));
+    assert_eq!(result_low.get("result"), Some(&json!("LOW: 5"));
 }
 
 #[tokio::test]
@@ -112,7 +112,7 @@ async fn test_cycle_with_limit() {
     let graph = StateGraph::with_channels(&["count"])
         .add_node_fn("increment", |ctx| async move {
             let count = ctx.get("count").and_then(|v| v.as_i64()).unwrap_or(0);
-            Ok(NodeOutput::new().with_update("count", json!(count + 1)))
+            Ok(NodeOutput::new().with_update("count", json!(count + 1))
         })
         .add_edge(START, "increment")
         .add_conditional_edges(
@@ -129,7 +129,7 @@ async fn test_cycle_with_limit() {
     let input = State::new();
     let result = graph.invoke(input, ExecutionConfig::new("test-cycle".to_string())).await.unwrap();
 
-    assert_eq!(result.get("count"), Some(&json!(5)));
+    assert_eq!(result.get("count"), Some(&json!(5));
 }
 
 #[tokio::test]
@@ -137,7 +137,7 @@ async fn test_recursion_limit() {
     let graph = StateGraph::with_channels(&["count"])
         .add_node_fn("infinite_loop", |ctx| async move {
             let count = ctx.get("count").and_then(|v| v.as_i64()).unwrap_or(0);
-            Ok(NodeOutput::new().with_update("count", json!(count + 1)))
+            Ok(NodeOutput::new().with_update("count", json!(count + 1))
         })
         .add_edge(START, "infinite_loop")
         .add_edge("infinite_loop", "infinite_loop") // Infinite cycle
@@ -148,7 +148,7 @@ async fn test_recursion_limit() {
     let input = State::new();
     let result = graph.invoke(input, ExecutionConfig::new("test-limit".to_string())).await;
 
-    assert!(matches!(result, Err(GraphError::RecursionLimitExceeded(_))));
+    assert!(matches!(result, Err(GraphError::RecursionLimitExceeded(_)));
 }
 
 #[tokio::test]
@@ -158,7 +158,7 @@ async fn test_with_checkpointer() {
     let graph = StateGraph::with_channels(&["value"])
         .add_node_fn("process", |ctx| async move {
             let value = ctx.get("value").and_then(|v| v.as_i64()).unwrap_or(0);
-            Ok(NodeOutput::new().with_update("value", json!(value + 10)))
+            Ok(NodeOutput::new().with_update("value", json!(value + 10))
         })
         .add_edge(START, "process")
         .add_edge("process", END)
@@ -167,12 +167,12 @@ async fn test_with_checkpointer() {
         .with_checkpointer(checkpointer);
 
     let mut input = State::new();
-    input.insert("value".to_string(), json!(5));
+    input.insert("value".to_string(), json!(5);
 
     let result =
         graph.invoke(input, ExecutionConfig::new("checkpoint-test".to_string())).await.unwrap();
 
-    assert_eq!(result.get("value"), Some(&json!(15)));
+    assert_eq!(result.get("value"), Some(&json!(15));
 }
 
 #[tokio::test]
@@ -181,9 +181,9 @@ async fn test_multiple_outputs() {
         .add_node_fn("analyze", |ctx| async move {
             let input = ctx.get("input").and_then(|v| v.as_str()).unwrap_or("");
             Ok(NodeOutput::new()
-                .with_update("length", json!(input.len()))
-                .with_update("uppercase", json!(input.to_uppercase()))
-                .with_update("words", json!(input.split_whitespace().count())))
+                .with_update("length", json!(input.len())
+                .with_update("uppercase", json!(input.to_uppercase())
+                .with_update("words", json!(input.split_whitespace().count()))
         })
         .add_edge(START, "analyze")
         .add_edge("analyze", END)
@@ -191,20 +191,20 @@ async fn test_multiple_outputs() {
         .unwrap();
 
     let mut input = State::new();
-    input.insert("input".to_string(), json!("hello world"));
+    input.insert("input".to_string(), json!("hello world");
 
     let result = graph.invoke(input, ExecutionConfig::new("test-multi".to_string())).await.unwrap();
 
-    assert_eq!(result.get("length"), Some(&json!(11)));
-    assert_eq!(result.get("uppercase"), Some(&json!("HELLO WORLD")));
-    assert_eq!(result.get("words"), Some(&json!(2)));
+    assert_eq!(result.get("length"), Some(&json!(11));
+    assert_eq!(result.get("uppercase"), Some(&json!("HELLO WORLD"));
+    assert_eq!(result.get("words"), Some(&json!(2));
 }
 
 #[tokio::test]
 async fn test_empty_input_state() {
     let graph = StateGraph::with_channels(&["result"])
         .add_node_fn("generate", |_ctx| async move {
-            Ok(NodeOutput::new().with_update("result", json!("generated")))
+            Ok(NodeOutput::new().with_update("result", json!("generated"))
         })
         .add_edge(START, "generate")
         .add_edge("generate", END)
@@ -214,5 +214,5 @@ async fn test_empty_input_state() {
     let input = State::new();
     let result = graph.invoke(input, ExecutionConfig::new("test-empty".to_string())).await.unwrap();
 
-    assert_eq!(result.get("result"), Some(&json!("generated")));
+    assert_eq!(result.get("result"), Some(&json!("generated"));
 }

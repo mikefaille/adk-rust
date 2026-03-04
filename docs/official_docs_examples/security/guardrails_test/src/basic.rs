@@ -25,15 +25,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("✓ PII with specific types works");
 
     // From docs: Content filtering - blocked keywords
-    let filter = ContentFilter::blocked_keywords(vec!["forbidden".into(), "banned".into()]);
+    let filter =
+        ContentFilter::blocked_keywords(vec!["forbidden".to_string(), "banned".to_string()]);
     let content = Content::new("user").with_text("This is forbidden content");
     let result = filter.validate(&content).await;
     assert!(result.is_fail());
     println!("✓ Blocked keywords filter works");
 
     // From docs: Content filtering - on topic
-    let filter =
-        ContentFilter::on_topic("cooking", vec!["recipe".into(), "cook".into(), "bake".into()]);
+    let filter = ContentFilter::on_topic(
+        "cooking",
+        vec!["recipe".to_string(), "cook".to_string(), "bake".to_string()],
+    );
     let content = Content::new("user").with_text("Give me a recipe");
     let result = filter.validate(&content).await;
     assert!(result.is_pass());
@@ -48,8 +51,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // From docs: Custom ContentFilterConfig
     let config = ContentFilterConfig {
-        blocked_keywords: vec!["spam".into()],
-        required_topics: vec!["rust".into()],
+        blocked_keywords: vec!["spam".to_string()],
+        required_topics: vec!["rust".to_string()],
         max_length: Some(5000),
         min_length: Some(10),
         severity: Severity::High,

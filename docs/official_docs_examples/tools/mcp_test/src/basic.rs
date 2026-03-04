@@ -10,6 +10,7 @@
 //!   cd doc-test/tools/mcp_test
 //!   GOOGLE_API_KEY=your_key cargo run --bin basic
 
+use adk_core::types::{SessionId, UserId};
 use adk_core::{Content, ReadonlyContext, Toolset};
 use adk_rust::prelude::*;
 use adk_tool::McpToolset;
@@ -88,9 +89,12 @@ async fn main() -> anyhow::Result<()> {
     let agent = builder.build()?;
 
     // 6. Run interactive console
-    let result =
-        adk_cli::console::run_console(Arc::new(agent), "mcp_basic".to_string(), "user".to_string())
-            .await;
+    let result = adk_cli::console::run_console(
+        Arc::new(agent),
+        "mcp_basic".to_string(),
+        UserId::from("user"),
+    )
+    .await;
 
     // 7. Cleanup: shutdown MCP server
     println!("\nShutting down MCP server...");

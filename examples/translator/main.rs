@@ -290,9 +290,9 @@ async fn run_batch_mode(
         let session = session_service
             .create(CreateRequest {
                 app_name: "translator".to_string(),
-                user_id: "batch_user".to_string().into(),
-                session_id: None,
-                state: initial_state,
+                user_id: UserId::new( "batch_user".to_string()),
+                session_id: SessionId::new(None),
+            state: initial_state,
             })
             .await?;
 
@@ -330,11 +330,11 @@ async fn run_batch_mode(
 async fn run_translation(
     runner: &Runner,
     session_service: &Arc<InMemorySessionService>,
-    session_id: &str,
+    session_id: &SessionId,
     user_content: Content,
 ) -> anyhow::Result<String> {
     let mut stream =
-        runner.run("batch_user".to_string().into(), session_id.to_string().into(), user_content).await?;
+        runner.run("batch_user".to_string(, session_id.to_string(, user_content).await?;
 
     // Process stream and collect any errors
     let mut last_text = String::new();
@@ -367,8 +367,8 @@ async fn run_translation(
     let updated_session = session_service
         .get(GetRequest {
             app_name: "translator".to_string(),
-            user_id: "batch_user".to_string().into(),
-            session_id: session_id.to_string().into(),
+            user_id: UserId::new( "batch_user".to_string()),
+            session_id: SessionId::new( session_id.to_string()),
             num_recent_events: None,
             after: None,
         })

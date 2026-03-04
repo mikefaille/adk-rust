@@ -1,0 +1,629 @@
+diff --git a/docs/official_docs_examples/agents/llm_agent_test/src/instruction_templating.rs b/docs/official_docs_examples/agents/llm_agent_test/src/instruction_templating.rs
+index 4925e5f7..3ba2c65d 100644
+--- a/docs/official_docs_examples/agents/llm_agent_test/src/instruction_templating.rs
++++ b/docs/official_docs_examples/agents/llm_agent_test/src/instruction_templating.rs
+@@ -49,7 +49,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
+     let session = session_service
+         .create(CreateRequest {
+             app_name: "templating_demo".to_string(),
+-            user_id: adk_rust::types::UserId::new("user123").unwrap(),
++            user_id: "user123".to_string().into(),
+             session_id: None,
+             state,
+         })
+@@ -64,7 +64,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
+     // Run the agent with templated instruction
+     let mut response_stream = runner
+         .run(
+-            adk_rust::types::UserId::new("user123").unwrap(),
++            "user123".to_string().into(),
+             session.id().clone(),
+             Content::new("user").with_text("Explain async/await in Rust"),
+         )
+diff --git a/docs/official_docs_examples/artifacts/artifacts_test/src/scoped.rs b/docs/official_docs_examples/artifacts/artifacts_test/src/scoped.rs
+index a708715c..9420889e 100644
+--- a/docs/official_docs_examples/artifacts/artifacts_test/src/scoped.rs
++++ b/docs/official_docs_examples/artifacts/artifacts_test/src/scoped.rs
+@@ -21,15 +21,15 @@ async fn main() -> anyhow::Result<()> {
+     let session1 = ScopedArtifacts::new(
+         service.clone(),
+         "my_app".to_string(),
+-        adk_rust::types::UserId::new("user_123").unwrap(),
+-        adk_rust::types::SessionId::new("session_1").unwrap(),
++        "user_123".to_string(),
++        "session_1".to_string(),
+     );
+ 
+     let session2 = ScopedArtifacts::new(
+         service.clone(),
+         "my_app".to_string(),
+-        adk_rust::types::UserId::new("user_123").unwrap(),
+-        adk_rust::types::SessionId::new("session_2").unwrap(),
++        "user_123".to_string(),
++        "session_2".to_string(),
+     );
+ 
+     // --- Session-scoped artifacts (default) ---
+@@ -85,8 +85,8 @@ async fn main() -> anyhow::Result<()> {
+     let artifacts = ScopedArtifacts::new(
+         service.clone(),
+         "demo_app".to_string(),
+-        adk_rust::types::UserId::new("demo_user").unwrap(),
+-        adk_rust::types::SessionId::new("demo_session").unwrap(),
++        "demo_user".to_string(),
++        "demo_session".to_string(),
+     );
+ 
+     // Save - just name and data
+diff --git a/docs/official_docs_examples/graph/graph_readme_test/src/basic.rs b/docs/official_docs_examples/graph/graph_readme_test/src/basic.rs
+index 496914c9..f37e1569 100644
+--- a/docs/official_docs_examples/graph/graph_readme_test/src/basic.rs
++++ b/docs/official_docs_examples/graph/graph_readme_test/src/basic.rs
+@@ -70,7 +70,7 @@ fn _state_graph_example() {
+ 
+ // Validate: ExecutionConfig
+ fn _execution_config_example() {
+-    let _config = ExecutionConfig::new(adk_core::types::SessionId::new("thread-1").unwrap())
++    let _config = ExecutionConfig::new("thread-1".to_string())
+         .with_recursion_limit(10)
+         .with_metadata("key", json!("value"));
+ }
+diff --git a/docs/official_docs_examples/readme_validation/src/graph_snippet.rs b/docs/official_docs_examples/readme_validation/src/graph_snippet.rs
+index 4749a186..2e684866 100644
+--- a/docs/official_docs_examples/readme_validation/src/graph_snippet.rs
++++ b/docs/official_docs_examples/readme_validation/src/graph_snippet.rs
+@@ -85,7 +85,7 @@ async fn main() -> anyhow::Result<()> {
+     // Execute
+     let mut input = State::new();
+     input.insert("input".to_string(), json!("AI is transforming how we work."));
+-    let _result = _agent.invoke(input, ExecutionConfig::new(adk_rust::types::SessionId::new("thread-1").expect("valid"))).await?;
++    let _result = _agent.invoke(input, ExecutionConfig::new("thread-1".to_string())).await?;
+ 
+     println!("✓ Graph snippet compiles");
+     Ok(())
+diff --git a/docs/official_docs_examples/sessions/sessions_test/src/basic.rs b/docs/official_docs_examples/sessions/sessions_test/src/basic.rs
+index a16a6749..8f545126 100644
+--- a/docs/official_docs_examples/sessions/sessions_test/src/basic.rs
++++ b/docs/official_docs_examples/sessions/sessions_test/src/basic.rs
+@@ -29,7 +29,7 @@ async fn main() -> anyhow::Result<()> {
+     let session = service
+         .create(CreateRequest {
+             app_name: "demo".to_string(),
+-            user_id: adk_core::types::UserId::new("alice").unwrap(),
++            user_id: "alice".to_string().into(),
+             session_id: None, // Auto-generate
+             state: initial_state,
+         })
+@@ -56,7 +56,7 @@ async fn main() -> anyhow::Result<()> {
+     let session = service
+         .get(GetRequest {
+             app_name: "demo".to_string(),
+-            user_id: adk_core::types::UserId::new("alice").unwrap(),
++            user_id: "alice".to_string().into(),
+             session_id: session.id().clone(),
+             num_recent_events: None,
+             after: None,
+@@ -69,7 +69,7 @@ async fn main() -> anyhow::Result<()> {
+     // 5. List all sessions
+     println!("\n5. Listing sessions...");
+     let sessions = service
+-        .list(ListRequest { app_name: "demo".to_string(), user_id: adk_core::types::UserId::new("alice").unwrap() })
++        .list(ListRequest { app_name: "demo".to_string(), user_id: "alice".to_string().into() })
+         .await?;
+ 
+     println!("   Total sessions: {}", sessions.len());
+@@ -83,7 +83,7 @@ async fn main() -> anyhow::Result<()> {
+     service
+         .delete(DeleteRequest {
+             app_name: "demo".to_string(),
+-            user_id: adk_core::types::UserId::new("alice").unwrap(),
++            user_id: "alice".to_string().into(),
+             session_id,
+         })
+         .await?;
+@@ -91,7 +91,7 @@ async fn main() -> anyhow::Result<()> {
+ 
+     // Verify deletion
+     let sessions = service
+-        .list(ListRequest { app_name: "demo".to_string(), user_id: adk_core::types::UserId::new("alice").unwrap() })
++        .list(ListRequest { app_name: "demo".to_string(), user_id: "alice".to_string().into() })
+         .await?;
+     println!("   Remaining sessions: {}", sessions.len());
+ 
+diff --git a/docs/official_docs_examples/sessions/sessions_test/src/state_example.rs b/docs/official_docs_examples/sessions/sessions_test/src/state_example.rs
+index 8b738a02..65504f8a 100644
+--- a/docs/official_docs_examples/sessions/sessions_test/src/state_example.rs
++++ b/docs/official_docs_examples/sessions/sessions_test/src/state_example.rs
+@@ -25,8 +25,8 @@ async fn main() -> anyhow::Result<()> {
+     let _session1 = service
+         .create(CreateRequest {
+             app_name: "my_app".to_string(),
+-            user_id: adk_core::types::UserId::new("alice").unwrap(),
+-            session_id: Some(adk_core::types::SessionId::new("s1").unwrap()),
++            user_id: "alice".to_string().into(),
++            session_id: Some("s1".to_string().into()),
+             state: state1,
+         })
+         .await?;
+@@ -38,8 +38,8 @@ async fn main() -> anyhow::Result<()> {
+     let session2 = service
+         .create(CreateRequest {
+             app_name: "my_app".to_string(),
+-            user_id: adk_core::types::UserId::new("alice").unwrap(),
+-            session_id: Some(adk_core::types::SessionId::new("s2").unwrap()),
++            user_id: "alice".to_string().into(),
++            session_id: Some("s2".to_string().into()),
+             state: state2,
+         })
+         .await?;
+diff --git a/docs/official_docs_examples/sessions/sessions_test/src/state_scopes.rs b/docs/official_docs_examples/sessions/sessions_test/src/state_scopes.rs
+index f4e40a6d..1a764284 100644
+--- a/docs/official_docs_examples/sessions/sessions_test/src/state_scopes.rs
++++ b/docs/official_docs_examples/sessions/sessions_test/src/state_scopes.rs
+@@ -30,8 +30,8 @@ async fn main() -> anyhow::Result<()> {
+     let session1 = service
+         .create(CreateRequest {
+             app_name: "my_app".to_string(),
+-            user_id: adk_core::types::UserId::new("alice").unwrap(),
+-            session_id: Some(adk_core::types::SessionId::new("s1").unwrap()),
++            user_id: "alice".to_string().into(),
++            session_id: Some("s1".to_string().into()),
+             state: state1,
+         })
+         .await?;
+@@ -49,8 +49,8 @@ async fn main() -> anyhow::Result<()> {
+     let session2 = service
+         .create(CreateRequest {
+             app_name: "my_app".to_string(),
+-            user_id: adk_core::types::UserId::new("alice").unwrap(),
+-            session_id: Some(adk_core::types::SessionId::new("s2").unwrap()),
++            user_id: "alice".to_string().into(),
++            session_id: Some("s2".to_string().into()),
+             state: state2,
+         })
+         .await?;
+@@ -69,8 +69,8 @@ async fn main() -> anyhow::Result<()> {
+     let session3 = service
+         .create(CreateRequest {
+             app_name: "my_app".to_string(),
+-            user_id: adk_core::types::UserId::new("bob").unwrap(),
+-            session_id: Some(adk_core::types::SessionId::new("s3").unwrap()),
++            user_id: "bob".to_string().into(),
++            session_id: Some("s3".to_string().into()),
+             state: state3,
+         })
+         .await?;
+@@ -87,8 +87,8 @@ async fn main() -> anyhow::Result<()> {
+     let session1_refetch = service
+         .get(GetRequest {
+             app_name: "my_app".to_string(),
+-            user_id: adk_core::types::UserId::new("alice").unwrap(),
+-            session_id: adk_core::types::SessionId::new("s1").unwrap(),
++            user_id: "alice".to_string().into(),
++            session_id: "s1".to_string().into(),
+             num_recent_events: None,
+             after: None,
+         })
+diff --git a/examples/eval_graph/main.rs b/examples/eval_graph/main.rs
+index 5b09010d..8ef04f90 100644
+--- a/examples/eval_graph/main.rs
++++ b/examples/eval_graph/main.rs
+@@ -199,7 +199,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
+         let mut state = State::new();
+         state.insert("input".to_string(), json!(input));
+ 
+-        let result = graph.invoke(state, ExecutionConfig::new(adk_core::types::SessionId::new(format!("test-{}", i)).unwrap())).await?;
++        let result = graph.invoke(state, ExecutionConfig::new(format!("test-{}", i))).await?;
+ 
+         // Get actual trajectory
+         let actual_trajectory = recorder.get_trajectory();
+@@ -264,7 +264,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
+         let mut state = State::new();
+         state.insert("input".to_string(), json!(input));
+ 
+-        let result = graph.invoke(state, ExecutionConfig::new(adk_core::types::SessionId::new("quality-test").unwrap())).await?;
++        let result = graph.invoke(state, ExecutionConfig::new("quality-test".to_string())).await?;
+ 
+         let actual_output = result.get("output").and_then(|v| v.as_str()).unwrap_or("");
+         let similarity = response_scorer.score(expected_output, actual_output);
+@@ -325,7 +325,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
+         let mut state = State::new();
+         state.insert("input".to_string(), json!(test_input));
+ 
+-        let result = graph.invoke(state, ExecutionConfig::new(adk_core::types::SessionId::new("llm-eval").unwrap())).await?;
++        let result = graph.invoke(state, ExecutionConfig::new("llm-eval".to_string())).await?;
+ 
+         let actual_output = result.get("output").and_then(|v| v.as_str()).unwrap_or("");
+         let context = format!(
+diff --git a/examples/gemini_prompt_caching/main.rs b/examples/gemini_prompt_caching/main.rs
+index ef006b6c..8c8e4309 100644
+--- a/examples/gemini_prompt_caching/main.rs
++++ b/examples/gemini_prompt_caching/main.rs
+@@ -256,7 +256,7 @@ async fn ask(
+ 
+     let content = Content::new("user").with_text(question);
+     let mut stream = runner
+-        .run(adk_core::types::UserId::new("user_1").unwrap(), adk_core::types::SessionId::new(session_id.to_string()).unwrap(), content)
++        .run("user_1".to_string().into(), session_id.to_string().into(), content)
+         .await?;
+ 
+     print!("   Assistant: ");
+@@ -322,7 +322,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
+     let session = session_service
+         .create(CreateRequest {
+             app_name: "gemini_prompt_caching".to_string(),
+-            user_id: adk_core::types::UserId::new("user_1").unwrap(),
++            user_id: "user_1".to_string().into(),
+             session_id: None,
+             state: HashMap::new(),
+         })
+@@ -371,8 +371,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
+     let session = session_service
+         .get(GetRequest {
+             app_name: "gemini_prompt_caching".to_string(),
+-            user_id: adk_core::types::UserId::new("user_1").unwrap(),
+-            session_id: adk_core::types::SessionId::new(session_id.clone()).unwrap(),
++            user_id: "user_1".to_string().into(),
++            session_id: session_id.clone().into(),
+             num_recent_events: None,
+             after: None,
+         })
+diff --git a/examples/gemini_thinking/main.rs b/examples/gemini_thinking/main.rs
+index bc6fa29a..1ddc3c39 100644
+--- a/examples/gemini_thinking/main.rs
++++ b/examples/gemini_thinking/main.rs
+@@ -193,7 +193,7 @@ async fn demo_thought_signature(model: Arc<GeminiModel>) -> Result<(), Box<dyn s
+     let session = session_service
+         .create(CreateRequest {
+             app_name: "gemini_thinking".to_string(),
+-            user_id: adk_core::types::UserId::new("user_1").unwrap(),
++            user_id: "user_1".to_string().into(),
+             session_id: None,
+             state: HashMap::new(),
+         })
+@@ -221,7 +221,7 @@ async fn demo_thought_signature(model: Arc<GeminiModel>) -> Result<(), Box<dyn s
+     );
+ 
+     let mut stream =
+-        runner.run(adk_core::types::UserId::new("user_1").unwrap(), adk_core::types::SessionId::new(session_id.clone()).unwrap(), content).await?;
++        runner.run("user_1".to_string().into(), session_id.clone().into(), content).await?;
+ 
+     let mut saw_thinking = false;
+     let mut saw_tool_call = false;
+@@ -285,7 +285,7 @@ async fn demo_thought_signature(model: Arc<GeminiModel>) -> Result<(), Box<dyn s
+     let content = Content::new("user").with_text("Now convert that speed to km/h as well.");
+ 
+     let mut stream =
+-        runner.run(adk_core::types::UserId::new("user_1").unwrap(), adk_core::types::SessionId::new(session_id.clone()).unwrap(), content).await?;
++        runner.run("user_1".to_string().into(), session_id.clone().into(), content).await?;
+ 
+     while let Some(event) = stream.next().await {
+         if let Ok(e) = event
+diff --git a/examples/graph_agent/main.rs b/examples/graph_agent/main.rs
+index 8ee2a2d1..e410c87e 100644
+--- a/examples/graph_agent/main.rs
++++ b/examples/graph_agent/main.rs
+@@ -169,7 +169,7 @@ async fn main() -> anyhow::Result<()> {
+     println!("[summarizer] Processing...");
+ 
+     // Execute using GraphAgent's invoke method
+-    let result = agent.invoke(input, ExecutionConfig::new(adk_core::types::SessionId::new("processor-thread").unwrap())).await?;
++    let result = agent.invoke(input, ExecutionConfig::new("processor-thread".to_string())).await?;
+ 
+     println!("\n{}", "=".repeat(60));
+     println!("\n{}", result.get("result").and_then(|v| v.as_str()).unwrap_or("No result"));
+diff --git a/examples/graph_checkpoint/main.rs b/examples/graph_checkpoint/main.rs
+index e82fddbb..7b9f160e 100644
+--- a/examples/graph_checkpoint/main.rs
++++ b/examples/graph_checkpoint/main.rs
+@@ -166,7 +166,7 @@ async fn main() -> anyhow::Result<()> {
+     println!("[analyzer] Running...");
+     println!("[summarizer] Running...");
+ 
+-    let result = graph.invoke(input, ExecutionConfig::new(adk_core::types::SessionId::new(thread_id.to_string()).unwrap())).await?;
++    let result = graph.invoke(input, ExecutionConfig::new(thread_id.to_string())).await?;
+ 
+     println!("\n--- Results ---");
+     println!(
+@@ -240,7 +240,7 @@ async fn main() -> anyhow::Result<()> {
+         let mut input = State::new();
+         input.insert("text".to_string(), json!(text));
+ 
+-        let result = graph.invoke(input, ExecutionConfig::new(adk_core::types::SessionId::new(thread.to_string()).unwrap())).await?;
++        let result = graph.invoke(input, ExecutionConfig::new(thread.to_string())).await?;
+         println!(
+             "\n{}: {}",
+             thread,
+diff --git a/examples/graph_conditional/main.rs b/examples/graph_conditional/main.rs
+index 9c85c752..67d074f2 100644
+--- a/examples/graph_conditional/main.rs
++++ b/examples/graph_conditional/main.rs
+@@ -224,7 +224,7 @@ async fn main() -> anyhow::Result<()> {
+         let mut input = State::new();
+         input.insert("message".to_string(), json!(message));
+ 
+-        let result = graph.invoke(input, ExecutionConfig::new(adk_core::types::SessionId::new(format!("test-{}", i)).unwrap())).await?;
++        let result = graph.invoke(input, ExecutionConfig::new(format!("test-{}", i))).await?;
+ 
+         println!(
+             "\nResponse:\n{}",
+diff --git a/examples/graph_gemini/main.rs b/examples/graph_gemini/main.rs
+index b815fc53..14ae6679 100644
+--- a/examples/graph_gemini/main.rs
++++ b/examples/graph_gemini/main.rs
+@@ -216,7 +216,7 @@ async fn main() -> anyhow::Result<()> {
+         let mut input = State::new();
+         input.insert("topic".to_string(), json!(topic));
+ 
+-        let result = graph.invoke(input, ExecutionConfig::new(adk_core::types::SessionId::new(format!("research-{}", i)).unwrap())).await?;
++        let result = graph.invoke(input, ExecutionConfig::new(format!("research-{}", i))).await?;
+ 
+         println!("\n{}\n", result.get("result").and_then(|v| v.as_str()).unwrap_or("No result"));
+     }
+diff --git a/examples/graph_hitl/main.rs b/examples/graph_hitl/main.rs
+index 4782226e..b8cfd4dd 100644
+--- a/examples/graph_hitl/main.rs
++++ b/examples/graph_hitl/main.rs
+@@ -172,7 +172,7 @@ async fn main() -> anyhow::Result<()> {
+     let mut input = State::new();
+     input.insert("task".to_string(), json!("Read and summarize the README.md file"));
+ 
+-    let result = graph.invoke(input, ExecutionConfig::new(adk_core::types::SessionId::new("low-risk-001").unwrap())).await?;
++    let result = graph.invoke(input, ExecutionConfig::new("low-risk-001".to_string())).await?;
+ 
+     println!("\nResult:\n{}", result.get("result").and_then(|v| v.as_str()).unwrap_or("None"));
+ 
+@@ -185,7 +185,7 @@ async fn main() -> anyhow::Result<()> {
+     input.insert("task".to_string(), json!("Delete all backup files from the production server"));
+ 
+     let thread_id = "high-risk-001";
+-    let result = graph.invoke(input, ExecutionConfig::new(adk_core::types::SessionId::new(thread_id.to_string()).unwrap())).await;
++    let result = graph.invoke(input, ExecutionConfig::new(thread_id.to_string())).await;
+ 
+     match result {
+         Err(GraphError::Interrupted(interrupted)) => {
+@@ -206,7 +206,7 @@ async fn main() -> anyhow::Result<()> {
+             // Resume execution
+             println!("\n*** RESUMING EXECUTION ***\n");
+             let final_result =
+-                graph.invoke(State::new(), ExecutionConfig::new(adk_core::types::SessionId::new(thread_id.to_string()).unwrap())).await?;
++                graph.invoke(State::new(), ExecutionConfig::new(thread_id.to_string())).await?;
+ 
+             println!(
+                 "\nFinal Result:\n{}",
+@@ -272,7 +272,7 @@ async fn main() -> anyhow::Result<()> {
+     input.insert("task".to_string(), json!("Organize project files"));
+ 
+     let result =
+-        graph_static.invoke(input, ExecutionConfig::new(adk_core::types::SessionId::new("static-interrupt").unwrap())).await;
++        graph_static.invoke(input, ExecutionConfig::new("static-interrupt".to_string())).await;
+ 
+     match result {
+         Err(GraphError::Interrupted(interrupted)) => {
+diff --git a/examples/graph_llm/main.rs b/examples/graph_llm/main.rs
+index a8ee3471..8869341e 100644
+--- a/examples/graph_llm/main.rs
++++ b/examples/graph_llm/main.rs
+@@ -139,7 +139,7 @@ async fn main() -> anyhow::Result<()> {
+     let mut input = State::new();
+     input.insert("topic".to_string(), json!(topic));
+ 
+-    let result = graph.invoke(input, ExecutionConfig::new(adk_core::types::SessionId::new("content-pipeline").unwrap())).await?;
++    let result = graph.invoke(input, ExecutionConfig::new("content-pipeline".to_string())).await?;
+ 
+     println!("{}\n", "=".repeat(60));
+     println!("FINAL ARTICLE:\n");
+diff --git a/examples/graph_react/main.rs b/examples/graph_react/main.rs
+index 0edb0bff..1826842f 100644
+--- a/examples/graph_react/main.rs
++++ b/examples/graph_react/main.rs
+@@ -226,7 +226,7 @@ async fn main() -> anyhow::Result<()> {
+         input.insert("input".to_string(), json!(question));
+         input.insert("messages".to_string(), json!([{"role": "user", "content": question}]));
+ 
+-        let result = graph.invoke(input, ExecutionConfig::new(adk_core::types::SessionId::new("react-thread").unwrap())).await?;
++        let result = graph.invoke(input, ExecutionConfig::new("react-thread".to_string())).await?;
+ 
+         println!("\nFinal Response:");
+         println!("{}", result.get("response").and_then(|v| v.as_str()).unwrap_or("No response"));
+diff --git a/examples/graph_streaming/main.rs b/examples/graph_streaming/main.rs
+index bde77c6b..2393deee 100644
+--- a/examples/graph_streaming/main.rs
++++ b/examples/graph_streaming/main.rs
+@@ -81,7 +81,7 @@ async fn main() -> Result<()> {
+ 
+     println!("📝 Prompt: Tell me a very short story about a robot.\n");
+ 
+-    let config = ExecutionConfig::new(adk_core::types::SessionId::new("demo-session").unwrap());
++    let config = ExecutionConfig::new("demo-session".to_string());
+ 
+     // Choose streaming mode
+     let mode = if streaming { StreamMode::Messages } else { StreamMode::Values };
+diff --git a/examples/graph_supervisor/main.rs b/examples/graph_supervisor/main.rs
+index 44d9cd3c..53143c50 100644
+--- a/examples/graph_supervisor/main.rs
++++ b/examples/graph_supervisor/main.rs
+@@ -303,7 +303,7 @@ async fn main() -> anyhow::Result<()> {
+         input.insert("history".to_string(), json!([]));
+ 
+         let result =
+-            graph.invoke(input, ExecutionConfig::new(adk_core::types::SessionId::new("supervisor-thread").unwrap())).await?;
++            graph.invoke(input, ExecutionConfig::new("supervisor-thread".to_string())).await?;
+ 
+         println!("\n{}", "=".repeat(70));
+         println!("{}", result.get("final_result").and_then(|v| v.as_str()).unwrap_or("No result"));
+diff --git a/examples/graph_workflow/main.rs b/examples/graph_workflow/main.rs
+index 8dd92d2c..e080ac0e 100644
+--- a/examples/graph_workflow/main.rs
++++ b/examples/graph_workflow/main.rs
+@@ -165,7 +165,7 @@ async fn main() -> anyhow::Result<()> {
+     println!("[Running analyzer agent...]");
+     println!("[Running formatter agent...]");
+ 
+-    let result = graph.invoke(input, ExecutionConfig::new(adk_core::types::SessionId::new("workflow-thread").unwrap())).await?;
++    let result = graph.invoke(input, ExecutionConfig::new("workflow-thread".to_string())).await?;
+ 
+     println!("\n{}", "=".repeat(60));
+     println!("\nEntities:\n{}", result.get("entities").and_then(|v| v.as_str()).unwrap_or("None"));
+diff --git a/examples/mcp/main.rs b/examples/mcp/main.rs
+index c946e771..df2fb2ea 100644
+--- a/examples/mcp/main.rs
++++ b/examples/mcp/main.rs
+@@ -48,8 +48,8 @@ struct MockSession {
+ impl MockSession {
+     fn new() -> Self {
+         Self {
+-            id: SessionId::new("mcp-session").unwrap(),
+-            user_id: UserId::new("user").unwrap(),
++            id: SessionId::from("mcp-session".to_string()),
++            user_id: UserId::from("user".to_string()),
+         }
+     }
+ }
+diff --git a/examples/skills_basic/main.rs b/examples/skills_basic/main.rs
+index f2632c07..a4d56fab 100644
+--- a/examples/skills_basic/main.rs
++++ b/examples/skills_basic/main.rs
+@@ -98,7 +98,7 @@ async fn main() -> Result<()> {
+     let session = session_service
+         .create(CreateRequest {
+             app_name: "demo".into(),
+-            user_id: adk_core::types::UserId::new(user_id.clone()).unwrap(),
++            user_id: user_id.clone().into(),
+             session_id: None,
+             state: HashMap::new(),
+         })
+@@ -110,7 +110,7 @@ async fn main() -> Result<()> {
+         println!("\nUser: {}", query);
+         let mut stream = runner
+             .run(
+-                adk_core::types::UserId::new(user_id.clone()).unwrap(),
++                user_id.clone().into(),
+                 session.id().clone().into(),
+                 Content::new("user").with_text(query),
+             )
+diff --git a/examples/skills_conventions/main.rs b/examples/skills_conventions/main.rs
+index 0e3652e9..8fa6e2ac 100644
+--- a/examples/skills_conventions/main.rs
++++ b/examples/skills_conventions/main.rs
+@@ -74,7 +74,7 @@ async fn main() -> Result<()> {
+     let session = session_service
+         .create(CreateRequest {
+             app_name: app_name.clone(),
+-            user_id: adk_core::types::UserId::new(user_id.clone()).unwrap(),
++            user_id: user_id.clone().into(),
+             session_id: None,
+             state: HashMap::new(),
+         })
+@@ -96,8 +96,8 @@ async fn main() -> Result<()> {
+ 
+     let mut stream = runner
+         .run(
+-            adk_core::types::UserId::new(user_id.clone()).unwrap(),
+-            adk_core::types::SessionId::new(session_id.clone()).unwrap(),
++            user_id.into(),
++            session_id.into(),
+             Content::new("user")
+                 .with_text("How should I configure Gemini access for this project?"),
+         )
+diff --git a/examples/skills_policy/main.rs b/examples/skills_policy/main.rs
+index 3420df36..c58e0f1f 100644
+--- a/examples/skills_policy/main.rs
++++ b/examples/skills_policy/main.rs
+@@ -94,7 +94,7 @@ async fn main() -> Result<()> {
+     let session = session_service
+         .create(CreateRequest {
+             app_name: "demo".into(),
+-            user_id: adk_core::types::UserId::new(user_id.clone()).unwrap(),
++            user_id: user_id.clone().into(),
+             session_id: None,
+             state: HashMap::new(),
+         })
+@@ -103,7 +103,7 @@ async fn main() -> Result<()> {
+     println!("Querying with 'Tell me about release notes' (Should NOT find security skill)...");
+     let mut stream = runner
+         .run(
+-            adk_core::types::UserId::new(user_id.clone()).unwrap(),
++            user_id.clone().into(),
+             session.id().clone(),
+             Content::new("user").with_text("Tell me about release notes"),
+         )
+diff --git a/examples/skills_workflow/main.rs b/examples/skills_workflow/main.rs
+index 2117cb6c..e4afea14 100644
+--- a/examples/skills_workflow/main.rs
++++ b/examples/skills_workflow/main.rs
+@@ -71,7 +71,7 @@ async fn main() -> Result<()> {
+     let session = session_service
+         .create(CreateRequest {
+             app_name: app_name.clone(),
+-            user_id: adk_core::types::UserId::new(user_id.clone()).unwrap(),
++            user_id: user_id.clone().into(),
+             session_id: None,
+             state: HashMap::new(),
+         })
+@@ -93,8 +93,8 @@ async fn main() -> Result<()> {
+ 
+     let mut stream = runner
+         .run(
+-            adk_core::types::UserId::new(user_id.clone()).unwrap(),
+-            adk_core::types::SessionId::new(session_id.clone()).unwrap(),
++            user_id.into(),
++            session_id.into(),
+             Content::new("user").with_text("Please search this repository for TODO markers."),
+         )
+         .await?;
+diff --git a/examples/template/main.rs b/examples/template/main.rs
+index bbed3405..05df125a 100644
+--- a/examples/template/main.rs
++++ b/examples/template/main.rs
+@@ -51,7 +51,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
+     let session = session_service
+         .create(CreateRequest {
+             app_name: app_name.to_string(),
+-            user_id: adk_core::types::UserId::new(user_id.to_string()).unwrap(),
++            user_id: user_id.to_string().into(),
+             session_id: None,
+             state,
+         })
+@@ -99,7 +99,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
+ 
+         let content = Content::new("user").with_text(input);
+         let mut events =
+-            runner.run(adk_core::types::UserId::new(user_id.to_string()).unwrap(), adk_core::types::SessionId::new(session_id.clone()).unwrap(), content).await?;
++            runner.run(user_id.to_string().into(), session_id.clone().into(), content).await?;
+ 
+         print!("Assistant: ");
+         stdout.flush()?;
+diff --git a/examples/translator/main.rs b/examples/translator/main.rs
+index 016ddbb0..c8475e6c 100644
+--- a/examples/translator/main.rs
++++ b/examples/translator/main.rs
+@@ -290,7 +290,7 @@ async fn run_batch_mode(
+         let session = session_service
+             .create(CreateRequest {
+                 app_name: "translator".to_string(),
+-                user_id: adk_core::types::UserId::new("batch_user").unwrap(),
++                user_id: "batch_user".to_string().into(),
+                 session_id: None,
+                 state: initial_state,
+             })
+@@ -334,7 +334,7 @@ async fn run_translation(
+     user_content: Content,
+ ) -> anyhow::Result<String> {
+     let mut stream =
+-        runner.run(adk_core::types::UserId::new("batch_user").unwrap(), adk_core::types::SessionId::new(session_id.to_string()).unwrap(), user_content).await?;
++        runner.run("batch_user".to_string().into(), session_id.to_string().into(), user_content).await?;
+ 
+     // Process stream and collect any errors
+     let mut last_text = String::new();
+@@ -367,8 +367,8 @@ async fn run_translation(
+     let updated_session = session_service
+         .get(GetRequest {
+             app_name: "translator".to_string(),
+-            user_id: adk_core::types::UserId::new("batch_user").unwrap(),
+-            session_id: adk_core::types::SessionId::new(session_id.to_string()).unwrap(),
++            user_id: "batch_user".to_string().into(),
++            session_id: session_id.to_string().into(),
+             num_recent_events: None,
+             after: None,
+         })

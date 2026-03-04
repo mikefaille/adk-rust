@@ -181,7 +181,7 @@ impl RunnerContext {
         session: Arc<dyn AdkSession>,
     ) -> Self {
         let base = adk_core::AdkContext::builder()
-            .invocation_id(InvocationId::from(invocation_id))
+            .invocation_id(InvocationId::new(invocation_id).unwrap())
             .agent_name(agent.name())
             .user_id(user_id)
             .app_name(app_name)
@@ -212,7 +212,7 @@ impl RunnerContext {
         session: Arc<MutableSession>,
     ) -> Self {
         let base = adk_core::AdkContext::builder()
-            .invocation_id(InvocationId::from(invocation_id))
+            .invocation_id(InvocationId::new(invocation_id).unwrap())
             .agent_name(agent.name())
             .user_id(user_id)
             .app_name(app_name)

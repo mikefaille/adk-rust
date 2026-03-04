@@ -15,14 +15,14 @@ use adk_core::types::{SessionId, UserId};
 
 struct MockSession {
     id: SessionId,
-    user_id: UserId,
+    user_id: UserId::new( UserId,
 }
 
 impl MockSession {
     fn new() -> Self {
         Self {
-            id: SessionId::from("multi-agent-session".to_string()),
-            user_id: UserId::from("multi-agent-user".to_string()),
+            id: SessionId::new("multi-agent-session".to_string()).unwrap(),
+            user_id: UserId::new( UserId::new("multi-agent-user".to_string()).unwrap(),
         }
     }
 }

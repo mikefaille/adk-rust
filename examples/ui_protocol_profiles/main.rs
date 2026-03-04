@@ -286,6 +286,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
         for failure in failures {
             eprintln!("- {}", failure);
         }
-        Err("one or more tool/protocol combinations failed".into())
+        Err("one or more tool/protocol combinations failed"))
     }
 }

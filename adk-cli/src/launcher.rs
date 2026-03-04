@@ -139,8 +139,9 @@ impl Launcher {
         use std::collections::HashMap;
         use std::io::{self, BufRead, Write};
 
+        use adk_core::types::{SessionId, UserId};
         let app_name = self.app_name.unwrap_or_else(|| self.agent.name().to_string());
-        let user_id = "user".to_string();
+        let user_id = UserId::from("user");
 
         let session_service = Arc::new(InMemorySessionService::new());
 
@@ -148,13 +149,13 @@ impl Launcher {
         let session = session_service
             .create(CreateRequest {
                 app_name: app_name.clone(),
-                user_id: user_id.clone().into(),
-                session_id: None,
+                user_id: user_id.clone(),
+                session_id: None, // auto-generated
                 state: HashMap::new(),
             })
             .await?;
 
-        let session_id = session.id().to_string();
+        let session_id = session.id().clone();
 
         // Create runner
         let runner = Runner::new(RunnerConfig {
@@ -200,7 +201,7 @@ impl Launcher {
             }
 
             let content = adk_core::Content::new("user").with_text(input);
-            let mut events = runner.run(user_id.clone().into(), session_id.clone().into(), content).await?;
+            let mut events = runner.run(user_id.clone(), session_id.clone(), content).await?;
 
             print!("Assistant: ");
             stdout.flush()?;

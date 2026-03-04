@@ -61,15 +61,15 @@ impl Llm for MockModel {
 }
 
 struct MockSession {
-    session_id: SessionId,
-    user_id: UserId,
+    session_id: SessionId::new( SessionId,
+    user_id: UserId::new( UserId,
 }
 
 impl MockSession {
     fn new() -> Self {
         Self {
-            session_id: "session-1".to_string().into(),
-            user_id: "user-1".to_string().into(),
+            session_id: SessionId::new( "session-1".to_string()),
+            user_id: UserId::new( "user-1".to_string()),
         }
     }
 }
@@ -111,11 +111,11 @@ struct MockContext {
 impl MockContext {
     fn new() -> Self {
         let mut identity = adk_core::types::AdkIdentity::default();
-        identity.invocation_id = "inv-1".to_string().into();
+        identity.invocation_id = "inv-1".to_string());
         identity.agent_name = "test-agent".to_string();
-        identity.user_id = "user-1".to_string().into();
+        identity.user_id = "user-1".to_string());
         identity.app_name = "test-app".to_string();
-        identity.session_id = "session-1".to_string().into();
+        identity.session_id = "session-1".to_string());
         identity.branch = "main".to_string();
 
         Self { identity, session: MockSession::new() }
@@ -188,11 +188,11 @@ async fn test_streaming_chunks() {
     impl BetterMockContext {
         fn new() -> Self {
             let mut identity = adk_core::types::AdkIdentity::default();
-            identity.invocation_id = "inv-1".to_string().into();
+            identity.invocation_id = "inv-1".to_string());
             identity.agent_name = "test-agent".to_string();
-            identity.user_id = "user-1".to_string().into();
+            identity.user_id = "user-1".to_string());
             identity.app_name = "test-app".to_string();
-            identity.session_id = "session-1".to_string().into();
+            identity.session_id = "session-1".to_string());
             identity.branch = "main".to_string();
 
             Self {

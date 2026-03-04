@@ -1,0 +1,793 @@
+Using Cachix caches: devenv, devenv
+Building shell in 90.6ms
+Entering shell
+Running tasks     devenv:enterShell
+
+Running           devenv:files:cleanup
+Succeeded         devenv:files:cleanup (12.28ms)
+Running           devenv:files
+Succeeded         devenv:files (12.65ms)
+Running           devenv:git-hooks:install
+Succeeded         devenv:git-hooks:install (16.99ms)
+Running           devenv:enterShell
+Succeeded         devenv:enterShell (8.35ms)
+Running           devenv:enterTest
+No command        devenv:enterTest
+1 Skipped, 4 Succeeded
+🚀 Welcome to the ADK-Rust Development Environment!
+   Rust:    rustc 1.93.1 (01f6ddf75 2026-02-11)
+   Cargo:   cargo 1.93.1 (083ac5135 2025-12-15)
+   sccache: sccache 0.13.0
+   Node:    v22.22.0
+
+💡 Run 'devenv tasks list' or use the scripts: ws-fmt, ws-check, ws-test, ws-clippy.
+    Checking adk-gemini v0.3.2 (/home/michael/src/voice_gateway/zenith/adk-rust/adk-gemini)
+    Checking datafusion-session v51.0.0
+    Checking adk-session v0.3.2 (/home/michael/src/voice_gateway/zenith/adk-rust/adk-session)
+    Checking bitpacking v0.9.3
+    Checking rmcp v0.15.0
+    Checking tantivy-common v0.9.0
+    Checking datafusion-functions-nested v51.0.0
+    Checking hyper-timeout v0.5.2
+    Checking hyperloglogplus v0.4.1
+    Checking path_abs v0.5.1
+   Compiling lance-encoding v2.0.0
+    Checking lance-namespace v2.0.0
+    Checking geoarrow-expr-geo v0.7.0
+    Checking datafusion-datasource v51.0.0
+   Compiling prost v0.12.6
+   Compiling lance-file v2.0.0
+    Checking geohash v0.13.1
+    Checking fsst v2.0.0
+   Compiling itertools v0.13.0
+    Checking rust-stemmers v1.2.0
+   Compiling hyper v1.8.1
+   Compiling prost-types v0.12.6
+error[E0053]: method `append_event` has an incompatible type for trait
+   --> adk-session/src/database.rs:369:46
+    |
+369 |     async fn append_event(&self, session_id: &str, mut event: Event) -> Result<()> {
+    |                                              ^^^^ expected `SessionId`, found `str`
+    |
+note: type in trait
+   --> adk-session/src/service.rs:47:46
+    |
+ 47 |     async fn append_event(&self, session_id: &SessionId, event: Event) -> Result<()>;
+    |                                              ^^^^^^^^^^
+    = note: expected signature `fn(&'life0 DatabaseSessionService, &'life1 SessionId, Event) -> Pin<_>`
+               found signature `fn(&'life0 DatabaseSessionService, &'life1 str, Event) -> Pin<_>`
+help: change the parameter type to match the trait
+    |
+369 -     async fn append_event(&self, session_id: &str, mut event: Event) -> Result<()> {
+369 +     async fn append_event(&self, session_id: &'life1 SessionId, mut event: Event) -> Result<()> {
+    |
+
+error[E0053]: method `id` has an incompatible type for trait
+   --> adk-session/src/database.rs:528:21
+    |
+528 |     fn id(&self) -> &str {
+    |                     ^^^^ expected `SessionId`, found `str`
+    |
+note: type in trait
+   --> adk-session/src/session.rs:6:21
+    |
+  6 |     fn id(&self) -> &SessionId;
+    |                     ^^^^^^^^^^
+    = note: expected signature `fn(&DatabaseSession) -> &SessionId`
+               found signature `fn(&DatabaseSession) -> &str`
+help: change the output type to match the trait
+    |
+528 -     fn id(&self) -> &str {
+528 +     fn id(&self) -> &SessionId {
+    |
+
+error[E0053]: method `user_id` has an incompatible type for trait
+   --> adk-session/src/database.rs:536:26
+    |
+536 |     fn user_id(&self) -> &str {
+    |                          ^^^^ expected `UserId`, found `str`
+    |
+note: type in trait
+   --> adk-session/src/session.rs:8:26
+    |
+  8 |     fn user_id(&self) -> &UserId;
+    |                          ^^^^^^^
+    = note: expected signature `fn(&DatabaseSession) -> &UserId`
+               found signature `fn(&DatabaseSession) -> &str`
+help: change the output type to match the trait
+    |
+536 -     fn user_id(&self) -> &str {
+536 +     fn user_id(&self) -> &UserId {
+    |
+
+error[E0053]: method `append_event` has an incompatible type for trait
+   --> adk-session/src/vertex.rs:541:46
+    |
+541 |     async fn append_event(&self, session_id: &str, mut event: Event) -> Result<()> {
+    |                                              ^^^^ expected `SessionId`, found `str`
+    |
+note: type in trait
+   --> adk-session/src/service.rs:47:46
+    |
+ 47 |     async fn append_event(&self, session_id: &SessionId, event: Event) -> Result<()>;
+    |                                              ^^^^^^^^^^
+    = note: expected signature `fn(&'life0 VertexAiSessionService, &'life1 SessionId, Event) -> Pin<_>`
+               found signature `fn(&'life0 VertexAiSessionService, &'life1 str, Event) -> Pin<_>`
+help: change the parameter type to match the trait
+    |
+541 -     async fn append_event(&self, session_id: &str, mut event: Event) -> Result<()> {
+541 +     async fn append_event(&self, session_id: &'life1 SessionId, mut event: Event) -> Result<()> {
+    |
+
+error[E0053]: method `id` has an incompatible type for trait
+   --> adk-session/src/vertex.rs:571:21
+    |
+571 |     fn id(&self) -> &str {
+    |                     ^^^^ expected `SessionId`, found `str`
+    |
+note: type in trait
+   --> adk-session/src/session.rs:6:21
+    |
+  6 |     fn id(&self) -> &SessionId;
+    |                     ^^^^^^^^^^
+    = note: expected signature `fn(&VertexSession) -> &SessionId`
+               found signature `fn(&VertexSession) -> &str`
+help: change the output type to match the trait
+    |
+571 -     fn id(&self) -> &str {
+571 +     fn id(&self) -> &SessionId {
+    |
+
+error[E0053]: method `user_id` has an incompatible type for trait
+   --> adk-session/src/vertex.rs:579:26
+    |
+579 |     fn user_id(&self) -> &str {
+    |                          ^^^^ expected `UserId`, found `str`
+    |
+note: type in trait
+   --> adk-session/src/session.rs:8:26
+    |
+  8 |     fn user_id(&self) -> &UserId;
+    |                          ^^^^^^^
+    = note: expected signature `fn(&VertexSession) -> &UserId`
+               found signature `fn(&VertexSession) -> &str`
+help: change the output type to match the trait
+    |
+579 -     fn user_id(&self) -> &str {
+579 +     fn user_id(&self) -> &UserId {
+    |
+
+error[E0308]: mismatched types
+   --> adk-session/src/database.rs:141:59
+    |
+141 |         let session_id = req.session_id.unwrap_or_else(|| Uuid::new_v4().to_string());
+    |                                                           ^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `SessionId`, found `String`
+    |
+help: call `Into::into` on this expression to convert `std::string::String` into `SessionId`
+    |
+141 |         let session_id = req.session_id.unwrap_or_else(|| Uuid::new_v4().to_string().into());
+    |                                                                                     +++++++
+
+error[E0277]: the trait bound `UserId: sqlx::Encode<'_, _>` is not satisfied
+   --> adk-session/src/database.rs:185:24
+    |
+185 |                 .bind(&req.user_id)
+    |                  ----  ^^^^^^^^^^^ the trait `sqlx::Encode<'_, _>` is not implemented for `UserId`
+    |                  |
+    |                  required by a bound introduced by this call
+    |
+    = note: required for `&UserId` to implement `sqlx::Encode<'_, _>`
+note: required by a bound in `Query::<'q, DB, <DB as sqlx::Database>::Arguments<'q>>::bind`
+   --> /home/michael/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/sqlx-core-0.8.6/src/query.rs:86:25
+    |
+ 86 |     pub fn bind<T: 'q + Encode<'q, DB> + Type<DB>>(mut self, value: T) -> Self {
+    |                         ^^^^^^^^^^^^^^ required by this bound in `Query::<'q, DB, <DB as Database>::Arguments<'q>>::bind`
+help: consider dereferencing here
+    |
+185 |                 .bind(&*req.user_id)
+    |                        +
+
+error[E0277]: the trait bound `UserId: Type<_>` is not satisfied
+   --> adk-session/src/database.rs:185:24
+    |
+185 |                 .bind(&req.user_id)
+    |                  ----  ^^^^^^^^^^^ the trait `Type<_>` is not implemented for `UserId`
+    |                  |
+    |                  required by a bound introduced by this call
+    |
+    = note: required for `&UserId` to implement `Type<_>`
+note: required by a bound in `Query::<'q, DB, <DB as sqlx::Database>::Arguments<'q>>::bind`
+   --> /home/michael/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/sqlx-core-0.8.6/src/query.rs:86:42
+    |
+ 86 |     pub fn bind<T: 'q + Encode<'q, DB> + Type<DB>>(mut self, value: T) -> Self {
+    |                                          ^^^^^^^^ required by this bound in `Query::<'q, DB, <DB as Database>::Arguments<'q>>::bind`
+help: consider dereferencing here
+    |
+185 |                 .bind(&*req.user_id)
+    |                        +
+
+error[E0277]: the trait bound `UserId: sqlx::Encode<'_, _>` is not satisfied
+   --> adk-session/src/database.rs:203:20
+    |
+203 |             .bind(&req.user_id)
+    |              ----  ^^^^^^^^^^^ the trait `sqlx::Encode<'_, _>` is not implemented for `UserId`
+    |              |
+    |              required by a bound introduced by this call
+    |
+    = note: required for `&UserId` to implement `sqlx::Encode<'_, _>`
+note: required by a bound in `Query::<'q, DB, <DB as sqlx::Database>::Arguments<'q>>::bind`
+   --> /home/michael/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/sqlx-core-0.8.6/src/query.rs:86:25
+    |
+ 86 |     pub fn bind<T: 'q + Encode<'q, DB> + Type<DB>>(mut self, value: T) -> Self {
+    |                         ^^^^^^^^^^^^^^ required by this bound in `Query::<'q, DB, <DB as Database>::Arguments<'q>>::bind`
+help: consider dereferencing here
+    |
+203 |             .bind(&*req.user_id)
+    |                    +
+
+error[E0277]: the trait bound `UserId: Type<_>` is not satisfied
+   --> adk-session/src/database.rs:203:20
+    |
+203 |             .bind(&req.user_id)
+    |              ----  ^^^^^^^^^^^ the trait `Type<_>` is not implemented for `UserId`
+    |              |
+    |              required by a bound introduced by this call
+    |
+    = note: required for `&UserId` to implement `Type<_>`
+note: required by a bound in `Query::<'q, DB, <DB as sqlx::Database>::Arguments<'q>>::bind`
+   --> /home/michael/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/sqlx-core-0.8.6/src/query.rs:86:42
+    |
+ 86 |     pub fn bind<T: 'q + Encode<'q, DB> + Type<DB>>(mut self, value: T) -> Self {
+    |                                          ^^^^^^^^ required by this bound in `Query::<'q, DB, <DB as Database>::Arguments<'q>>::bind`
+help: consider dereferencing here
+    |
+203 |             .bind(&*req.user_id)
+    |                    +
+
+error[E0277]: the trait bound `UserId: sqlx::Encode<'_, _>` is not satisfied
+   --> adk-session/src/database.rs:217:20
+    |
+217 |             .bind(&req.user_id)
+    |              ----  ^^^^^^^^^^^ the trait `sqlx::Encode<'_, _>` is not implemented for `UserId`
+    |              |
+    |              required by a bound introduced by this call
+    |
+    = note: required for `&UserId` to implement `sqlx::Encode<'_, _>`
+note: required by a bound in `Query::<'q, DB, <DB as sqlx::Database>::Arguments<'q>>::bind`
+   --> /home/michael/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/sqlx-core-0.8.6/src/query.rs:86:25
+    |
+ 86 |     pub fn bind<T: 'q + Encode<'q, DB> + Type<DB>>(mut self, value: T) -> Self {
+    |                         ^^^^^^^^^^^^^^ required by this bound in `Query::<'q, DB, <DB as Database>::Arguments<'q>>::bind`
+help: consider dereferencing here
+    |
+217 |             .bind(&*req.user_id)
+    |                    +
+
+error[E0277]: the trait bound `UserId: Type<_>` is not satisfied
+   --> adk-session/src/database.rs:217:20
+    |
+217 |             .bind(&req.user_id)
+    |              ----  ^^^^^^^^^^^ the trait `Type<_>` is not implemented for `UserId`
+    |              |
+    |              required by a bound introduced by this call
+    |
+    = note: required for `&UserId` to implement `Type<_>`
+note: required by a bound in `Query::<'q, DB, <DB as sqlx::Database>::Arguments<'q>>::bind`
+   --> /home/michael/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/sqlx-core-0.8.6/src/query.rs:86:42
+    |
+ 86 |     pub fn bind<T: 'q + Encode<'q, DB> + Type<DB>>(mut self, value: T) -> Self {
+    |                                          ^^^^^^^^ required by this bound in `Query::<'q, DB, <DB as Database>::Arguments<'q>>::bind`
+help: consider dereferencing here
+    |
+217 |             .bind(&*req.user_id)
+    |                    +
+
+error[E0277]: the trait bound `SessionId: sqlx::Encode<'_, _>` is not satisfied
+   --> adk-session/src/database.rs:218:20
+    |
+218 |             .bind(&session_id)
+    |              ----  ^^^^^^^^^^ the trait `sqlx::Encode<'_, _>` is not implemented for `SessionId`
+    |              |
+    |              required by a bound introduced by this call
+    |
+    = note: required for `&SessionId` to implement `sqlx::Encode<'_, _>`
+note: required by a bound in `Query::<'q, DB, <DB as sqlx::Database>::Arguments<'q>>::bind`
+   --> /home/michael/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/sqlx-core-0.8.6/src/query.rs:86:25
+    |
+ 86 |     pub fn bind<T: 'q + Encode<'q, DB> + Type<DB>>(mut self, value: T) -> Self {
+    |                         ^^^^^^^^^^^^^^ required by this bound in `Query::<'q, DB, <DB as Database>::Arguments<'q>>::bind`
+help: consider dereferencing here
+    |
+218 |             .bind(&*session_id)
+    |                    +
+
+error[E0277]: the trait bound `SessionId: Type<_>` is not satisfied
+   --> adk-session/src/database.rs:218:20
+    |
+218 |             .bind(&session_id)
+    |              ----  ^^^^^^^^^^ the trait `Type<_>` is not implemented for `SessionId`
+    |              |
+    |              required by a bound introduced by this call
+    |
+    = note: required for `&SessionId` to implement `Type<_>`
+note: required by a bound in `Query::<'q, DB, <DB as sqlx::Database>::Arguments<'q>>::bind`
+   --> /home/michael/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/sqlx-core-0.8.6/src/query.rs:86:42
+    |
+ 86 |     pub fn bind<T: 'q + Encode<'q, DB> + Type<DB>>(mut self, value: T) -> Self {
+    |                                          ^^^^^^^^ required by this bound in `Query::<'q, DB, <DB as Database>::Arguments<'q>>::bind`
+help: consider dereferencing here
+    |
+218 |             .bind(&*session_id)
+    |                    +
+
+error[E0308]: mismatched types
+   --> adk-session/src/database.rs:232:22
+    |
+232 |             user_id: req.user_id,
+    |                      ^^^^^^^^^^^ expected `String`, found `UserId`
+    |
+help: try using a conversion method
+    |
+232 |             user_id: req.user_id.to_string(),
+    |                                 ++++++++++++
+
+error[E0308]: mismatched types
+   --> adk-session/src/database.rs:233:13
+    |
+233 |             session_id,
+    |             ^^^^^^^^^^ expected `String`, found `SessionId`
+    |
+help: try using a conversion method
+    |
+233 |             session_id: session_id.to_string(),
+    |             +++++++++++           ++++++++++++
+
+error[E0277]: the trait bound `UserId: sqlx::Encode<'_, _>` is not satisfied
+   --> adk-session/src/database.rs:243:20
+    |
+243 |             .bind(&req.user_id)
+    |              ----  ^^^^^^^^^^^ the trait `sqlx::Encode<'_, _>` is not implemented for `UserId`
+    |              |
+    |              required by a bound introduced by this call
+    |
+    = note: required for `&UserId` to implement `sqlx::Encode<'_, _>`
+note: required by a bound in `Query::<'q, DB, <DB as sqlx::Database>::Arguments<'q>>::bind`
+   --> /home/michael/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/sqlx-core-0.8.6/src/query.rs:86:25
+    |
+ 86 |     pub fn bind<T: 'q + Encode<'q, DB> + Type<DB>>(mut self, value: T) -> Self {
+    |                         ^^^^^^^^^^^^^^ required by this bound in `Query::<'q, DB, <DB as Database>::Arguments<'q>>::bind`
+help: consider dereferencing here
+    |
+243 |             .bind(&*req.user_id)
+    |                    +
+
+error[E0277]: the trait bound `UserId: Type<_>` is not satisfied
+   --> adk-session/src/database.rs:243:20
+    |
+243 |             .bind(&req.user_id)
+    |              ----  ^^^^^^^^^^^ the trait `Type<_>` is not implemented for `UserId`
+    |              |
+    |              required by a bound introduced by this call
+    |
+    = note: required for `&UserId` to implement `Type<_>`
+note: required by a bound in `Query::<'q, DB, <DB as sqlx::Database>::Arguments<'q>>::bind`
+   --> /home/michael/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/sqlx-core-0.8.6/src/query.rs:86:42
+    |
+ 86 |     pub fn bind<T: 'q + Encode<'q, DB> + Type<DB>>(mut self, value: T) -> Self {
+    |                                          ^^^^^^^^ required by this bound in `Query::<'q, DB, <DB as Database>::Arguments<'q>>::bind`
+help: consider dereferencing here
+    |
+243 |             .bind(&*req.user_id)
+    |                    +
+
+error[E0277]: the trait bound `SessionId: sqlx::Encode<'_, _>` is not satisfied
+   --> adk-session/src/database.rs:244:20
+    |
+244 |             .bind(&req.session_id)
+    |              ----  ^^^^^^^^^^^^^^ the trait `sqlx::Encode<'_, _>` is not implemented for `SessionId`
+    |              |
+    |              required by a bound introduced by this call
+    |
+    = note: required for `&SessionId` to implement `sqlx::Encode<'_, _>`
+note: required by a bound in `Query::<'q, DB, <DB as sqlx::Database>::Arguments<'q>>::bind`
+   --> /home/michael/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/sqlx-core-0.8.6/src/query.rs:86:25
+    |
+ 86 |     pub fn bind<T: 'q + Encode<'q, DB> + Type<DB>>(mut self, value: T) -> Self {
+    |                         ^^^^^^^^^^^^^^ required by this bound in `Query::<'q, DB, <DB as Database>::Arguments<'q>>::bind`
+help: consider dereferencing here
+    |
+244 |             .bind(&*req.session_id)
+    |                    +
+
+error[E0277]: the trait bound `SessionId: Type<_>` is not satisfied
+   --> adk-session/src/database.rs:244:20
+    |
+244 |             .bind(&req.session_id)
+    |              ----  ^^^^^^^^^^^^^^ the trait `Type<_>` is not implemented for `SessionId`
+    |              |
+    |              required by a bound introduced by this call
+    |
+    = note: required for `&SessionId` to implement `Type<_>`
+note: required by a bound in `Query::<'q, DB, <DB as sqlx::Database>::Arguments<'q>>::bind`
+   --> /home/michael/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/sqlx-core-0.8.6/src/query.rs:86:42
+    |
+ 86 |     pub fn bind<T: 'q + Encode<'q, DB> + Type<DB>>(mut self, value: T) -> Self {
+    |                                          ^^^^^^^^ required by this bound in `Query::<'q, DB, <DB as Database>::Arguments<'q>>::bind`
+help: consider dereferencing here
+    |
+244 |             .bind(&*req.session_id)
+    |                    +
+
+error[E0277]: the trait bound `UserId: sqlx::Encode<'_, _>` is not satisfied
+   --> adk-session/src/database.rs:258:20
+    |
+258 |             .bind(&req.user_id)
+    |              ----  ^^^^^^^^^^^ the trait `sqlx::Encode<'_, _>` is not implemented for `UserId`
+    |              |
+    |              required by a bound introduced by this call
+    |
+    = note: required for `&UserId` to implement `sqlx::Encode<'_, _>`
+note: required by a bound in `Query::<'q, DB, <DB as sqlx::Database>::Arguments<'q>>::bind`
+   --> /home/michael/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/sqlx-core-0.8.6/src/query.rs:86:25
+    |
+ 86 |     pub fn bind<T: 'q + Encode<'q, DB> + Type<DB>>(mut self, value: T) -> Self {
+    |                         ^^^^^^^^^^^^^^ required by this bound in `Query::<'q, DB, <DB as Database>::Arguments<'q>>::bind`
+help: consider dereferencing here
+    |
+258 |             .bind(&*req.user_id)
+    |                    +
+
+error[E0277]: the trait bound `UserId: Type<_>` is not satisfied
+   --> adk-session/src/database.rs:258:20
+    |
+258 |             .bind(&req.user_id)
+    |              ----  ^^^^^^^^^^^ the trait `Type<_>` is not implemented for `UserId`
+    |              |
+    |              required by a bound introduced by this call
+    |
+    = note: required for `&UserId` to implement `Type<_>`
+note: required by a bound in `Query::<'q, DB, <DB as sqlx::Database>::Arguments<'q>>::bind`
+   --> /home/michael/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/sqlx-core-0.8.6/src/query.rs:86:42
+    |
+ 86 |     pub fn bind<T: 'q + Encode<'q, DB> + Type<DB>>(mut self, value: T) -> Self {
+    |                                          ^^^^^^^^ required by this bound in `Query::<'q, DB, <DB as Database>::Arguments<'q>>::bind`
+help: consider dereferencing here
+    |
+258 |             .bind(&*req.user_id)
+    |                    +
+
+error[E0277]: the trait bound `SessionId: sqlx::Encode<'_, _>` is not satisfied
+   --> adk-session/src/database.rs:259:20
+    |
+259 |             .bind(&req.session_id)
+    |              ----  ^^^^^^^^^^^^^^ the trait `sqlx::Encode<'_, _>` is not implemented for `SessionId`
+    |              |
+    |              required by a bound introduced by this call
+    |
+    = note: required for `&SessionId` to implement `sqlx::Encode<'_, _>`
+note: required by a bound in `Query::<'q, DB, <DB as sqlx::Database>::Arguments<'q>>::bind`
+   --> /home/michael/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/sqlx-core-0.8.6/src/query.rs:86:25
+    |
+ 86 |     pub fn bind<T: 'q + Encode<'q, DB> + Type<DB>>(mut self, value: T) -> Self {
+    |                         ^^^^^^^^^^^^^^ required by this bound in `Query::<'q, DB, <DB as Database>::Arguments<'q>>::bind`
+help: consider dereferencing here
+    |
+259 |             .bind(&*req.session_id)
+    |                    +
+
+error[E0277]: the trait bound `SessionId: Type<_>` is not satisfied
+   --> adk-session/src/database.rs:259:20
+    |
+259 |             .bind(&req.session_id)
+    |              ----  ^^^^^^^^^^^^^^ the trait `Type<_>` is not implemented for `SessionId`
+    |              |
+    |              required by a bound introduced by this call
+    |
+    = note: required for `&SessionId` to implement `Type<_>`
+note: required by a bound in `Query::<'q, DB, <DB as sqlx::Database>::Arguments<'q>>::bind`
+   --> /home/michael/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/sqlx-core-0.8.6/src/query.rs:86:42
+    |
+ 86 |     pub fn bind<T: 'q + Encode<'q, DB> + Type<DB>>(mut self, value: T) -> Self {
+    |                                          ^^^^^^^^ required by this bound in `Query::<'q, DB, <DB as Database>::Arguments<'q>>::bind`
+help: consider dereferencing here
+    |
+259 |             .bind(&*req.session_id)
+    |                    +
+
+error[E0308]: mismatched types
+   --> adk-session/src/database.rs:297:22
+    |
+297 |             user_id: req.user_id,
+    |                      ^^^^^^^^^^^ expected `String`, found `UserId`
+    |
+help: try using a conversion method
+    |
+297 |             user_id: req.user_id.to_string(),
+    |                                 ++++++++++++
+
+error[E0308]: mismatched types
+   --> adk-session/src/database.rs:298:25
+    |
+298 |             session_id: req.session_id,
+    |                         ^^^^^^^^^^^^^^ expected `String`, found `SessionId`
+    |
+help: try using a conversion method
+    |
+298 |             session_id: req.session_id.to_string(),
+    |                                       ++++++++++++
+
+error[E0277]: the trait bound `UserId: sqlx::Encode<'_, _>` is not satisfied
+   --> adk-session/src/database.rs:310:16
+    |
+310 |         .bind(&req.user_id)
+    |          ----  ^^^^^^^^^^^ the trait `sqlx::Encode<'_, _>` is not implemented for `UserId`
+    |          |
+    |          required by a bound introduced by this call
+    |
+    = note: required for `&UserId` to implement `sqlx::Encode<'_, _>`
+note: required by a bound in `Query::<'q, DB, <DB as sqlx::Database>::Arguments<'q>>::bind`
+   --> /home/michael/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/sqlx-core-0.8.6/src/query.rs:86:25
+    |
+ 86 |     pub fn bind<T: 'q + Encode<'q, DB> + Type<DB>>(mut self, value: T) -> Self {
+    |                         ^^^^^^^^^^^^^^ required by this bound in `Query::<'q, DB, <DB as Database>::Arguments<'q>>::bind`
+help: consider dereferencing here
+    |
+310 |         .bind(&*req.user_id)
+    |                +
+
+error[E0277]: the trait bound `UserId: Type<_>` is not satisfied
+   --> adk-session/src/database.rs:310:16
+    |
+310 |         .bind(&req.user_id)
+    |          ----  ^^^^^^^^^^^ the trait `Type<_>` is not implemented for `UserId`
+    |          |
+    |          required by a bound introduced by this call
+    |
+    = note: required for `&UserId` to implement `Type<_>`
+note: required by a bound in `Query::<'q, DB, <DB as sqlx::Database>::Arguments<'q>>::bind`
+   --> /home/michael/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/sqlx-core-0.8.6/src/query.rs:86:42
+    |
+ 86 |     pub fn bind<T: 'q + Encode<'q, DB> + Type<DB>>(mut self, value: T) -> Self {
+    |                                          ^^^^^^^^ required by this bound in `Query::<'q, DB, <DB as Database>::Arguments<'q>>::bind`
+help: consider dereferencing here
+    |
+310 |         .bind(&*req.user_id)
+    |                +
+
+error[E0308]: mismatched types
+   --> adk-session/src/database.rs:326:26
+    |
+326 |                 user_id: req.user_id.clone(),
+    |                          ^^^^^^^^^^^^^^^^^^^ expected `String`, found `UserId`
+    |
+help: try using a conversion method
+    |
+326 -                 user_id: req.user_id.clone(),
+326 +                 user_id: req.user_id.to_string(),
+    |
+
+error[E0277]: the trait bound `UserId: sqlx::Encode<'_, _>` is not satisfied
+   --> adk-session/src/database.rs:348:20
+    |
+348 |             .bind(&req.user_id)
+    |              ----  ^^^^^^^^^^^ the trait `sqlx::Encode<'_, _>` is not implemented for `UserId`
+    |              |
+    |              required by a bound introduced by this call
+    |
+    = note: required for `&UserId` to implement `sqlx::Encode<'_, _>`
+note: required by a bound in `Query::<'q, DB, <DB as sqlx::Database>::Arguments<'q>>::bind`
+   --> /home/michael/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/sqlx-core-0.8.6/src/query.rs:86:25
+    |
+ 86 |     pub fn bind<T: 'q + Encode<'q, DB> + Type<DB>>(mut self, value: T) -> Self {
+    |                         ^^^^^^^^^^^^^^ required by this bound in `Query::<'q, DB, <DB as Database>::Arguments<'q>>::bind`
+help: consider dereferencing here
+    |
+348 |             .bind(&*req.user_id)
+    |                    +
+
+error[E0277]: the trait bound `UserId: Type<_>` is not satisfied
+   --> adk-session/src/database.rs:348:20
+    |
+348 |             .bind(&req.user_id)
+    |              ----  ^^^^^^^^^^^ the trait `Type<_>` is not implemented for `UserId`
+    |              |
+    |              required by a bound introduced by this call
+    |
+    = note: required for `&UserId` to implement `Type<_>`
+note: required by a bound in `Query::<'q, DB, <DB as sqlx::Database>::Arguments<'q>>::bind`
+   --> /home/michael/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/sqlx-core-0.8.6/src/query.rs:86:42
+    |
+ 86 |     pub fn bind<T: 'q + Encode<'q, DB> + Type<DB>>(mut self, value: T) -> Self {
+    |                                          ^^^^^^^^ required by this bound in `Query::<'q, DB, <DB as Database>::Arguments<'q>>::bind`
+help: consider dereferencing here
+    |
+348 |             .bind(&*req.user_id)
+    |                    +
+
+error[E0277]: the trait bound `SessionId: sqlx::Encode<'_, _>` is not satisfied
+   --> adk-session/src/database.rs:349:20
+    |
+349 |             .bind(&req.session_id)
+    |              ----  ^^^^^^^^^^^^^^ the trait `sqlx::Encode<'_, _>` is not implemented for `SessionId`
+    |              |
+    |              required by a bound introduced by this call
+    |
+    = note: required for `&SessionId` to implement `sqlx::Encode<'_, _>`
+note: required by a bound in `Query::<'q, DB, <DB as sqlx::Database>::Arguments<'q>>::bind`
+   --> /home/michael/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/sqlx-core-0.8.6/src/query.rs:86:25
+    |
+ 86 |     pub fn bind<T: 'q + Encode<'q, DB> + Type<DB>>(mut self, value: T) -> Self {
+    |                         ^^^^^^^^^^^^^^ required by this bound in `Query::<'q, DB, <DB as Database>::Arguments<'q>>::bind`
+help: consider dereferencing here
+    |
+349 |             .bind(&*req.session_id)
+    |                    +
+
+error[E0277]: the trait bound `SessionId: Type<_>` is not satisfied
+   --> adk-session/src/database.rs:349:20
+    |
+349 |             .bind(&req.session_id)
+    |              ----  ^^^^^^^^^^^^^^ the trait `Type<_>` is not implemented for `SessionId`
+    |              |
+    |              required by a bound introduced by this call
+    |
+    = note: required for `&SessionId` to implement `Type<_>`
+note: required by a bound in `Query::<'q, DB, <DB as sqlx::Database>::Arguments<'q>>::bind`
+   --> /home/michael/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/sqlx-core-0.8.6/src/query.rs:86:42
+    |
+ 86 |     pub fn bind<T: 'q + Encode<'q, DB> + Type<DB>>(mut self, value: T) -> Self {
+    |                                          ^^^^^^^^ required by this bound in `Query::<'q, DB, <DB as Database>::Arguments<'q>>::bind`
+help: consider dereferencing here
+    |
+349 |             .bind(&*req.session_id)
+    |                    +
+
+error[E0277]: the trait bound `UserId: sqlx::Encode<'_, _>` is not satisfied
+   --> adk-session/src/database.rs:356:20
+    |
+356 |             .bind(&req.user_id)
+    |              ----  ^^^^^^^^^^^ the trait `sqlx::Encode<'_, _>` is not implemented for `UserId`
+    |              |
+    |              required by a bound introduced by this call
+    |
+    = note: required for `&UserId` to implement `sqlx::Encode<'_, _>`
+note: required by a bound in `Query::<'q, DB, <DB as sqlx::Database>::Arguments<'q>>::bind`
+   --> /home/michael/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/sqlx-core-0.8.6/src/query.rs:86:25
+    |
+ 86 |     pub fn bind<T: 'q + Encode<'q, DB> + Type<DB>>(mut self, value: T) -> Self {
+    |                         ^^^^^^^^^^^^^^ required by this bound in `Query::<'q, DB, <DB as Database>::Arguments<'q>>::bind`
+help: consider dereferencing here
+    |
+356 |             .bind(&*req.user_id)
+    |                    +
+
+error[E0277]: the trait bound `UserId: Type<_>` is not satisfied
+   --> adk-session/src/database.rs:356:20
+    |
+356 |             .bind(&req.user_id)
+    |              ----  ^^^^^^^^^^^ the trait `Type<_>` is not implemented for `UserId`
+    |              |
+    |              required by a bound introduced by this call
+    |
+    = note: required for `&UserId` to implement `Type<_>`
+note: required by a bound in `Query::<'q, DB, <DB as sqlx::Database>::Arguments<'q>>::bind`
+   --> /home/michael/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/sqlx-core-0.8.6/src/query.rs:86:42
+    |
+ 86 |     pub fn bind<T: 'q + Encode<'q, DB> + Type<DB>>(mut self, value: T) -> Self {
+    |                                          ^^^^^^^^ required by this bound in `Query::<'q, DB, <DB as Database>::Arguments<'q>>::bind`
+help: consider dereferencing here
+    |
+356 |             .bind(&*req.user_id)
+    |                    +
+
+error[E0277]: the trait bound `SessionId: sqlx::Encode<'_, _>` is not satisfied
+   --> adk-session/src/database.rs:357:20
+    |
+357 |             .bind(&req.session_id)
+    |              ----  ^^^^^^^^^^^^^^ the trait `sqlx::Encode<'_, _>` is not implemented for `SessionId`
+    |              |
+    |              required by a bound introduced by this call
+    |
+    = note: required for `&SessionId` to implement `sqlx::Encode<'_, _>`
+note: required by a bound in `Query::<'q, DB, <DB as sqlx::Database>::Arguments<'q>>::bind`
+   --> /home/michael/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/sqlx-core-0.8.6/src/query.rs:86:25
+    |
+ 86 |     pub fn bind<T: 'q + Encode<'q, DB> + Type<DB>>(mut self, value: T) -> Self {
+    |                         ^^^^^^^^^^^^^^ required by this bound in `Query::<'q, DB, <DB as Database>::Arguments<'q>>::bind`
+help: consider dereferencing here
+    |
+357 |             .bind(&*req.session_id)
+    |                    +
+
+error[E0277]: the trait bound `SessionId: Type<_>` is not satisfied
+   --> adk-session/src/database.rs:357:20
+    |
+357 |             .bind(&req.session_id)
+    |              ----  ^^^^^^^^^^^^^^ the trait `Type<_>` is not implemented for `SessionId`
+    |              |
+    |              required by a bound introduced by this call
+    |
+    = note: required for `&SessionId` to implement `Type<_>`
+note: required by a bound in `Query::<'q, DB, <DB as sqlx::Database>::Arguments<'q>>::bind`
+   --> /home/michael/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/sqlx-core-0.8.6/src/query.rs:86:42
+    |
+ 86 |     pub fn bind<T: 'q + Encode<'q, DB> + Type<DB>>(mut self, value: T) -> Self {
+    |                                          ^^^^^^^^ required by this bound in `Query::<'q, DB, <DB as Database>::Arguments<'q>>::bind`
+help: consider dereferencing here
+    |
+357 |             .bind(&*req.session_id)
+    |                    +
+
+error[E0308]: mismatched types
+   --> adk-session/src/vertex.rs:375:26
+    |
+375 |                 user_id: req.user_id.clone(),
+    |                          ^^^^^^^^^^^^^^^^^^^ expected `String`, found `UserId`
+    |
+help: try using a conversion method
+    |
+375 -                 user_id: req.user_id.clone(),
+375 +                 user_id: req.user_id.to_string(),
+    |
+
+error[E0308]: mismatched types
+   --> adk-session/src/vertex.rs:394:22
+    |
+394 |             user_id: req.user_id,
+    |                      ^^^^^^^^^^^ expected `String`, found `UserId`
+    |
+help: try using a conversion method
+    |
+394 |             user_id: req.user_id.to_string(),
+    |                                 ++++++++++++
+
+error[E0277]: can't compare `std::string::String` with `UserId`
+   --> adk-session/src/vertex.rs:419:28
+    |
+419 |         if payload.user_id != req.user_id {
+    |                            ^^ no implementation for `std::string::String == UserId`
+    |
+    = help: the trait `PartialEq<UserId>` is not implemented for `std::string::String`
+help: consider dereferencing here
+    |
+419 |         if payload.user_id != *req.user_id {
+    |                               +
+
+error[E0308]: mismatched types
+   --> adk-session/src/vertex.rs:443:22
+    |
+443 |             user_id: req.user_id,
+    |                      ^^^^^^^^^^^ expected `String`, found `UserId`
+    |
+help: try using a conversion method
+    |
+443 |             user_id: req.user_id.to_string(),
+    |                                 ++++++++++++
+
+error[E0308]: mismatched types
+   --> adk-session/src/vertex.rs:444:25
+    |
+444 |             session_id: req.session_id,
+    |                         ^^^^^^^^^^^^^^ expected `String`, found `SessionId`
+    |
+help: try using a conversion method
+    |
+444 |             session_id: req.session_id.to_string(),
+    |                                       ++++++++++++
+
+error[E0277]: can't compare `std::string::String` with `UserId`
+   --> adk-session/src/vertex.rs:482:70
+    |
+482 |                 if !req.user_id.trim().is_empty() && payload.user_id != req.user_id {
+    |                                                                      ^^ no implementation for `std::string::String == UserId`
+    |
+    = help: the trait `PartialEq<UserId>` is not implemented for `std::string::String`
+help: consider dereferencing here
+    |
+482 |                 if !req.user_id.trim().is_empty() && payload.user_id != *req.user_id {
+    |                                                                         +
+
+Some errors have detailed explanations: E0053, E0277, E0308.
+For more information about an error, try `rustc --explain E0053`.
+error: could not compile `adk-session` (lib) due to 44 previous errors
+warning: build failed, waiting for other jobs to finish...

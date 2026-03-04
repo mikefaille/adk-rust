@@ -16,28 +16,24 @@ pub struct GeminiModel {
 }
 
 impl GeminiModel {
-    pub fn new(api_key: impl Into<String>, model: impl Into<String>) -> Result<Self> {
+    pub fn new(api_key: impl AsRef<str>, model: impl Into<String>) -> Result<Self> {
         let model_name = model.into();
-        let client = Gemini::with_model(api_key.into(), model_name.clone())
+        let client = Gemini::with_model(api_key, model_name.clone())
             .map_err(|e| adk_core::AdkError::Model(e.to_string()))?;
 
         Ok(Self { client, model_name, retry_config: RetryConfig::default() })
     }
 
     pub fn new_google_cloud(
-        api_key: impl Into<String>,
+        api_key: impl AsRef<str>,
         project_id: impl AsRef<str>,
         location: impl AsRef<str>,
         model: impl Into<String>,
     ) -> Result<Self> {
         let model_name = model.into();
-        let client = Gemini::with_google_cloud_model(
-            api_key.into(),
-            project_id,
-            location,
-            model_name.clone(),
-        )
-        .map_err(|e| adk_core::AdkError::Model(e.to_string()))?;
+        let client =
+            Gemini::with_google_cloud_model(api_key, project_id, location, model_name.clone())
+                .map_err(|e| adk_core::AdkError::Model(e.to_string()))?;
 
         Ok(Self { client, model_name, retry_config: RetryConfig::default() })
     }

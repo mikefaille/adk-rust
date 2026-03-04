@@ -140,13 +140,12 @@ mod tests {
         let json = r#"{"jsonrpc":"2.0","method":"message/send","params":{},"id":1}"#;
         let req: JsonRpcRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.method, "message/send");
-        assert_eq!(req.id, Some(Value::Number(1.into())));
+        assert_eq!(req.id, Some(Value::Number(1)));
     }
 
     #[test]
     fn test_jsonrpc_response_success() {
-        let resp =
-            JsonRpcResponse::success(Some(Value::Number(1.into())), Value::String("ok".into()));
+        JsonRpcResponse::success(Some(Value::Number(1)), Value::String("ok"));
         assert!(resp.result.is_some());
         assert!(resp.error.is_none());
     }
@@ -154,7 +153,7 @@ mod tests {
     #[test]
     fn test_jsonrpc_response_error() {
         let resp = JsonRpcResponse::error(
-            Some(Value::Number(1.into())),
+            Some(Value::Number(1)),
             JsonRpcError::method_not_found("unknown"),
         );
         assert!(resp.result.is_none());

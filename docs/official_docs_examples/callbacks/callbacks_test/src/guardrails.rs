@@ -7,6 +7,7 @@
 //!   GOOGLE_API_KEY=your_key cargo run --bin guardrails
 
 use adk_core::Part;
+use adk_core::types::{SessionId, UserId};
 use adk_rust::prelude::*;
 use std::sync::Arc;
 
@@ -51,8 +52,8 @@ async fn main() -> anyhow::Result<()> {
     // Run with console
     adk_cli::console::run_console(
         Arc::new(agent),
-        "guardrails_demo".to_string(),
-        "user".to_string(),
+        SessionId::from("guardrails_demo"),
+        UserId::from("user"),
     )
     .await?;
 

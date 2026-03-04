@@ -1,4 +1,5 @@
 use crate::service::*;
+use adk_core::types::{SessionId, UserId};
 use adk_core::{Part, Result};
 use async_trait::async_trait;
 use std::collections::HashMap;
@@ -9,8 +10,8 @@ const USER_SCOPED_KEY: &str = "user";
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 struct ArtifactKey {
     app_name: String,
-    user_id: String,
-    session_id: String,
+    user_id: UserId,
+    session_id: SessionId,
     file_name: String,
     version: i64,
 }
@@ -28,11 +29,11 @@ impl InMemoryArtifactService {
         file_name.starts_with("user:")
     }
 
-    fn get_session_id(session_id: &str, file_name: &str) -> String {
+    fn get_session_id(session_id: &SessionId, file_name: &str) -> SessionId {
         if Self::is_user_scoped(file_name) {
-            USER_SCOPED_KEY.to_string()
+            SessionId::from(USER_SCOPED_KEY)
         } else {
-            session_id.to_string()
+            session_id.clone()
         }
     }
 
@@ -62,8 +63,8 @@ impl InMemoryArtifactService {
     fn find_latest_version(
         &self,
         app_name: &str,
-        user_id: &str,
-        session_id: &str,
+        user_id: &UserId,
+        session_id: &SessionId,
         file_name: &str,
     ) -> Option<(i64, Part)> {
         let artifacts = self.artifacts.read().unwrap();
@@ -71,8 +72,8 @@ impl InMemoryArtifactService {
             .iter()
             .filter(|(k, _)| {
                 k.app_name == app_name
-                    && k.user_id == user_id
-                    && k.session_id == session_id
+                    && k.user_id == *user_id
+                    && k.session_id == *session_id
                     && k.file_name == file_name
             })
             .collect();
@@ -178,7 +179,8 @@ impl ArtifactService for InMemoryArtifactService {
         for key in artifacts.keys() {
             if key.app_name == req.app_name
                 && key.user_id == req.user_id
-                && (key.session_id == req.session_id || key.session_id == USER_SCOPED_KEY)
+                && (key.session_id == req.session_id
+                    || key.session_id == SessionId::from(USER_SCOPED_KEY))
             {
                 file_names.insert(key.file_name.clone());
             }

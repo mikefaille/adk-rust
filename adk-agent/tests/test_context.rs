@@ -74,14 +74,14 @@ use adk_core::types::{SessionId, UserId};
 
 struct DummySession {
     id: SessionId,
-    user_id: UserId,
+    user_id: UserId::new( UserId,
 }
 
 impl DummySession {
     fn new() -> Self {
         Self {
-            id: SessionId::from("test-session".to_string()),
-            user_id: UserId::from("test-user".to_string()),
+            id: SessionId::new("test-session".to_string()).unwrap(),
+            user_id: UserId::new( UserId::new("test-user".to_string()).unwrap(),
         }
     }
 }

@@ -1,4 +1,5 @@
 use crate::service::{ArtifactService, ListRequest, LoadRequest, SaveRequest};
+use adk_core::types::{SessionId, UserId};
 use adk_core::{Artifacts, Part, Result};
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -37,8 +38,8 @@ use std::sync::Arc;
 pub struct ScopedArtifacts {
     service: Arc<dyn ArtifactService>,
     app_name: String,
-    user_id: String,
-    session_id: String,
+    user_id: UserId,
+    session_id: SessionId,
 }
 
 impl ScopedArtifacts {
@@ -53,8 +54,8 @@ impl ScopedArtifacts {
     pub fn new(
         service: Arc<dyn ArtifactService>,
         app_name: String,
-        user_id: String,
-        session_id: String,
+        user_id: UserId,
+        session_id: SessionId,
     ) -> Self {
         Self { service, app_name, user_id, session_id }
     }
@@ -116,14 +117,14 @@ mod tests {
         let sess1 = ScopedArtifacts::new(
             service.clone(),
             "app".to_string(),
-            "user".to_string(),
-            "sess1".to_string(),
+            UserId::from("user"),
+            SessionId::from("sess1"),
         );
         let sess2 = ScopedArtifacts::new(
             service.clone(),
             "app".to_string(),
-            "user".to_string(),
-            "sess2".to_string(),
+            UserId::from("user"),
+            SessionId::from("sess2"),
         );
 
         // Save different data to same filename in different sessions
@@ -150,14 +151,14 @@ mod tests {
         let sess1 = ScopedArtifacts::new(
             service.clone(),
             "app".to_string(),
-            "user".to_string(),
-            "sess1".to_string(),
+            UserId::from("user"),
+            SessionId::from("sess1"),
         );
         let sess2 = ScopedArtifacts::new(
             service.clone(),
             "app".to_string(),
-            "user".to_string(),
-            "sess2".to_string(),
+            UserId::from("user"),
+            SessionId::from("sess2"),
         );
 
         // Save files in different sessions
@@ -179,14 +180,14 @@ mod tests {
         let sess1 = ScopedArtifacts::new(
             service.clone(),
             "app".to_string(),
-            "user1".to_string(),
-            "sess1".to_string(),
+            UserId::from("user1"),
+            SessionId::from("sess1"),
         );
         let sess2 = ScopedArtifacts::new(
             service.clone(),
             "app".to_string(),
-            "user1".to_string(),
-            "sess2".to_string(),
+            UserId::from("user1"),
+            SessionId::from("sess2"),
         );
 
         // Save user-scoped artifact (with "user:" prefix)

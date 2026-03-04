@@ -9,7 +9,7 @@ async fn test_memory_checkpointer_save_and_load() {
     let checkpointer = MemoryCheckpointer::new();
 
     let mut state = State::new();
-    state.insert("value".to_string(), json!(42));
+    state.insert("value".to_string(), json!(42);
 
     let checkpoint = Checkpoint::new("thread-1", state.clone(), 0, vec!["node_a".to_string()]);
     let checkpoint_id = checkpoint.checkpoint_id.clone();
@@ -17,11 +17,11 @@ async fn test_memory_checkpointer_save_and_load() {
     checkpointer.save(&checkpoint).await.unwrap();
 
     let retrieved = checkpointer.load("thread-1").await.unwrap();
-    assert!(retrieved.is_some());
+    assert!(retrieved.is_some();
 
     let cp = retrieved.unwrap();
     assert_eq!(cp.thread_id, "thread-1");
-    assert_eq!(cp.state.get("value"), Some(&json!(42)));
+    assert_eq!(cp.state.get("value"), Some(&json!(42));
     assert_eq!(cp.pending_nodes, vec!["node_a".to_string()]);
     assert_eq!(cp.checkpoint_id, checkpoint_id);
 }
@@ -37,12 +37,12 @@ async fn test_memory_checkpointer_load_by_id() {
     checkpointer.save(&checkpoint).await.unwrap();
 
     let retrieved = checkpointer.load_by_id(&checkpoint_id).await.unwrap();
-    assert!(retrieved.is_some());
+    assert!(retrieved.is_some();
     assert_eq!(retrieved.unwrap().step, 5);
 
     // Non-existent ID should return None
     let not_found = checkpointer.load_by_id("nonexistent-id").await.unwrap();
-    assert!(not_found.is_none());
+    assert!(not_found.is_none();
 }
 
 #[tokio::test]
@@ -60,7 +60,7 @@ async fn test_memory_checkpointer_load_latest() {
 
     // load() returns the latest (last saved)
     let latest = checkpointer.load("thread-1").await.unwrap();
-    assert!(latest.is_some());
+    assert!(latest.is_some();
     assert_eq!(latest.unwrap().step, 1);
 }
 
@@ -81,7 +81,7 @@ async fn test_memory_checkpointer_list() {
     assert_eq!(thread2_checkpoints.len(), 1);
 
     let thread3_checkpoints = checkpointer.list("thread-3").await.unwrap();
-    assert!(thread3_checkpoints.is_empty());
+    assert!(thread3_checkpoints.is_empty();
 }
 
 #[tokio::test]
@@ -95,14 +95,14 @@ async fn test_memory_checkpointer_delete() {
 
     // Verify it exists
     let exists = checkpointer.load("thread-1").await.unwrap();
-    assert!(exists.is_some());
+    assert!(exists.is_some();
 
     // Delete it
     checkpointer.delete("thread-1").await.unwrap();
 
     // Verify it's gone
     let deleted = checkpointer.load("thread-1").await.unwrap();
-    assert!(deleted.is_none());
+    assert!(deleted.is_none();
 }
 
 #[tokio::test]
@@ -110,7 +110,7 @@ async fn test_memory_checkpointer_load_nonexistent() {
     let checkpointer = MemoryCheckpointer::new();
 
     let result = checkpointer.load("nonexistent").await.unwrap();
-    assert!(result.is_none());
+    assert!(result.is_none();
 }
 
 #[tokio::test]
@@ -132,11 +132,11 @@ async fn test_checkpoint_with_complex_state() {
             "user_id": "user456"
         }),
     );
-    state.insert("count".to_string(), json!(42));
+    state.insert("count".to_string(), json!(42);
 
     let checkpoint = Checkpoint::new("complex-thread", state, 5, vec!["node_x".to_string()])
         .with_metadata("source", json!("test"))
-        .with_metadata("version", json!(1));
+        .with_metadata("version", json!(1);
 
     checkpointer.save(&checkpoint).await.unwrap();
 
@@ -144,11 +144,11 @@ async fn test_checkpoint_with_complex_state() {
 
     assert_eq!(retrieved.step, 5);
     assert_eq!(retrieved.pending_nodes, vec!["node_x".to_string()]);
-    assert_eq!(retrieved.metadata.get("source"), Some(&json!("test")));
-    assert_eq!(retrieved.metadata.get("version"), Some(&json!(1)));
+    assert_eq!(retrieved.metadata.get("source"), Some(&json!("test"));
+    assert_eq!(retrieved.metadata.get("version"), Some(&json!(1));
 
     let messages = retrieved.state.get("messages").unwrap();
-    assert!(messages.is_array());
+    assert!(messages.is_array();
     assert_eq!(messages.as_array().unwrap().len(), 2);
 }
 
@@ -159,7 +159,7 @@ async fn test_checkpoint_ordering() {
     // Save checkpoints in order
     for step in 0..5 {
         let mut state = State::new();
-        state.insert("step".to_string(), json!(step));
+        state.insert("step".to_string(), json!(step);
         let checkpoint = Checkpoint::new("ordered-thread", state, step, vec![]);
         checkpointer.save(&checkpoint).await.unwrap();
     }

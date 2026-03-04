@@ -16,9 +16,10 @@ async fn _pii_redactor_example() {
 // Validate: ContentFilter factory methods
 fn _content_filter_examples() {
     let _filter1 = ContentFilter::harmful_content();
-    let _filter2 = ContentFilter::on_topic("cooking", vec!["recipe".into(), "bake".into()]);
+    let _filter2 =
+        ContentFilter::on_topic("cooking", vec!["recipe".to_string(), "bake".to_string()]);
     let _filter3 = ContentFilter::max_length(1000);
-    let _filter4 = ContentFilter::blocked_keywords(vec!["forbidden".into()]);
+    let _filter4 = ContentFilter::blocked_keywords(vec!["forbidden".to_string()]);
 }
 
 // Validate: GuardrailSet builder

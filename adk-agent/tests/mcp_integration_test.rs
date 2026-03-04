@@ -21,14 +21,14 @@ use adk_core::types::{SessionId, UserId};
 
 struct MockSession {
     id: SessionId,
-    user_id: UserId,
+    user_id: UserId::new( UserId,
 }
 
 impl MockSession {
     fn new() -> Self {
         Self {
-            id: SessionId::from("mcp-session".to_string()),
-            user_id: UserId::from("mcp-user".to_string()),
+            id: SessionId::new("mcp-session".to_string()).unwrap(),
+            user_id: UserId::new( UserId::new("mcp-user".to_string()).unwrap(),
         }
     }
 }

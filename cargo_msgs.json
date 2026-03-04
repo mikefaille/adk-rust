@@ -1,0 +1,7 @@
+🚀 Welcome to the ADK-Rust Development Environment!
+   Rust:    rustc 1.93.1 (01f6ddf75 2026-02-11)
+   Cargo:   cargo 1.93.1 (083ac5135 2025-12-15)
+   sccache: sccache 0.13.0
+   Node:    v22.22.0
+
+💡 Run 'devenv tasks list' or use the scripts: ws-fmt, ws-check, ws-test, ws-clippy.
