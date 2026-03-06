@@ -1,14 +1,14 @@
 //! Gemini Token Usage Metadata Example
 //!
 //! Demonstrates how to inspect `UsageMetadata` returned by the Gemini API,
-//! including prompt tokens, candidate tokens, thinking tokens, and cache
-//! token counts. Uses Gemini 2.5 Flash which supports thinking natively.
+//! including prompt tokens, candidate tokens, thought tokens, and cache
+//! token counts. Uses Gemini 2.5 Flash which supports thought natively.
 //!
 //! The response metadata includes:
 //! - `prompt_token_count` — tokens consumed by the input
 //! - `candidates_token_count` — tokens generated in the output
 //! - `total_token_count` — sum of prompt + candidates
-//! - `thinking_token_count` — tokens used for internal reasoning (Gemini 2.5)
+//! - `thought_token_count` — tokens used for internal reasoning (Gemini 2.5)
 //! - `cache_read_input_token_count` — tokens served from cache (if caching active)
 //! - `cache_creation_input_token_count` — tokens used to populate cache
 //!
@@ -28,8 +28,8 @@ fn print_usage(label: &str, usage: &UsageMetadata) {
     println!("  prompt tokens:           {}", usage.prompt_token_count);
     println!("  candidate tokens:        {}", usage.candidates_token_count);
     println!("  total tokens:            {}", usage.total_token_count);
-    if let Some(thinking) = usage.thinking_token_count {
-        println!("  thinking tokens:         {thinking}");
+    if let Some(thought) = usage.thought_token_count {
+        println!("  thought tokens:         {thought}");
     }
     if let Some(cache_read) = usage.cache_read_input_token_count {
         println!("  cache read tokens:       {cache_read}");
@@ -67,9 +67,9 @@ async fn send_request(
         if let Some(content) = &response.content {
             for part in &content.parts {
                 match part {
-                    Part::Thinking { thinking, .. } => {
+                    Part::Thinking { thought, .. } => {
                         if text.is_empty() {
-                            println!("  [thinking] {}", &thinking[..thinking.len().min(80)]);
+                            println!("  [thought] {}", &thought[..thought.len().min(80)]);
                         }
                     }
                     Part::Text(t) => text.push_str(t),
@@ -92,12 +92,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .or_else(|_| std::env::var("GEMINI_API_KEY"))
         .expect("GOOGLE_API_KEY or GEMINI_API_KEY must be set");
 
-    // Gemini 2.5 Flash supports thinking natively
+    // Gemini 2.5 Flash supports thought natively
     let model = GeminiModel::new(&api_key, "gemini-2.5-flash")?;
 
     println!("=== Gemini Token Usage Metadata Demo ===\n");
 
-    // 1. Simple question — minimal thinking
+    // 1. Simple question — minimal thought
     println!(">> Request 1: Simple factual question\n");
     let (answer, usage) = send_request(&model, "What is the capital of France?").await?;
     println!("  Answer: {answer}");
@@ -105,8 +105,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         print_usage("Request 1 Usage", u);
     }
 
-    // 2. Reasoning question — triggers more thinking tokens
-    println!(">> Request 2: Math reasoning (triggers thinking tokens)\n");
+    // 2. Reasoning question — triggers more thought tokens
+    println!(">> Request 2: Math reasoning (triggers thought tokens)\n");
     let (answer, usage) = send_request(
         &model,
         "If a train travels 120 km in 1.5 hours, and then 80 km in 45 minutes, \
@@ -129,8 +129,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     println!("=== Summary ===");
-    println!("• thinking_token_count reflects internal reasoning effort");
-    println!("• Harder problems consume more thinking tokens");
+    println!("• thought_token_count reflects internal reasoning effort");
+    println!("• Harder problems consume more thought tokens");
     println!("• prompt_token_count scales with input length");
     println!("• cache_read/creation tokens appear when prompt caching is active");
 

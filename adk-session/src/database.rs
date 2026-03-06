@@ -275,7 +275,7 @@ impl SessionService for DatabaseSessionService {
                 Some(Event {
                     id: row.get("id"),
                     timestamp,
-                    invocation_id: InvocationId::from(invocation_id_str),
+                    invocation_id: InvocationId::new(invocation_id_str).ok()?,
                     branch: row.get("branch"),
                     author: row.get("author"),
                     llm_request: None,

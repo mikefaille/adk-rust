@@ -284,7 +284,7 @@ impl BedrockClient {
                             yield LlmResponse {
                                 content: Some(adk_core::Content {
                                     role: adk_core::types::Role::Model,
-                                    parts: vec![adk_core::Part::Thinking { thought: String::new() }],
+                                    parts: vec![adk_core::Part::Thinking { thought: String::new(), signature: None }],
                                 }),
                                 usage_metadata: None,
                                 finish_reason: None,

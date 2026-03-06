@@ -7,8 +7,8 @@
 //!    `cache_creation_input_token_count` when `with_prompt_caching(true)` is set.
 //!    Anthropic caches system instructions and long prefixes, giving 90% discount
 //!    on cache reads.
-//! 3. **Extended thinking** — `Part::Thinking` blocks with Claude's internal
-//!    reasoning when `with_thinking(budget)` is configured.
+//! 3. **Extended thought** — `Part::Thinking` blocks with Claude's internal
+//!    reasoning when `with_thought(budget)` is configured.
 //!
 //! ```bash
 //! export ANTHROPIC_API_KEY=sk-ant-...
@@ -31,8 +31,8 @@ fn print_usage(label: &str, usage: &UsageMetadata) {
     if let Some(cache_create) = usage.cache_creation_input_token_count {
         println!("  cache creation tokens:   {cache_create}  ← 25% surcharge on first use");
     }
-    if let Some(thinking) = usage.thinking_token_count {
-        println!("  thinking tokens:         {thinking}");
+    if let Some(thought) = usage.thought_token_count {
+        println!("  thought tokens:         {thought}");
     }
     println!();
 }
@@ -211,15 +211,15 @@ async fn demo_prompt_caching(api_key: &str) -> Result<(), Box<dyn std::error::Er
 }
 
 // ---------------------------------------------------------------------------
-// Part 2: Extended thinking
+// Part 2: Extended thought
 // ---------------------------------------------------------------------------
 
-async fn demo_thinking(api_key: &str) -> Result<(), Box<dyn std::error::Error>> {
+async fn demo_thought(api_key: &str) -> Result<(), Box<dyn std::error::Error>> {
     println!("=== Part 2: Extended Thinking ===\n");
 
     let config = AnthropicConfig::new(api_key, "claude-sonnet-4-20250514")
         .with_max_tokens(16384)
-        .with_thinking(8192);
+        .with_thought(8192);
 
     let client = AnthropicClient::new(config)?;
 
@@ -237,17 +237,17 @@ async fn demo_thinking(api_key: &str) -> Result<(), Box<dyn std::error::Error>> 
     println!("  Question: Mislabeled boxes puzzle\n");
 
     let mut stream = client.generate_content(request, true).await?;
-    let mut thinking_count = 0;
+    let mut thought_count = 0;
 
     while let Some(result) = stream.next().await {
         let response = result?;
         if let Some(content) = &response.content {
             for part in &content.parts {
                 match part {
-                    Part::Thinking { thinking, .. } => {
-                        thinking_count += 1;
-                        let preview = &thinking[..thinking.len().min(120)];
-                        println!("  💭 Thinking #{thinking_count}: {preview}...");
+                    Part::Thinking { thought, .. } => {
+                        thought_count += 1;
+                        let preview = &thought[..thought.len().min(120)];
+                        println!("  💭 Thinking #{thought_count}: {preview}...");
                     }
                     Part::Text(text) => print!("{text}"),
                     _ => {}
@@ -277,13 +277,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== Anthropic Token Usage, Caching & Thinking Demo ===\n");
 
     demo_prompt_caching(&api_key).await?;
-    demo_thinking(&api_key).await?;
+    demo_thought(&api_key).await?;
 
     println!("=== Key Takeaways ===");
     println!("• with_prompt_caching(true) enables cache_control on system instructions");
     println!("• cache_creation tokens have a 25% surcharge on first use");
     println!("• cache_read tokens get a 90% discount on subsequent requests");
-    println!("• with_thinking(budget) enables extended thinking with Part::Thinking blocks");
+    println!("• with_thought(budget) enables extended thought with Part::Thinking blocks");
     println!("• Thinking blocks show Claude's internal reasoning process");
 
     Ok(())

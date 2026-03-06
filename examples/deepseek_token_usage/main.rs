@@ -7,7 +7,7 @@
 //!    `cache_read_input_token_count` shows tokens served from cache (10x cheaper).
 //!    No configuration needed — just reuse the same prefix across requests.
 //! 3. **Reasoning mode** — `deepseek-reasoner` produces `Part::Thinking` blocks
-//!    with chain-of-thought reasoning. `thinking_token_count` tracks the cost.
+//!    with chain-of-thought reasoning. `thought_token_count` tracks the cost.
 //!
 //! ```bash
 //! export DEEPSEEK_API_KEY=...
@@ -27,8 +27,8 @@ fn print_usage(label: &str, usage: &UsageMetadata) {
     if let Some(cached) = usage.cache_read_input_token_count {
         println!("  cache hit tokens:    {cached}  ← 10x cheaper (0.1 yuan/M)");
     }
-    if let Some(thinking) = usage.thinking_token_count {
-        println!("  reasoning tokens:    {thinking}  ← chain-of-thought cost");
+    if let Some(thought) = usage.thought_token_count {
+        println!("  reasoning tokens:    {thought}  ← chain-of-thought cost");
     }
     println!();
 }
@@ -173,7 +173,7 @@ async fn demo_caching(api_key: &str) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 // ---------------------------------------------------------------------------
-// Part 2: Reasoning mode with thinking traces
+// Part 2: Reasoning mode with thought traces
 // ---------------------------------------------------------------------------
 
 async fn demo_reasoning(api_key: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -196,17 +196,17 @@ async fn demo_reasoning(api_key: &str) -> Result<(), Box<dyn std::error::Error>>
     println!("  Question: 100 murderers puzzle\n");
 
     let mut stream = model.generate_content(request, true).await?;
-    let mut thinking_count = 0;
+    let mut thought_count = 0;
 
     while let Some(result) = stream.next().await {
         let response = result?;
         if let Some(content) = &response.content {
             for part in &content.parts {
                 match part {
-                    Part::Thinking { thinking, .. } => {
-                        thinking_count += 1;
-                        let preview = &thinking[..thinking.len().min(120)];
-                        println!("  💭 Thinking #{thinking_count}: {preview}...");
+                    Part::Thinking { thought, .. } => {
+                        thought_count += 1;
+                        let preview = &thought[..thought.len().min(120)];
+                        println!("  💭 Thinking #{thought_count}: {preview}...");
                     }
                     Part::Text(text) => print!("{text}"),
                     _ => {}
@@ -242,7 +242,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("• DeepSeek caches prefixes automatically — no configuration needed");
     println!("• Cache hit tokens cost 10x less (0.1 vs 1 yuan per million)");
     println!("• deepseek-reasoner produces Part::Thinking with chain-of-thought");
-    println!("• thinking_token_count tracks reasoning cost separately");
+    println!("• thought_token_count tracks reasoning cost separately");
     println!("• Reasoning tokens are billed but provide better accuracy");
 
     Ok(())

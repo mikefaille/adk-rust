@@ -212,7 +212,7 @@ fn build_content_with_attachments(
                     ));
                 }
                 content.parts.push(adk_core::Part::InlineData {
-                    mime_type: attachment.mime_type.clone().parse().unwrap_or(mime::APPLICATION_OCTET_STREAM),
+                    mime_type: attachment.mime_type.clone().parse().unwrap_or(mime_guess::mime::APPLICATION_OCTET_STREAM),
                     data: data.into(),
                 });
             }

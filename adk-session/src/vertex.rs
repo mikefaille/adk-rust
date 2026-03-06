@@ -4,7 +4,7 @@ use crate::{
 };
 use adk_core::{
     AdkError, Result,
-    types::{SessionId, UserId},
+    types::{InvocationId, SessionId, UserId},
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -705,6 +705,7 @@ impl VertexEventPayload {
             self.invocation_id
         };
 
+        let invocation_id = InvocationId::new(invocation_id).unwrap_or_else(|_| InvocationId::new("vertex-event").unwrap());
         let mut event = Event::new(invocation_id.clone());
 
         if let Some(event_id) = event_id_from_resource_name(&self.name) {
@@ -714,7 +715,7 @@ impl VertexEventPayload {
             event.timestamp = timestamp;
         }
 
-        event.invocation_id = invocation_id.into();
+        event.invocation_id = invocation_id;
         event.author = self.author;
         event.branch = self.event_metadata.branch;
         event.actions.state_delta = sanitize_state_map(self.actions.state_delta);
