@@ -101,11 +101,11 @@ impl BaseEventsSummarizer for LlmEventSummarizer {
         let end_timestamp = events.last().map(|e| e.timestamp).unwrap_or_default();
 
         let compaction =
-            EventCompaction { start_timestamp, end_timestamp, compacted_content: summary };
+            EventCompaction { start_timestamp, end_timestamp, compacted_content: summary, summary: None, truncate_before_id: "".to_string() };
 
         let actions = EventActions { compaction: Some(compaction), ..Default::default() };
 
-        let mut event = Event::new(Event::new("compaction").invocation_id);
+        let mut event = Event::new(adk_core::types::InvocationId::new("compaction").unwrap());
         event.author = "system".to_string();
         event.actions = actions;
 

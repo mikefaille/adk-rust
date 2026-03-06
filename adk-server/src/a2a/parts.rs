@@ -14,7 +14,7 @@ pub fn adk_parts_to_a2a(
                 let encoded = general_purpose::STANDARD.encode(data);
                 Ok(crate::a2a::Part::file(crate::a2a::FileContent {
                     name: None,
-                    mime_type: Some(mime_type.clone()),
+                    mime_type: Some(mime_type.to_string()),
                     bytes: Some(encoded),
                     uri: None,
                 }))
@@ -23,7 +23,7 @@ pub fn adk_parts_to_a2a(
                 // FileData contains a URI reference to a file
                 Ok(crate::a2a::Part::file(crate::a2a::FileContent {
                     name: None,
-                    mime_type: Some(mime_type.clone()),
+                    mime_type: Some(mime_type.to_string()),
                     bytes: None,
                     uri: Some(file_uri.clone()),
                 }))
@@ -75,7 +75,7 @@ pub fn a2a_parts_to_adk(parts: &[crate::a2a::Part]) -> Result<Vec<Part>> {
                         adk_core::AdkError::Agent(format!("Base64 decode error: {}", e))
                     })?;
                     Ok(Part::InlineData {
-                        mime_type: file.mime_type.clone().unwrap_or_default(),
+                        mime_type: file.mime_type.clone().unwrap_or_else(|| "application/octet-stream".to_string()).parse().unwrap_or_else(|_| "application/octet-stream".parse().unwrap()),
                         data: data.into(),
                     })
                 } else {

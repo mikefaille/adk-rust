@@ -212,7 +212,7 @@ fn build_content_with_attachments(
                     ));
                 }
                 content.parts.push(adk_core::Part::InlineData {
-                    mime_type: attachment.mime_type.clone(),
+                    mime_type: attachment.mime_type.clone().parse().unwrap_or(mime::APPLICATION_OCTET_STREAM),
                     data: data.into(),
                 });
             }
@@ -252,7 +252,7 @@ fn build_content_from_parts(parts: &[MessagePart]) -> Result<adk_core::Content, 
                         ));
                     }
                     content.parts.push(adk_core::Part::InlineData {
-                        mime_type: inline_data.mime_type.clone(),
+                        mime_type: inline_data.mime_type.clone().parse().unwrap_or_else(|_| "application/octet-stream".parse().unwrap()),
                         data: data.into(),
                     });
                 }

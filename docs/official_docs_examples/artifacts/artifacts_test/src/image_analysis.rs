@@ -38,7 +38,7 @@ async fn main() -> anyhow::Result<()> {
             file_name: "user:photo.jpg".to_string(),
             part: Part::InlineData {
                 data: image_bytes.into(),
-                mime_type: "image/jpeg".to_string(),
+                mime_type: "image/jpeg".parse().unwrap(),
             },
             version: None,
         })
