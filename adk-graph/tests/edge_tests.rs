@@ -1,7 +1,6 @@
 use adk_graph::edge::*;
 use adk_graph::state::State;
 use serde_json::json;
-use std::collections::HashMap;
 
 #[test]
 fn test_edge_target_from_str() {
@@ -30,7 +29,7 @@ fn test_by_field_router() {
     assert_eq!(router(&state), "unknown");
 
     state.insert("action".to_string(), json!(123));
-    assert_eq!(router(&state), "__end__");
+    assert_eq!(router(&state), END);
 }
 
 #[test]

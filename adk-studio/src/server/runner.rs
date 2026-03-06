@@ -1825,7 +1825,7 @@ mod tests {
             Just(Value::Null),
             Just(Value::Bool(true)),
             Just(Value::Bool(false)),
-            any::<i64>().prop_map(|n| Value::Number(n)),
+            any::<i64>().prop_map(|n| Value::Number(n.into())),
             "[a-z]{1,10}".prop_map(Value::String),
         ]
     }
