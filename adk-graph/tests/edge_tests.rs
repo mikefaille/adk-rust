@@ -91,11 +91,18 @@ fn test_custom_router() {
     assert_eq!(router(&state), "low");
 }
 
+
 #[test]
 fn test_edge_target_equality() {
-    assert_eq!(EdgeTarget::from(START), EdgeTarget::from(START));
-    assert_eq!(EdgeTarget::from(END), EdgeTarget::from(END));
+    // Correct: Prove the constant converts to the explicit End variant
+    assert_eq!(EdgeTarget::from(END), EdgeTarget::End);
+
+    // Correct: Prove identical nodes are equal
     assert_eq!(EdgeTarget::Node("a".to_string()), EdgeTarget::Node("a".to_string()));
+
+    // Correct: Prove distinct nodes are not equal
     assert_ne!(EdgeTarget::Node("a".to_string()), EdgeTarget::Node("b".to_string()));
+
+    // Correct: Prove a node coincidentally named "end" is NOT the framework's End state
     assert_ne!(EdgeTarget::Node("end".to_string()), EdgeTarget::End);
 }
