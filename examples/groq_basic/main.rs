@@ -39,7 +39,7 @@ async fn main() -> Result<()> {
         "groq_basic".to_string(),
         adk_core::types::UserId::new("user1").unwrap(),
     )
-        .await?;
+    .await?;
 
     Ok(())
 }

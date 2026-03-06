@@ -60,7 +60,7 @@ struct ListSessionsQuery {
     filter: Option<String>,
 }
 
-fn session_name(project: &str, location: &str, engine: &str, session_id: SessionId::new( &str) -> String {
+fn session_name(project: &str, location: &str, engine: &str, session_id: &str) -> String {
     format!(
         "projects/{project}/locations/{location}/reasoningEngines/{engine}/sessions/{session_id}"
     )
@@ -95,7 +95,7 @@ async fn create_session(
     db.sessions.insert(
         name.clone(),
         MockSession {
-            user_id: UserId::new( session.user_id,
+            user_id: session.user_id,
             state: session.session_state,
             update_time: Utc::now().to_rfc3339(),
         },

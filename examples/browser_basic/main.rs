@@ -113,11 +113,11 @@ struct MockContext {
 impl MockContext {
     fn new(agent: Arc<dyn Agent>, content: Content) -> Self {
         let mut identity = adk_core::types::AdkIdentity::default();
-        identity.invocation_id = "inv-browser-1".to_string());
+        identity.invocation_id = "inv-browser-1".to_string();
         identity.agent_name = agent.name().to_string();
-        identity.user_id = "user".to_string());
+        identity.user_id = "user".to_string();
         identity.app_name = "browser_example".to_string();
-        identity.session_id = "browser-session".to_string());
+        identity.session_id = "browser-session".to_string();
         identity.branch = "".to_string();
 
         Self {

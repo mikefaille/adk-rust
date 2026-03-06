@@ -15,14 +15,14 @@ fn test_node_output_builder() {
     assert_eq!(output.updates.get("key1"), Some(&json!("value1"));
     assert_eq!(output.updates.get("key2"), Some(&json!(42));
     assert!(output.interrupt.is_none();
-    assert!(output.events.is_empty();
+    assert!(output.events.is_empty());
 }
 
 #[tokio::test]
 async fn test_function_node() {
     let node = FunctionNode::new("test_node", |ctx| async move {
         let value = ctx.get("input").and_then(|v| v.as_i64()).unwrap_or(0);
-        Ok(NodeOutput::new().with_update("output", json!(value * 2))
+        Ok(NodeOutput::new().with_update("output", json!(value * 2)))
     });
 
     assert_eq!(node.name(), "test_node");
@@ -34,7 +34,7 @@ async fn test_function_node() {
     let ctx = NodeContext::new(state, config, 0);
     let result = node.execute(&ctx).await.unwrap();
 
-    assert_eq!(result.updates.get("output"), Some(&json!(42));
+    assert_eq!(result.updates.get("output"), Some(&json!(42)));
 }
 
 #[tokio::test]
@@ -50,8 +50,8 @@ async fn test_passthrough_node() {
     let ctx = NodeContext::new(state, config, 0);
     let result = node.execute(&ctx).await.unwrap();
 
-    assert!(result.updates.is_empty();
-    assert!(result.interrupt.is_none();
+    assert!(result.updates.is_empty());
+    assert!(result.interrupt.is_none());
 }
 
 #[tokio::test]
@@ -59,8 +59,8 @@ async fn test_function_node_with_multiple_outputs() {
     let node = FunctionNode::new("multi_output", |ctx| async move {
         let input = ctx.get("input").and_then(|v| v.as_str()).unwrap_or("");
         Ok(NodeOutput::new()
-            .with_update("length", json!(input.len())
-            .with_update("uppercase", json!(input.to_uppercase())
+            .with_update("length", json!(input.len())))
+            .with_update("uppercase", json!(input.to_uppercase()))
             .with_update("words", json!(input.split_whitespace().count()))
     });
 
@@ -72,8 +72,8 @@ async fn test_function_node_with_multiple_outputs() {
     let result = node.execute(&ctx).await.unwrap();
 
     assert_eq!(result.updates.get("length"), Some(&json!(11));
-    assert_eq!(result.updates.get("uppercase"), Some(&json!("HELLO WORLD"));
-    assert_eq!(result.updates.get("words"), Some(&json!(2));
+    assert_eq!(result.updates.get("uppercase"), Some(&json!("HELLO WORLD")));
+    assert_eq!(result.updates.get("words"), Some(&json!(2)));
 }
 
 #[tokio::test]
@@ -85,8 +85,8 @@ async fn test_node_context_methods() {
     let config = ExecutionConfig::new("test-thread".to_string();
     let ctx = NodeContext::new(state, config, 5);
 
-    assert_eq!(ctx.get("key1"), Some(&json!("value1"));
-    assert_eq!(ctx.get("key2"), Some(&json!(100));
+    assert_eq!(ctx.get("key1"), Some(&json!("value1")));
+    assert_eq!(ctx.get("key2"), Some(&json!(100)));
     assert_eq!(ctx.get("nonexistent"), None);
     assert_eq!(ctx.step, 5);
 }
@@ -100,7 +100,7 @@ async fn test_node_error_handling() {
         })
     });
 
-    let config = ExecutionConfig::new("test-thread".to_string();
+    let config = ExecutionConfig::new("test-thread".to_string());
     let ctx = NodeContext::new(State::new(), config, 0);
     let result = node.execute(&ctx).await;
 
@@ -118,17 +118,17 @@ async fn test_node_error_handling() {
 fn test_execution_config() {
     let config = ExecutionConfig::new("thread-123".to_string())
         .with_recursion_limit(100)
-        .with_metadata("key", json!("value");
+        .with_metadata("key", json!("value")));
 
     assert_eq!(config.thread_id.as_ref(), "thread-123");
     assert_eq!(config.recursion_limit, 100);
-    assert_eq!(config.metadata.get("key"), Some(&json!("value"));
-    assert!(config.resume_from.is_none();
+    assert_eq!(config.metadata.get("key"), Some(&json!("value")));
+    assert!(config.resume_from.is_none());
 }
 
 #[test]
 fn test_execution_config_with_resume() {
     let config = ExecutionConfig::new("thread-123".to_string()).with_resume_from("checkpoint-456");
 
-    assert_eq!(config.resume_from, Some("checkpoint-456".to_string());
+    assert_eq!(config.resume_from, Some("checkpoint-456".to_string()));
 }

@@ -255,9 +255,7 @@ async fn ask(
     println!(">> Turn {turn}: {question}\n");
 
     let content = Content::new("user").with_text(question);
-    let mut stream = runner
-        .run("user_1".to_string(, session_id.to_string(, content)
-        .await?;
+    let mut stream = runner.run("user_1".to_string(), session_id.to_string(), content).await?;
 
     print!("   Assistant: ");
     let mut last_usage = None;
@@ -322,7 +320,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let session = session_service
         .create(CreateRequest {
             app_name: "gemini_prompt_caching".to_string(),
-            user_id: UserId::new( "user_1".to_string()),
+            user_id: UserId::from("user_1".to_string()),
             session_id: SessionId::new(None),
             state: HashMap::new(),
         })
@@ -371,8 +369,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let session = session_service
         .get(GetRequest {
             app_name: "gemini_prompt_caching".to_string(),
-            user_id: UserId::new( "user_1".to_string()),
-            session_id: SessionId::new( session_id.clone()),
+            user_id: UserId::from("user_1".to_string()),
+            session_id: SessionId::new(session_id.clone()),
             num_recent_events: None,
             after: None,
         })

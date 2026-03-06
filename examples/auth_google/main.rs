@@ -39,13 +39,13 @@ fn main() -> anyhow::Result<()> {
     let google_claims = TokenClaims {
         sub: "118234...", // Google user ID
         iss: "https://accounts.google.com",
-        email: Some("alice@gmail.com")),
+        email: Some("alice@gmail.com"),
         email_verified: Some(true),
-        name: Some("Alice Smith")),
-        given_name: Some("Alice")),
-        family_name: Some("Smith")),
-        picture: Some("https://lh3.googleusercontent.com/a/...")),
-        hd: Some("company.com")), // Google Workspace domain
+        name: Some("Alice Smith"),
+        given_name: Some("Alice"),
+        family_name: Some("Smith"),
+        picture: Some("https://lh3.googleusercontent.com/a/..."),
+        hd: Some("company.com"), // Google Workspace domain
         exp: 1735700000,
         iat: 1735696400,
         ..Default::default()
@@ -85,9 +85,8 @@ fn main() -> anyhow::Result<()> {
 
     let internal = Role::new("internal").allow(Permission::AllTools);
 
-    let external = Role::new("external")
-        .allow(Permission::Tool("search")))
-        .deny(Permission::Tool("admin")));
+    let external =
+        Role::new("external").allow(Permission::Tool("search")).deny(Permission::Tool("admin"));
 
     let _ac = AccessControl::builder().role(internal).role(external).build()?;
 
@@ -140,10 +139,9 @@ fn main() -> anyhow::Result<()> {
        .access_control(ac)
        .build()?;
 
-   // Validate Google ID token
    let claims = sso.check_token(
        google_id_token,
-       &Permission::Tool("search")),
+       &Permission::Tool("search")
    ).await?;
 
    // Check domain for internal users

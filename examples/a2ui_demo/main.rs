@@ -36,7 +36,7 @@ async fn main() -> Result<()> {
         "a2ui_demo".to_string(),
         adk_core::types::UserId::new("user1").unwrap(),
     )
-        .await?;
+    .await?;
 
     Ok(())
 }

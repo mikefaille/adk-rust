@@ -142,6 +142,6 @@ fn test_graph_node_access() {
         .add_edge("node_b", END);
 
     assert!(graph.nodes.contains_key("node_a");
-    assert!(graph.nodes.contains_key("node_b");
+    assert!(graph.nodes.contains_key("node_b"));
     assert_eq!(graph.nodes.len(), 2);
 }

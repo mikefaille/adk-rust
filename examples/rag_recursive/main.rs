@@ -34,7 +34,9 @@ fn codebase_docs() -> Vec<Document> {
                    tokens from the Authorization header and validates them against the \
                    signing key stored in environment variables.",
             metadata: HashMap::from([
-                ("file", "docs/architecture.md".to_string()),("area", "architecture".to_string()),]),
+                ("file", "docs/architecture.md".to_string()),
+                ("area", "architecture".to_string()),
+            ]),
             source_uri: Some("docs/architecture.md"),
         },
         Document {
@@ -49,7 +51,9 @@ fn codebase_docs() -> Vec<Document> {
                    Set DATABASE_URL in .env to point to your PostgreSQL instance. For testing, \
                    use DATABASE_URL_TEST which creates an isolated test database.",
             metadata: HashMap::from([
-                ("file", "docs/database.md".to_string()),("area", "database".to_string()),]),
+                ("file", "docs/database.md".to_string()),
+                ("area", "database".to_string()),
+            ]),
             source_uri: Some("docs/database.md"),
         },
         Document {
@@ -65,7 +69,9 @@ fn codebase_docs() -> Vec<Document> {
                    title and optional description, priority (low/medium/high), and due_date. \
                    The assignee defaults to the creating user.",
             metadata: HashMap::from([
-                ("file", "docs/api.md".to_string()),("area", "api".to_string()),]),
+                ("file", "docs/api.md".to_string()),
+                ("area", "api".to_string()),
+            ]),
             source_uri: Some("docs/api.md"),
         },
         Document {
@@ -81,7 +87,9 @@ fn codebase_docs() -> Vec<Document> {
                    server is ready. The ECS task definition configures a health check \
                    interval of 30 seconds with a 5-second timeout.",
             metadata: HashMap::from([
-                ("file", "docs/deployment.md".to_string()),("area", "deployment".to_string()),]),
+                ("file", "docs/deployment.md".to_string()),
+                ("area", "deployment".to_string()),
+            ]),
             source_uri: Some("docs/deployment.md"),
         },
     ]

@@ -337,9 +337,8 @@ async fn run_translation(
     session_id: &SessionId,
     user_content: Content,
 ) -> anyhow::Result<String> {
-    let mut stream = runner
-        .run(UserId::new("batch_user").unwrap(), session_id.clone(), user_content)
-        .await?;
+    let mut stream =
+        runner.run(UserId::new("batch_user").unwrap(), session_id.clone(), user_content).await?;
 
     // Process stream and collect any errors
     let mut last_text = String::new();

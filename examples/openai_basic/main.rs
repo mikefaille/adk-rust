@@ -10,9 +10,9 @@
 
 use adk_agent::LlmAgentBuilder;
 use adk_core::Content;
+use adk_core::types::UserId;
 use adk_model::openai::{OpenAIClient, OpenAIConfig};
 use adk_runner::{Runner, RunnerConfig};
-use adk_core::types::UserId;
 use adk_session::{CreateRequest, InMemorySessionService, SessionService};
 use futures::StreamExt;
 use std::sync::Arc;

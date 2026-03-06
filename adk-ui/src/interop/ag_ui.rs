@@ -233,7 +233,7 @@ pub fn text_message_events(
     thread_id: impl Into<String>,
     run_id: impl Into<String>,
     message_id: impl Into<String>,
-    role: impl Into<String>,
+    role: impl Into<Role>,
     delta: impl Into<String>,
 ) -> Vec<AgUiEvent> {
     let thread_id = thread_id.into();

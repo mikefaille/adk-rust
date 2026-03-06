@@ -10,10 +10,10 @@ fn test_overwrite_reducer() {
     let mut state = State::new();
 
     schema.apply_update(&mut state, "value", json!(1);
-    assert_eq!(state.get("value"), Some(&json!(1));
+    assert_eq!(state.get("value"), Some(&json!(1)));
 
-    schema.apply_update(&mut state, "value", json!(2);
-    assert_eq!(state.get("value"), Some(&json!(2));
+    schema.apply_update(&mut state, "value", json!(2));
+    assert_eq!(state.get("value"), Some(&json!(2)));
 }
 
 #[test]
@@ -21,10 +21,10 @@ fn test_append_reducer() {
     let schema = StateSchema::builder().list_channel("messages").build();
     let mut state = schema.initialize_state();
 
-    schema.apply_update(&mut state, "messages", json!({"role": "user", "content": "hi"});
-    assert_eq!(state.get("messages"), Some(&json!([{"role": "user", "content": "hi"}]));
+    schema.apply_update(&mut state, "messages", json!({"role": "user", "content": "hi"}));
+    assert_eq!(state.get("messages"), Some(&json!([{"role": "user", "content": "hi"}])));
 
-    schema.apply_update(&mut state, "messages", json!([{"role": "assistant", "content": "hello"}]);
+    schema.apply_update(&mut state, "messages", json!([{"role": "assistant", "content": "hello"}]));
     assert_eq!(
         state.get("messages"),
         Some(&json!([
@@ -42,10 +42,10 @@ fn test_sum_reducer() {
     assert_eq!(state.get("count"), Some(&json!(0));
 
     schema.apply_update(&mut state, "count", json!(5);
-    assert_eq!(state.get("count"), Some(&json!(5.0));
+    assert_eq!(state.get("count"), Some(&json!(5.0)));
 
-    schema.apply_update(&mut state, "count", json!(3);
-    assert_eq!(state.get("count"), Some(&json!(8.0));
+    schema.apply_update(&mut state, "count", json!(3));
+    assert_eq!(state.get("count"), Some(&json!(8.0)));
 }
 
 #[test]
@@ -63,18 +63,18 @@ fn test_custom_reducer() {
     let mut state = State::new();
 
     schema.apply_update(&mut state, "max", json!(5);
-    schema.apply_update(&mut state, "max", json!(3);
-    schema.apply_update(&mut state, "max", json!(8);
-    assert_eq!(state.get("max"), Some(&json!(8.0));
+    schema.apply_update(&mut state, "max", json!(3)));
+    schema.apply_update(&mut state, "max", json!(8));
+    assert_eq!(state.get("max"), Some(&json!(8.0)));
 }
 
 #[test]
 fn test_state_schema_simple() {
     let schema = StateSchema::simple(&["input", "output", "count"]);
 
-    assert!(schema.channels.contains_key("input");
-    assert!(schema.channels.contains_key("output");
-    assert!(schema.channels.contains_key("count");
+    assert!(schema.channels.contains_key("input"));
+    assert!(schema.channels.contains_key("output"));
+    assert!(schema.channels.contains_key("count"));
 }
 
 #[test]
@@ -88,9 +88,9 @@ fn test_state_schema_builder() {
 
     assert!(schema.channels.contains_key("name");
     assert!(schema.channels.contains_key("items");
-    assert!(schema.channels.contains_key("count");
-    assert!(schema.channels.contains_key("status");
-    assert_eq!(schema.get_default("status"), Some(&json!("pending"));
+    assert!(schema.channels.contains_key("count"));
+    assert!(schema.channels.contains_key("status"));
+    assert_eq!(schema.get_default("status"), Some(&json!("pending")));
 }
 
 #[test]
@@ -105,11 +105,11 @@ fn test_channel_builders() {
 
     let counter = Channel::counter("count");
     assert_eq!(counter.name, "count");
-    assert_eq!(counter.default, Some(json!(0));
+    assert_eq!(counter.default, Some(json!(0)));
 
     let custom =
-        Channel::new("custom").with_reducer(Reducer::Append).with_default(json!(["initial"]);
-    assert_eq!(custom.default, Some(json!(["initial"]));
+        Channel::new("custom").with_reducer(Reducer::Append).with_default(json!(["initial"]));
+    assert_eq!(custom.default, Some(json!(["initial"])));
 }
 
 #[test]
@@ -122,21 +122,21 @@ fn test_initialize_state() {
 
     let state = schema.initialize_state();
 
-    assert_eq!(state.get("name"), Some(&json!("default"));
-    assert_eq!(state.get("count"), Some(&json!(0));
-    assert_eq!(state.get("items"), Some(&json!([]));
+    assert_eq!(state.get("name"), Some(&json!("default")));
+    assert_eq!(state.get("count"), Some(&json!(0)));
+    assert_eq!(state.get("items"), Some(&json!([])));
 }
 
 #[test]
 fn test_checkpoint_creation() {
     let mut state = State::new();
-    state.insert("value".to_string(), json!(42);
+    state.insert("value".to_string(), json!(42));
 
     let checkpoint = Checkpoint::new("thread-1", state.clone(), 3, vec!["node_a".to_string()]);
 
     assert_eq!(checkpoint.thread_id, "thread-1");
     assert_eq!(checkpoint.step, 3);
-    assert_eq!(checkpoint.state.get("value"), Some(&json!(42));
+    assert_eq!(checkpoint.state.get("value"), Some(&json!(42)));
     assert_eq!(checkpoint.pending_nodes, vec!["node_a".to_string()]);
 }
 
@@ -145,8 +145,8 @@ fn test_checkpoint_with_metadata() {
     let state = State::new();
     let checkpoint = Checkpoint::new("thread-1", state, 0, vec![])
         .with_metadata("source", json!("test"))
-        .with_metadata("priority", json!(5);
+        .with_metadata("priority", json!(5)));
 
-    assert_eq!(checkpoint.metadata.get("source"), Some(&json!("test"));
-    assert_eq!(checkpoint.metadata.get("priority"), Some(&json!(5));
+    assert_eq!(checkpoint.metadata.get("source"), Some(&json!("test")));
+    assert_eq!(checkpoint.metadata.get("priority"), Some(&json!(5)));
 }

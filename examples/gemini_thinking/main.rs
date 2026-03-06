@@ -19,7 +19,9 @@
 //! ```
 
 use adk_agent::LlmAgentBuilder;
-use adk_core::{AdkError, Content, Llm, LlmRequest, Part, Result as AdkResult, ToolContext, UserId, SessionId};
+use adk_core::{
+    AdkError, Content, Llm, LlmRequest, Part, Result as AdkResult, SessionId, ToolContext, UserId,
+};
 use adk_model::gemini::GeminiModel;
 use adk_runner::{Runner, RunnerConfig};
 use adk_session::{CreateRequest, InMemorySessionService, SessionService};
@@ -220,7 +222,8 @@ async fn demo_thought_signature(model: Arc<GeminiModel>) -> Result<(), Box<dyn s
          What is its average speed in miles per hour?",
     );
 
-    let mut stream = runner.run(UserId::new("user_1").unwrap(), session_id.clone(), content).await?;
+    let mut stream =
+        runner.run(UserId::new("user_1").unwrap(), session_id.clone(), content).await?;
 
     let mut saw_thinking = false;
     let mut saw_tool_call = false;
@@ -283,7 +286,8 @@ async fn demo_thought_signature(model: Arc<GeminiModel>) -> Result<(), Box<dyn s
     println!("\n>> Turn 2: Follow-up (history includes thought_signature)\n");
     let content = Content::new("user").with_text("Now convert that speed to km/h as well.");
 
-    let mut stream = runner.run(UserId::new("user_1").unwrap(), session_id.clone(), content).await?;
+    let mut stream =
+        runner.run(UserId::new("user_1").unwrap(), session_id.clone(), content).await?;
 
     while let Some(event) = stream.next().await {
         if let Ok(e) = event {

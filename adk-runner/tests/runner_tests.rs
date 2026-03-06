@@ -278,7 +278,7 @@ async fn test_find_agent_to_run_skips_user_events() {
     let session = MockSession {
         id: "session1".to_string(),
         app_name: "test".to_string(),
-        user_id: UserId::new( "user1".to_string(),
+        user_id: UserId::new("user1").unwrap(),
         events: MockEvents { events },
         state: MockState,
     };
@@ -411,10 +411,8 @@ async fn test_plugin_callback_order_and_mutation() {
     .unwrap();
 
     let content = Content::new("user").with_text("hello");
-    let mut stream = runner
-        .run("user123".to_string(), "session456".to_string(), content)
-        .await
-        .unwrap();
+    let mut stream =
+        runner.run("user123".to_string(), "session456".to_string(), content).await.unwrap();
 
     let mut events = Vec::new();
     while let Some(event) = stream.next().await {

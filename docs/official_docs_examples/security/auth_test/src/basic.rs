@@ -1,6 +1,7 @@
 //! Access control doc-test - validates access-control.md documentation
 
 use adk_auth::{AccessControl, Permission, Role};
+use adk_core::types::UserId;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== Access Control Doc-Test ===\n");
@@ -30,12 +31,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ac = AccessControl::builder()
         .role(admin)
         .role(analyst)
-        .assign("alice@company.com", "admin")
-        .assign("bob@company.com", "analyst")
+        .assign(UserId::new("alice@company.com").unwrap(), "admin")
+        .assign(UserId::new("bob@company.com").unwrap(), "analyst")
         .build()?;
 
     // From docs: Check permission
-    ac.check("bob@company.com", &Permission::Tool("search".to_string()))?;
+    let bob_id = UserId::new("bob@company.com").unwrap();
+    ac.check(&bob_id, &Permission::Tool("search".to_string()))?;
     println!("✓ AccessControl builder and check works");
 
     // From docs: Multi-Role Union
@@ -45,12 +47,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ac2 = AccessControl::builder()
         .role(reader)
         .role(writer)
-        .assign("alice", "reader")
-        .assign("alice", "writer")
+        .assign(UserId::new("alice").unwrap(), "reader")
+        .assign(UserId::new("alice").unwrap(), "writer")
         .build()?;
 
-    assert!(ac2.check("alice", &Permission::Tool("search".to_string())).is_ok());
-    assert!(ac2.check("alice", &Permission::Tool("write".to_string())).is_ok());
+    let alice_id = UserId::new("alice").unwrap();
+    assert!(ac2.check(&alice_id, &Permission::Tool("search".to_string())).is_ok());
+    assert!(ac2.check(&alice_id, &Permission::Tool("write".to_string())).is_ok());
     println!("✓ Multi-role union works");
 
     // From docs: Explicit Over Implicit

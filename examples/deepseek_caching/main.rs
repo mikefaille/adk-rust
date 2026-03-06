@@ -182,7 +182,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("User: {}\n", q1);
 
     let content = Content::new("user").with_text(q1);
-    let mut stream = runner.run("user_1".to_string(, session_id.clone(, content).await?;
+    let mut stream = runner.run("user_1".to_string(), session_id.clone(), content).await?;
 
     print!("Assistant: ");
     while let Some(event) = stream.next().await {
@@ -204,7 +204,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("User: {}\n", q2);
 
     let content = Content::new("user").with_text(q2);
-    let mut stream = runner.run("user_1".to_string(, session_id.clone(, content).await?;
+    let mut stream = runner.run("user_1".to_string(), session_id.clone(), content).await?;
 
     print!("Assistant: ");
     while let Some(event) = stream.next().await {
@@ -226,7 +226,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("User: {}\n", q3);
 
     let content = Content::new("user").with_text(q3);
-    let mut stream = runner.run("user_1".to_string(, session_id.clone(, content).await?;
+    let mut stream = runner.run("user_1".to_string(), session_id.clone(), content).await?;
 
     print!("Assistant: ");
     while let Some(event) = stream.next().await {

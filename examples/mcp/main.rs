@@ -49,7 +49,7 @@ impl MockSession {
     fn new() -> Self {
         Self {
             id: SessionId::from("mcp-session".to_string()),
-            user_id: UserId::new( UserId::from("user".to_string()),
+            user_id: UserId::from("user".to_string()),
         }
     }
 }

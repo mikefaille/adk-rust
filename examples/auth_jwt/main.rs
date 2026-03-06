@@ -53,9 +53,9 @@ fn main() -> anyhow::Result<()> {
     let claims = TokenClaims {
         sub: "user-12345",
         iss: "https://accounts.google.com",
-        email: Some("alice@example.com")),
-        name: Some("Alice Smith")),
-        groups: vec!["Engineering"), "Admins")],
+        email: Some("alice@example.com"),
+        name: Some("Alice Smith"),
+        groups: vec!["Engineering", "Admins"],
         exp: 1735700000,
         iat: 1735696400,
         ..Default::default()
@@ -89,8 +89,8 @@ fn main() -> anyhow::Result<()> {
             expected: "https://expected.com",
             actual: "https://actual.com",
         },
-        TokenError::MissingClaim("email")),
-        TokenError::KeyNotFound("key-123")),
+        TokenError::MissingClaim("email"),
+        TokenError::KeyNotFound("key-123"),
     ];
 
     for err in errors {

@@ -89,7 +89,7 @@ async fn main() -> anyhow::Result<()> {
         "ollama_tools".to_string(),
         adk_core::types::UserId::new("user1").unwrap(),
     )
-        .await?;
+    .await?;
 
     Ok(())
 }

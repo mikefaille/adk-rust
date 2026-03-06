@@ -1,6 +1,7 @@
 use adk_core::{
-    Agent, CallbackContext, Content, Event, FunctionResponseData, Part, ReadonlyContext, RunConfig,
-    InvocationContext as RunnerContextTrait, Session as CoreSession, StreamingMode,
+    Agent, CallbackContext, Content, Event, FunctionResponseData,
+    InvocationContext as RunnerContextTrait, Part, ReadonlyContext, RunConfig,
+    Session as CoreSession, StreamingMode,
 };
 use adk_runner::{MutableSession, RunnerContext};
 use adk_session::{Events, Session, State};
@@ -40,7 +41,7 @@ impl State for MockSessionStateView {
 use adk_core::types::{SessionId, UserId};
 
 struct MockSessionWithState {
-    session_id: SessionId::new( SessionId,
+    session_id: SessionId,
     user_identity: UserId,
     state_view: MockSessionStateView,
 }
@@ -49,7 +50,7 @@ impl MockSessionWithState {
     fn new() -> Self {
         let state_arc = std::sync::Arc::new(std::sync::RwLock::new(HashMap::new()));
         Self {
-            session_id: SessionId::new( SessionId::new("session-789".to_string()).unwrap(),
+            session_id: SessionId::new("session-789").unwrap(),
             user_identity: UserId::new("user-456".to_string()).unwrap(),
             state_view: MockSessionStateView(state_arc),
         }
@@ -58,7 +59,7 @@ impl MockSessionWithState {
     fn with_state(state: HashMap<String, serde_json::Value>) -> Self {
         let state_arc = std::sync::Arc::new(std::sync::RwLock::new(state));
         Self {
-            session_id: SessionId::new( SessionId::new("session-789".to_string()).unwrap(),
+            session_id: SessionId::new("session-789").unwrap(),
             user_identity: UserId::new("user-456".to_string()).unwrap(),
             state_view: MockSessionStateView(state_arc),
         }
@@ -124,9 +125,9 @@ fn test_context_creation() {
     let ctx = RunnerContext::new(
         "inv-123".to_string(),
         agent.clone(),
-        "user-456".to_string()),
+        "user-456".to_string(),
         "test-app".to_string(),
-        "session-789".to_string()),
+        "session-789".to_string(),
         content.clone(),
         Arc::new(MockSessionWithState::new()),
     );
@@ -149,9 +150,9 @@ fn test_context_with_branch() {
     let ctx = RunnerContext::new(
         "inv-123".to_string(),
         agent,
-        "user-456".to_string()),
+        "user-456".to_string(),
         "test-app".to_string(),
-        "session-789".to_string()),
+        "session-789".to_string(),
         content,
         Arc::new(MockSessionWithState::new()),
     )
@@ -171,9 +172,9 @@ fn test_context_with_run_config() {
     let ctx = RunnerContext::new(
         "inv-123".to_string(),
         agent,
-        "user-456".to_string()),
+        "user-456".to_string(),
         "test-app".to_string(),
-        "session-789".to_string()),
+        "session-789".to_string(),
         content,
         Arc::new(MockSessionWithState::new()),
     )
@@ -191,9 +192,9 @@ fn test_context_end_invocation() {
     let ctx = RunnerContext::new(
         "inv-123".to_string(),
         agent,
-        "user-456".to_string()),
+        "user-456".to_string(),
         "test-app".to_string(),
-        "session-789".to_string()),
+        "session-789".to_string(),
         content,
         Arc::new(MockSessionWithState::new()),
     );
@@ -212,9 +213,9 @@ fn test_context_agent_access() {
     let ctx = RunnerContext::new(
         "inv-123".to_string(),
         agent.clone(),
-        "user-456".to_string()),
+        "user-456".to_string(),
         "test-app".to_string(),
-        "session-789".to_string()),
+        "session-789".to_string(),
         content,
         Arc::new(MockSessionWithState::new()),
     );
@@ -232,9 +233,9 @@ fn test_context_optional_services() {
     let ctx = RunnerContext::new(
         "inv-123".to_string(),
         agent,
-        "user-456".to_string()),
+        "user-456".to_string(),
         "test-app".to_string(),
-        "session-789".to_string()),
+        "session-789".to_string(),
         content,
         Arc::new(MockSessionWithState::new()),
     );
@@ -301,9 +302,9 @@ fn test_mutable_session_shared_across_contexts() {
     let ctx1 = RunnerContext::new(
         "inv-1".to_string(),
         agent.clone(),
-        "user-456".to_string()),
+        "user-456".to_string(),
         "test-app".to_string(),
-        "session-789".to_string()),
+        "session-789".to_string(),
         content.clone(),
         Arc::new(MockSessionWithState::new()),
     );
@@ -317,9 +318,9 @@ fn test_mutable_session_shared_across_contexts() {
     let ctx2 = RunnerContext::with_mutable_session(
         "inv-2".to_string(),
         agent.clone(),
-        "user-456".to_string()),
+        "user-456".to_string(),
         "test-app".to_string(),
-        "session-789".to_string()),
+        "session-789".to_string(),
         content,
         ctx1.mutable_session().clone(),
     );
@@ -353,10 +354,8 @@ fn test_mutable_session_event_accumulation() {
     // Append some events
     let mut event1 = Event::new("inv-1");
     event1.author = "user".to_string();
-    event1.llm_response.content = Some(Content {
-        role: "user".to_string(),
-        parts: vec![Part::text("Hello".to_string())],
-    });
+    event1.llm_response.content =
+        Some(Content { role: "user".to_string(), parts: vec![Part::text("Hello".to_string())] });
     mutable.append_event(event1);
 
     let mut event2 = Event::new("inv-1");
@@ -401,10 +400,8 @@ fn conversation_history_preserves_tool_role() {
     // Simulate: user message
     let mut user_event = Event::new("inv-1");
     user_event.author = "user".to_string();
-    user_event.llm_response.content = Some(Content {
-        role: "user".to_string(),
-        parts: vec![Part::text("hello"))],
-    });
+    user_event.llm_response.content =
+        Some(Content { role: "user".to_string(), parts: vec![Part::text("hello")] });
     mutable.append_event(user_event);
 
     // Simulate: assistant with tool call
@@ -413,9 +410,9 @@ fn conversation_history_preserves_tool_role() {
     assistant_event.llm_response.content = Some(Content {
         role: "model".to_string(),
         parts: vec![Part::FunctionCall {
-            name: "browser_navigate"),
+            name: "browser_navigate".to_string(),
             args: serde_json::json!({"url": "https://example.com"}),
-            id: Some("call_1")),
+            id: Some("call_1".to_string()),
             thought_signature: None,
         }],
     });
@@ -428,10 +425,10 @@ fn conversation_history_preserves_tool_role() {
         role: "function".to_string(),
         parts: vec![Part::FunctionResponse {
             function_response: FunctionResponseData {
-                name: "browser_navigate"),
+                name: "browser_navigate".to_string(),
                 response: serde_json::json!({"success": true}),
             },
-            id: Some("call_1")),
+            id: Some("call_1".to_string()),
         }],
     });
     mutable.append_event(tool_event);
@@ -453,7 +450,7 @@ fn conversation_history_maps_agent_events_to_model() {
     event.author = "my_agent".to_string();
     event.llm_response.content = Some(Content {
         role: "model".to_string(),
-        parts: vec![Part::text("here are the results"))],
+        parts: vec![Part::text("here are the results")],
     });
     mutable.append_event(event);
 
