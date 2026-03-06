@@ -95,7 +95,7 @@ pub fn apply_skill_injection(
     policy: &SelectionPolicy,
     max_injected_chars: usize,
 ) -> Option<SkillMatch> {
-    if content.role != "user" || index.is_empty() {
+    if content.role != "user".into() || index.is_empty() {
         return None;
     }
 
