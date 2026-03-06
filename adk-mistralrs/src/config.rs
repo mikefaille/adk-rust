@@ -254,12 +254,14 @@ pub enum ModelSource {
 impl ModelSource {
     /// Create a HuggingFace model source
     pub fn huggingface(model_id: impl Into<String>) -> Self {
-        Self::HuggingFace(model_id.into())
+        let id = model_id.into();
+        Self::HuggingFace(id)
     }
 
     /// Create a local path model source
     pub fn local(path: impl Into<PathBuf>) -> Self {
-        Self::Local(path.into())
+        let p = path.into();
+        Self::Local(p)
     }
 
     /// Create a GGUF file model source
