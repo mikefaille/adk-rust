@@ -13,14 +13,14 @@ pub fn content_to_message(content: &Content) -> IndexMap<String, Value> {
     let mut message = IndexMap::new();
 
     // Convert role - map ADK roles to OpenAI-style roles
-    let role = match content.role.as_str() {
-        "user" => "user",
-        "model" | "assistant" => "assistant",
-        "system" => "system",
-        "tool" | "function" => "tool",
-        other => other, // Pass through unknown roles
+    let role = match &content.role {
+        adk_core::types::Role::User => "user".to_string(),
+        adk_core::types::Role::Model => "assistant".to_string(),
+        adk_core::types::Role::System => "system".to_string(),
+        adk_core::types::Role::Tool => "tool".to_string(),
+        adk_core::types::Role::Custom(c) => c.clone(), // Pass through unknown roles
     };
-    message.insert("role".to_string(), Value::String(role.to_string()));
+    message.insert("role".to_string(), Value::String(role));
 
     // Convert content parts to text
     let text_parts: Vec<String> = content
@@ -135,7 +135,7 @@ mod tests {
     #[test]
     fn test_content_to_message_user() {
         let content = Content {
-            role: "user".to_string(),
+            role: adk_core::types::Role::User,
             parts: vec![Part::Text { text: "Hello, world!".to_string() }],
         };
 
@@ -147,7 +147,7 @@ mod tests {
     #[test]
     fn test_content_to_message_assistant() {
         let content = Content {
-            role: "model".to_string(),
+            role: adk_core::types::Role::Model,
             parts: vec![Part::Text { text: "Hi there!".to_string() }],
         };
 
@@ -158,7 +158,7 @@ mod tests {
     #[test]
     fn test_content_to_message_with_function_call() {
         let content = Content {
-            role: "model".to_string(),
+            role: adk_core::types::Role::Model,
             parts: vec![Part::FunctionCall {
                 id: Some("call_123".to_string()),
                 name: "get_weather".to_string(),
@@ -724,7 +724,7 @@ mod image_audio_tests {
     #[test]
     fn test_extract_text_from_content() {
         let content = Content {
-            role: "user".to_string(),
+            role: adk_core::types::Role::User,
             parts: vec![
                 Part::Text { text: "Hello".to_string() },
                 Part::Text { text: "World".to_string() },

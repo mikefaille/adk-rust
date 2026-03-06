@@ -56,7 +56,7 @@ fn arb_audio_mime_type() -> impl Strategy<Value = String> {
 /// Generate a content with only text parts
 fn arb_text_only_content() -> impl Strategy<Value = Content> {
     (arb_text(), arb_text()).prop_map(|(text1, text2)| Content {
-        role: "user".to_string(),
+        role: adk_core::types::Role::User,
         parts: vec![Part::Text { text: text1 }, Part::Text { text: text2 }],
     })
 }
@@ -66,7 +66,7 @@ fn arb_text_and_image_content() -> impl Strategy<Value = Content> {
     (arb_text(), arb_image_mime_type()).prop_map(|(text, mime_type)| {
         let png_data = generate_minimal_png();
         Content {
-            role: "user".to_string(),
+            role: adk_core::types::Role::User,
             parts: vec![Part::Text { text }, Part::InlineData { mime_type, data: png_data }],
         }
     })
@@ -77,7 +77,7 @@ fn arb_text_and_audio_content() -> impl Strategy<Value = Content> {
     (arb_text(), arb_audio_mime_type()).prop_map(|(text, mime_type)| {
         // Use empty audio data - we're testing extraction logic, not decoding
         Content {
-            role: "user".to_string(),
+            role: adk_core::types::Role::User,
             parts: vec![
                 Part::Text { text },
                 Part::InlineData {
@@ -95,7 +95,7 @@ fn arb_multimodal_content() -> impl Strategy<Value = Content> {
         |(text, image_mime, audio_mime)| {
             let png_data = generate_minimal_png();
             Content {
-                role: "user".to_string(),
+                role: adk_core::types::Role::User,
                 parts: vec![
                     Part::Text { text },
                     Part::InlineData { mime_type: image_mime, data: png_data },
@@ -225,10 +225,9 @@ proptest! {
     #[test]
     fn prop_role_preservation(
         role in prop_oneof![
-            Just("user".to_string()),
-            Just("assistant".to_string()),
-            Just("model".to_string()),
-            Just("system".to_string()),
+            Just(adk_core::types::Role::User),
+            Just(adk_core::types::Role::Model),
+            Just(adk_core::types::Role::System),
         ],
         text in arb_text()
     ) {
@@ -248,7 +247,7 @@ proptest! {
 
 #[test]
 fn test_empty_content_extraction() {
-    let content = Content { role: "user".to_string(), parts: vec![] };
+    let content = Content { role: adk_core::types::Role::User, parts: vec![] };
 
     let text = extract_text_from_content(&content);
     let images = extract_images_from_content(&content);
@@ -263,7 +262,7 @@ fn test_empty_content_extraction() {
 fn test_mixed_valid_invalid_images() {
     let png_data = generate_minimal_png();
     let content = Content {
-        role: "user".to_string(),
+        role: adk_core::types::Role::User,
         parts: vec![
             Part::InlineData { mime_type: "image/png".to_string(), data: png_data },
             Part::InlineData {
@@ -281,7 +280,7 @@ fn test_mixed_valid_invalid_images() {
 #[test]
 fn test_multiple_text_parts_joined() {
     let content = Content {
-        role: "user".to_string(),
+        role: adk_core::types::Role::User,
         parts: vec![
             Part::Text { text: "Hello".to_string() },
             Part::Text { text: "World".to_string() },
@@ -300,7 +299,7 @@ fn test_multimodal_with_multiple_images() {
     let png_data1 = generate_minimal_png();
     let png_data2 = generate_minimal_png();
     let content = Content {
-        role: "user".to_string(),
+        role: adk_core::types::Role::User,
         parts: vec![
             Part::Text { text: "Describe these images".to_string() },
             Part::InlineData { mime_type: "image/png".to_string(), data: png_data1 },
@@ -318,7 +317,7 @@ fn test_multimodal_with_multiple_images() {
 #[test]
 fn test_unsupported_mime_type_ignored() {
     let content = Content {
-        role: "user".to_string(),
+        role: adk_core::types::Role::User,
         parts: vec![
             Part::Text { text: "Test".to_string() },
             Part::InlineData {

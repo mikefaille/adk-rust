@@ -316,10 +316,10 @@ impl MistralRsModel {
         let mut messages = TextMessages::new();
 
         for content in &request.contents {
-            let role = match content.role.as_str() {
-                "user" => TextMessageRole::User,
-                "model" | "assistant" => TextMessageRole::Assistant,
-                "system" => TextMessageRole::System,
+            let role = match &content.role {
+                adk_core::types::Role::User => TextMessageRole::User,
+                adk_core::types::Role::Model => TextMessageRole::Assistant,
+                adk_core::types::Role::System => TextMessageRole::System,
                 _ => TextMessageRole::User, // Default to user for unknown roles
             };
 
