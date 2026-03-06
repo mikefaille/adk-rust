@@ -24,7 +24,7 @@ pub fn event_to_message(event: &Event) -> Result<Message> {
     Ok(Message::builder()
         .role(role)
         .parts(a2a_parts)
-        .message_id(event.invocation_id.clone())
+        .message_id(event.invocation_id.to_string())
         .metadata(if metadata.is_empty() { None } else { Some(metadata) })
         .build())
 }
@@ -47,7 +47,7 @@ pub fn message_to_event(message: &Message, invocation_id: String) -> Result<Even
         Role::Agent => "agent".to_string(),
     };
 
-    let mut event = Event::new(invocation_id);
+    let mut event = Event::new(adk_core::types::InvocationId::new(invocation_id).unwrap());
     event.author = author;
     event.llm_response.content =
         Some(Content { role: adk_core::types::Role::User, parts: adk_parts });

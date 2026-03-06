@@ -37,18 +37,18 @@ async fn main() -> anyhow::Result<()> {
     println!("1. Session-scoped artifacts (isolated):");
 
     // Save in session 1
-    session1.save("notes.txt", &Part::text("Session 1 notes".to_string() )).await?;
+    session1.save("notes.txt", &Part::Text("Session 1 notes".to_string() )).await?;
     println!("   Session 1: Saved notes.txt");
 
     // Save in session 2
-    session2.save("notes.txt", &Part::text("Session 2 notes".to_string() )).await?;
+    session2.save("notes.txt", &Part::Text("Session 2 notes".to_string() )).await?;
     println!("   Session 2: Saved notes.txt");
 
     // Load from each - they're isolated
     let s1_notes = session1.load("notes.txt").await?;
     let s2_notes = session2.load("notes.txt").await?;
 
-    if let (Part::text(t1 ), Part::text(t2 )) = (s1_notes, s2_notes) {
+    if let (Part::Text(t1 ), Part::Text(t2 )) = (s1_notes, s2_notes) {
         println!("   Session 1 loaded: {}", t1);
         println!("   Session 2 loaded: {}", t2);
     }
@@ -64,7 +64,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Save user-scoped artifact from session 1
     session1
-        .save("user:profile.json", &Part::text(r#"{"name": "Alice")"#.to_string() })
+        .save("user:profile.json", &Part::Text(r#"{"name": "Alice"}"#.to_string()))
         .await?;
     println!("   Session 1: Saved user:profile.json");
 
@@ -95,7 +95,7 @@ async fn main() -> anyhow::Result<()> {
         .save(
             "report.pdf",
             &Part::InlineData {
-                mime_type: "application/pdf".to_string(),
+                mime_type: "application/pdf".parse().unwrap(),
                 data: vec![0x25, 0x50, 0x44, 0x46].into(), // PDF header
             },
         )

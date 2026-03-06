@@ -65,7 +65,7 @@ async fn main() -> anyhow::Result<()> {
                             if let Some(text) = &response.part.as_text() {
                                 last_content.parts.insert(
                                     0,
-                                    Part::text(format!("CSV Data:\n```\n{)\n```\n\nQuestion: ", text) },
+                                    Part::text(format!("CSV Data:\n```\n{}\n```\n\nQuestion: ", text))
                                 );
                             }
                         }

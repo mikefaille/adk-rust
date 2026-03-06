@@ -225,7 +225,7 @@ impl Agent for LlmConditionalAgent {
             // Build classification request
             let user_content = run_ctx.user_content().clone();
             let user_text: String = user_content.parts.iter()
-                .filter_map(|p| if let Some(text) = p.as_text() { Some(text.as_str()) } else { None })
+                .filter_map(|p| if let Some(text) = p.as_text() { Some(text) } else { None })
                 .collect::<Vec<_>>()
                 .join(" ");
 

@@ -551,7 +551,7 @@ impl Agent for LlmAgent {
                 match callback(ctx.clone() as Arc<dyn CallbackContext>).await {
                     Ok(Some(content)) => {
                         // Callback returned content - yield it and skip agent execution
-                        let mut early_event = Event::new(&invocation_id);
+                        let mut early_event = Event::new(ctx.invocation_id().clone());
                         early_event.author = agent_name.clone();
                         early_event.llm_response.content = Some(content);
                         yield Ok(early_event);
@@ -560,7 +560,7 @@ impl Agent for LlmAgent {
                         for after_callback in after_agent_callbacks.as_ref() {
                             match after_callback(ctx.clone() as Arc<dyn CallbackContext>).await {
                                 Ok(Some(after_content)) => {
-                                    let mut after_event = Event::new(&invocation_id);
+                                    let mut after_event = Event::new(ctx.invocation_id().clone());
                                     after_event.author = agent_name.clone();
                                     after_event.llm_response.content = Some(after_content);
                                     yield Ok(after_event);
@@ -852,7 +852,7 @@ impl Agent for LlmAgent {
                 if let Some(cached_response) = model_response_override {
                     // Use callback-provided response (e.g., from cache)
                     // Yield it as an event
-                    let mut cached_event = Event::new(&invocation_id);
+                    let mut cached_event = Event::new(ctx.invocation_id().clone());
                     cached_event.author = agent_name.clone();
                     cached_event.llm_response.content = cached_response.content.clone();
                     cached_event.llm_request = Some(serde_json::to_string(&request).unwrap_or_default());
@@ -953,7 +953,7 @@ impl Agent for LlmAgent {
 
                         // For SSE/Bidi mode: yield each chunk immediately with stable event ID
                         if should_stream_to_client {
-                            let mut partial_event = Event::with_id(&llm_event_id, &invocation_id);
+                            let mut partial_event = Event::with_id(&llm_event_id, ctx.invocation_id().clone());
                             partial_event.author = agent_name.clone();
                             partial_event.llm_request = Some(request_json.clone());
                             partial_event.provider_metadata.insert("adk.llm_request".to_string(), request_json.clone());
@@ -963,8 +963,8 @@ impl Agent for LlmAgent {
                             partial_event.provider_metadata.insert("gcp.vertex.llm_response".to_string(), serde_json::to_string(&chunk).unwrap_or_default());
                             partial_event.llm_response.partial = chunk.partial;
                             partial_event.llm_response.turn_complete = chunk.turn_complete;
-                            partial_event.llm_response.finish_reason = chunk.finish_reason;
-                            partial_event.llm_response.usage_metadata = chunk.usage_metadata.clone();
+                            partial_event.llm_response.finish_reason = crate::util::map_finish_reason(chunk.finish_reason);
+                            partial_event.llm_response.usage_metadata = crate::util::map_usage_metadata(chunk.usage_metadata.clone());
                             partial_event.llm_response.content = chunk.content.clone();
 
                             // Populate long_running_tool_ids
@@ -986,7 +986,7 @@ impl Agent for LlmAgent {
 
                     // For None mode: yield single final event with accumulated content
                     if !should_stream_to_client {
-                        let mut final_event = Event::with_id(&llm_event_id, &invocation_id);
+                        let mut final_event = Event::with_id(&llm_event_id, ctx.invocation_id().clone());
                         final_event.author = agent_name.clone();
                         final_event.provider_metadata.insert("adk.llm_request".to_string(), request_json.clone());
                         // Legacy
@@ -1001,8 +1001,8 @@ impl Agent for LlmAgent {
                             final_event.provider_metadata.insert("adk.llm_response".to_string(), serde_json::to_string(last).unwrap_or_default());
                             // Legacy
                             final_event.provider_metadata.insert("gcp.vertex.llm_response".to_string(), serde_json::to_string(last).unwrap_or_default());
-                            final_event.llm_response.finish_reason = last.finish_reason;
-                            final_event.llm_response.usage_metadata = last.usage_metadata.clone();
+                            final_event.llm_response.finish_reason = crate::util::map_finish_reason(last.finish_reason);
+                            final_event.llm_response.usage_metadata = crate::util::map_usage_metadata(last.usage_metadata.clone());
                             final_event.provider_metadata.insert("gcp.vertex.llm_response".to_string(), serde_json::to_string(last).unwrap_or_default());
                         }
 
@@ -1061,7 +1061,7 @@ impl Agent for LlmAgent {
                             }
                             if !text_parts.is_empty() {
                                 // Yield a final state update event
-                                let mut state_event = Event::new(run_ctx.invocation_id().clone());
+                                let mut state_event = Event::new(ctx.invocation_id().clone());
                                 state_event.author = agent_name.clone();
                                 state_event.actions.state_delta.insert(
                                     output_key.clone(),
@@ -1123,14 +1123,14 @@ impl Agent for LlmAgent {
                                     };
                                     conversation_history.push(error_content.clone());
 
-                                    let mut error_event = Event::new(run_ctx.invocation_id().clone());
+                                    let mut error_event = Event::new(ctx.invocation_id().clone());
                                     error_event.author = agent_name.clone();
                                     error_event.llm_response.content = Some(error_content);
                                     yield Ok(error_event);
                                     continue;
                                 }
 
-                                let mut transfer_event = Event::new(run_ctx.invocation_id().clone());
+                                let mut transfer_event = Event::new(ctx.invocation_id().clone());
                                 transfer_event.author = agent_name.clone();
                                 transfer_event.actions.transfer_to_agent = Some(target_agent);
 
@@ -1172,7 +1172,7 @@ impl Agent for LlmAgent {
                                         run_after_tool_callbacks = false;
                                     }
                                     None => {
-                                        let mut confirmation_event = Event::new(run_ctx.invocation_id().clone());
+                                        let mut confirmation_event = Event::new(ctx.invocation_id().clone());
                                         confirmation_event.author = agent_name.clone();
                                         confirmation_event.llm_response.interrupted = true;
                                         confirmation_event.llm_response.turn_complete = true;
@@ -1184,11 +1184,12 @@ impl Agent for LlmAgent {
                                             ))],
                                         });
                                         confirmation_event.actions.tool_confirmation =
-                                            Some(ToolConfirmationRequest {
+                                            serde_json::to_value(ToolConfirmationRequest {
                                                 tool_name: name.clone(),
                                                 function_call_id: Some(function_call_id),
                                                 args: args.clone(),
-                                            });
+                                            })
+                                            .ok();
                                         yield Ok(confirmation_event);
                                         return;
                                     }
@@ -1312,7 +1313,7 @@ impl Agent for LlmAgent {
                             }
 
                             // Yield tool execution event
-                            let mut tool_event = Event::new(run_ctx.invocation_id().clone());
+                            let mut tool_event = Event::new(ctx.invocation_id().clone());
                             tool_event.author = agent_name.clone();
                             tool_event.actions = tool_actions.clone();
                             tool_event.llm_response.content = Some(response_content.clone());
@@ -1346,7 +1347,7 @@ impl Agent for LlmAgent {
                 match callback(ctx.clone() as Arc<dyn CallbackContext>).await {
                     Ok(Some(content)) => {
                         // Callback returned content - yield it
-                        let mut after_event = Event::new(run_ctx.invocation_id().clone());
+                        let mut after_event = Event::new(ctx.invocation_id().clone());
                         after_event.author = agent_name.clone();
                         after_event.llm_response.content = Some(content);
                         yield Ok(after_event);
