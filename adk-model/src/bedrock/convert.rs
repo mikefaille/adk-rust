@@ -51,7 +51,7 @@ pub(crate) fn adk_request_to_bedrock(
             "system" => {
                 for part in &content.parts {
                     match part {
-                        Part::Text { text } if !text.is_empty() => {
+                        Part::Text(text) if text.starts_with("<thinking>") || text.ends_with("</thinking>") => {
                             system.push(SystemContentBlock::Text(text.clone()));
                         }
                         Part::Thinking { thought, .. } if !thought.is_empty() => {
@@ -112,7 +112,7 @@ fn adk_parts_to_bedrock(parts: &[Part]) -> Vec<ContentBlock> {
     parts
         .iter()
         .filter_map(|part| match part {
-            Part::Text { text } => {
+            Part::Text(text) => {
                 if text.is_empty() {
                     None
                 } else {
@@ -284,7 +284,8 @@ fn bedrock_content_blocks_to_parts(blocks: &[ContentBlock]) -> Vec<Part> {
             ContentBlock::ReasoningContent(reasoning) => {
                 if let Ok(reasoning_text) = reasoning.as_reasoning_text() {
                     let text = reasoning_text.text().to_string();
-                    if text.is_empty() { None } else { Some(Part::Thinking { thought: text }) }
+                    let signature = reasoning_text.signature().map(String::from);
+                    if text.is_empty() { None } else { Some(Part::Thinking { thought: text, signature }) }
                 } else {
                     None
                 }
@@ -392,14 +393,17 @@ pub(crate) fn bedrock_stream_delta_to_adk(delta: &ContentBlockDelta) -> Option<L
             }
         }
         ContentBlockDelta::ReasoningContent(reasoning_delta) => {
-            if let Ok(text) = reasoning_delta.as_text() {
-                if text.is_empty() {
+            if let Ok(t) = reasoning_delta.as_text() {
+                if t.is_empty() {
                     None
                 } else {
                     Some(LlmResponse {
                         content: Some(Content {
                             role: adk_core::types::Role::Model,
-                            parts: vec![Part::Thinking { thought: text.clone() }],
+                            parts: vec![Part::Thinking {
+                                thought: t.clone(),
+                                signature: None,
+                            }],
                         }),
                         usage_metadata: None,
                         finish_reason: None,
@@ -490,7 +494,7 @@ pub(crate) fn document_to_json_value(doc: &Document) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use adk_core::FunctionResponseData;
+    use adk_core::types::FunctionResponseData;
 
     #[test]
     fn test_json_value_to_document_roundtrip() {
@@ -544,7 +548,7 @@ mod tests {
                 parts: vec![Part::text("Hello".to_string())],
             },
             Content {
-                role: "assistant".to_string(),
+                role: adk_core::types::Role::Model,
                 parts: vec![Part::text("How can I help?".to_string())],
             },
         ];
@@ -581,10 +585,8 @@ mod tests {
         let contents = vec![Content {
             role: adk_core::types::Role::User,
             parts: vec![Part::FunctionResponse {
-                function_response: FunctionResponseData {
-                    name: "get_weather".to_string(),
-                    response: serde_json::json!({"temp": 72}),
-                },
+                name: "get_weather".to_string(),
+                response: serde_json::json!({"temp": 72}),
                 id: Some("call_123".to_string()),
             }],
         }];
@@ -696,7 +698,7 @@ mod tests {
         let parts = bedrock_content_blocks_to_parts(&[block]);
         assert_eq!(parts.len(), 1);
         assert!(parts[0].is_thinking());
-        assert_eq!(parts[0].thinking_text().unwrap(), "Let me think step by step...");
+        assert_eq!(parts[0].to_text().unwrap(), "Let me think step by step...");
     }
 
     #[test]
@@ -713,7 +715,7 @@ mod tests {
         let parts = bedrock_content_blocks_to_parts(&[block]);
         assert_eq!(parts.len(), 1);
         match &parts[0] {
-            Part::Thinking { thought: thinking } => {
+            Part::Thinking { thought: thinking, .. } => {
                 assert_eq!(thinking, "Analyzing the problem...");
                 assert_eq!(signature.as_deref(), Some("sig_abc123"));
             }
@@ -757,7 +759,7 @@ mod tests {
         let parts = bedrock_content_blocks_to_parts(&blocks);
         assert_eq!(parts.len(), 2);
         assert!(parts[0].is_thinking());
-        assert_eq!(parts[0].thinking_text().unwrap(), "Thinking...");
+        assert_eq!(parts[0].to_text().unwrap(), "Thinking...");
         assert_eq!(parts[1].as_text().unwrap(), "Final answer");
     }
 
@@ -773,7 +775,7 @@ mod tests {
         let content = response.content.unwrap();
         assert_eq!(content.parts.len(), 1);
         assert!(content.parts[0].is_thinking());
-        assert_eq!(content.parts[0].thinking_text().unwrap(), "reasoning chunk");
+        assert_eq!(content.parts[0].to_text().unwrap(), "reasoning chunk");
     }
 
     #[test]
@@ -817,7 +819,7 @@ mod tests {
         assert_eq!(content.parts.len(), 2);
 
         assert!(content.parts[0].is_thinking());
-        assert_eq!(content.parts[0].thinking_text().unwrap(), "Step 1: analyze input");
+        assert_eq!(content.parts[0].to_text().unwrap(), "Step 1: analyze input");
         match &content.parts[0] {
             Part::Thinking { signature, .. } => {
                 assert_eq!(signature.as_deref(), Some("sig_test"));

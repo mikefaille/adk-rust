@@ -153,7 +153,7 @@ async fn main() -> anyhow::Result<()> {
                                 has_tool_calls = true;
                                 tool_names.push(name.clone());
                             }
-                            Part::Text { text } => {
+                            Part::Text(text) => {
                                 response_text.push_str(text);
                             }
                             _ => {}

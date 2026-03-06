@@ -114,7 +114,7 @@ impl GeminiModel {
                 match p {
                     adk_gemini::Part::Text { text, thought, thought_signature: _ } => {
                         if thought == &Some(true) {
-                            converted_parts.push(Part::Thinking { thought: text.clone() });
+                            converted_parts.push(Part::Thinking { thought: text.clone(), signature: None });
                         } else {
                             converted_parts.push(Part::text(text.clone()));
                         }
@@ -127,7 +127,11 @@ impl GeminiModel {
                                 ))
                             })?;
                         converted_parts.push(Part::InlineData {
-                            mime_type: inline_data.mime_type.clone(),
+                            mime_type: inline_data.mime_type.parse().map_err(|e| {
+                                adk_core::AdkError::Model(format!(
+                                    "failed to parse mime type from gemini response: {e}"
+                                ))
+                            })?,
                             data: Bytes::from(decoded),
                         });
                     }
@@ -297,14 +301,14 @@ impl GeminiModel {
                     let mut gemini_parts = Vec::new();
                     for part in &content.parts {
                         match part {
-                            Part::Text { text } => {
+                            Part::Text(text) => {
                                 gemini_parts.push(adk_gemini::Part::Text {
                                     text: text.clone(),
                                     thought: None,
                                     thought_signature: None,
                                 });
                             }
-                            Part::Thinking { thought: thinking } => {
+                            Part::Thinking { thought: thinking, .. } => {
                                 gemini_parts.push(adk_gemini::Part::Text {
                                     text: thinking.clone(),
                                     thought: Some(true),
@@ -315,14 +319,14 @@ impl GeminiModel {
                                 let encoded = attachment::encode_base64(data);
                                 gemini_parts.push(adk_gemini::Part::InlineData {
                                     inline_data: adk_gemini::Blob {
-                                        mime_type: mime_type.clone(),
+                                        mime_type: mime_type.to_string(),
                                         data: encoded,
                                     },
                                 });
                             }
                             Part::FileData { mime_type, file_uri } => {
                                 gemini_parts.push(adk_gemini::Part::Text {
-                                    text: attachment::file_attachment_to_text(mime_type, file_uri),
+                                    text: attachment::file_attachment_to_text(mime_type.as_ref(), file_uri),
                                     thought: None,
                                     thought_signature: None,
                                 });
@@ -346,14 +350,14 @@ impl GeminiModel {
                     let mut gemini_parts = Vec::new();
                     for part in &content.parts {
                         match part {
-                            Part::Text { text } => {
+                            Part::Text(text) => {
                                 gemini_parts.push(adk_gemini::Part::Text {
                                     text: text.clone(),
                                     thought: None,
                                     thought_signature: None,
                                 });
                             }
-                            Part::Thinking { thought: thinking } => {
+                            Part::Thinking { thought: thinking, .. } => {
                                 gemini_parts.push(adk_gemini::Part::Text {
                                     text: thinking.clone(),
                                     thought: Some(true),
@@ -821,13 +825,13 @@ mod tests {
             content
                 .parts
                 .iter()
-                .any(|part| matches!(part, Part::Text { text } if text == "Here is the image"))
+                .any(|part| matches!(part, Part::Text(text) if text == "Here is the image"))
         );
         assert!(content.parts.iter().any(|part| {
             matches!(
                 part,
                 Part::InlineData { mime_type, data }
-                    if mime_type == "image/png" && data.as_slice() == image_bytes.as_slice()
+                    if mime_type.as_ref() == "image/png" && data.as_ref() == image_bytes.as_slice()
             )
         }));
     }

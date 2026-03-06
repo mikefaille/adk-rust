@@ -273,7 +273,7 @@ async fn translate_language(
                     while let Some(Ok(event)) = events.next().await {
                         if let Some(content) = &event.llm_response.content {
                             for part in &content.parts {
-                                if let Part::Text { text } = part {
+                                if let Some(text) = part.as_text() {
                                     chunk_translated.push_str(text);
                                 }
                             }

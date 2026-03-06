@@ -1,21 +1,61 @@
-use base64::{Engine as _, engine::general_purpose::STANDARD};
+#[cfg(feature = "base64")]
+use base64::Engine as _;
 use bytes::Bytes;
 use derive_more::{AsRef, Deref, Display};
+use mime::Mime;
 use serde::{Deserialize, Serialize};
 
+pub mod mime_serde {
+    use mime::Mime;
+    use serde::{self, Deserialize, Deserializer, Serializer};
+    use std::str::FromStr;
+
+    pub fn serialize<S>(mime: &Mime, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(mime.as_ref())
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Mime, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        Mime::from_str(&s).map_err(serde::de::Error::custom)
+    }
+}
+
 pub mod base64_bytes {
+    #[cfg(feature = "base64")]
     use base64::{Engine as _, engine::general_purpose::STANDARD};
     use bytes::Bytes;
-    use serde::{Deserialize, Deserializer, Serializer};
+    use serde::{Deserializer, Serializer};
 
     pub fn serialize<S: Serializer>(bytes: &Bytes, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(&STANDARD.encode(bytes))
+        #[cfg(feature = "base64")]
+        {
+            serializer.serialize_str(&STANDARD.encode(bytes))
+        }
+        #[cfg(not(feature = "base64"))]
+        {
+            serializer.serialize_str(&format!("<binary data: {} bytes>", bytes.len()))
+        }
     }
 
     pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Bytes, D::Error> {
+        use serde::Deserialize;
         let s = String::deserialize(deserializer)?;
-        let decoded = STANDARD.decode(s).map_err(serde::de::Error::custom)?;
-        Ok(Bytes::from(decoded))
+        #[cfg(feature = "base64")]
+        {
+            let decoded = STANDARD.decode(s).map_err(serde::de::Error::custom)?;
+            Ok(Bytes::from(decoded))
+        }
+        #[cfg(not(feature = "base64"))]
+        {
+            let _ = s;
+            Err(serde::de::Error::custom("base64 feature not enabled"))
+        }
     }
 }
 
@@ -42,6 +82,12 @@ macro_rules! define_id_type {
             /// Creates a new ID, ensuring it does not contain invalid characters (like colons).
             pub fn new(id: impl Into<String>) -> Result<Self, crate::AdkError> {
                 let id_str = id.into();
+                if id_str.is_empty() {
+                    return Err(crate::AdkError::$err_name(format!(
+                        "{} cannot be empty",
+                        stringify!($name)
+                    )));
+                }
                 if id_str.contains(':') {
                     return Err(crate::AdkError::$err_name(format!(
                         "{} cannot contain a colon (':')",
@@ -49,6 +95,21 @@ macro_rules! define_id_type {
                     )));
                 }
                 Ok(Self(id_str))
+            }
+
+            pub fn as_str(&self) -> &str {
+                &self.0
+            }
+        }
+
+        // ----------------------------------------------------------------
+        // SAFE, FALLIBLE CONVERSIONS (INBOUND)
+        // ----------------------------------------------------------------
+
+        impl std::str::FromStr for $name {
+            type Err = crate::AdkError;
+            fn from_str(s: &str) -> Result<Self, Self::Err> {
+                Self::new(s)
             }
         }
 
@@ -66,12 +127,9 @@ macro_rules! define_id_type {
             }
         }
 
-        impl std::str::FromStr for $name {
-            type Err = crate::AdkError;
-            fn from_str(s: &str) -> Result<Self, Self::Err> {
-                Self::new(s)
-            }
-        }
+        // ----------------------------------------------------------------
+        // SAFE, INFALLIBLE CONVERSIONS (OUTBOUND)
+        // ----------------------------------------------------------------
 
         impl From<$name> for String {
             fn from(id: $name) -> String {
@@ -154,13 +212,31 @@ impl std::str::FromStr for Role {
     type Err = std::convert::Infallible;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Ok(match s {
+        Ok(match s.to_lowercase().as_str() {
             "user" | "human" => Role::User,
             "model" | "assistant" => Role::Model,
             "system" | "developer" => Role::System,
             "tool" | "function" => Role::Tool,
             _ => Role::Custom(s.to_string()),
         })
+    }
+}
+
+impl From<String> for Role {
+    fn from(s: String) -> Self {
+        std::str::FromStr::from_str(&s).unwrap()
+    }
+}
+
+impl From<&str> for Role {
+    fn from(s: &str) -> Self {
+        std::str::FromStr::from_str(s).unwrap()
+    }
+}
+
+impl From<Role> for String {
+    fn from(role: Role) -> String {
+        role.to_string()
     }
 }
 
@@ -181,7 +257,7 @@ impl Role {
     pub fn is_user(&self) -> bool {
         match self {
             Role::User => true,
-            Role::Custom(s) => s == "user",
+            Role::Custom(s) => s == "user" || s == "human",
             _ => false,
         }
     }
@@ -212,9 +288,31 @@ impl Role {
 }
 
 impl Default for Role {
-    fn default() -> Self {
+    fn default() -> Role {
         Role::User
     }
+}
+
+impl PartialEq<&str> for Role {
+    fn eq(&self, other: &&str) -> bool {
+        let other_role: Role = (*other).into();
+        self == &other_role
+    }
+}
+
+impl PartialEq<String> for Role {
+    fn eq(&self, other: &String) -> bool {
+        self.eq(&other.as_str())
+    }
+}
+
+/// Data associated with a function response.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FunctionResponseData {
+    /// The name of the function that was called.
+    pub name: String,
+    /// The response from the function.
+    pub response: serde_json::Value,
 }
 
 /// A consolidated message content structure.
@@ -225,8 +323,8 @@ pub struct Content {
 }
 
 impl Content {
-    pub fn new(role: Role) -> Self {
-        Self { role, parts: Vec::new() }
+    pub fn new(role: impl Into<Role>) -> Self {
+        Self { role: role.into(), parts: Vec::new() }
     }
 
     pub fn user() -> Self {
@@ -242,6 +340,11 @@ impl Content {
         self
     }
 
+    /// Returns the concatenated text from all text parts.
+    pub fn text(&self) -> String {
+        self.parts.iter().filter_map(|p| p.as_text()).collect::<Vec<_>>().join("")
+    }
+
     pub fn with_inline_data(
         mut self,
         mime_type: impl Into<String>,
@@ -252,7 +355,7 @@ impl Content {
     }
 
     pub fn with_thinking(mut self, thought: impl Into<String>) -> Self {
-        self.parts.push(Part::Thinking { thought: thought.into() });
+        self.parts.push(Part::thinking(thought));
         self
     }
 
@@ -260,9 +363,9 @@ impl Content {
         mut self,
         mime_type: impl Into<String>,
         file_uri: impl Into<String>,
-    ) -> Self {
-        self.parts.push(Part::FileData { mime_type: mime_type.into(), file_uri: file_uri.into() });
-        self
+    ) -> Result<Self, crate::AdkError> {
+        self.parts.push(Part::file_data(mime_type, file_uri)?);
+        Ok(self)
     }
 
     pub fn with_part(mut self, part: Part) -> Self {
@@ -283,12 +386,10 @@ impl Content {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Part {
-    Text {
-        text: String,
-    },
+    Text(String),
     InlineData {
-        #[serde(rename = "mimeType")]
-        mime_type: String,
+        #[serde(rename = "mimeType", with = "mime_serde")]
+        mime_type: Mime,
         #[serde(with = "base64_bytes")]
         data: Bytes,
     },
@@ -308,10 +409,12 @@ pub enum Part {
     },
     Thinking {
         thought: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        signature: Option<String>,
     },
     FileData {
-        #[serde(rename = "mimeType")]
-        mime_type: String,
+        #[serde(rename = "mimeType", with = "mime_serde")]
+        mime_type: Mime,
         #[serde(rename = "fileUri")]
         file_uri: String,
     },
@@ -319,7 +422,7 @@ pub enum Part {
 
 impl Part {
     pub fn text(text: impl Into<String>) -> Self {
-        Part::Text { text: text.into() }
+        Part::Text(text.into())
     }
 
     pub fn inline_data(
@@ -330,20 +433,39 @@ impl Part {
         if data.len() > MAX_INLINE_DATA_SIZE {
             return Err(crate::AdkError::PayloadTooLarge(data.len()));
         }
-        Ok(Part::InlineData { mime_type: mime_type.into(), data })
+        let mime_str = mime_type.into();
+        let mime = mime_str
+            .parse::<Mime>()
+            .map_err(|e| crate::AdkError::Config(format!("Invalid mime type: {e}")))?;
+        Ok(Part::InlineData { mime_type: mime, data })
     }
 
     pub fn thinking(thought: impl Into<String>) -> Self {
-        Part::Thinking { thought: thought.into() }
+        Part::Thinking { thought: thought.into(), signature: None }
     }
 
-    pub fn file_data(mime_type: impl Into<String>, file_uri: impl Into<String>) -> Self {
-        Part::FileData { mime_type: mime_type.into(), file_uri: file_uri.into() }
+    pub fn file_data(
+        mime_type: impl Into<String>,
+        file_uri: impl Into<String>,
+    ) -> crate::Result<Self> {
+        let mime_str = mime_type.into();
+        let mime = mime_str
+            .parse::<Mime>()
+            .map_err(|e| crate::AdkError::Config(format!("Invalid mime type: {e}")))?;
+        Ok(Part::FileData { mime_type: mime, file_uri: file_uri.into() })
+    }
+
+    pub fn with_signature(mut self, sig: impl Into<String>) -> Self {
+        if let Part::Thinking { ref mut signature, .. } = self {
+            *signature = Some(sig.into());
+        }
+        self
     }
 
     pub fn as_text(&self) -> Option<&str> {
         match self {
-            Part::Text { text } => Some(text),
+            Part::Text(text) => Some(text),
+            Part::Thinking { thought, .. } => Some(thought),
             _ => None,
         }
     }
@@ -354,8 +476,8 @@ impl Part {
 
     pub fn mime_type(&self) -> Option<&str> {
         match self {
-            Part::InlineData { mime_type, .. } => Some(mime_type),
-            Part::FileData { mime_type, .. } => Some(mime_type),
+            Part::InlineData { mime_type, .. } => Some(mime_type.as_ref()),
+            Part::FileData { mime_type, .. } => Some(mime_type.as_ref()),
             _ => None,
         }
     }
@@ -377,16 +499,24 @@ impl Part {
 
     pub fn to_text(&self) -> String {
         match self {
-            Part::Text { text } => text.clone(),
-            Part::Thinking { thought } => thought.clone(),
+            Part::Text(text) => text.clone(),
+            Part::Thinking { thought, .. } => thought.clone(),
             Part::InlineData { mime_type, data } => {
-                let encoded = STANDARD.encode(data);
-                format!(
-                    "<attachment mime_type=\"{mime_type}\" encoding=\"base64\">{encoded}</attachment>"
-                )
+                #[cfg(feature = "base64")]
+                {
+                    let encoded = base64::engine::general_purpose::STANDARD.encode(data);
+                    format!(
+                        "<attachment mime_type=\"{mime_type}\" encoding=\"base64\">{encoded}</attachment>"
+                    )
+                }
+                #[cfg(not(feature = "base64"))]
+                {
+                    let _ = data;
+                    format!("[Inline Data: {mime_type}]")
+                }
             }
-            Part::FileData { mime_type: _, file_uri } => {
-                format!("[File: {file_uri}]")
+            Part::FileData { mime_type, file_uri } => {
+                format!("[File: {file_uri}] (mime: {mime_type})")
             }
             Part::FunctionCall { name, args, .. } => {
                 format!("[Function Call: {}({})]", name, args)
@@ -405,6 +535,7 @@ mod tests {
     #[test]
     fn test_id_validation() {
         assert!(SessionId::new("valid").is_ok());
+        assert!(SessionId::new("").is_err());
         assert!(SessionId::new("invalid:id").is_err());
     }
 
@@ -457,11 +588,15 @@ mod tests {
         let data = bytes::Bytes::from("fake_image_bytes");
         let inline_content = Content::user().with_inline_data("image/png", data).unwrap();
         let inline_json = serde_json::to_string(&inline_content).unwrap();
-        // "fake_image_bytes" base64 encoded is "ZmFrZV9pbWFnZV9ieXRlcw=="
-        assert_eq!(
-            inline_json,
-            r#"{"role":"user","parts":[{"inlineData":{"mimeType":"image/png","data":"ZmFrZV9pbWFnZV9ieXRlcw=="}}]}"#
-        );
+
+        #[cfg(feature = "base64")]
+        {
+            // "fake_image_bytes" base64 encoded is "ZmFrZV9pbWFnZV9ieXRlcw=="
+            assert_eq!(
+                inline_json,
+                r#"{"role":"user","parts":[{"inlineData":{"mimeType":"image/png","data":"ZmFrZV9pbWFnZV9ieXRlcw=="}}]}"#
+            );
+        }
 
         // 3. Test thinking variant
         let thinking_content = Content::model().with_thinking("Calculating steps...");
@@ -471,14 +606,24 @@ mod tests {
             r#"{"role":"model","parts":[{"thinking":{"thought":"Calculating steps..."}}]}"#
         );
 
-        // 4. Test tool call structure
+        // 5. Test file data shape
+        let file_content = Content::user()
+            .with_file_uri("application/pdf", "gs://my-bucket/doc.pdf")
+            .unwrap();
+        let file_json = serde_json::to_string(&file_content).unwrap();
+        assert_eq!(
+            file_json,
+            r#"{"role":"user","parts":[{"fileData":{"mimeType":"application/pdf","fileUri":"gs://my-bucket/doc.pdf"}}]}"#
+        );
+ 
+        // 6. Test tool call structure
         let tool_part = Part::FunctionCall {
             name: "get_weather".to_string(),
             args: serde_json::json!({"location": "Richmond"}),
             id: None,
             thought_signature: None,
         };
-        let tool_content = Content::model().with_text("Let me check.").with_part(tool_part); // Requires adding `with_part` to Content
+        let tool_content = Content::model().with_text("Let me check.").with_part(tool_part);
         let tool_json = serde_json::to_string(&tool_content).unwrap();
         assert_eq!(
             tool_json,

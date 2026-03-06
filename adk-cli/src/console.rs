@@ -111,7 +111,7 @@ struct StreamPrinter {
 impl StreamPrinter {
     fn handle_part(&mut self, part: &Part) {
         match part {
-            Part::Text { text } => self.handle_text_chunk(text),
+            Part::Text(text) => self.handle_text_chunk(text),
             Part::Thinking { thought, .. } => {
                 print!("\n[thinking] {}\n", thought);
                 let _ = io::stdout().flush();

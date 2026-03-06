@@ -261,7 +261,7 @@ async fn test_llm_agent_basic_generation() {
         .parts
         .iter()
         .filter_map(|p| match p {
-            Part::Text { text } => Some(text.as_str()),
+            Part::Text(text) => Some(text.as_str()),
             _ => None,
         })
         .collect::<Vec<_>>()
@@ -302,7 +302,7 @@ async fn test_llm_agent_with_instruction() {
         .parts
         .iter()
         .filter_map(|p| match p {
-            Part::Text { text } => Some(text.as_str()),
+            Part::Text(text) => Some(text.as_str()),
             _ => None,
         })
         .collect::<Vec<_>>()

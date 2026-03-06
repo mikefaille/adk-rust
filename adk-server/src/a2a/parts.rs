@@ -9,7 +9,7 @@ pub fn adk_parts_to_a2a(
     parts
         .iter()
         .map(|part| match part {
-            Part::Text { text } => Ok(crate::a2a::Part::text(text.clone())),
+            Part::Text(text) => Ok(crate::a2a::Part::text(text.clone())),
             Part::InlineData { mime_type, data } => {
                 let encoded = general_purpose::STANDARD.encode(data);
                 Ok(crate::a2a::Part::file(crate::a2a::FileContent {

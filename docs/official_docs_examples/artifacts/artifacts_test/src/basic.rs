@@ -28,7 +28,7 @@ async fn main() -> anyhow::Result<()> {
             user_id: UserId::new("user_123").unwrap(),
             session_id: SessionId::new("session_456").unwrap(),
             file_name: "notes.txt".to_string(),
-            part: Part::Text { text: "First version of notes".to_string() },
+            part: Part::text("First version of notes".to_string() ),
             version: None, // Auto-increment
         })
         .await?;
@@ -57,7 +57,7 @@ async fn main() -> anyhow::Result<()> {
             user_id: UserId::new("user_123").unwrap(),
             session_id: SessionId::new("session_456").unwrap(),
             file_name: "notes.txt".to_string(),
-            part: Part::Text { text: "Updated notes - version 2".to_string() },
+            part: Part::text("Updated notes - version 2".to_string() ),
             version: None,
         })
         .await?;
@@ -87,7 +87,7 @@ async fn main() -> anyhow::Result<()> {
             version: None, // Latest
         })
         .await?;
-    if let Part::Text { text } = load_response.part {
+    if let Some(text) = load_response.part.as_text() {
         println!("   Content: {}", text);
     }
 
@@ -102,7 +102,7 @@ async fn main() -> anyhow::Result<()> {
             version: Some(1),
         })
         .await?;
-    if let Part::Text { text } = load_response.part {
+    if let Some(text) = load_response.part.as_text() {
         println!("   Content: {}", text);
     }
 

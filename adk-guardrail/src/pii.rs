@@ -89,7 +89,7 @@ impl Guardrail for PiiRedactor {
 
         for part in &content.parts {
             match part {
-                Part::Text { text } => {
+                Part::Text(text) => {
                     let (redacted, found) = self.redact(text);
                     if !found.is_empty() {
                         any_redacted = true;

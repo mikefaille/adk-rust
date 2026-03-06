@@ -151,7 +151,7 @@ async fn main() -> Result<()> {
 
         if let Some(content) = &event.llm_response.content {
             for part in &content.parts {
-                if let Part::Text { text } = part {
+                if let Some(text) = part.as_text() {
                     println!("Response: {}", text);
                 }
             }
@@ -205,7 +205,7 @@ async fn main() -> Result<()> {
 
         if let Some(content) = &event.llm_response.content {
             for part in &content.parts {
-                if let Part::Text { text } = part {
+                if let Some(text) = part.as_text() {
                     println!("Response: {}", text);
                 }
             }
@@ -257,7 +257,7 @@ async fn main() -> Result<()> {
         let event = result?;
         if let Some(content) = &event.llm_response.content {
             for part in &content.parts {
-                if let Part::Text { text } = part {
+                if let Some(text) = part.as_text() {
                     println!("{}", text);
                 }
             }

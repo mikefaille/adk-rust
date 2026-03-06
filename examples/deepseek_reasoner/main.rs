@@ -85,7 +85,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Ok(e) => {
                 if let Some(content) = e.llm_response.content {
                     for part in content.parts {
-                        if let adk_core::Part::Text { text } = part {
+                        if let adk_core::Part::text(text) = part {
                             print!("{}", text);
                         }
                     }

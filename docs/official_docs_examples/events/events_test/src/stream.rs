@@ -25,7 +25,7 @@ fn main() {
 
         // Identify event type by content
         if let Some(content) = event.content() {
-            let has_text = content.parts.iter().any(|p| matches!(p, Part::Text { .. }));
+            let has_text = content.parts.iter().any(|p| matches!(p, Part::Text(..)));
             let has_function_call =
                 content.parts.iter().any(|p| matches!(p, Part::FunctionCall { .. }));
             let has_function_response =
@@ -50,7 +50,7 @@ fn main() {
             } else if has_text {
                 println!("Type: Text Message");
                 for part in &content.parts {
-                    if let Part::Text { text } = part {
+                    if let Some(text) = part.as_text() {
                         println!("  Content: {}", text);
                     }
                 }

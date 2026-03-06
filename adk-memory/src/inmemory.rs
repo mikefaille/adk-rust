@@ -1,5 +1,5 @@
 use crate::service::*;
-use adk_core::{Part, Result, types::UserId};
+use adk_core::{Result, types::UserId};
 use async_trait::async_trait;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
@@ -34,7 +34,7 @@ impl InMemoryMemoryService {
     fn extract_words_from_content(content: &adk_core::Content) -> HashSet<String> {
         let mut words = HashSet::new();
         for part in &content.parts {
-            if let Part::Text { text } = part {
+            if let Some(text) = part.as_text() {
                 words.extend(Self::extract_words(text));
             }
         }

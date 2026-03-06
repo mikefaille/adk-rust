@@ -95,7 +95,7 @@ async fn main() -> anyhow::Result<()> {
                                 println!("🔧 Tool called: {}", name);
                                 has_tool_calls = true;
                             }
-                            Part::Text { text } => {
+                            Part::Text(text) => {
                                 response.push_str(text);
                             }
                             _ => {}

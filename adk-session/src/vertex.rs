@@ -714,7 +714,7 @@ impl VertexEventPayload {
             event.timestamp = timestamp;
         }
 
-        event.invocation_id = invocation_id;
+        event.invocation_id = invocation_id.into();
         event.author = self.author;
         event.branch = self.event_metadata.branch;
         event.actions.state_delta = sanitize_state_map(self.actions.state_delta);
@@ -842,7 +842,7 @@ fn build_append_event_payload(event: &Event) -> Value {
     let mut event_payload = Map::new();
     event_payload.insert("timestamp".to_string(), Value::String(event.timestamp.to_rfc3339()));
     event_payload.insert("author".to_string(), Value::String(event.author.clone()));
-    event_payload.insert("invocationId".to_string(), Value::String(event.invocation_id.clone()));
+    event_payload.insert("invocationId".to_string(), Value::String(event.invocation_id.to_string()));
 
     if !event.actions.state_delta.is_empty() {
         event_payload.insert(

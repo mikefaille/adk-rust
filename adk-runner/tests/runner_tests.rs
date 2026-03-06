@@ -334,7 +334,7 @@ impl Agent for EchoUserContentAgent {
             .parts
             .iter()
             .find_map(|p| match p {
-                Part::Text { text } => Some(text.clone()),
+                Part::Text(text) => Some(text.clone()),
                 _ => None,
             })
             .unwrap_or_default();
@@ -371,7 +371,7 @@ async fn test_plugin_callback_order_and_mutation() {
             let on_user_order = on_user_order.clone();
             Box::pin(async move {
                 on_user_order.lock().unwrap().push("on_user_message".to_string());
-                if let Some(Part::Text { text }) = content.parts.first_mut() {
+                if let Some(Part::text(text)) = content.parts.first_mut() {
                     *text = format!("{text} [plugin]");
                 }
                 Ok(Some(content))
@@ -433,7 +433,7 @@ async fn test_plugin_callback_order_and_mutation() {
         .parts
         .iter()
         .filter_map(|part| match part {
-            Part::Text { text } => Some(text.clone()),
+            Part::Text(text) => Some(text.clone()),
             _ => None,
         })
         .collect();

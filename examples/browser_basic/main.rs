@@ -324,10 +324,10 @@ If an action fails, explain what went wrong."#,
         // Create a simple task
         let task_content = Content {
             role: "user".to_string(),
-            parts: vec![Part::Text {
-                text: "Navigate to https://example.com and tell me what the page title is."
+            parts: vec![Part::text(
+                "Navigate to https://example.com and tell me what the page title is."
                     .to_string(),
-            }],
+            )],
         };
 
         let ctx = Arc::new(MockContext::new(Arc::new(agent), task_content));
@@ -341,7 +341,7 @@ If an action fails, explain what went wrong."#,
                 Ok(event) => {
                     if let Some(content) = &event.llm_response.content {
                         for part in &content.parts {
-                            if let Part::Text { text } = part {
+                            if let Some(text) = part.as_text() {
                                 print!("{}", text);
                             }
                         }

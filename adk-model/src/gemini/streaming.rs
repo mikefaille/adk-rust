@@ -16,7 +16,7 @@ pub async fn aggregate_stream(
 
         if let Some(content) = &response.content {
             for part in &content.parts {
-                if let Part::Text { text } = part {
+                if let Some(text) = part.as_text() {
                     aggregated_text.push_str(text);
                 }
             }

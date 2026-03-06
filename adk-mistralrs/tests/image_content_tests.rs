@@ -285,7 +285,7 @@ fn test_content_with_file_uri() {
     assert_eq!(content.parts.len(), 2);
 
     // First part is text
-    assert!(matches!(&content.parts[0], Part::Text { text } if text == "Check this image"));
+    assert!(matches!(&content.parts[0], Part::text(text) if text == "Check this image"));
 
     // Second part is FileData
     assert!(matches!(

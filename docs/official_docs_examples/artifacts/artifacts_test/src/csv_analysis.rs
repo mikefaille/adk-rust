@@ -36,7 +36,7 @@ async fn main() -> anyhow::Result<()> {
             user_id: UserId::new("user").unwrap(),
             session_id: SessionId::new("init").unwrap(),
             file_name: "user:sales.csv".to_string(),
-            part: Part::Text { text: csv_data },
+            part: Part::text(csv_data ),
             version: None,
         })
         .await?;
@@ -62,10 +62,10 @@ async fn main() -> anyhow::Result<()> {
                 {
                     if let Some(last_content) = request.contents.last_mut() {
                         if last_content.role == adk_core::types::Role::User {
-                            if let Part::Text { text } = &response.part {
+                            if let Some(text) = &response.part.as_text() {
                                 last_content.parts.insert(
                                     0,
-                                    Part::Text { text: format!("CSV Data:\n```\n{}\n```\n\nQuestion: ", text) },
+                                    Part::text(format!("CSV Data:\n```\n{)\n```\n\nQuestion: ", text) },
                                 );
                             }
                         }

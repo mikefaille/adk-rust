@@ -225,7 +225,7 @@ impl Agent for LlmConditionalAgent {
             // Build classification request
             let user_content = run_ctx.user_content().clone();
             let user_text: String = user_content.parts.iter()
-                .filter_map(|p| if let Part::Text { text } = p { Some(text.as_str()) } else { None })
+                .filter_map(|p| if let Some(text) = p.as_text() { Some(text.as_str()) } else { None })
                 .collect::<Vec<_>>()
                 .join(" ");
 
@@ -258,7 +258,7 @@ impl Agent for LlmConditionalAgent {
                     Ok(chunk) => {
                         if let Some(content) = chunk.content {
                             for part in content.parts {
-                                if let Part::Text { text } = part {
+                                if let Some(text) = part.as_text() {
                                     classification.push_str(&text);
                                 }
                             }
@@ -275,7 +275,7 @@ impl Agent for LlmConditionalAgent {
             let classification = classification.trim().to_lowercase();
 
             // Emit routing event
-            let mut routing_event = Event::new(&invocation_id);
+            let mut routing_event = Event::new(run_ctx.invocation_id().clone());
             routing_event.author = agent_name.clone();
             routing_event.llm_response.content = Some(
                 Content::model().with_text(format!("[Routing to: {}]", classification))
@@ -302,7 +302,7 @@ impl Agent for LlmConditionalAgent {
                 }
             } else {
                 // No matching route and no default
-                let mut error_event = Event::new(&invocation_id);
+                let mut error_event = Event::new(run_ctx.invocation_id().clone());
                 error_event.author = agent_name;
                 error_event.llm_response.content = Some(
                     Content::model().with_text(format!(

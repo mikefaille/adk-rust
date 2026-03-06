@@ -4,7 +4,7 @@ use crate::{
 };
 use adk_core::{
     Result,
-    types::{SessionId, UserId},
+    types::{InvocationId, SessionId, UserId},
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -271,10 +271,11 @@ impl SessionService for DatabaseSessionService {
                 let long_running_tool_ids = serde_json::from_str(row.get("long_running_tool_ids")).ok()?;
                 let timestamp: String = row.get("timestamp");
                 let timestamp = DateTime::parse_from_rfc3339(&timestamp).ok()?.with_timezone(&Utc);
+                let invocation_id_str: String = row.get("invocation_id");
                 Some(Event {
                     id: row.get("id"),
                     timestamp,
-                    invocation_id: row.get("invocation_id"),
+                    invocation_id: InvocationId::from(invocation_id_str),
                     branch: row.get("branch"),
                     author: row.get("author"),
                     llm_request: None,
@@ -282,6 +283,9 @@ impl SessionService for DatabaseSessionService {
                     actions,
                     long_running_tool_ids,
                     provider_metadata: std::collections::HashMap::new(),
+                    data: serde_json::Value::Null,
+                    metadata: None,
+                    control: std::collections::HashMap::new(),
                 })
             })
             .collect();

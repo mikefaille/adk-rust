@@ -155,7 +155,7 @@ async fn test_real_gemini_interaction() {
             Ok(event) => {
                 if let Some(content) = event.llm_response.content {
                     for part in content.parts {
-                        if let Part::Text { text } = part {
+                        if let Some(text) = part.as_text() {
                             print!("{}", text);
                             full_response.push_str(&text);
                         }

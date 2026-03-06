@@ -76,7 +76,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         let event = event?;
         if let Some(content) = event.content() {
             for part in &content.parts {
-                if let Part::Text { text } = part {
+                if let Some(text) = part.as_text() {
                     print!("{}", text);
                 }
             }

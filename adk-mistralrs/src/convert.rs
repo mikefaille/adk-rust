@@ -27,7 +27,7 @@ pub fn content_to_message(content: &Content) -> IndexMap<String, Value> {
         .parts
         .iter()
         .filter_map(|part| match part {
-            Part::Text { text } => Some(text.clone()),
+            Part::Text(text) => Some(text.clone()),
             _ => None,
         })
         .collect();
@@ -658,7 +658,7 @@ pub fn extract_text_from_content(content: &Content) -> String {
         .parts
         .iter()
         .filter_map(|part| match part {
-            Part::Text { text } => Some(text.as_str()),
+            Part::Text(text) => Some(text.as_str()),
             _ => None,
         })
         .collect::<Vec<_>>()

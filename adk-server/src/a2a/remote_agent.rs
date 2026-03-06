@@ -133,7 +133,7 @@ impl RemoteA2aAgentBuilder {
 fn get_user_content_from_context(ctx: &dyn InvocationContext) -> Option<String> {
     let content = ctx.user_content();
     for part in &content.parts {
-        if let Part::Text { text } = part {
+        if let Some(text) = part.as_text() {
             return Some(text.clone());
         }
     }

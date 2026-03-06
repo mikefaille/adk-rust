@@ -24,11 +24,11 @@ let
       pkgs.libva
       pkgs.libvdpau
       pkgs.libxcb
-      pkgs.libX11
-      pkgs.libXcursor
-      pkgs.libXext
-      pkgs.libXi
-      pkgs.libXrender
+      pkgs.libx11
+      pkgs.libxcursor
+      pkgs.libxext
+      pkgs.libxi
+      pkgs.libxrender
       pkgs.libxkbcommon
       pkgs.fontconfig
       pkgs.freetype
@@ -43,7 +43,7 @@ let
       pkgs.zstd
       pkgs.snappy
       # Lower priority for xorgproto to avoid header collisions with libX11
-      (lib.lowPrio pkgs.xorg.xorgproto)
+      (lib.lowPrio pkgs.xorgproto)
     ];
   };
 

@@ -95,7 +95,7 @@ async fn test_before_agent_callback_skip_execution() {
         if let Ok(event) = result {
             if let Some(content) = &event.llm_response.content {
                 for part in &content.parts {
-                    if let Part::Text { text } = part {
+                    if let Some(text) = part.as_text() {
                         if text.contains("AGENT SKIPPED BY CALLBACK") {
                             found_skip_message = true;
                         }
@@ -140,7 +140,7 @@ async fn test_after_agent_callback() {
         if let Ok(event) = result {
             if let Some(content) = &event.llm_response.content {
                 for part in &content.parts {
-                    if let Part::Text { text } = part {
+                    if let Some(text) = part.as_text() {
                         if text.contains("AFTER AGENT CALLBACK") {
                             found_after_message = true;
                         }

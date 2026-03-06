@@ -263,7 +263,7 @@ async fn ask(
         if let Ok(e) = event {
             if let Some(content) = e.llm_response.content {
                 for part in content.parts {
-                    if let Part::Text { text } = part {
+                    if let Some(text) = part.as_text() {
                         print!("{text}");
                     }
                 }

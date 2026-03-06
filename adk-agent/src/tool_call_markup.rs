@@ -24,7 +24,7 @@ pub fn normalize_content(content: &mut Content) {
 
     for part in parts {
         match part {
-            Part::Text { text } => {
+            Part::Text(text) => {
                 normalized.extend(convert_text_to_parts(text));
             }
             other => normalized.push(other),
@@ -163,7 +163,7 @@ mod tests {
     fn test_no_markup() {
         let parts = convert_text_to_parts("Hello world".to_string());
         assert_eq!(parts.len(), 1);
-        assert!(matches!(&parts[0], Part::Text { text } if text == "Hello world"));
+        assert!(matches!(&parts[0], Part::Text(text) if text == "Hello world"));
     }
 
     #[test]
@@ -197,9 +197,9 @@ get_weather
 
         let parts = convert_text_to_parts(text);
         assert_eq!(parts.len(), 3);
-        assert!(matches!(&parts[0], Part::Text { text } if text.contains("Let me check")));
+        assert!(matches!(&parts[0], Part::Text(text) if text.contains("Let me check")));
         assert!(matches!(&parts[1], Part::FunctionCall { name, .. } if name == "get_weather"));
-        assert!(matches!(&parts[2], Part::Text { text } if text.contains("Done")));
+        assert!(matches!(&parts[2], Part::Text(text) if text.contains("Done")));
     }
 
     #[test]

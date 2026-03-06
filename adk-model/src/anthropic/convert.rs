@@ -8,8 +8,9 @@ use claudius::{
     Base64ImageSource, Base64PdfSource, CacheControlEphemeral, ContentBlock, DocumentBlock,
     ImageBlock, Message, MessageCreateParams, MessageParam, MessageRole, Model, PlainTextSource,
     StopReason, SystemPrompt, TextBlock, ToolParam, ToolResultBlock, ToolResultBlockContent,
-    ToolUnionParam, ToolUseBlock, UrlPdfSource,
+    ToolUnionParam, ToolUseBlock,
 };
+
 use serde_json::Value;
 use std::collections::HashMap;
 
@@ -28,19 +29,18 @@ pub fn content_to_message(
 
     let cache = if prompt_caching { Some(CacheControlEphemeral::new()) } else { None };
 
-    let blocks: Vec<ContentBlock> = content
-        .parts
-        .iter()
-        .filter_map(|part| match part {
-            Part::Text { text } => {
+    let mut blocks = Vec::new();
+    for part in &content.parts {
+        let result_block = match part {
+            Part::Text(text) => {
                 if text.is_empty() {
-                    None
+                    Ok(None)
                 } else {
                     let mut block = TextBlock::new(text.clone());
                     if let Some(ref cc) = cache {
                         block = block.with_cache_control(cc.clone());
                     }
-                    Some(ContentBlock::Text(block))
+                    Ok(Some(ContentBlock::Text(block)))
                 }
             }
             Part::FunctionCall { name, args, id, .. } => {
@@ -53,20 +53,20 @@ pub fn content_to_message(
                 if let Some(ref cc) = cache {
                     block = block.with_cache_control(cc.clone());
                 }
-                Some(ContentBlock::ToolUse(block))
+                Ok(Some(ContentBlock::ToolUse(block)))
             }
-            Part::FunctionResponse { name: _, response, id } => {
-                Some(ContentBlock::ToolResult(ToolResultBlock {
+            Part::FunctionResponse { name: _, response, id } => Ok(Some(ContentBlock::ToolResult(
+                ToolResultBlock {
                     tool_use_id: id.clone().unwrap_or_else(|| "unknown".to_string()),
                     content: Some(ToolResultBlockContent::String(
                         serde_json::to_string(&response).unwrap_or_default(),
                     )),
                     is_error: None,
                     cache_control: None,
-                }))
-            }
+                },
+            ))),
             Part::InlineData { mime_type, data } => {
-                let media_type = match mime_type.as_str() {
+                let media_type = match mime_type.as_ref() {
                     "image/jpeg" => Some(ImageMediaType::Jpeg),
                     "image/png" => Some(ImageMediaType::Png),
                     "image/gif" => Some(ImageMediaType::Gif),
@@ -75,43 +75,44 @@ pub fn content_to_message(
                 };
                 if let Some(media_type) = media_type {
                     let encoded = attachment::encode_base64(data);
-                    Some(ContentBlock::Image(ImageBlock::new_with_base64(Base64ImageSource::new(
-                        encoded, media_type,
+                    Ok(Some(ContentBlock::Image(ImageBlock::new_with_base64(
+                        Base64ImageSource::new(encoded, media_type),
                     ))))
-                } else if mime_type == "application/pdf" {
+                } else if mime_type.as_ref() == "application/pdf" {
                     let encoded = attachment::encode_base64(data);
-                    Some(ContentBlock::Document(DocumentBlock::new_with_base64_pdf(
+                    Ok(Some(ContentBlock::Document(DocumentBlock::new_with_base64_pdf(
                         Base64PdfSource::new(encoded),
-                    )))
-                } else if mime_type.starts_with("text/") {
+                    ))))
+                } else if mime_type.as_ref().starts_with("text/") {
                     match String::from_utf8(data.to_vec()) {
-                        Ok(text) => Some(ContentBlock::Document(
+                        Ok(text) => Ok(Some(ContentBlock::Document(
                             DocumentBlock::new_with_plain_text(PlainTextSource::new(text)),
-                        )),
-                        Err(_) => Some(ContentBlock::Text(TextBlock::new(part.to_text()))),
+                        ))),
+                        Err(_) => Ok(Some(ContentBlock::Text(TextBlock::new(part.to_text())))),
                     }
                 } else {
-                    Some(ContentBlock::Text(TextBlock::new(part.to_text())))
+                    Ok(Some(ContentBlock::Text(TextBlock::new(part.to_text()))))
                 }
             }
-            Part::FileData { mime_type, file_uri } => {
-                if mime_type == "application/pdf" {
-                    Some(ContentBlock::Document(DocumentBlock::new_with_url_pdf(
-                        UrlPdfSource::new(file_uri.clone()),
-                    )))
-                } else {
-                    Some(ContentBlock::Text(TextBlock::new(part.to_text())))
-                }
+            Part::FileData { .. } => {
+                // Anthropic API requires inline base64 for files, not URLs.
+                // We return an error to prevent the 'PDF Parsing Trap'.
+                Err(ConversionError::UnsupportedFileData)
             }
             Part::Thinking { thought: thinking, .. } => {
                 if thinking.is_empty() {
-                    None
+                    Ok(None)
                 } else {
-                    Some(ContentBlock::Text(TextBlock::new(thinking.clone())))
+                    // Fallback to text if dedicated Thinking blocks are not supported in this claudius version
+                    Ok(Some(ContentBlock::Text(TextBlock::new(format!("<thinking>{}</thinking>", thinking)))))
                 }
             }
-        })
-        .collect();
+        }?;
+
+        if let Some(block) = result_block {
+            blocks.push(block);
+        }
+    }
 
     // If no blocks, add a placeholder for assistant messages
     let blocks = if blocks.is_empty() && role == MessageRole::Assistant {
@@ -168,7 +169,10 @@ pub fn from_anthropic_message(message: &Message) -> (LlmResponse, HashMap<String
             }
             ContentBlock::Thinking(thinking_block) => {
                 if !thinking_block.thinking.is_empty() {
-                    parts.push(Part::Thinking { thought: thinking_block.thinking.clone() });
+                    parts.push(Part::Thinking {
+                        thought: thinking_block.thinking.clone(),
+                        signature: Some(thinking_block.signature.clone()),
+                    });
                 }
             }
             _ => {}
@@ -239,7 +243,7 @@ pub fn from_thinking_delta(thinking_text: &str) -> LlmResponse {
     LlmResponse {
         content: Some(Content {
             role: adk_core::types::Role::Model,
-            parts: vec![Part::Thinking { thought: thinking_text.to_string() }],
+            parts: vec![Part::Thinking { thought: thinking_text.to_string(), signature: None }],
         }),
         partial: true,
         turn_complete: false,
@@ -372,10 +376,10 @@ mod tests {
     #[test]
     fn test_content_to_message_with_inline_image() {
         let content =
-            Content::user().with_text("What is in this image?").with_part(Part::InlineData {
-                mime_type: "image/png".to_string(),
-                data: Bytes::from_static(&[0x89, 0x50, 0x4E, 0x47]),
-            });
+            Content::user().with_text("What is in this image?").with_part(
+                Part::inline_data("image/png", Bytes::from_static(&[0x89, 0x50, 0x4E, 0x47]))
+                    .unwrap(),
+            );
         let msg = content_to_message(&content, false).unwrap();
         assert!(matches!(msg.role, MessageRole::User));
 
@@ -394,10 +398,9 @@ mod tests {
 
     #[test]
     fn test_content_to_message_unsupported_mime_type_falls_back_to_text() {
-        let content = Content::user().with_text("Check this").with_part(Part::InlineData {
-            mime_type: "audio/wav".to_string(), // Not supported by Anthropic images
-            data: Bytes::from_static(&[0x52, 0x49, 0x46, 0x46]),
-        });
+        let content = Content::user().with_text("Check this").with_part(
+            Part::inline_data("audio/wav", Bytes::from_static(&[0x52, 0x49, 0x46, 0x46])).unwrap(),
+        );
         let msg = content_to_message(&content, false).unwrap();
 
         // Audio part should be preserved as textual attachment fallback.
@@ -413,14 +416,8 @@ mod tests {
     fn test_content_to_message_multiple_images() {
         let content = Content::user()
             .with_text("Compare")
-            .with_part(Part::InlineData {
-                mime_type: "image/jpeg".to_string(),
-                data: Bytes::from_static(&[0xFF, 0xD8]),
-            })
-            .with_part(Part::InlineData {
-                mime_type: "image/webp".to_string(),
-                data: Bytes::from_static(&[0x52, 0x49]),
-            });
+            .with_part(Part::inline_data("image/jpeg", Bytes::from_static(&[0xFF, 0xD8])).unwrap())
+            .with_part(Part::inline_data("image/webp", Bytes::from_static(&[0x52, 0x49])).unwrap());
         let msg = content_to_message(&content, false).unwrap();
 
         let json = serde_json::to_value(&msg).unwrap();
@@ -432,10 +429,9 @@ mod tests {
 
     #[test]
     fn test_content_to_message_pdf_inline_data_maps_to_document_block() {
-        let content = Content::user().with_part(Part::InlineData {
-            mime_type: "application/pdf".to_string(),
-            data: Bytes::from_static(b"%PDF-1.4"),
-        });
+        let content = Content::user().with_part(
+            Part::inline_data("application/pdf", Bytes::from_static(b"%PDF-1.4")).unwrap(),
+        );
         let msg = content_to_message(&content, false).unwrap();
 
         let json = serde_json::to_value(&msg).unwrap();
@@ -448,10 +444,9 @@ mod tests {
 
     #[test]
     fn test_content_to_message_pdf_file_uri_maps_to_document_block() {
-        let content = Content::user().with_part(Part::FileData {
-            mime_type: "application/pdf".to_string(),
-            file_uri: "https://example.com/test.pdf".to_string(),
-        });
+        let content = Content::user().with_part(
+            Part::file_data("application/pdf", "https://example.com/test.pdf").unwrap(),
+        );
         let msg = content_to_message(&content, false).unwrap();
 
         let json = serde_json::to_value(&msg).unwrap();

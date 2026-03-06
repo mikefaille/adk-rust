@@ -136,7 +136,7 @@ mod tests {
         let loaded2 = sess2.load("file.txt").await.unwrap();
 
         match (loaded1, loaded2) {
-            (Part::Text { text: text1 }, Part::Text { text: text2 }) => {
+            (Part::text(text1 ), Part::text(text2 )) => {
                 assert_eq!(text1, "session 1 data");
                 assert_eq!(text2, "session 2 data");
             }
@@ -198,7 +198,7 @@ mod tests {
         let loaded2 = sess2.load("user:shared.txt").await.unwrap();
 
         match (loaded1, loaded2) {
-            (Part::Text { text: text1 }, Part::Text { text: text2 }) => {
+            (Part::text(text1 ), Part::text(text2 )) => {
                 assert_eq!(text1, "shared data");
                 assert_eq!(text2, "shared data");
             }

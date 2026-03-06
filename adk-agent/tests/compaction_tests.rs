@@ -73,7 +73,7 @@ async fn test_summarize_produces_compaction_event() {
     // Compacted content should be the LLM summary
     assert_eq!(compaction.compacted_content.role, "model");
     let text = match &compaction.compacted_content.parts[0] {
-        Part::Text { text } => text.clone(),
+        Part::Text(text) => text.clone(),
         _ => panic!("Expected text part"),
     };
     assert!(text.contains("weather"));
@@ -92,7 +92,7 @@ async fn test_summarize_with_custom_prompt_template() {
 
     let compaction = result.unwrap().actions.compaction.unwrap();
     let text = match &compaction.compacted_content.parts[0] {
-        Part::Text { text } => text.clone(),
+        Part::Text(text) => text.clone(),
         _ => panic!("Expected text part"),
     };
     assert_eq!(text, "Custom summary output");

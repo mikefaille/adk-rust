@@ -2,6 +2,7 @@
 
 use crate::attachment;
 use adk_core::{Content, FinishReason, LlmResponse, Part, UsageMetadata};
+use mime;
 use async_openai::types::{
     ChatCompletionMessageToolCall, ChatCompletionRequestAssistantMessageArgs,
     ChatCompletionRequestMessage, ChatCompletionRequestMessageContentPartAudio,
@@ -26,7 +27,7 @@ pub fn content_to_message(content: &Content) -> ChatCompletionRequestMessage {
                 .parts
                 .iter()
                 .filter_map(|p| match p {
-                    Part::Text { text } => Some(ChatCompletionRequestUserMessageContentPart::Text(
+                    Part::Text(text) => Some(ChatCompletionRequestUserMessageContentPart::Text(
                         ChatCompletionRequestMessageContentPartText { text: text.clone() },
                     )),
                     Part::Thinking { thought: thinking, .. } => {
@@ -35,10 +36,10 @@ pub fn content_to_message(content: &Content) -> ChatCompletionRequestMessage {
                         ))
                     }
                     Part::InlineData { mime_type, data } => {
-                        Some(inline_data_part_to_openai(mime_type, data))
+                        Some(inline_data_part_to_openai(mime_type.as_ref(), data))
                     }
                     Part::FileData { mime_type, file_uri } => {
-                        if mime_type.starts_with("image/") {
+                        if mime_type.type_() == mime::IMAGE {
                             Some(ChatCompletionRequestUserMessageContentPart::ImageUrl(
                                 ChatCompletionRequestMessageContentPartImage {
                                     image_url: ImageUrl {
@@ -50,7 +51,7 @@ pub fn content_to_message(content: &Content) -> ChatCompletionRequestMessage {
                         } else {
                             Some(ChatCompletionRequestUserMessageContentPart::Text(
                                 ChatCompletionRequestMessageContentPartText {
-                                    text: attachment::file_attachment_to_text(mime_type, file_uri),
+                                    text: attachment::file_attachment_to_text(mime_type.as_ref(), file_uri),
                                 },
                             ))
                         }
@@ -177,7 +178,7 @@ fn extract_text(parts: &[Part]) -> String {
     parts
         .iter()
         .filter_map(|p| match p {
-            Part::Text { text } => Some(text.clone()),
+            Part::Text(text) => Some(text.clone()),
             Part::Thinking { thought: thinking, .. } => Some(thinking.clone()),
             _ => None,
         })
@@ -381,10 +382,10 @@ mod tests {
     #[test]
     fn test_user_message_with_inline_data_produces_array_content() {
         let content =
-            Content::user().with_text("What is in this image?").with_part(Part::InlineData {
-                mime_type: "image/png".to_string(),
-                data: Bytes::from_static(&[0x89, 0x50, 0x4E, 0x47]), // PNG magic bytes
-            });
+            Content::user().with_text("What is in this image?").with_part(Part::inline_data(
+                "image/png",
+                Bytes::from_static(&[0x89, 0x50, 0x4E, 0x47]), // PNG magic bytes
+            ).unwrap());
         let msg = content_to_message(&content);
 
         // Should produce a user message with Array content (not Text)
@@ -415,14 +416,8 @@ mod tests {
     fn test_user_message_with_multiple_attachments() {
         let content = Content::user()
             .with_text("Compare these")
-            .with_part(Part::InlineData {
-                mime_type: "image/jpeg".to_string(),
-                data: Bytes::from_static(&[0xFF, 0xD8]),
-            })
-            .with_part(Part::InlineData {
-                mime_type: "image/png".to_string(),
-                data: Bytes::from_static(&[0x89, 0x50]),
-            });
+            .with_part(Part::inline_data("image/jpeg", Bytes::from_static(&[0xFF, 0xD8])).unwrap())
+            .with_part(Part::inline_data("image/png", Bytes::from_static(&[0x89, 0x50])).unwrap());
         let msg = content_to_message(&content);
 
         if let ChatCompletionRequestMessage::User(user_msg) = &msg {
@@ -438,10 +433,9 @@ mod tests {
 
     #[test]
     fn test_user_message_with_audio_inline_data_uses_input_audio_part() {
-        let content = Content::user().with_text("Transcribe this").with_part(Part::InlineData {
-            mime_type: "audio/wav".to_string(),
-            data: Bytes::from_static(&[0x52, 0x49, 0x46, 0x46]),
-        });
+        let content = Content::user().with_text("Transcribe this").with_part(
+            Part::inline_data("audio/wav", Bytes::from_static(&[0x52, 0x49, 0x46, 0x46])).unwrap(),
+        );
         let msg = content_to_message(&content);
 
         if let ChatCompletionRequestMessage::User(user_msg) = &msg {
@@ -461,16 +455,15 @@ mod tests {
 
     #[test]
     fn test_user_message_with_pdf_inline_data_falls_back_to_text_part() {
-        let content = Content::user().with_part(Part::InlineData {
-            mime_type: "application/pdf".to_string(),
-            data: Bytes::from_static(b"%PDF"),
-        });
+        let content = Content::user().with_part(
+            Part::inline_data("application/pdf", Bytes::from_static(b"%PDF")).unwrap(),
+        );
         let msg = content_to_message(&content);
 
         if let ChatCompletionRequestMessage::User(user_msg) = &msg {
             if let ChatCompletionRequestUserMessageContent::Array(parts) = &user_msg.content {
                 assert_eq!(parts.len(), 1);
-                if let ChatCompletionRequestUserMessageContentPart::text(text_part) = &parts[0] {
+                if let ChatCompletionRequestUserMessageContentPart::Text(text_part) = &parts[0] {
                     assert!(text_part.text.contains("application/pdf"));
                     assert!(text_part.text.contains("encoding=\"base64\""));
                 } else {
@@ -486,10 +479,10 @@ mod tests {
 
     #[test]
     fn test_user_message_with_file_data_image_uses_image_url_part() {
-        let content = Content::user().with_part(Part::FileData {
-            mime_type: "image/jpeg".to_string(),
-            file_uri: "https://example.com/photo.jpg".to_string(),
-        });
+        let content = Content::user().with_part(Part::file_data(
+            "image/jpeg",
+            "https://example.com/photo.jpg".to_string(),
+        ).unwrap());
         let msg = content_to_message(&content);
 
         if let ChatCompletionRequestMessage::User(user_msg) = &msg {
@@ -511,20 +504,20 @@ mod tests {
 
     #[test]
     fn test_user_message_with_file_data_falls_back_to_text_part() {
-        let content = Content::user().with_part(Part::FileData {
-            mime_type: "application/pdf".to_string(),
-            file_uri: "https://example.com/report.pdf".to_string(),
-        });
+        let content = Content::user().with_part(Part::file_data(
+            "application/pdf",
+            "https://example.com/report.pdf".to_string(),
+        ).unwrap());
         let msg = content_to_message(&content);
 
         if let ChatCompletionRequestMessage::User(user_msg) = &msg {
             if let ChatCompletionRequestUserMessageContent::Array(parts) = &user_msg.content {
                 assert_eq!(parts.len(), 1);
-                if let ChatCompletionRequestUserMessageContentPart::text(text_part) = &parts[0] {
+                if let ChatCompletionRequestUserMessageContentPart::Text(text_part) = &parts[0] {
                     assert!(text_part.text.contains("https://example.com/report.pdf"));
                     assert!(text_part.text.contains("application/pdf"));
                 } else {
-                    panic!("Expected text part for file uri attachment");
+                    panic!("Expected Text part for file uri attachment");
                 }
             } else {
                 panic!("Expected Array content");

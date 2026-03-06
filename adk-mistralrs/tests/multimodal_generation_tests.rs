@@ -202,7 +202,7 @@ proptest! {
     /// **Validates: Requirements 6.1, 17.1**
     #[test]
     fn prop_content_part_count(content in arb_multimodal_content()) {
-        let text_parts: Vec<_> = content.parts.iter().filter(|p| matches!(p, Part::Text { .. })).collect();
+        let text_parts: Vec<_> = content.parts.iter().filter(|p| matches!(p, Part::Text(..))).collect();
         let image_parts: Vec<_> = content.parts.iter().filter(|p| {
             matches!(p, Part::InlineData { mime_type, .. } if ImageFormat::is_supported_mime_type(mime_type))
         }).collect();

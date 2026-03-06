@@ -61,7 +61,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     println!("  parts ({}):", content.parts.len());
                     for (i, part) in content.parts.iter().enumerate() {
                         match part {
-                            Part::Text { text } => {
+                            Part::Text(text) => {
                                 println!("    [{}] Text: {}", i, text);
                             }
                             Part::FunctionCall { name, args, id, .. } => {

@@ -430,7 +430,8 @@ mod tests {
 
     #[test]
     fn text_message_helpers_emit_start_delta_end() {
-        let events = text_message_events("thread-1", "run-1", "msg-1", "assistant", "hello");
+        use adk_core::Role;
+        let events = text_message_events("thread-1", "run-1", "msg-1", Role::Model, "hello");
         assert_eq!(events.len(), 3);
 
         let start = serde_json::to_value(&events[0]).unwrap();

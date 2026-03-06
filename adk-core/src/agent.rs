@@ -169,7 +169,8 @@ mod tests {
 
         async fn run(&self, _ctx: Arc<dyn InvocationContext>) -> Result<EventStream> {
             let s = stream! {
-                yield Ok(Event::new("test"));
+                let id = crate::types::InvocationId::new("test").unwrap();
+                yield Ok(Event::new(id));
             };
             Ok(Box::pin(s))
         }

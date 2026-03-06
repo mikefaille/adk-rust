@@ -48,7 +48,7 @@ async fn main() -> anyhow::Result<()> {
 
     // 3. Append an event
     println!("\n3. Appending event...");
-    let event = Event::new("inv_001");
+    let event = Event::new(adk_core::types::InvocationId::new("inv_001").unwrap());
     service.append_event(session.id(), event).await?;
     println!("   Event appended");
 

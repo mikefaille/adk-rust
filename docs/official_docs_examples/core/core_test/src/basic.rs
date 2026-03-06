@@ -26,21 +26,22 @@ fn main() {
 
     // From docs: Create content with file URI
     let content = Content::user()
-        .with_text("Analyze this document")
-        .with_file_uri("application/pdf", "https://example.com/doc.pdf");
+        .with_text("Here's a document:")
+        .with_file_uri("application/pdf", "https://example.com/doc.pdf")
+        .unwrap();
     assert_eq!(content.parts.len(), 2);
     println!("✓ Content with file URI works");
 
     // From docs: Part helpers
     let text = Part::text("Hello");
-    assert!(matches!(text, Part::Text { .. }));
+    assert!(matches!(text, Part::Text(..)));
     println!("✓ Part::text() works");
 
     let image = Part::inline_data("image/png", vec![1, 2, 3]).unwrap();
     assert!(matches!(image, Part::InlineData { .. }));
     println!("✓ Part::inline_data() works");
 
-    let file = Part::file_data("image/jpeg", "https://example.com/img.jpg");
+    let file = Part::file_data("image/jpeg", "https://example.com/img.jpg").unwrap();
     assert!(matches!(file, Part::FileData { .. }));
     println!("✓ Part::file_data() works");
 
@@ -53,7 +54,7 @@ fn main() {
     assert_eq!(part.mime_type(), Some("image/png"));
     println!("✓ part.mime_type() works");
 
-    let part = Part::file_data("image/jpeg", "https://example.com/img.jpg");
+    let part = Part::file_data("image/jpeg", "https://example.com/img.jpg").unwrap();
     assert_eq!(part.file_uri(), Some("https://example.com/img.jpg"));
     println!("✓ part.file_uri() works");
 

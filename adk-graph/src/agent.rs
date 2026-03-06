@@ -143,7 +143,8 @@ impl Agent for GraphAgent {
                 }
                 Err(GraphError::Interrupted(interrupt)) => {
                     // Create an interrupt event
-                    let mut event = Event::new("graph_interrupted");
+                    let id = adk_core::types::InvocationId::new("graph_interrupted").unwrap();
+                    let mut event = Event::new(id);
                     event.set_content(Content::model().with_text(format!(
                         "Graph interrupted: {:?}\nThread: {}\nCheckpoint: {}",
                         interrupt.interrupt,
@@ -207,7 +208,8 @@ fn default_output_mapper(state: &State) -> Vec<Event> {
         serde_json::to_string_pretty(state).unwrap_or_default()
     };
 
-    let mut event = Event::new("graph_output");
+    let id = adk_core::types::InvocationId::new("graph_output").unwrap();
+    let mut event = Event::new(id);
     event.set_content(Content::model().with_text(&text));
     events.push(event);
 

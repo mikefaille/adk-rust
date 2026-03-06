@@ -135,7 +135,7 @@ async fn demo_thinking_traces(model: &GeminiModel) -> Result<(), Box<dyn std::er
                             );
                         }
                     }
-                    Part::Text { text } => {
+                    Part::Text(text) => {
                         print!("{text}");
                     }
                     _ => {}
@@ -242,7 +242,7 @@ async fn demo_thought_signature(model: Arc<GeminiModel>) -> Result<(), Box<dyn s
                                 println!("     [has signature]");
                             }
                         }
-                        Part::Text { text } => print!("{text}"),
+                        Part::Text(text) => print!("{text}"),
                         Part::FunctionCall { name, args, thought_signature, .. } => {
                             saw_tool_call = true;
                             println!("  🔧 Tool call: {name}({args})");
@@ -298,7 +298,7 @@ async fn demo_thought_signature(model: Arc<GeminiModel>) -> Result<(), Box<dyn s
                             let preview = &thinking[..thinking.len().min(100)];
                             println!("  💭 {preview}...");
                         }
-                        Part::Text { text } => print!("{text}"),
+                        Part::Text(text) => print!("{text}"),
                         Part::FunctionCall { name, args, .. } => {
                             println!("  🔧 Tool call: {name}({args})");
                         }

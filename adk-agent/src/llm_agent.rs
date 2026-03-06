@@ -599,7 +599,7 @@ impl Agent for LlmAgent {
                     .parts
                     .iter()
                     .filter_map(|part| match part {
-                        Part::Text { text } => Some(text.as_str()),
+                        Part::Text(text) => Some(text.as_str()),
                         _ => None,
                     })
                     .collect::<Vec<_>>()
@@ -679,7 +679,7 @@ impl Agent for LlmAgent {
                     // Keep global and agent instructions (already added above)
                     let instruction_count = conversation_history.iter()
                         .take_while(|c| c.role == adk_core::types::Role::User && c.parts.iter().any(|p| {
-                            if let Part::Text { text } = p {
+                            if let Some(text) = p.as_text() {
                                 // These are likely instructions, not user queries
                                 !text.is_empty()
                             } else {
@@ -1055,13 +1055,13 @@ impl Agent for LlmAgent {
                         if !has_function_calls {  // Only save if not calling tools
                             let mut text_parts = String::new();
                             for part in &content.parts {
-                                if let Part::Text { text } = part {
+                                if let Some(text) = part.as_text() {
                                     text_parts.push_str(text);
                                 }
                             }
                             if !text_parts.is_empty() {
                                 // Yield a final state update event
-                                let mut state_event = Event::new(&invocation_id);
+                                let mut state_event = Event::new(run_ctx.invocation_id().clone());
                                 state_event.author = agent_name.clone();
                                 state_event.actions.state_delta.insert(
                                     output_key.clone(),
@@ -1123,14 +1123,14 @@ impl Agent for LlmAgent {
                                     };
                                     conversation_history.push(error_content.clone());
 
-                                    let mut error_event = Event::new(&invocation_id);
+                                    let mut error_event = Event::new(run_ctx.invocation_id().clone());
                                     error_event.author = agent_name.clone();
                                     error_event.llm_response.content = Some(error_content);
                                     yield Ok(error_event);
                                     continue;
                                 }
 
-                                let mut transfer_event = Event::new(&invocation_id);
+                                let mut transfer_event = Event::new(run_ctx.invocation_id().clone());
                                 transfer_event.author = agent_name.clone();
                                 transfer_event.actions.transfer_to_agent = Some(target_agent);
 
@@ -1152,12 +1152,10 @@ impl Agent for LlmAgent {
                                 match ctx.run_config().tool_confirmation_decisions.get(name).copied()
                                 {
                                     Some(ToolConfirmationDecision::Approve) => {
-                                        tool_actions.tool_confirmation_decision =
-                                            Some(ToolConfirmationDecision::Approve);
+                                        tool_actions.tool_confirmation_decision = Some(true);
                                     }
                                     Some(ToolConfirmationDecision::Deny) => {
-                                        tool_actions.tool_confirmation_decision =
-                                            Some(ToolConfirmationDecision::Deny);
+                                        tool_actions.tool_confirmation_decision = Some(false);
                                         response_content = Some(Content {
                                             role: adk_core::types::Role::Custom("tool".to_string()),
                                             parts: vec![Part::FunctionResponse {
@@ -1174,7 +1172,7 @@ impl Agent for LlmAgent {
                                         run_after_tool_callbacks = false;
                                     }
                                     None => {
-                                        let mut confirmation_event = Event::new(&invocation_id);
+                                        let mut confirmation_event = Event::new(run_ctx.invocation_id().clone());
                                         confirmation_event.author = agent_name.clone();
                                         confirmation_event.llm_response.interrupted = true;
                                         confirmation_event.llm_response.turn_complete = true;
@@ -1314,7 +1312,7 @@ impl Agent for LlmAgent {
                             }
 
                             // Yield tool execution event
-                            let mut tool_event = Event::new(&invocation_id);
+                            let mut tool_event = Event::new(run_ctx.invocation_id().clone());
                             tool_event.author = agent_name.clone();
                             tool_event.actions = tool_actions.clone();
                             tool_event.llm_response.content = Some(response_content.clone());
@@ -1348,7 +1346,7 @@ impl Agent for LlmAgent {
                 match callback(ctx.clone() as Arc<dyn CallbackContext>).await {
                     Ok(Some(content)) => {
                         // Callback returned content - yield it
-                        let mut after_event = Event::new(&invocation_id);
+                        let mut after_event = Event::new(run_ctx.invocation_id().clone());
                         after_event.author = agent_name.clone();
                         after_event.llm_response.content = Some(content);
                         yield Ok(after_event);

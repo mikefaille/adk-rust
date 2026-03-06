@@ -147,7 +147,7 @@ mod tests {
 
     #[test]
     fn content_to_chat_message_keeps_file_attachment_payload() {
-        let content = Content::user().with_file_uri("text/csv", "https://example.com/data.csv");
+        let content = Content::user().with_file_uri("text/csv", "https://example.com/data.csv").unwrap();
         let message = content_to_chat_message(&content).expect("message should be created");
         assert!(message.content.contains("[File: https://example.com/data.csv]"));
     }

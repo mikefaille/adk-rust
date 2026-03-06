@@ -621,7 +621,7 @@ impl UiResponse {
         adk_core::Content {
             role: adk_core::types::Role::Model,
             parts: vec![adk_core::Part::InlineData {
-                mime_type: MIME_TYPE_UI.to_string(),
+                mime_type: MIME_TYPE_UI.parse().unwrap(),
                 data: json.into(),
             }],
         }
@@ -747,7 +747,7 @@ impl UiUpdate {
         adk_core::Content {
             role: adk_core::types::Role::Model,
             parts: vec![adk_core::Part::InlineData {
-                mime_type: MIME_TYPE_UI_UPDATE.to_string(),
+                mime_type: MIME_TYPE_UI_UPDATE.parse().unwrap(),
                 data: json.into(),
             }],
         }

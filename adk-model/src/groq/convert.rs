@@ -171,7 +171,7 @@ pub fn content_to_message(content: &Content) -> Message {
 
     for part in &content.parts {
         match part {
-            Part::Text { text } => text_parts.push(text.clone()),
+            Part::Text(text) => text_parts.push(text.clone()),
             Part::Thinking { thought, .. } => text_parts.push(thought.clone()),
             Part::FunctionCall { name, args, id, .. } => {
                 tool_calls.push(ToolCall {

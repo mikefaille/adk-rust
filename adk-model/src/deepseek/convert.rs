@@ -196,7 +196,7 @@ pub fn content_to_message(content: &Content) -> Message {
 
     for part in &content.parts {
         match part {
-            Part::Text { text } => text_parts.push(text.clone()),
+            Part::Text(text) => text_parts.push(text.clone()),
             Part::FunctionCall { name, args, id, .. } => {
                 tool_calls.push(ToolCall {
                     id: id.clone().unwrap_or_else(|| format!("call_{}", tool_calls.len())),
@@ -213,10 +213,10 @@ pub fn content_to_message(content: &Content) -> Message {
                 text_parts.push(serde_json::to_string(&response).unwrap_or_default());
             }
             Part::InlineData { mime_type, data } => {
-                text_parts.push(attachment::inline_attachment_to_text(mime_type, data));
+                text_parts.push(attachment::inline_attachment_to_text(mime_type.as_ref(), data));
             }
             Part::FileData { mime_type, file_uri } => {
-                text_parts.push(attachment::file_attachment_to_text(mime_type, file_uri));
+                text_parts.push(attachment::file_attachment_to_text(mime_type.as_ref(), file_uri));
             }
             Part::Thinking { thought, .. } => {
                 text_parts.push(thought.clone());
@@ -279,7 +279,7 @@ pub fn from_response(response: &ChatCompletionResponse) -> LlmResponse {
             // Add reasoning content if present (thinking mode)
             if let Some(reasoning) = &msg.reasoning_content {
                 if !reasoning.is_empty() {
-                    parts.push(Part::Thinking { thought: reasoning.clone() });
+                    parts.push(Part::Thinking { thought: reasoning.clone(), signature: None });
                 }
             }
 

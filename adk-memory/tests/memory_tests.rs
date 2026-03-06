@@ -1,4 +1,5 @@
-use adk_core::{Content, Part};
+use adk_core::{Content, Part, Role};
+use adk_core::types::UserId;
 use adk_memory::*;
 use chrono::Utc;
 
@@ -8,12 +9,12 @@ async fn test_add_and_search() {
 
     let entries = vec![
         MemoryEntry {
-            content: Content::new("assistant").with_text("The weather is sunny today"),
+            content: Content::new(Role::Model).with_text("The weather is sunny today"),
             author: "assistant".to_string(),
             timestamp: Utc::now(),
         },
         MemoryEntry {
-            content: Content::new("assistant").with_text("I like programming in Rust"),
+            content: Content::new(Role::Model).with_text("I like programming in Rust"),
             author: "assistant".to_string(),
             timestamp: Utc::now(),
         },
@@ -31,7 +32,7 @@ async fn test_add_and_search() {
         .unwrap();
 
     assert_eq!(search_resp.memories.len(), 1);
-    if let Part::Text { text } = &search_resp.memories[0].content.parts[0] {
+    if let Some(text) = &search_resp.memories[0].content.parts[0].as_text() {
         assert!(text.contains("weather"));
     }
 }
@@ -41,7 +42,7 @@ async fn test_search_no_results() {
     let service = InMemoryMemoryService::new();
 
     let entries = vec![MemoryEntry {
-        content: Content::new("assistant").with_text("The weather is sunny"),
+        content: Content::new(Role::Model).with_text("The weather is sunny"),
         author: "assistant".to_string(),
         timestamp: Utc::now(),
     }];
@@ -70,7 +71,7 @@ async fn test_multiple_sessions() {
             "user1",
             "session1",
             vec![MemoryEntry {
-                content: Content::new("assistant").with_text("First session content"),
+                content: Content::new(Role::Model).with_text("First session content"),
                 author: "assistant".to_string(),
                 timestamp: Utc::now(),
             }],
@@ -84,7 +85,7 @@ async fn test_multiple_sessions() {
             "user1",
             "session2",
             vec![MemoryEntry {
-                content: Content::new("assistant").with_text("Second session content"),
+                content: Content::new(Role::Model).with_text("Second session content"),
                 author: "assistant".to_string(),
                 timestamp: Utc::now(),
             }],
@@ -114,7 +115,7 @@ async fn test_user_isolation() {
             "user1",
             "session1",
             vec![MemoryEntry {
-                content: Content::new("assistant").with_text("User1 data"),
+                content: Content::new(Role::Model).with_text("User1 data"),
                 author: "assistant".to_string(),
                 timestamp: Utc::now(),
             }],
@@ -128,7 +129,7 @@ async fn test_user_isolation() {
             "user2",
             "session1",
             vec![MemoryEntry {
-                content: Content::new("assistant").with_text("User2 data"),
+                content: Content::new(Role::Model).with_text("User2 data"),
                 author: "assistant".to_string(),
                 timestamp: Utc::now(),
             }],
@@ -146,7 +147,7 @@ async fn test_user_isolation() {
         .unwrap();
 
     assert_eq!(search_resp.memories.len(), 1);
-    if let Part::Text { text } = &search_resp.memories[0].content.parts[0] {
+    if let Some(text) = &search_resp.memories[0].content.parts[0].as_text() {
         assert!(text.contains("User1"));
     }
 }
@@ -156,7 +157,7 @@ async fn test_empty_content_filtered() {
     let service = InMemoryMemoryService::new();
 
     let entries = vec![MemoryEntry {
-        content: Content::new("assistant"),
+        content: Content::new(Role::Model),
         author: "assistant".to_string(),
         timestamp: Utc::now(),
     }];

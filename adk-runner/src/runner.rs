@@ -193,7 +193,7 @@ impl Runner {
                     .await
                 {
                     Ok(Some(content)) => {
-                        let mut early_event = adk_core::Event::new(&invocation_id);
+                        let mut early_event = adk_core::Event::new(adk_core::types::InvocationId::try_from(invocation_id.as_str()).unwrap());
                         early_event.author = agent_to_run.name().to_string();
                         early_event.llm_response.content = Some(content);
 
@@ -262,7 +262,7 @@ impl Runner {
             }
 
             // Append user message to session service (persistent storage)
-            let mut user_event = adk_core::Event::new(&invocation_id);
+            let mut user_event = adk_core::Event::new(adk_core::types::InvocationId::try_from(invocation_id.as_str()).unwrap());
             user_event.author = "user".to_string();
             user_event.llm_response.content = Some(effective_user_content.clone());
 

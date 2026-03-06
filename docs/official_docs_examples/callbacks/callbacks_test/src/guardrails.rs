@@ -31,7 +31,7 @@ async fn main() -> anyhow::Result<()> {
                 // Check user input for blocked content
                 let user_content = ctx.user_content();
                 for part in &user_content.parts {
-                    if let Part::Text { text } = part {
+                    if let Some(text) = part.as_text() {
                         if text.to_lowercase().contains("blocked_word") {
                             println!("[GUARDRAIL] Blocked content detected!");
                             // Return early with rejection message

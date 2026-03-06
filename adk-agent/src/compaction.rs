@@ -46,7 +46,7 @@ impl LlmEventSummarizer {
         for event in events {
             if let Some(content) = &event.llm_response.content {
                 for part in &content.parts {
-                    if let Part::Text { text } = part {
+                    if let Some(text) = part.as_text() {
                         lines.push(format!("{}: {}", event.author, text));
                     }
                 }

@@ -154,7 +154,7 @@ async fn test_multi_agent_workflow() {
         if let Ok(event) = result {
             if let Some(content) = event.llm_response.content {
                 for part in content.parts {
-                    if let Part::Text { text } = part {
+                    if let Some(text) = part.as_text() {
                         response_text.push_str(&text);
                     }
                 }
@@ -202,7 +202,7 @@ async fn test_agent_delegation() {
         if let Ok(event) = result {
             if let Some(content) = event.llm_response.content {
                 for part in content.parts {
-                    if let Part::Text { text } = part {
+                    if let Some(text) = part.as_text() {
                         if text.contains("345") {
                             has_answer = true;
                         }

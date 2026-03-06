@@ -269,7 +269,7 @@ async fn test_before_tool_callback_short_circuits_tool_execution() {
         let event = result.unwrap();
         if let Some(content) = event.llm_response.content {
             for part in content.parts {
-                if let Part::Text { text } = part {
+                if let Some(text) = part.as_text() {
                     if text == "blocked" {
                         saw_blocked = true;
                     }
@@ -325,7 +325,7 @@ async fn test_after_tool_callback_overrides_result_and_order() {
         let event = result.unwrap();
         if let Some(content) = event.llm_response.content {
             for part in content.parts {
-                if let Part::Text { text } = part {
+                if let Some(text) = part.as_text() {
                     if text == "after-override" {
                         saw_override = true;
                     }

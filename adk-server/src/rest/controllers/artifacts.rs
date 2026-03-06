@@ -59,7 +59,7 @@ pub async fn get_artifact(
             adk_core::Part::InlineData { data, .. } => {
                 Ok(([(header::CONTENT_TYPE, mime_header)], Body::from(data)))
             }
-            adk_core::Part::Text { text } => {
+            adk_core::Part::Text(text) => {
                 Ok(([(header::CONTENT_TYPE, mime_header)], Body::from(text)))
             }
             _ => Err(StatusCode::INTERNAL_SERVER_ERROR),

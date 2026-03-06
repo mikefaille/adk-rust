@@ -91,7 +91,7 @@ impl AnthropicClient {
                     .parts
                     .iter()
                     .filter_map(|p| match p {
-                        Part::Text { text } => Some(text.clone()),
+                        Part::Text(text) => Some(text.clone()),
                         _ => None,
                     })
                     .collect::<Vec<_>>()
@@ -1160,7 +1160,7 @@ mod tests {
                     c.parts
                         .iter()
                         .filter_map(|p| match p {
-                            Part::Text { text } => Some(text.clone()),
+                            Part::Text(text) => Some(text.clone()),
                             _ => None,
                         })
                         .collect::<Vec<_>>()
@@ -1230,7 +1230,7 @@ mod tests {
                         .parts
                         .iter()
                         .filter_map(|p| match p {
-                            Part::Text { text } => Some(text.clone()),
+                            Part::Text(text) => Some(text.clone()),
                             _ => None,
                         })
                         .collect::<Vec<_>>()

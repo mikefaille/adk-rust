@@ -85,7 +85,7 @@ impl Tool for ScreenshotTool {
                     )?;
 
                 let part = adk_core::Part::InlineData {
-                    mime_type: "image/png".to_string(),
+                    mime_type: mime::IMAGE_PNG,
                     data: image_data.into(),
                 };
 

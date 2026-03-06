@@ -211,7 +211,7 @@ impl Llm for DeepSeekClient {
                                                         yield LlmResponse {
                                                             content: Some(adk_core::Content {
                                                                 role: adk_core::types::Role::Model,
-                                                                parts: vec![Part::Thinking { thought: reasoning.clone() }],
+                                                                parts: vec![Part::Thinking { thought: reasoning.clone(), signature: None }],
                                                             }),
                                                             usage_metadata: None,
                                                             finish_reason: None,

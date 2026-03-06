@@ -29,7 +29,7 @@ fn main() {
     if let Some(content) = event.content() {
         println!("   Role: {}", content.role);
         for part in &content.parts {
-            if let Part::Text { text } = part {
+            if let Some(text) = part.as_text() {
                 println!("   Text: {}", text);
             }
         }

@@ -349,7 +349,7 @@ async fn run_translation(
                 // Track text output for fallback
                 if let Some(content) = &event.llm_response.content {
                     for part in &content.parts {
-                        if let Part::Text { text } = part {
+                        if let Some(text) = part.as_text() {
                             if !text.is_empty() {
                                 last_text = text.clone();
                             }

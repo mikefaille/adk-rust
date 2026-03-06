@@ -107,7 +107,7 @@ async fn main() -> Result<()> {
                 .parts
                 .iter()
                 .filter_map(|p| match p {
-                    Part::Text { text } => Some(text.as_str()),
+                    Part::Text(text) => Some(text.as_str()),
                     _ => None,
                 })
                 .collect::<Vec<_>>()

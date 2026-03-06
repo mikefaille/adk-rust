@@ -119,7 +119,7 @@ async fn test_vision_streaming() {
             Ok(response) => {
                 if let Some(content) = &response.content {
                     for part in &content.parts {
-                        if let Part::Text { text } = part {
+                        if let Some(text) = part.as_text() {
                             print!("{}", text);
                             full_response.push_str(text);
                         }

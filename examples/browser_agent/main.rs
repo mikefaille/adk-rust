@@ -154,7 +154,7 @@ async fn run_agent(
             Ok(event) => {
                 if let Some(content) = &event.llm_response.content {
                     for part in &content.parts {
-                        if let Part::Text { text } = part {
+                        if let Some(text) = part.as_text() {
                             response.push_str(text);
                         }
                     }

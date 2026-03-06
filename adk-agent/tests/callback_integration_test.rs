@@ -257,7 +257,7 @@ async fn test_callback_short_circuit() {
     while let Some(result) = stream.next().await {
         let event = result.unwrap();
         if let Some(content) = event.llm_response.content {
-            if let Some(Part::Text { text }) = content.parts.first() {
+            if let Some(Part::text(text)) = content.parts.first() {
                 if text.contains("Short-circuited") {
                     found_short_circuit = true;
                 }
