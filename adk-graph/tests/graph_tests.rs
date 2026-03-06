@@ -24,7 +24,7 @@ fn test_graph_missing_entry() {
         .add_edge("process", END)
         .compile();
 
-    assert!(matches!(graph, Err(GraphError::NoEntryPoint));
+    assert!(matches!(graph, Err(GraphError::NoEntryPoint)));
 }
 
 #[test]
@@ -43,19 +43,19 @@ fn test_graph_with_multiple_nodes() {
     let graph =
         StateGraph::with_channels(&["value"])
             .add_node_fn("step1", |_ctx| async move {
-                Ok(NodeOutput::new().with_update("value", json!(1))
+                Ok(NodeOutput::new().with_update("value", json!(1)))
             })
             .add_node_fn("step2", |_ctx| async move {
-                Ok(NodeOutput::new().with_update("value", json!(2))
+                Ok(NodeOutput::new().with_update("value", json!(2)))
             })
             .add_node_fn("step3", |_ctx| async move {
-                Ok(NodeOutput::new().with_update("value", json!(3))
+                Ok(NodeOutput::new().with_update("value", json!(3)))
             })
             .add_edge(START, "step1")
             .add_edge("step1", "step2")
             .add_edge("step2", "step3")
             .add_edge("step3", END)
-            .compile());
+            .compile();
 
     assert!(graph.is_ok());
 }
@@ -65,10 +65,10 @@ fn test_graph_with_conditional_edges() {
     let graph = StateGraph::with_channels(&["action", "result"])
         .add_node_fn("router", |_ctx| async move { Ok(NodeOutput::new()) })
         .add_node_fn("action_a", |_ctx| async move {
-            Ok(NodeOutput::new().with_update("result", json!("A"))
+            Ok(NodeOutput::new().with_update("result", json!("A")))
         })
         .add_node_fn("action_b", |_ctx| async move {
-            Ok(NodeOutput::new().with_update("result", json!("B"))
+            Ok(NodeOutput::new().with_update("result", json!("B")))
         })
         .add_edge(START, "router")
         .add_conditional_edges(
@@ -78,7 +78,7 @@ fn test_graph_with_conditional_edges() {
         )
         .add_edge("action_a", END)
         .add_edge("action_b", END)
-        .compile());
+        .compile();
 
     assert!(graph.is_ok());
 }
@@ -90,7 +90,7 @@ fn test_graph_with_cycle() {
             let count = ctx.get("count").and_then(|v| v.as_i64()).unwrap_or(0);
             Ok(NodeOutput::new()
                 .with_update("count", json!(count + 1))
-                .with_update("done", json!(count >= 2))
+                .with_update("done", json!(count >= 2)))
         })
         .add_node_fn("finish", |_ctx| async move { Ok(NodeOutput::new()) })
         .add_edge(START, "increment")
@@ -106,7 +106,7 @@ fn test_graph_with_cycle() {
             [("increment", "increment"), ("finish", "finish")],
         )
         .add_edge("finish", END)
-        .compile());
+        .compile();
 
     assert!(graph.is_ok());
 }
@@ -143,5 +143,5 @@ fn test_graph_node_access() {
 
     assert!(graph.nodes.contains_key("node_a"));
     assert!(graph.nodes.contains_key("node_b"));
-    assert_eq!(graph.nodes.len(), 2));
+    assert_eq!(graph.nodes.len(), 2);
 }

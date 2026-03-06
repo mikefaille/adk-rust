@@ -1,15 +1,15 @@
 use adk_graph::edge::*;
-use adk_session::State;
+use adk_graph::state::State;
 use serde_json::json;
 use std::collections::HashMap;
 
 #[test]
 fn test_edge_target_from_str() {
-    let start: EdgeTarget = "start".into();
-    assert_eq!(start, EdgeTarget::Start);
+    let start: EdgeTarget = START.into();
+    assert_eq!(start, EdgeTarget::from(START));
 
-    let end: EdgeTarget = "end".into();
-    assert_eq!(end, EdgeTarget::End);
+    let end: EdgeTarget = END.into();
+    assert_eq!(end, EdgeTarget::from(END));
 
     let node: EdgeTarget = "my_node".into();
     assert_eq!(node, EdgeTarget::Node("my_node".to_string()));
@@ -17,27 +17,27 @@ fn test_edge_target_from_str() {
 
 #[test]
 fn test_by_field_router() {
-    let router = by_field("action", [("save", "save_node"), ("delete", "delete_node")]);
+    let router = Router::by_field("action");
 
-    let mut state = adk_session::InMemorySession::default();
+    let mut state = State::new();
     state.insert("action".to_string(), json!("save"));
-    assert_eq!(router(&state), "save_node");
+    assert_eq!(router(&state), "save");
 
     state.insert("action".to_string(), json!("delete"));
-    assert_eq!(router(&state), "delete_node");
+    assert_eq!(router(&state), "delete");
 
     state.insert("action".to_string(), json!("unknown"));
-    assert_eq!(router(&state), "end");
+    assert_eq!(router(&state), "unknown");
 
     state.insert("action".to_string(), json!(123));
-    assert_eq!(router(&state), "end");
+    assert_eq!(router(&state), "__end__");
 }
 
 #[test]
 fn test_by_bool_router() {
-    let router = by_bool("is_valid", "success", "fail");
+    let router = Router::by_bool("is_valid", "success", "fail");
 
-    let mut state = adk_session::InMemorySession::default();
+    let mut state = State::new();
     state.insert("is_valid".to_string(), json!(true));
     assert_eq!(router(&state), "success");
 
@@ -50,9 +50,9 @@ fn test_by_bool_router() {
 
 #[test]
 fn test_max_iterations_router() {
-    let router = max_iterations(5, "loop_node", "stop");
+    let router = Router::max_iterations("iteration_count", 5, "loop_node", "stop");
 
-    let mut state = adk_session::InMemorySession::default();
+    let mut state = State::new();
     
     // No iteration count in state
     assert_eq!(router(&state), "loop_node");
@@ -66,9 +66,9 @@ fn test_max_iterations_router() {
 
 #[test]
 fn test_on_error_router() {
-    let router = on_error("handle_error", "next");
+    let router = Router::on_error("error", "handle_error", "next");
 
-    let mut state = adk_session::InMemorySession::default();
+    let mut state = State::new();
     
     // No error in state
     assert_eq!(router(&state), "next");
@@ -79,12 +79,12 @@ fn test_on_error_router() {
 
 #[test]
 fn test_custom_router() {
-    let router = custom_router(|state| {
+    let router = Router::custom(|state| {
         let score = state.get("score").and_then(|v| v.as_i64()).unwrap_or(0);
-        if score > 80 { "high" } else { "low" }
+        if score > 80 { "high".to_string() } else { "low".to_string() }
     });
 
-    let mut state = adk_session::InMemorySession::default();
+    let mut state = State::new();
     state.insert("score".to_string(), json!(90));
     assert_eq!(router(&state), "high");
 
@@ -94,8 +94,8 @@ fn test_custom_router() {
 
 #[test]
 fn test_edge_target_equality() {
-    assert_eq!(EdgeTarget::Start, EdgeTarget::Start);
-    assert_eq!(EdgeTarget::End, EdgeTarget::End);
+    assert_eq!(EdgeTarget::from(START), EdgeTarget::from(START));
+    assert_eq!(EdgeTarget::from(END), EdgeTarget::from(END));
     assert_eq!(EdgeTarget::Node("a".to_string()), EdgeTarget::Node("a".to_string()));
     assert_ne!(EdgeTarget::Node("a".to_string()), EdgeTarget::Node("b".to_string()));
     assert_ne!(EdgeTarget::Node("end".to_string()), EdgeTarget::End);
