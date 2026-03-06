@@ -226,7 +226,7 @@ async fn main() -> anyhow::Result<()> {
         input.insert("input".to_string(), json!(question));
         input.insert("messages".to_string(), json!([{"role": "user", "content": question}]));
 
-        let result = graph.invoke(input, ExecutionConfig::new("react-thread".to_string())).await?;
+        let result = graph.invoke(input, ExecutionConfig::new(adk_core::types::SessionId::new("react-thread").unwrap())).await?;
 
         println!("\nFinal Response:");
         println!("{}", result.get("response").and_then(|v| v.as_str()).unwrap_or("No response"));
