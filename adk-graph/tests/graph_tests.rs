@@ -14,7 +14,7 @@ fn test_basic_graph_construction() {
         .add_edge("process", END)
         .compile();
 
-    assert!(graph.is_ok();
+    assert!(graph.is_ok());
 }
 
 #[test]
@@ -35,7 +35,7 @@ fn test_graph_missing_node() {
         .compile();
 
     // Reference to nonexistent node should fail validation
-    assert!(graph.is_err();
+    assert!(graph.is_err());
 }
 
 #[test]
@@ -55,9 +55,9 @@ fn test_graph_with_multiple_nodes() {
             .add_edge("step1", "step2")
             .add_edge("step2", "step3")
             .add_edge("step3", END)
-            .compile();
+            .compile());
 
-    assert!(graph.is_ok();
+    assert!(graph.is_ok());
 }
 
 #[test]
@@ -78,9 +78,9 @@ fn test_graph_with_conditional_edges() {
         )
         .add_edge("action_a", END)
         .add_edge("action_b", END)
-        .compile();
+        .compile());
 
-    assert!(graph.is_ok();
+    assert!(graph.is_ok());
 }
 
 #[test]
@@ -106,9 +106,9 @@ fn test_graph_with_cycle() {
             [("increment", "increment"), ("finish", "finish")],
         )
         .add_edge("finish", END)
-        .compile();
+        .compile());
 
-    assert!(graph.is_ok();
+    assert!(graph.is_ok());
 }
 
 #[test]
@@ -127,9 +127,9 @@ fn test_graph_with_recursion_limit() {
 fn test_state_graph_builder_methods() {
     let graph = StateGraph::with_channels(&["a", "b", "c"]);
 
-    assert!(graph.schema.channels.contains_key("a");
-    assert!(graph.schema.channels.contains_key("b");
-    assert!(graph.schema.channels.contains_key("c");
+    assert!(graph.schema.channels.contains_key("a"));
+    assert!(graph.schema.channels.contains_key("b"));
+    assert!(graph.schema.channels.contains_key("c"));
 }
 
 #[test]
@@ -141,7 +141,7 @@ fn test_graph_node_access() {
         .add_edge("node_a", "node_b")
         .add_edge("node_b", END);
 
-    assert!(graph.nodes.contains_key("node_a");
+    assert!(graph.nodes.contains_key("node_a"));
     assert!(graph.nodes.contains_key("node_b"));
-    assert_eq!(graph.nodes.len(), 2);
+    assert_eq!(graph.nodes.len(), 2));
 }

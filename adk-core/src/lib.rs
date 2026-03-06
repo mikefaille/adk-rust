@@ -67,6 +67,7 @@ pub mod error;
 pub mod event;
 pub mod instruction_template;
 pub mod model;
+pub mod prelude;
 pub mod tool;
 pub mod types;
 

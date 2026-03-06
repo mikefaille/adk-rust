@@ -10,11 +10,11 @@ use serde_json::json;
 #[test]
 fn test_node_output_builder() {
     let output =
-        NodeOutput::new().with_update("key1", json!("value1")).with_update("key2", json!(42);
+        NodeOutput::new().with_update("key1", json!("value1")).with_update("key2", json!(42));
 
     assert_eq!(output.updates.get("key1"), Some(&json!("value1"));
     assert_eq!(output.updates.get("key2"), Some(&json!(42));
-    assert!(output.interrupt.is_none();
+    assert!(output.interrupt.is_none());
     assert!(output.events.is_empty());
 }
 
@@ -23,14 +23,14 @@ async fn test_function_node() {
     let node = FunctionNode::new("test_node", |ctx| async move {
         let value = ctx.get("input").and_then(|v| v.as_i64()).unwrap_or(0);
         Ok(NodeOutput::new().with_update("output", json!(value * 2)))
-    });
+    }));
 
-    assert_eq!(node.name(), "test_node");
+    assert_eq!(node.name(), "test_node"));
 
     let mut state = State::new();
     state.insert("input".to_string(), json!(21);
 
-    let config = ExecutionConfig::new("test-thread".to_string();
+    let config = ExecutionConfig::new("test-thread".to_string());
     let ctx = NodeContext::new(state, config, 0);
     let result = node.execute(&ctx).await.unwrap();
 
@@ -41,12 +41,12 @@ async fn test_function_node() {
 async fn test_passthrough_node() {
     let node = PassthroughNode::new("passthrough");
 
-    assert_eq!(node.name(), "passthrough");
+    assert_eq!(node.name(), "passthrough"));
 
     let mut state = State::new();
     state.insert("value".to_string(), json!("unchanged");
 
-    let config = ExecutionConfig::new("test-thread".to_string();
+    let config = ExecutionConfig::new("test-thread".to_string());
     let ctx = NodeContext::new(state, config, 0);
     let result = node.execute(&ctx).await.unwrap();
 
@@ -62,12 +62,12 @@ async fn test_function_node_with_multiple_outputs() {
             .with_update("length", json!(input.len())))
             .with_update("uppercase", json!(input.to_uppercase()))
             .with_update("words", json!(input.split_whitespace().count()))
-    });
+    }));
 
     let mut state = State::new();
     state.insert("input".to_string(), json!("hello world");
 
-    let config = ExecutionConfig::new("test-thread".to_string();
+    let config = ExecutionConfig::new("test-thread".to_string());
     let ctx = NodeContext::new(state, config, 0);
     let result = node.execute(&ctx).await.unwrap();
 
@@ -82,13 +82,13 @@ async fn test_node_context_methods() {
     state.insert("key1".to_string(), json!("value1");
     state.insert("key2".to_string(), json!(100);
 
-    let config = ExecutionConfig::new("test-thread".to_string();
+    let config = ExecutionConfig::new("test-thread".to_string());
     let ctx = NodeContext::new(state, config, 5);
 
     assert_eq!(ctx.get("key1"), Some(&json!("value1")));
     assert_eq!(ctx.get("key2"), Some(&json!(100)));
-    assert_eq!(ctx.get("nonexistent"), None);
-    assert_eq!(ctx.step, 5);
+    assert_eq!(ctx.get("nonexistent"), None));
+    assert_eq!(ctx.step, 5));
 }
 
 #[tokio::test]
@@ -107,8 +107,8 @@ async fn test_node_error_handling() {
     assert!(result.is_err());
     match result {
         Err(GraphError::NodeExecutionFailed { node, message }) => {
-            assert_eq!(node, "error_node");
-            assert_eq!(message, "Test error");
+            assert_eq!(node, "error_node"));
+            assert_eq!(message, "Test error"));
         }
         _ => panic!("Expected NodeExecutionFailed error"),
     }
@@ -118,17 +118,17 @@ async fn test_node_error_handling() {
 fn test_execution_config() {
     let config = ExecutionConfig::new("thread-123".to_string())
         .with_recursion_limit(100)
-        .with_metadata("key", json!("value")));
+        .with_metadata("key", json!("value"))));
 
-    assert_eq!(config.thread_id.as_ref(), "thread-123");
-    assert_eq!(config.recursion_limit, 100);
+    assert_eq!(config.thread_id.as_ref(), "thread-123"));
+    assert_eq!(config.recursion_limit, 100));
     assert_eq!(config.metadata.get("key"), Some(&json!("value")));
     assert!(config.resume_from.is_none());
 }
 
 #[test]
 fn test_execution_config_with_resume() {
-    let config = ExecutionConfig::new("thread-123".to_string()).with_resume_from("checkpoint-456");
+    let config = ExecutionConfig::new("thread-123".to_string()).with_resume_from("checkpoint-456"));
 
     assert_eq!(config.resume_from, Some("checkpoint-456".to_string()));
 }
