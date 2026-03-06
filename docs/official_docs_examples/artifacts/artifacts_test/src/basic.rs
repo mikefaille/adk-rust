@@ -43,7 +43,7 @@ async fn main() -> anyhow::Result<()> {
             user_id: UserId::new("user_123").unwrap(),
             session_id: SessionId::new("session_456").unwrap(),
             file_name: "image.jpg".to_string(),
-            part: Part::InlineData { mime_type: "image/jpeg".to_string(), data: image_data.into() },
+            part: Part::InlineData { mime_type: "image/jpeg".parse().unwrap(), data: image_data.into() },
             version: None,
         })
         .await?;

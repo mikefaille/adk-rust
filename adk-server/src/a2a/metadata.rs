@@ -48,7 +48,7 @@ pub fn to_invocation_meta(
 pub fn to_event_meta(meta: &InvocationMeta, event: &adk_core::Event) -> HashMap<String, Value> {
     let mut result = meta.event_meta.clone();
 
-    result.insert(to_a2a_meta_key("invocation_id"), Value::String(event.invocation_id.clone()));
+    result.insert(to_a2a_meta_key("invocation_id"), Value::String(event.invocation_id.to_string()));
     result.insert(to_a2a_meta_key("author"), Value::String(event.author.clone()));
     if !event.branch.is_empty() {
         result.insert(to_a2a_meta_key("branch"), Value::String(event.branch.clone()));

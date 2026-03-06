@@ -38,7 +38,7 @@ async fn main() -> anyhow::Result<()> {
             file_name: "user:document.pdf".to_string(),
             part: Part::InlineData {
                 data: pdf_bytes.into(),
-                mime_type: "application/pdf".to_string(),
+                mime_type: "application/pdf".parse().unwrap(),
             },
             version: None,
         })
