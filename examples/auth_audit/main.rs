@@ -12,6 +12,7 @@ use adk_core::{Result, Tool, ToolContext};
 use async_trait::async_trait;
 use serde_json::Value;
 use std::sync::{Arc, Mutex};
+use adk_core::types::UserId;
 
 // In-memory audit sink for demonstration
 struct MemoryAuditSink {
@@ -65,8 +66,8 @@ fn main() -> anyhow::Result<()> {
     let ac = AccessControl::builder()
         .role(data_analyst)
         .role(guest)
-        .assign("analyst@company.com", "data_analyst")
-        .assign("guest@company.com", "guest")
+        .assign(UserId::new("analyst@company.com").unwrap(), "data_analyst")
+        .assign(UserId::new("guest@company.com").unwrap(), "guest")
         .build()?;
 
     println!("Roles:");

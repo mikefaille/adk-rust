@@ -27,7 +27,8 @@ fn main() {
     // From docs: Create content with file URI
     let content = Content::user()
         .with_text("Here's a document:")
-        .with_file_uri("application/pdf", "https://example.com/doc.pdf");
+        .with_file_uri("application/pdf", "https://example.com/doc.pdf")
+        .unwrap();
     assert_eq!(content.parts.len(), 2);
     println!("✓ Content with file URI works");
 
@@ -40,7 +41,7 @@ fn main() {
     assert!(matches!(image, Part::InlineData { .. }));
     println!("✓ Part::inline_data() works");
 
-    let file = Part::file_data("image/jpeg", "https://example.com/img.jpg");
+    let file = Part::file_data("image/jpeg", "https://example.com/img.jpg").unwrap();
     assert!(matches!(file, Part::FileData { .. }));
     println!("✓ Part::file_data() works");
 
@@ -53,7 +54,7 @@ fn main() {
     assert_eq!(part.mime_type(), Some("image/png"));
     println!("✓ part.mime_type() works");
 
-    let part = Part::file_data("image/jpeg", "https://example.com/img.jpg");
+    let part = Part::file_data("image/jpeg", "https://example.com/img.jpg").unwrap();
     assert_eq!(part.file_uri(), Some("https://example.com/img.jpg"));
     println!("✓ part.file_uri() works");
 

@@ -103,7 +103,7 @@ mod tests {
         fn new() -> Self {
             Self {
                 identity: AdkIdentity::default(),
-                content: Content::new("user"),
+                content: Content::user(),
                 metadata: HashMap::new(),
                 actions: Mutex::new(EventActions::default()),
             }

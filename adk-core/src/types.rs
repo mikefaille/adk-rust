@@ -1,7 +1,7 @@
 #[cfg(feature = "base64")]
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use bytes::Bytes;
-use derive_more::{AsRef, Deref, Display};
+use derive_more::{AsRef, Display};
 use mime::Mime;
 use serde::{Deserialize, Serialize};
 
@@ -39,7 +39,7 @@ pub mod base64_bytes {
         }
         #[cfg(not(feature = "base64"))]
         {
-            serializer.serialize_str(&format!("<binary data: {} bytes>", bytes.len()))
+            Err(serde::ser::Error::custom("base64 feature not enabled for serialization"))
         }
     }
 
@@ -69,10 +69,8 @@ macro_rules! define_id_type {
             Hash,
             Display,
             AsRef,
-            Deref,
             Serialize,
             Deserialize,
-            Default,
             PartialOrd,
             Ord,
         )]
@@ -115,21 +113,24 @@ macro_rules! define_id_type {
             }
         }
 
-        impl From<String> for $name {
-            fn from(s: String) -> Self {
-                Self::new(s).expect("Valid ID expected")
+        impl TryFrom<String> for $name {
+            type Error = crate::AdkError;
+            fn try_from(s: String) -> Result<Self, Self::Error> {
+                Self::new(s)
             }
         }
 
-        impl From<&str> for $name {
-            fn from(s: &str) -> Self {
-                Self::new(s).expect("Valid ID expected")
+        impl TryFrom<&str> for $name {
+            type Error = crate::AdkError;
+            fn try_from(s: &str) -> Result<Self, Self::Error> {
+                Self::new(s)
             }
         }
 
-        impl From<&String> for $name {
-            fn from(s: &String) -> Self {
-                Self::new(s.clone()).expect("Valid ID expected")
+        impl TryFrom<&String> for $name {
+            type Error = crate::AdkError;
+            fn try_from(s: &String) -> Result<Self, Self::Error> {
+                Self::new(s.clone())
             }
         }
 
@@ -157,11 +158,6 @@ define_id_type!(SessionId, Session);
 define_id_type!(InvocationId, Agent);
 define_id_type!(UserId, Agent);
 
-impl From<SessionId> for InvocationId {
-    fn from(id: SessionId) -> Self {
-        InvocationId(id.0)
-    }
-}
 
 /// A consolidated identity capsule for ADK execution.
 ///
@@ -181,8 +177,8 @@ pub struct AdkIdentity {
 impl Default for AdkIdentity {
     fn default() -> Self {
         Self {
-            invocation_id: InvocationId::default(),
-            session_id: SessionId::default(),
+            invocation_id: InvocationId::new("default-invocation").unwrap(),
+            session_id: SessionId::new("default-session").unwrap(),
             user_id: UserId::new("anonymous").unwrap(),
             app_name: "adk-app".to_string(),
             branch: "main".to_string(),
@@ -196,115 +192,94 @@ impl Default for AdkIdentity {
 pub const MAX_INLINE_DATA_SIZE: usize = 10 * 1024 * 1024;
 
 /// Represents the role of the author of a message.
-#[derive(Debug, Clone, PartialEq, Eq, Display)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize, Display)]
+#[serde(rename_all = "lowercase")]
 pub enum Role {
+    #[default]
+    #[serde(alias = "human")]
     #[display("user")]
     User,
+
+    #[serde(alias = "assistant")]
     #[display("model")]
     Model,
+
+    #[serde(alias = "developer")]
     #[display("system")]
     System,
+
     #[display("tool")]
     Tool,
-    #[display("{_0}")]
-    Custom(String),
+
+    #[display("function")]
+    Function,
+}
+
+impl Role {
+    pub fn as_str(&self) -> &str {
+        match self {
+            Role::User => "user",
+            Role::Model => "model",
+            Role::System => "system",
+            Role::Tool => "tool",
+            Role::Function => "function",
+        }
+    }
+
+    pub fn is_user(&self) -> bool {
+        matches!(self, Role::User)
+    }
+
+    pub fn is_model(&self) -> bool {
+        matches!(self, Role::Model)
+    }
+
+    pub fn is_system(&self) -> bool {
+        matches!(self, Role::System)
+    }
+
+    pub fn is_tool(&self) -> bool {
+        matches!(self, Role::Tool | Role::Function)
+    }
 }
 
 impl std::str::FromStr for Role {
-    type Err = std::convert::Infallible;
+    type Err = crate::AdkError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Ok(match s.to_lowercase().as_str() {
-            "user" | "human" => Role::User,
-            "model" | "assistant" => Role::Model,
-            "system" | "developer" => Role::System,
-            "tool" | "function" => Role::Tool,
-            _ => Role::Custom(s.to_string()),
-        })
+        if s.eq_ignore_ascii_case("user") || s.eq_ignore_ascii_case("human") {
+            Ok(Role::User)
+        } else if s.eq_ignore_ascii_case("model") || s.eq_ignore_ascii_case("assistant") {
+            Ok(Role::Model)
+        } else if s.eq_ignore_ascii_case("system") || s.eq_ignore_ascii_case("developer") {
+            Ok(Role::System)
+        } else if s.eq_ignore_ascii_case("tool") {
+            Ok(Role::Tool)
+        } else if s.eq_ignore_ascii_case("function") {
+            Ok(Role::Function)
+        } else {
+            Err(crate::AdkError::Config(format!("Invalid role: {s}")))
+        }
     }
 }
 
-impl From<String> for Role {
-    fn from(s: String) -> Self {
-        std::str::FromStr::from_str(&s).unwrap()
+impl TryFrom<String> for Role {
+    type Error = crate::AdkError;
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        std::str::FromStr::from_str(&s)
     }
 }
 
-impl From<&str> for Role {
-    fn from(s: &str) -> Self {
-        std::str::FromStr::from_str(s).unwrap()
+impl TryFrom<&str> for Role {
+    type Error = crate::AdkError;
+    fn try_from(s: &str) -> Result<Self, Self::Error> {
+        std::str::FromStr::from_str(s)
     }
 }
 
 impl From<Role> for String {
     fn from(role: Role) -> String {
-        role.to_string()
-    }
-}
-
-impl serde::Serialize for Role {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(&self.to_string())
-    }
-}
-
-impl<'de> serde::Deserialize<'de> for Role {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let s = String::deserialize(deserializer)?;
-        Ok(std::str::FromStr::from_str(&s).unwrap())
-    }
-}
-
-impl Role {
-    pub fn is_user(&self) -> bool {
-        match self {
-            Role::User => true,
-            Role::Custom(s) => s == "user" || s == "human",
-            _ => false,
-        }
-    }
-
-    pub fn is_model(&self) -> bool {
-        match self {
-            Role::Model => true,
-            Role::Custom(s) => s == "model" || s == "assistant",
-            _ => false,
-        }
-    }
-
-    pub fn is_system(&self) -> bool {
-        match self {
-            Role::System => true,
-            Role::Custom(s) => s == "system" || s == "developer",
-            _ => false,
-        }
-    }
-
-    pub fn is_tool(&self) -> bool {
-        match self {
-            Role::Tool => true,
-            Role::Custom(s) => s == "tool" || s == "function",
-            _ => false,
-        }
-    }
-}
-
-impl Default for Role {
-    fn default() -> Role {
-        Role::User
-    }
-}
-
-impl PartialEq<&str> for Role {
-    fn eq(&self, other: &&str) -> bool {
-        let other_role: Role = (*other).into();
-        self == &other_role
-    }
-}
-
-impl PartialEq<String> for Role {
-    fn eq(&self, other: &String) -> bool {
-        self.eq(&other.as_str())
+        role.as_str().to_string()
     }
 }
 
@@ -325,8 +300,13 @@ pub struct Content {
 }
 
 impl Content {
-    pub fn new(role: impl Into<Role>) -> Self {
-        Self { role: role.into(), parts: Vec::new() }
+    pub fn new(role: Role) -> Self {
+        Self { role, parts: Vec::new() }
+    }
+
+    pub fn try_new(role: impl TryInto<Role>) -> Result<Self, crate::AdkError> {
+        let role = role.try_into().map_err(|_| crate::AdkError::Config("Invalid role".into()))?;
+        Ok(Self { role, parts: Vec::new() })
     }
 
     pub fn user() -> Self {
@@ -365,9 +345,9 @@ impl Content {
         mut self,
         mime_type: impl Into<String>,
         file_uri: impl Into<String>,
-    ) -> Self {
-        self.parts.push(Part::file_data(mime_type, file_uri));
-        self
+    ) -> Result<Self, crate::AdkError> {
+        self.parts.push(Part::file_data(mime_type, file_uri)?);
+        Ok(self)
     }
 
     pub fn with_part(mut self, part: Part) -> Self {
@@ -446,10 +426,12 @@ impl Part {
         Part::Thinking { thought: thought.into(), signature: None }
     }
 
-    pub fn file_data(mime_type: impl Into<String>, file_uri: impl Into<String>) -> Self {
+    pub fn file_data(mime_type: impl Into<String>, file_uri: impl Into<String>) -> crate::Result<Self> {
         let mime_str = mime_type.into();
-        let mime = mime_str.parse::<Mime>().unwrap_or(mime::APPLICATION_OCTET_STREAM);
-        Part::FileData { mime_type: mime, file_uri: file_uri.into() }
+        let mime = mime_str
+            .parse::<Mime>()
+            .map_err(|e| crate::AdkError::Config(format!("Invalid mime type: {e}")))?;
+        Ok(Part::FileData { mime_type: mime, file_uri: file_uri.into() })
     }
 
     pub fn with_signature(mut self, sig: impl Into<String>) -> Self {
@@ -537,17 +519,16 @@ mod tests {
 
     #[test]
     fn test_id_from() {
-        let id: SessionId = "test".into();
+        let id = SessionId::try_from("test").unwrap();
         assert_eq!(id.to_string(), "test");
 
-        let id2: SessionId = "test".to_string().into();
+        let id2 = SessionId::try_from("test").unwrap();
         assert_eq!(id2.to_string(), "test");
     }
 
     #[test]
     fn test_role_display() {
         assert_eq!(Role::User.to_string(), "user");
-        assert_eq!(Role::Custom("admin".to_string()).to_string(), "admin");
     }
 
     #[test]

@@ -48,8 +48,8 @@ struct MockSession {
 impl MockSession {
     fn new() -> Self {
         Self {
-            id: SessionId::from("mcp-session".to_string()),
-            user_id: UserId::from("user".to_string()),
+            id: SessionId::try_from("mcp-session").unwrap(),
+            user_id: UserId::try_from("user").unwrap(),
         }
     }
 }
@@ -96,7 +96,7 @@ impl MockContext {
             identity: AdkIdentity::default(),
             session: MockSession::new(),
             user_content: Content {
-                role: adk_core::Role::Custom("user".to_string()),
+                role: adk_core::Role::User,
                 parts: vec![Part::text(text.to_string())],
             },
             metadata: HashMap::new(),

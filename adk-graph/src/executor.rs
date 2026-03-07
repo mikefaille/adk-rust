@@ -248,7 +248,7 @@ impl<'a> PregelExecutor<'a> {
             }
         } else if let Some(cp) = self.graph.checkpointer.as_ref() {
             // Try to load latest checkpoint for thread
-            if let Some(checkpoint) = cp.load(&self.config.thread_id).await? {
+            if let Some(checkpoint) = cp.load(self.config.thread_id.as_str()).await? {
                 state = checkpoint.state;
             }
         }
@@ -356,7 +356,7 @@ impl<'a> PregelExecutor<'a> {
     async fn save_checkpoint(&self) -> Result<String> {
         if let Some(cp) = &self.graph.checkpointer {
             let checkpoint = Checkpoint::new(
-                &self.config.thread_id,
+                self.config.thread_id.as_str(),
                 self.state.clone(),
                 self.step,
                 self.pending_nodes.clone(),

@@ -101,7 +101,7 @@ fn create_sample_conversation() -> Vec<Event> {
     let mut e3 = Event::new(adk_core::types::InvocationId::new(invocation_id).unwrap());
     e3.author = "get_weather".to_string();
     e3.set_content(Content {
-        role: adk_core::types::Role::Custom("function".to_string()),
+        role: adk_core::types::Role::Function,
         parts: vec![Part::FunctionResponse {
             name: "get_weather".to_string(),
             response: json!({"temp": 22, "condition": "sunny"}),

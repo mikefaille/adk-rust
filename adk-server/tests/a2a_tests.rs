@@ -39,7 +39,7 @@ impl Agent for TestAgent {
         let agent_name = self.name.clone();
 
         let stream = async_stream::stream! {
-            let mut event = adk_core::Event::new(invocation_id);
+            let mut event = adk_core::Event::new(adk_core::types::InvocationId::try_from(invocation_id.as_str()).unwrap());
             event.author = agent_name;
             event.llm_response.content = Some(adk_core::Content {
                 role: adk_core::Role::Model,

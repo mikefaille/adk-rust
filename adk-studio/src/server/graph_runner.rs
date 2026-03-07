@@ -166,7 +166,7 @@ impl InterruptedSessionStore {
     /// The interrupted session state if found, None otherwise.
     pub async fn get(&self, session_id: &SessionId) -> Option<InterruptedSessionState> {
         let sessions = self.sessions.read().await;
-        sessions.get(&session_id.to_string()).cloned()
+        sessions.get(session_id.as_str()).cloned()
     }
 
     /// Remove an interrupted session state (after resumption).
@@ -178,13 +178,13 @@ impl InterruptedSessionStore {
     /// The removed session state if found, None otherwise.
     pub async fn remove(&self, session_id: &SessionId) -> Option<InterruptedSessionState> {
         let mut sessions = self.sessions.write().await;
-        sessions.remove(&session_id.to_string())
+        sessions.remove(session_id.as_str())
     }
 
     /// Check if a session is interrupted.
     pub async fn is_interrupted(&self, session_id: &SessionId) -> bool {
         let sessions = self.sessions.read().await;
-        sessions.contains_key(&session_id.to_string())
+        sessions.contains_key(session_id.as_str())
     }
 
     /// Get all interrupted session IDs.

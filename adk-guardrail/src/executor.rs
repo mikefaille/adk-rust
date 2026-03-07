@@ -177,7 +177,7 @@ mod tests {
     #[tokio::test]
     async fn test_empty_guardrails_pass() {
         let set = GuardrailSet::new();
-        let content = Content::new("user").with_text("hello");
+        let content = Content::user().with_text("hello");
         let result = GuardrailExecutor::run(&set, &content).await.unwrap();
         assert!(result.passed);
     }
@@ -185,7 +185,7 @@ mod tests {
     #[tokio::test]
     async fn test_pass_guardrail() {
         let set = GuardrailSet::new().with(PassGuardrail);
-        let content = Content::new("user").with_text("hello");
+        let content = Content::user().with_text("hello");
         let result = GuardrailExecutor::run(&set, &content).await.unwrap();
         assert!(result.passed);
     }
@@ -193,7 +193,7 @@ mod tests {
     #[tokio::test]
     async fn test_fail_guardrail_low_severity() {
         let set = GuardrailSet::new().with(FailGuardrail { severity: Severity::Low });
-        let content = Content::new("user").with_text("hello");
+        let content = Content::user().with_text("hello");
         let result = GuardrailExecutor::run(&set, &content).await.unwrap();
         assert!(result.passed); // Low severity doesn't fail
         assert_eq!(result.failures.len(), 1);
@@ -202,7 +202,7 @@ mod tests {
     #[tokio::test]
     async fn test_fail_guardrail_high_severity() {
         let set = GuardrailSet::new().with(FailGuardrail { severity: Severity::High });
-        let content = Content::new("user").with_text("hello");
+        let content = Content::user().with_text("hello");
         let result = GuardrailExecutor::run(&set, &content).await.unwrap();
         assert!(!result.passed);
     }
@@ -210,7 +210,7 @@ mod tests {
     #[tokio::test]
     async fn test_critical_early_exit() {
         let set = GuardrailSet::new().with(FailGuardrail { severity: Severity::Critical });
-        let content = Content::new("user").with_text("hello");
+        let content = Content::user().with_text("hello");
         let result = GuardrailExecutor::run(&set, &content).await;
         assert!(result.is_err());
     }

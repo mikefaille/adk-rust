@@ -55,7 +55,7 @@ async fn main() -> Result<()> {
     println!("  - \"Delete my account\"");
     println!();
 
-    adk_cli::console::run_console(Arc::new(ui_agent), app_name, user_id.into()).await?;
+    adk_cli::console::run_console(Arc::new(ui_agent), app_name, adk_core::types::UserId::try_from(user_id).unwrap()).await?;
 
     Ok(())
 }

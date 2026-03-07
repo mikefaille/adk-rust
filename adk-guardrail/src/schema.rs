@@ -115,7 +115,7 @@ mod tests {
     #[tokio::test]
     async fn test_valid_json() {
         let validator = SchemaValidator::new(&test_schema()).unwrap();
-        let content = Content::new("model").with_text(r#"{"name": "Alice", "age": 30}"#);
+        let content = Content::model().with_text(r#"{"name": "Alice", "age": 30}"#);
         let result = validator.validate(&content).await;
         assert!(result.is_pass());
     }
@@ -123,7 +123,7 @@ mod tests {
     #[tokio::test]
     async fn test_invalid_json_missing_required() {
         let validator = SchemaValidator::new(&test_schema()).unwrap();
-        let content = Content::new("model").with_text(r#"{"age": 30}"#);
+        let content = Content::model().with_text(r#"{"age": 30}"#);
         let result = validator.validate(&content).await;
         assert!(result.is_fail());
     }
@@ -131,7 +131,7 @@ mod tests {
     #[tokio::test]
     async fn test_invalid_json_wrong_type() {
         let validator = SchemaValidator::new(&test_schema()).unwrap();
-        let content = Content::new("model").with_text(r#"{"name": "Alice", "age": "thirty"}"#);
+        let content = Content::model().with_text(r#"{"name": "Alice", "age": "thirty"}"#);
         let result = validator.validate(&content).await;
         assert!(result.is_fail());
     }
@@ -139,7 +139,7 @@ mod tests {
     #[tokio::test]
     async fn test_json_in_markdown() {
         let validator = SchemaValidator::new(&test_schema()).unwrap();
-        let content = Content::new("model")
+        let content = Content::model()
             .with_text("Here is the result:\n```json\n{\"name\": \"Bob\"}\n```");
         let result = validator.validate(&content).await;
         assert!(result.is_pass());
@@ -148,7 +148,7 @@ mod tests {
     #[tokio::test]
     async fn test_no_json() {
         let validator = SchemaValidator::new(&test_schema()).unwrap();
-        let content = Content::new("model").with_text("This is just plain text");
+        let content = Content::model().with_text("This is just plain text");
         let result = validator.validate(&content).await;
         assert!(result.is_fail());
     }

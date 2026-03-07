@@ -351,10 +351,10 @@ async fn run_translation(
                 // Track text output for fallback
                 if let Some(content) = &event.llm_response.content {
                     for part in &content.parts {
-                        if let Some(text) = part.as_text() {
-                            if !text.is_empty() {
-                                last_text = text.to_string();
-                            }
+                        if let Some(text) = part.as_text()
+                            && !text.is_empty()
+                        {
+                            last_text = text.to_string();
                         }
                     }
                 }
@@ -382,19 +382,17 @@ async fn run_translation(
 
     if let Some(serde_json::Value::String(translation)) =
         updated_session.state().get("final_translation")
+        && !translation.is_empty()
     {
-        if !translation.is_empty() {
-            return Ok(clean_output(&translation));
-        }
+        return Ok(clean_output(&translation));
     }
 
     // Fallback to current_translation if final not available
     if let Some(serde_json::Value::String(translation)) =
         updated_session.state().get("current_translation")
+        && !translation.is_empty()
     {
-        if !translation.is_empty() {
-            return Ok(clean_output(&translation));
-        }
+        return Ok(clean_output(&translation));
     }
 
     // Last resort: use the last text we saw

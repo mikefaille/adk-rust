@@ -86,7 +86,7 @@ async fn test_append_event() {
         .await
         .unwrap();
 
-    let event = Event::new("inv1");
+    let event = Event::new(adk_core::types::InvocationId::try_from("inv1").unwrap());
     service.append_event(&SessionId::new("session1").unwrap(), event).await.unwrap();
 
     let session = service

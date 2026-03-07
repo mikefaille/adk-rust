@@ -7,7 +7,7 @@
 //!   cargo run --manifest-path examples/Cargo.toml --example skills_workflow
 
 use adk_agent::{LlmAgentBuilder, SequentialAgent};
-use adk_core::types::{SessionId, UserId};
+use adk_core::types::UserId;
 use adk_core::{Content, Part};
 use adk_model::gemini::GeminiModel;
 use adk_runner::{Runner, RunnerConfig};
@@ -96,7 +96,7 @@ async fn main() -> Result<()> {
         .run(
             user_id,
             session_id,
-            Content::new("user").with_text("Please search this repository for TODO markers."),
+            Content::user().with_text("Please search this repository for TODO markers."),
         )
         .await?;
 

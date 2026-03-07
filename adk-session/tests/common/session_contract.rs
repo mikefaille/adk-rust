@@ -1,4 +1,4 @@
-use adk_core::types::{SessionId, UserId};
+use adk_core::types::{InvocationId, SessionId, UserId};
 use adk_session::{
     CreateRequest, DeleteRequest, Event, GetRequest, KEY_PREFIX_TEMP, ListRequest, SessionService,
 };
@@ -31,7 +31,7 @@ pub async fn assert_session_contract_with_users(
     let created = service
         .create(CreateRequest {
             app_name: app_name.to_string(),
-            user_id: UserId::from(user_1.to_string()),
+            user_id: UserId::try_from(user_1.to_string()).unwrap(),
             session_id: None,
             state: initial_state,
         })
@@ -46,7 +46,7 @@ pub async fn assert_session_contract_with_users(
     let fetched = service
         .get(GetRequest {
             app_name: app_name.to_string(),
-            user_id: UserId::from(user_1.to_string()),
+            user_id: UserId::try_from(user_1.to_string()).unwrap(),
             session_id: SessionId::new(session_id.clone()).unwrap(),
             num_recent_events: None,
             after: None,
@@ -63,7 +63,7 @@ pub async fn assert_session_contract_with_users(
     let t1 = Utc::now();
     let t2 = t1 + Duration::seconds(1);
 
-    let mut event_1 = Event::new("inv-1");
+    let mut event_1 = Event::new(InvocationId::try_from("inv-1").unwrap());
     event_1.author = "agent".to_string();
     event_1.timestamp = t1;
     event_1.actions.state_delta.insert("result".to_string(), json!("ok-1"));
@@ -71,7 +71,7 @@ pub async fn assert_session_contract_with_users(
 
     service.append_event(&session_id, event_1).await.expect("append first event should succeed");
 
-    let mut event_2 = Event::new("inv-2");
+    let mut event_2 = Event::new(InvocationId::try_from("inv-2").unwrap());
     event_2.author = "agent".to_string();
     event_2.timestamp = t2;
     event_2.actions.state_delta.insert("result".to_string(), json!("ok-2"));
@@ -81,7 +81,7 @@ pub async fn assert_session_contract_with_users(
     let with_events = service
         .get(GetRequest {
             app_name: app_name.to_string(),
-            user_id: UserId::from(user_1.to_string()),
+            user_id: UserId::try_from(user_1.to_string()).unwrap(),
             session_id: SessionId::new(session_id.clone()).unwrap(),
             num_recent_events: None,
             after: None,
@@ -96,7 +96,7 @@ pub async fn assert_session_contract_with_users(
     let recent = service
         .get(GetRequest {
             app_name: app_name.to_string(),
-            user_id: UserId::from(user_1.to_string()),
+            user_id: UserId::try_from(user_1.to_string()).unwrap(),
             session_id: SessionId::new(session_id.clone()).unwrap(),
             num_recent_events: Some(1),
             after: None,
@@ -110,7 +110,7 @@ pub async fn assert_session_contract_with_users(
     let after = service
         .get(GetRequest {
             app_name: app_name.to_string(),
-            user_id: UserId::from(user_1.to_string()),
+            user_id: UserId::try_from(user_1.to_string()).unwrap(),
             session_id: SessionId::new(session_id.clone()).unwrap(),
             num_recent_events: None,
             after: Some(t2),
@@ -124,7 +124,7 @@ pub async fn assert_session_contract_with_users(
     let sessions_user1 = service
         .list(ListRequest {
             app_name: app_name.to_string(),
-            user_id: UserId::from(user_1.to_string()),
+            user_id: UserId::try_from(user_1.to_string()).unwrap(),
         })
         .await
         .expect("list for user1 should succeed");
@@ -134,7 +134,7 @@ pub async fn assert_session_contract_with_users(
     let user2 = service
         .create(CreateRequest {
             app_name: app_name.to_string(),
-            user_id: UserId::from(user_2.to_string()),
+            user_id: UserId::try_from(user_2.to_string()).unwrap(),
             session_id: None,
             state: HashMap::new(),
         })
@@ -145,7 +145,7 @@ pub async fn assert_session_contract_with_users(
     let wrong_user_get = service
         .get(GetRequest {
             app_name: app_name.to_string(),
-            user_id: UserId::from(user_2.to_string()),
+            user_id: UserId::try_from(user_2.to_string()).unwrap(),
             session_id: SessionId::new(session_id.clone()).unwrap(),
             num_recent_events: None,
             after: None,
@@ -156,7 +156,7 @@ pub async fn assert_session_contract_with_users(
     let sessions_user2 = service
         .list(ListRequest {
             app_name: app_name.to_string(),
-            user_id: UserId::from(user_2.to_string()),
+            user_id: UserId::try_from(user_2.to_string()).unwrap(),
         })
         .await
         .expect("list for user2 should succeed");
@@ -167,7 +167,7 @@ pub async fn assert_session_contract_with_users(
     let other_app = service
         .create(CreateRequest {
             app_name: other_app_name.to_string(),
-            user_id: UserId::from(user_1.to_string()),
+            user_id: UserId::try_from(user_1.to_string()).unwrap(),
             session_id: None,
             state: HashMap::new(),
         })
@@ -178,7 +178,7 @@ pub async fn assert_session_contract_with_users(
     let sessions_primary_app = service
         .list(ListRequest {
             app_name: app_name.to_string(),
-            user_id: UserId::from(user_1.to_string()),
+            user_id: UserId::try_from(user_1.to_string()).unwrap(),
         })
         .await
         .expect("list primary app should succeed");
@@ -189,7 +189,7 @@ pub async fn assert_session_contract_with_users(
     let sessions_other_app = service
         .list(ListRequest {
             app_name: other_app_name.to_string(),
-            user_id: UserId::from(user_1.to_string()),
+            user_id: UserId::try_from(user_1.to_string()).unwrap(),
         })
         .await
         .expect("list secondary app should succeed");
@@ -200,7 +200,7 @@ pub async fn assert_session_contract_with_users(
     service
         .delete(DeleteRequest {
             app_name: app_name.to_string(),
-            user_id: UserId::from(user_1.to_string()),
+            user_id: UserId::try_from(user_1.to_string()).unwrap(),
             session_id: SessionId::new(session_id.clone()).unwrap(),
         })
         .await
@@ -209,7 +209,7 @@ pub async fn assert_session_contract_with_users(
     service
         .delete(DeleteRequest {
             app_name: app_name.to_string(),
-            user_id: UserId::from(user_2.to_string()),
+            user_id: UserId::try_from(user_2.to_string()).unwrap(),
             session_id: user2_session_id,
         })
         .await
@@ -218,7 +218,7 @@ pub async fn assert_session_contract_with_users(
     service
         .delete(DeleteRequest {
             app_name: other_app_name.to_string(),
-            user_id: UserId::from(user_1.to_string()),
+            user_id: UserId::try_from(user_1.to_string()).unwrap(),
             session_id: other_app_session_id,
         })
         .await
@@ -227,7 +227,7 @@ pub async fn assert_session_contract_with_users(
     let deleted_get = service
         .get(GetRequest {
             app_name: app_name.to_string(),
-            user_id: UserId::from(user_1.to_string()),
+            user_id: UserId::try_from(user_1.to_string()).unwrap(),
             session_id,
             num_recent_events: None,
             after: None,

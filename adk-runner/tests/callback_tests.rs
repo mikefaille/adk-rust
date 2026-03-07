@@ -122,7 +122,7 @@ async fn test_execute_after_model_callbacks() {
     let results = callbacks.execute_after_model(ctx).await.unwrap();
 
     assert_eq!(results.len(), 1);
-    assert_eq!(results[0].role, "assistant");
+    assert_eq!(results[0].role, adk_core::Role::Model);
 }
 
 #[tokio::test]
@@ -151,7 +151,7 @@ async fn test_execute_after_tool_callbacks() {
     callbacks.add_after_tool(Box::new(|_ctx| {
         Box::pin(async move {
             Ok(Some(Content {
-                role: adk_core::Role::Custom("function".to_string()),
+                role: adk_core::Role::Function,
                 parts: vec![Part::Text("After tool".to_string())],
             }))
         })
@@ -194,19 +194,19 @@ async fn test_multiple_callback_types() {
     let mut callbacks = Callbacks::new();
 
     callbacks.add_before_model(Box::new(|_ctx| {
-        Box::pin(async move { Ok(Some(Content::new("system"))) })
+        Box::pin(async move { Ok(Some(Content::new(adk_core::Role::System))) })
     }));
 
     callbacks.add_after_model(Box::new(|_ctx| {
-        Box::pin(async move { Ok(Some(Content::new("assistant"))) })
+        Box::pin(async move { Ok(Some(Content::new(adk_core::Role::Model))) })
     }));
 
     callbacks.add_before_tool(Box::new(|_ctx| {
-        Box::pin(async move { Ok(Some(Content::new("system"))) })
+        Box::pin(async move { Ok(Some(Content::new(adk_core::Role::System))) })
     }));
 
     callbacks.add_after_tool(Box::new(|_ctx| {
-        Box::pin(async move { Ok(Some(Content::new("function"))) })
+        Box::pin(async move { Ok(Some(Content::new(adk_core::Role::Function))) })
     }));
 
     assert_eq!(callbacks.before_model.len(), 1);

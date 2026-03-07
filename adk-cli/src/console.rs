@@ -1,4 +1,4 @@
-use adk_core::types::{SessionId, UserId};
+use adk_core::types::UserId;
 use adk_core::{Agent, Content, Part};
 use adk_runner::{Runner, RunnerConfig};
 use adk_session::{CreateRequest, InMemorySessionService, SessionService};
@@ -56,7 +56,6 @@ pub async fn run_console(agent: Arc<dyn Agent>, app_name: String, user_id: UserI
 
                 print!("\nAgent -> ");
 
-                let session_id = session.id().to_string();
                 let mut events =
                     runner.run(user_id.clone(), session.id().clone(), user_content).await?;
 

@@ -61,7 +61,7 @@ async fn main() -> anyhow::Result<()> {
     let translator_node = AgentNode::new(translator_agent)
         .with_input_mapper(|state| {
             let text = state.get("input").and_then(|v| v.as_str()).unwrap_or("");
-            adk_core::Content::new("user").with_text(text)
+            adk_core::Content::user().with_text(text)
         })
         .with_output_mapper(|events| {
             let mut updates = std::collections::HashMap::new();
@@ -84,7 +84,7 @@ async fn main() -> anyhow::Result<()> {
     let summarizer_node = AgentNode::new(summarizer_agent)
         .with_input_mapper(|state| {
             let text = state.get("input").and_then(|v| v.as_str()).unwrap_or("");
-            adk_core::Content::new("user").with_text(text)
+            adk_core::Content::user().with_text(text)
         })
         .with_output_mapper(|events| {
             let mut updates = std::collections::HashMap::new();
@@ -177,7 +177,7 @@ async fn main() -> anyhow::Result<()> {
     println!("[summarizer] Processing...");
 
     // Execute using GraphAgent's invoke method
-    let result = agent.invoke(input, ExecutionConfig::new("processor-thread".to_string())).await?;
+    let result = agent.invoke(input, ExecutionConfig::new(adk_core::types::SessionId::try_from("processor-thread").unwrap())).await?;
 
     println!("\n{}", "=".repeat(60));
     println!("\n{}", result.get("result").and_then(|v| v.as_str()).unwrap_or("No result"));

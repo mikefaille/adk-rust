@@ -230,7 +230,7 @@ mod tests {
 
     #[test]
     fn test_llm_response_creation() {
-        let content = Content::new(crate::types::Role::Custom("assistant".to_string()));
+        let content = Content::model();
         let resp = LlmResponse::new(content);
         assert!(resp.content.is_some());
         assert!(resp.turn_complete);

@@ -3,6 +3,7 @@
 use super::error::ConversionError;
 use crate::attachment;
 use adk_core::{Content, FinishReason, LlmResponse, Part, UsageMetadata};
+#[cfg(test)]
 use bytes::Bytes;
 use claudius::ImageMediaType;
 use claudius::{
@@ -447,7 +448,7 @@ mod tests {
     #[test]
     fn test_content_to_message_pdf_file_uri_errors() {
         let content = Content::user()
-            .with_part(Part::file_data("application/pdf", "https://example.com/test.pdf"));
+            .with_part(Part::file_data("application/pdf", "https://example.com/test.pdf").unwrap());
         let result = content_to_message(&content, false);
         assert!(matches!(result, Err(ConversionError::UnsupportedFileData)));
     }

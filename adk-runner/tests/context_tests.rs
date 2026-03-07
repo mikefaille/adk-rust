@@ -143,7 +143,7 @@ fn test_context_creation() {
 fn test_context_with_branch() {
     let agent = Arc::new(MockAgent { name: "test_agent".to_string() });
 
-    let content = Content::new("user");
+    let content = Content::user();
 
     let ctx = RunnerContext::new(
         InvocationId::new("inv-123").unwrap(),
@@ -163,7 +163,7 @@ fn test_context_with_branch() {
 fn test_context_with_run_config() {
     let agent = Arc::new(MockAgent { name: "test_agent".to_string() });
 
-    let content = Content::new("user");
+    let content = Content::user();
 
     let config = RunConfig { streaming_mode: StreamingMode::SSE, ..RunConfig::default() };
 
@@ -185,7 +185,7 @@ fn test_context_with_run_config() {
 fn test_context_end_invocation() {
     let agent = Arc::new(MockAgent { name: "test_agent".to_string() });
 
-    let content = Content::new("user");
+    let content = Content::user();
 
     let ctx = RunnerContext::new(
         InvocationId::new("inv-123").unwrap(),
@@ -206,7 +206,7 @@ fn test_context_end_invocation() {
 fn test_context_agent_access() {
     let agent = Arc::new(MockAgent { name: "test_agent".to_string() });
 
-    let content = Content::new("user");
+    let content = Content::user();
 
     let ctx = RunnerContext::new(
         InvocationId::new("inv-123").unwrap(),
@@ -226,7 +226,7 @@ fn test_context_agent_access() {
 fn test_context_optional_services() {
     let agent = Arc::new(MockAgent { name: "test_agent".to_string() });
 
-    let content = Content::new("user");
+    let content = Content::user();
 
     let ctx = RunnerContext::new(
         InvocationId::new("inv-123").unwrap(),
@@ -294,7 +294,7 @@ fn test_mutable_session_temp_keys_not_persisted() {
 fn test_mutable_session_shared_across_contexts() {
     // Test that two InvocationContexts sharing the same MutableSession see each other's changes
     let agent = Arc::new(MockAgent { name: "test_agent".to_string() });
-    let content = Content::new("user");
+    let content = Content::user();
 
     // Create first context
     let ctx1 = RunnerContext::new(
@@ -350,13 +350,13 @@ fn test_mutable_session_event_accumulation() {
     assert_eq!(mutable.conversation_history().len(), 0);
 
     // Append some events
-    let mut event1 = Event::new("inv-1");
+    let mut event1 = Event::new(InvocationId::try_from("inv-1").unwrap());
     event1.author = "user".to_string();
     event1.llm_response.content =
         Some(Content { role: adk_core::Role::User, parts: vec![Part::Text("Hello".to_string())] });
     mutable.append_event(event1);
 
-    let mut event2 = Event::new("inv-1");
+    let mut event2 = Event::new(InvocationId::try_from("inv-1").unwrap());
     event2.author = "assistant".to_string();
     event2.llm_response.content = Some(Content {
         role: adk_core::Role::Model,
@@ -367,8 +367,8 @@ fn test_mutable_session_event_accumulation() {
     // Check conversation history
     let history = mutable.conversation_history();
     assert_eq!(history.len(), 2);
-    assert_eq!(history[0].role, "user");
-    assert_eq!(history[1].role, "model");
+    assert_eq!(history[0].role, adk_core::Role::User);
+    assert_eq!(history[1].role, adk_core::Role::Model);
 }
 
 #[test]
@@ -396,14 +396,14 @@ fn conversation_history_preserves_tool_role() {
     let mutable = MutableSession::new(session);
 
     // Simulate: user message
-    let mut user_event = Event::new("inv-1");
+    let mut user_event = Event::new(InvocationId::try_from("inv-1").unwrap());
     user_event.author = "user".to_string();
     user_event.llm_response.content =
         Some(Content { role: adk_core::Role::User, parts: vec![Part::Text("hello".into())] });
     mutable.append_event(user_event);
 
     // Simulate: assistant with tool call
-    let mut assistant_event = Event::new("inv-1");
+    let mut assistant_event = Event::new(InvocationId::try_from("inv-1").unwrap());
     assistant_event.author = "my_agent".to_string();
     assistant_event.llm_response.content = Some(Content {
         role: adk_core::Role::Model,
@@ -417,10 +417,10 @@ fn conversation_history_preserves_tool_role() {
     mutable.append_event(assistant_event);
 
     // Simulate: tool response
-    let mut tool_event = Event::new("inv-1");
+    let mut tool_event = Event::new(InvocationId::try_from("inv-1").unwrap());
     tool_event.author = "my_agent".to_string();
     tool_event.llm_response.content = Some(Content {
-        role: adk_core::Role::Custom("function".to_string()),
+        role: adk_core::Role::Function,
         parts: vec![Part::FunctionResponse {
             name: "browser_navigate".into(),
             response: serde_json::json!({"success": true}),
@@ -431,9 +431,9 @@ fn conversation_history_preserves_tool_role() {
 
     let history = mutable.conversation_history();
     assert_eq!(history.len(), 3);
-    assert_eq!(history[0].role, "user");
-    assert_eq!(history[1].role, "model");
-    assert_eq!(history[2].role, adk_core::Role::Custom("function".to_string())); // NOT "model"
+    assert_eq!(history[0].role, adk_core::Role::User);
+    assert_eq!(history[1].role, adk_core::Role::Model);
+    assert_eq!(history[2].role, adk_core::Role::Function); // NOT "model"
 }
 
 #[test]
@@ -442,7 +442,7 @@ fn conversation_history_maps_agent_events_to_model() {
     let session = Arc::new(MockSessionWithState::new());
     let mutable = MutableSession::new(session);
 
-    let mut event = Event::new("inv-1");
+    let mut event = Event::new(InvocationId::try_from("inv-1").unwrap());
     event.author = "my_agent".to_string();
     event.llm_response.content = Some(Content {
         role: adk_core::Role::Model,
@@ -451,5 +451,5 @@ fn conversation_history_maps_agent_events_to_model() {
     mutable.append_event(event);
 
     let history = mutable.conversation_history();
-    assert_eq!(history[0].role, "model");
+    assert_eq!(history[0].role, adk_core::Role::Model);
 }

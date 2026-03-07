@@ -1,6 +1,7 @@
 //! Type conversions between ADK core types and ollama-rs types.
 
 use adk_core::{Content, FinishReason, LlmResponse, Part, Role, UsageMetadata};
+#[cfg(test)]
 use bytes::Bytes;
 use ollama_rs::generation::chat::{ChatMessage, ChatMessageResponse};
 
@@ -11,31 +12,19 @@ pub fn content_to_chat_message(content: &Content) -> Option<ChatMessage> {
     match content.role {
         Role::User => Some(ChatMessage::user(text)),
         Role::Model | Role::System => Some(ChatMessage::assistant(text)),
-        Role::Custom(ref s) if s == "assistant" => Some(ChatMessage::assistant(text)),
-        Role::Custom(ref s) if s == "system" => Some(ChatMessage::system(text)),
-        Role::Custom(ref s) if s == "user" => Some(ChatMessage::user(text)),
-        _ => {
-            // Check for tool/function role equivalents
-            if content.role.is_tool() {
-                let mut response_texts = Vec::new();
-                for part in &content.parts {
-                    if let Part::FunctionResponse { name, response, .. } = part {
-                        response_texts.push(format!("{}: {}", name, response));
-                    }
-                }
-                if !response_texts.is_empty() {
-                    return Some(ChatMessage::tool(response_texts.join("\n")));
-                } else if !text.is_empty() {
-                    return Some(ChatMessage::tool(text));
+        Role::Tool | Role::Function => {
+            let mut response_texts = Vec::new();
+            for part in &content.parts {
+                if let Part::FunctionResponse { name, response, .. } = part {
+                    response_texts.push(format!("{}: {}", name, response));
                 }
             }
-            // Fallback for unknown roles
-            if content.role.is_system() {
-                Some(ChatMessage::system(text))
-            } else if content.role.is_model() {
-                Some(ChatMessage::assistant(text))
+            if !response_texts.is_empty() {
+                Some(ChatMessage::tool(response_texts.join("\n")))
+            } else if !text.is_empty() {
+                Some(ChatMessage::tool(text))
             } else {
-                Some(ChatMessage::user(text))
+                None
             }
         }
     }
@@ -148,7 +137,7 @@ mod tests {
 
     #[test]
     fn content_to_chat_message_keeps_file_attachment_payload() {
-        let content = Content::user().with_file_uri("text/csv", "https://example.com/data.csv");
+        let content = Content::user().with_file_uri("text/csv", "https://example.com/data.csv").unwrap();
         let message = content_to_chat_message(&content).expect("message should be created");
         assert!(message.content.contains("[File: https://example.com/data.csv]"));
     }

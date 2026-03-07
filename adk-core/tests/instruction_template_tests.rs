@@ -110,19 +110,19 @@ impl ReadonlyContext for MockContext {
         static IDENTITY: std::sync::OnceLock<adk_core::types::AdkIdentity> =
             std::sync::OnceLock::new();
         IDENTITY.get_or_init(|| {
-            let mut id = adk_core::types::AdkIdentity::default();
-            id.invocation_id = adk_core::types::InvocationId::new("inv-1").unwrap();
-            id.agent_name = "test-agent".to_string();
-            id.user_id = adk_core::types::UserId::new("user-1").unwrap();
-            id.app_name = "test-app".to_string();
-            id.session_id = adk_core::types::SessionId::new("session-1").unwrap();
-            id.branch = "main".to_string();
-            id
+        adk_core::types::AdkIdentity {
+            invocation_id: adk_core::types::InvocationId::new("inv-1").unwrap(),
+            agent_name: "test-agent".to_string(),
+            user_id: adk_core::types::UserId::new("user-1").unwrap(),
+            app_name: "test-app".to_string(),
+            session_id: adk_core::types::SessionId::new("session-1").unwrap(),
+            branch: "main".to_string(),
+        }
         })
     }
     fn user_content(&self) -> &Content {
         static CONTENT: std::sync::OnceLock<Content> = std::sync::OnceLock::new();
-        CONTENT.get_or_init(|| Content::user())
+        CONTENT.get_or_init(Content::user)
     }
     fn metadata(&self) -> &HashMap<String, String> {
         static METADATA: std::sync::OnceLock<HashMap<String, String>> = std::sync::OnceLock::new();

@@ -9,6 +9,7 @@ use adk_core::{Result, Tool, ToolContext};
 use async_trait::async_trait;
 use serde_json::Value;
 use std::sync::Arc;
+use adk_core::types::UserId;
 
 // Simple tools for demonstration
 struct SearchTool;
@@ -76,9 +77,9 @@ fn main() -> anyhow::Result<()> {
         .role(admin)
         .role(analyst)
         .role(developer)
-        .assign("alice@company.com", "admin")
-        .assign("bob@company.com", "analyst")
-        .assign("charlie@company.com", "developer")
+        .assign(UserId::new("alice@company.com").unwrap(), "admin")
+        .assign(UserId::new("bob@company.com").unwrap(), "analyst")
+        .assign(UserId::new("charlie@company.com").unwrap(), "developer")
         .build()?;
 
     println!("Roles defined:");

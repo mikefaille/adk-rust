@@ -146,9 +146,9 @@ impl adk_core::Agent for StreamingTestAgent {
     {
         let invocation_id = ctx.invocation_id().to_string();
         let output = stream::once(async move {
-            let mut event = Event::new(invocation_id);
+            let mut event = Event::new(adk_core::types::InvocationId::try_from(invocation_id).unwrap());
             event.author = "stream-test-agent".to_string();
-            event.set_content(adk_core::Content::new("model").with_text("hello from stream"));
+            event.set_content(adk_core::Content::model().with_text("hello from stream"));
             Ok(event)
         });
         Ok(Box::pin(output))

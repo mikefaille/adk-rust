@@ -3,6 +3,7 @@
 //! Groq uses OpenAI-compatible API format, so we can reuse most types from DeepSeek.
 
 use adk_core::{Content, FinishReason, LlmResponse, Part, Role, UsageMetadata};
+#[cfg(test)]
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

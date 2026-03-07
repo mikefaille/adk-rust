@@ -52,7 +52,7 @@ async fn main() -> Result<()> {
     let storyteller_node = AgentNode::new(agent)
         .with_input_mapper(|state| {
             let msg = state.get("message").and_then(|v| v.as_str()).unwrap_or("");
-            adk_core::Content::new("user").with_text(msg)
+            adk_core::Content::user().with_text(msg)
         })
         .with_output_mapper(|events| {
             let mut updates = std::collections::HashMap::new();
@@ -81,7 +81,7 @@ async fn main() -> Result<()> {
 
     println!("📝 Prompt: Tell me a very short story about a robot.\n");
 
-    let config = ExecutionConfig::new("demo-session".to_string());
+    let config = ExecutionConfig::new(adk_core::types::SessionId::try_from("demo-session").unwrap());
 
     // Choose streaming mode
     let mode = if streaming { StreamMode::Messages } else { StreamMode::Values };

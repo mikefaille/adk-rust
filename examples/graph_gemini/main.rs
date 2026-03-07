@@ -24,7 +24,7 @@ use std::sync::Arc;
 
 /// Helper to call Gemini and collect the full response
 async fn call_gemini(model: &Arc<GeminiModel>, prompt: &str) -> Result<String, GraphError> {
-    let request = LlmRequest::new(model.name(), vec![Content::new("user").with_text(prompt)]);
+    let request = LlmRequest::new(model.name(), vec![Content::user().with_text(prompt)]);
 
     let mut stream = model.generate_content(request, false).await.map_err(|e| {
         GraphError::NodeExecutionFailed { node: "gemini".to_string(), message: e.to_string() }
@@ -216,7 +216,7 @@ async fn main() -> anyhow::Result<()> {
         let mut input = State::new();
         input.insert("topic".to_string(), json!(topic));
 
-        let result = graph.invoke(input, ExecutionConfig::new(format!("research-{}", i))).await?;
+        let result = graph.invoke(input, ExecutionConfig::new(adk_core::types::SessionId::try_from(format!("research-{}", i)).unwrap())).await?;
 
         println!("\n{}\n", result.get("result").and_then(|v| v.as_str()).unwrap_or("No result"));
     }

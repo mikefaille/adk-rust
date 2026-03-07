@@ -1118,7 +1118,7 @@ mod tests {
     fn arb_system_content() -> impl Strategy<Value = Content> {
         prop::collection::vec(arb_system_text(), 1..=3).prop_map(|texts| Content {
             role: adk_core::types::Role::System,
-            parts: texts.into_iter().map(|t| Part::text(t)).collect(),
+            parts: texts.into_iter().map(Part::text).collect(),
         })
     }
 

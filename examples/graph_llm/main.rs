@@ -24,7 +24,7 @@ async fn call_llm(
     model_name: &str,
     prompt: &str,
 ) -> Result<String, GraphError> {
-    let request = LlmRequest::new(model_name, vec![Content::new("user").with_text(prompt)]);
+    let request = LlmRequest::new(model_name, vec![Content::user().with_text(prompt)]);
 
     let mut stream = model.generate_content(request, false).await.map_err(|e| {
         GraphError::NodeExecutionFailed { node: "llm".to_string(), message: e.to_string() }
@@ -139,7 +139,7 @@ async fn main() -> anyhow::Result<()> {
     let mut input = State::new();
     input.insert("topic".to_string(), json!(topic));
 
-    let result = graph.invoke(input, ExecutionConfig::new("content-pipeline".to_string())).await?;
+    let result = graph.invoke(input, ExecutionConfig::new(adk_core::types::SessionId::try_from("content-pipeline").unwrap())).await?;
 
     println!("{}\n", "=".repeat(60));
     println!("FINAL ARTICLE:\n");

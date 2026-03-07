@@ -102,12 +102,14 @@ struct ScopedMockContext {
 
 impl ScopedMockContext {
     fn create(user_id: &UserId, scopes: Vec<&str>) -> Arc<dyn ToolContext> {
-        let mut identity = adk_core::types::AdkIdentity::default();
-        identity.invocation_id = InvocationId::new("test-invocation").unwrap();
-        identity.agent_name = "test-agent".to_string();
-        identity.user_id = user_id.clone();
-        identity.app_name = "test-app".to_string();
-        identity.session_id = SessionId::new("test-session").unwrap();
+        let identity = adk_core::types::AdkIdentity {
+            invocation_id: InvocationId::new("test-invocation").unwrap(),
+            agent_name: "test-agent".to_string(),
+            user_id: user_id.clone(),
+            app_name: "test-app".to_string(),
+            session_id: SessionId::new("test-session").unwrap(),
+            ..Default::default()
+        };
 
         Arc::new(Self {
             identity,

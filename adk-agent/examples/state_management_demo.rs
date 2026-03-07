@@ -234,7 +234,7 @@ async fn main() -> Result<()> {
         .handler(move |_ctx| {
             let state = all_state.clone();
             async move {
-                let mut event = Event::new("demo-invocation");
+                let mut event = Event::new(adk_core::types::InvocationId::try_from("demo-invocation").unwrap());
                 event.author = "state_reader".to_string();
 
                 let mut text = String::from("State summary:\n");

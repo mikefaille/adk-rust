@@ -25,7 +25,7 @@ async fn main() -> Result<()> {
     let app_name = "quickstart".to_string();
     let user_id = "user1".to_string();
 
-    adk_cli::console::run_console(Arc::new(agent), app_name, user_id.into()).await?;
+    adk_cli::console::run_console(Arc::new(agent), app_name, adk_core::types::UserId::try_from(user_id).unwrap()).await?;
 
     Ok(())
 }

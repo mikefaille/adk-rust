@@ -126,7 +126,7 @@ impl adk_core::Session for MutableSession {
                 let role_str = content.role.to_string();
                 mapped_content.role = match (author_str.as_str(), role_str.as_str()) {
                     ("user", _) => adk_core::types::Role::User,
-                    (_, "function" | "tool") => content.role.clone(),
+                    (_, "function" | "tool") => content.role,
                     _ => adk_core::types::Role::Model,
                 };
                 history.push(mapped_content);

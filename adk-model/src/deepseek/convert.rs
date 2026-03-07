@@ -2,6 +2,7 @@
 
 use crate::attachment;
 use adk_core::{Content, FinishReason, LlmResponse, Part, Role, UsageMetadata};
+#[cfg(test)]
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -186,9 +187,7 @@ pub fn content_to_message(content: &Content) -> Message {
     let role = match content.role {
         Role::User => Role::User,
         Role::Model | Role::System => Role::Model,
-        Role::Custom(ref s) if s == "assistant" => Role::Model,
-        Role::Tool => Role::Tool,
-        _ => Role::User,
+        Role::Tool | Role::Function => Role::Tool,
     };
 
     let mut text_parts = Vec::new();

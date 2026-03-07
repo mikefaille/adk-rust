@@ -51,7 +51,7 @@ impl adk_core::Agent for MockAgent {
         _ctx: Arc<dyn adk_core::InvocationContext>,
     ) -> adk_core::Result<adk_core::EventStream> {
         let s = stream! {
-            yield Ok(adk_core::Event::new("test-invocation"));
+            yield Ok(adk_core::Event::new(adk_core::types::InvocationId::try_from("test-invocation").unwrap()));
         };
         Ok(Box::pin(s))
     }

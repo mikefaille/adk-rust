@@ -173,18 +173,19 @@ struct MockContext {
 
 impl MockContext {
     fn new() -> Self {
-        let mut identity = adk_core::types::AdkIdentity::default();
-        identity.invocation_id = "inv-1".into();
-        identity.agent_name = "test-agent".to_string();
-        identity.user_id = "user-1".into();
-        identity.app_name = "test-app".to_string();
-        identity.session_id = "session-1".into();
-        identity.branch = "main".to_string();
+        let identity = adk_core::types::AdkIdentity {
+            invocation_id: adk_core::types::InvocationId::try_from("inv-1").unwrap(),
+            agent_name: "test-agent".to_string(),
+            user_id: adk_core::types::UserId::try_from("user-1").unwrap(),
+            app_name: "test-app".to_string(),
+            session_id: adk_core::types::SessionId::try_from("session-1").unwrap(),
+            branch: "main".to_string(),
+        };
 
         Self {
             identity,
             session: MockSession::new(),
-            user_content: Content::new("user").with_text("start"),
+            user_content: Content::user().with_text("start"),
         }
     }
 }
@@ -254,7 +255,7 @@ async fn test_before_tool_callback_short_circuits_tool_execution() {
         .before_tool_callback(Box::new(|_ctx| {
             Box::pin(async move {
                 Ok(Some(Content {
-                    role: adk_core::Role::Custom("function".to_string()),
+                    role: adk_core::Role::Function,
                     parts: vec![Part::text("blocked".to_string())],
                 }))
             })
@@ -310,7 +311,7 @@ async fn test_after_tool_callback_overrides_result_and_order() {
             Box::pin(async move {
                 after_order.lock().unwrap().push("after_tool".to_string());
                 Ok(Some(Content {
-                    role: adk_core::Role::Custom("function".to_string()),
+                    role: adk_core::Role::Function,
                     parts: vec![Part::text("after-override".to_string())],
                 }))
             })

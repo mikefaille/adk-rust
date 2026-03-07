@@ -38,9 +38,9 @@ impl Agent for HistoryCapturingAgent {
 
         let name = self.name.clone();
         Ok(Box::pin(futures::stream::once(async move {
-            let mut event = Event::new("inv-e2e");
+            let mut event = Event::new(adk_core::types::InvocationId::try_from("inv-e2e").unwrap());
             event.author = name;
-            event.set_content(Content::new("model").with_text("Agent response"));
+            event.set_content(Content::model().with_text("Agent response"));
             Ok(event)
         })))
     }
@@ -74,7 +74,7 @@ impl BaseEventsSummarizer for DeterministicSummarizer {
         let num_events = events.len();
         let summary_text = format!("[Compaction #{}: summarized {} events]", n, num_events);
 
-        let summary_content = Content::new("model").with_text(&summary_text);
+        let summary_content = Content::model().with_text(&summary_text);
         let start_timestamp = events.first().unwrap().timestamp;
         let end_timestamp = events.last().unwrap().timestamp;
 
@@ -136,7 +136,7 @@ async fn test_e2e_compaction_with_inmemory_session() {
     .unwrap();
 
     // Invocation 1
-    let content1 = Content::new("user").with_text("Hello");
+    let content1 = Content::user().with_text("Hello");
     let mut stream = runner
         .run(UserId::new("user-1").unwrap(), SessionId::new("sess-e2e").unwrap(), content1)
         .await
@@ -146,7 +146,7 @@ async fn test_e2e_compaction_with_inmemory_session() {
     }
 
     // Invocation 2 — should trigger compaction (interval=2)
-    let content2 = Content::new("user").with_text("How are you?");
+    let content2 = Content::user().with_text("How are you?");
     let mut stream = runner
         .run(UserId::new("user-1").unwrap(), SessionId::new("sess-e2e").unwrap(), content2)
         .await
@@ -216,7 +216,7 @@ fn test_event_compaction_serde_roundtrip() {
     let restored = deserialized.compaction.unwrap();
     assert_eq!(restored.start_timestamp, compaction.start_timestamp);
     assert_eq!(restored.end_timestamp, compaction.end_timestamp);
-    assert_eq!(restored.compacted_content.role, "model");
+    assert_eq!(restored.compacted_content.role, adk_core::types::Role::Model);
 
     let text = match &restored.compacted_content.parts[0] {
         Part::Text(text) => text.clone(),

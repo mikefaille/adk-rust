@@ -8,7 +8,7 @@ use futures::StreamExt;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use adk_core::types::{SessionId, UserId};
+use adk_core::types::{InvocationId, SessionId, UserId};
 
 struct MockSession {
     id: SessionId,
@@ -53,8 +53,10 @@ struct MockContext {
 
 impl MockContext {
     fn new() -> Self {
-        let mut identity = AdkIdentity::default();
-        identity.invocation_id = adk_core::types::InvocationId::new("inv-1").unwrap();
+        let identity = AdkIdentity {
+            invocation_id: adk_core::types::InvocationId::new("inv-1").unwrap(),
+            ..Default::default()
+        };
         Self {
             content: Content {
                 role: adk_core::Role::User,
@@ -118,7 +120,7 @@ fn test_custom_agent_builder() {
         .description("A test agent")
         .handler(|_ctx| async {
             let stream = async_stream::stream! {
-                yield Ok(Event::new("inv-1"));
+                yield Ok(Event::new(InvocationId::try_from("inv-1").unwrap()));
             };
             Ok(Box::pin(stream) as adk_core::EventStream)
         })
@@ -134,7 +136,7 @@ async fn test_custom_agent_run() {
     let agent = CustomAgent::builder("echo_agent")
         .description("Echoes input")
         .handler(|ctx| async move {
-            let mut event = Event::new(ctx.invocation_id().to_string());
+            let mut event = Event::new(InvocationId::try_from(ctx.invocation_id().as_str()).unwrap());
             event.llm_response.content = Some(ctx.user_content().clone());
 
             let stream = async_stream::stream! {
@@ -165,7 +167,7 @@ async fn test_custom_agent_with_sub_agents() {
         .description("A sub agent")
         .handler(|_ctx| async {
             let stream = async_stream::stream! {
-                yield Ok(Event::new("inv-1"));
+                yield Ok(Event::new(InvocationId::try_from("inv-1").unwrap()));
             };
             Ok(Box::pin(stream) as adk_core::EventStream)
         })
@@ -177,7 +179,7 @@ async fn test_custom_agent_with_sub_agents() {
         .sub_agent(Arc::new(sub_agent))
         .handler(|_ctx| async {
             let stream = async_stream::stream! {
-                yield Ok(Event::new("inv-1"));
+                yield Ok(Event::new(InvocationId::try_from("inv-1").unwrap()));
             };
             Ok(Box::pin(stream) as adk_core::EventStream)
         })
@@ -193,7 +195,7 @@ fn test_custom_agent_duplicate_sub_agents() {
     let sub1 = CustomAgent::builder("duplicate")
         .handler(|_ctx| async {
             let stream = async_stream::stream! {
-                yield Ok(Event::new("inv-1"));
+                yield Ok(Event::new(InvocationId::try_from("inv-1").unwrap()));
             };
             Ok(Box::pin(stream) as adk_core::EventStream)
         })
@@ -203,7 +205,7 @@ fn test_custom_agent_duplicate_sub_agents() {
     let sub2 = CustomAgent::builder("duplicate")
         .handler(|_ctx| async {
             let stream = async_stream::stream! {
-                yield Ok(Event::new("inv-1"));
+                yield Ok(Event::new(InvocationId::try_from("inv-1").unwrap()));
             };
             Ok(Box::pin(stream) as adk_core::EventStream)
         })
@@ -214,7 +216,7 @@ fn test_custom_agent_duplicate_sub_agents() {
         .sub_agents(vec![Arc::new(sub1), Arc::new(sub2)])
         .handler(|_ctx| async {
             let stream = async_stream::stream! {
-                yield Ok(Event::new("inv-1"));
+                yield Ok(Event::new(InvocationId::try_from("inv-1").unwrap()));
             };
             Ok(Box::pin(stream) as adk_core::EventStream)
         })

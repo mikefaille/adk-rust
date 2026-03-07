@@ -6,7 +6,7 @@ use crate::server::events::ResumeEvent;
 use crate::server::graph_runner::{INTERRUPTED_SESSIONS, deserialize_interrupt_response};
 use crate::server::sse::send_resume_response;
 use crate::server::state::AppState;
-use adk_core::types::{SessionId, UserId};
+use adk_core::types::SessionId;
 use axum::{
     Json,
     extract::{Path, Query, State},
@@ -1261,7 +1261,7 @@ async fn store_webhook_payload(
 /// Retrieve and remove a webhook payload by session ID.
 pub async fn get_webhook_payload(session_id: &SessionId) -> Option<WebhookPayload> {
     let mut payloads = WEBHOOK_PAYLOADS.write().await;
-    payloads.remove(&session_id.to_string())
+    payloads.remove(session_id.as_str())
 }
 
 /// Check if a session has a pending webhook payload.
@@ -1269,7 +1269,7 @@ pub async fn get_webhook_payload(session_id: &SessionId) -> Option<WebhookPayloa
 #[allow(dead_code)]
 pub async fn has_webhook_payload(session_id: &SessionId) -> bool {
     let payloads = WEBHOOK_PAYLOADS.read().await;
-    payloads.contains_key(&session_id.to_string())
+    payloads.contains_key(session_id.as_str())
 }
 
 // ============================================

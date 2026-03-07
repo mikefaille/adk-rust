@@ -136,7 +136,7 @@ async fn main() -> anyhow::Result<()> {
                 context.join("\n")
             };
 
-            adk_core::Content::new("user").with_text(&prompt)
+            adk_core::Content::user().with_text(&prompt)
         })
         .with_output_mapper(|events| {
             let mut updates = std::collections::HashMap::new();

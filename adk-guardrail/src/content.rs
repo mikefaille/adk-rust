@@ -185,7 +185,7 @@ mod tests {
     #[tokio::test]
     async fn test_harmful_content_blocks() {
         let filter = ContentFilter::harmful_content();
-        let content = Content::new("user").with_text("How to hack a computer");
+        let content = Content::user().with_text("How to hack a computer");
         let result = filter.validate(&content).await;
         assert!(result.is_fail());
     }
@@ -193,7 +193,7 @@ mod tests {
     #[tokio::test]
     async fn test_harmful_content_passes() {
         let filter = ContentFilter::harmful_content();
-        let content = Content::new("user").with_text("How to bake a cake");
+        let content = Content::user().with_text("How to bake a cake");
         let result = filter.validate(&content).await;
         assert!(result.is_pass());
     }
@@ -202,7 +202,7 @@ mod tests {
     async fn test_on_topic_passes() {
         let filter =
             ContentFilter::on_topic("cooking", vec!["recipe".into(), "cook".into(), "bake".into()]);
-        let content = Content::new("user").with_text("Give me a recipe for cookies");
+        let content = Content::user().with_text("Give me a recipe for cookies");
         let result = filter.validate(&content).await;
         assert!(result.is_pass());
     }
@@ -211,7 +211,7 @@ mod tests {
     async fn test_on_topic_fails() {
         let filter =
             ContentFilter::on_topic("cooking", vec!["recipe".into(), "cook".into(), "bake".into()]);
-        let content = Content::new("user").with_text("What is the weather today?");
+        let content = Content::user().with_text("What is the weather today?");
         let result = filter.validate(&content).await;
         assert!(result.is_fail());
     }
@@ -219,7 +219,7 @@ mod tests {
     #[tokio::test]
     async fn test_max_length() {
         let filter = ContentFilter::max_length(10);
-        let content = Content::new("user").with_text("This is a very long message");
+        let content = Content::user().with_text("This is a very long message");
         let result = filter.validate(&content).await;
         assert!(result.is_fail());
     }
@@ -227,7 +227,7 @@ mod tests {
     #[tokio::test]
     async fn test_blocked_keywords() {
         let filter = ContentFilter::blocked_keywords(vec!["forbidden".into(), "banned".into()]);
-        let content = Content::new("user").with_text("This is forbidden content");
+        let content = Content::user().with_text("This is forbidden content");
         let result = filter.validate(&content).await;
         assert!(result.is_fail());
     }

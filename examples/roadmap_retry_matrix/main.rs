@@ -10,7 +10,7 @@
 //!   ROADMAP_RUN_PROVIDER=gemini|openai|anthropic|deepseek|groq
 //!   ROADMAP_PROMPT="..."
 
-use adk_core::{Content, Llm, LlmRequest, Part};
+use adk_core::{Content, Llm, LlmRequest};
 use adk_model::{GeminiModel, RetryConfig};
 use anyhow::Result;
 use futures::StreamExt;
@@ -43,7 +43,7 @@ fn print_retry(label: &str, retry: &RetryConfig) {
 
 async fn call_once<M: Llm + ?Sized>(label: &str, model: &M, prompt: &str) -> Result<()> {
     println!("Running {} request...", label);
-    let request = LlmRequest::new(model.name(), vec![Content::new("user").with_text(prompt)]);
+    let request = LlmRequest::new(model.name(), vec![Content::user().with_text(prompt)]);
     let mut stream = model.generate_content(request, false).await?;
     let mut output = String::new();
 
@@ -52,7 +52,7 @@ async fn call_once<M: Llm + ?Sized>(label: &str, model: &M, prompt: &str) -> Res
         if let Some(content) = response.content {
             for part in content.parts {
                 if let Some(text) = part.as_text() {
-                    output.push_str(&text);
+                    output.push_str(text);
                 }
             }
         }

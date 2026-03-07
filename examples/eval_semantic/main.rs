@@ -28,7 +28,7 @@ SCORE: 0.92
 REASONING: Both responses correctly state that Python is a programming language, though the actual response provides slightly more detail about it being high-level and interpreted."#;
 
     let mock_llm = MockLlm::new("mock-judge")
-        .with_response(LlmResponse::new(Content::new("assistant").with_text(mock_response)));
+        .with_response(LlmResponse::new(Content::model().with_text(mock_response)));
 
     let _judge = LlmJudge::new(Arc::new(mock_llm));
 
@@ -82,7 +82,7 @@ REASONING: Both responses correctly state that Python is a programming language,
 
     // Using custom config
     let mock_llm2 = MockLlm::new("judge-v2")
-        .with_response(LlmResponse::new(Content::new("assistant").with_text(mock_response)));
+        .with_response(LlmResponse::new(Content::model().with_text(mock_response)));
     let _judge_with_config = LlmJudge::with_config(Arc::new(mock_llm2), config);
 
     // -------------------------------------------------------------------------
@@ -104,7 +104,7 @@ REASONING: Both responses correctly state that Python is a programming language,
 
     // Create evaluator with LLM judge
     let mock_llm3 = MockLlm::new("eval-judge")
-        .with_response(LlmResponse::new(Content::new("assistant").with_text(mock_response)));
+        .with_response(LlmResponse::new(Content::model().with_text(mock_response)));
     let _evaluator =
         Evaluator::with_llm_judge(EvaluationConfig::with_criteria(criteria), Arc::new(mock_llm3));
 

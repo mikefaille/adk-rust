@@ -1108,7 +1108,7 @@ impl Agent for LlmAgent {
                                 if !valid_target {
                                     // Return error to LLM so it can try again
                                     let error_content = Content {
-                                        role: adk_core::types::Role::Custom("tool".to_string()),
+                                        role: adk_core::types::Role::Tool,
                                         parts: vec![Part::FunctionResponse {
                                             name: name.clone(),
                                             response: serde_json::json!({
@@ -1157,7 +1157,7 @@ impl Agent for LlmAgent {
                                     Some(ToolConfirmationDecision::Deny) => {
                                         tool_actions.tool_confirmation_decision = Some(false);
                                         response_content = Some(Content {
-                                            role: adk_core::types::Role::Custom("tool".to_string()),
+                                            role: adk_core::types::Role::Tool,
                                             parts: vec![Part::FunctionResponse {
                                                 name: name.clone(),
                                                 response: serde_json::json!({
@@ -1272,7 +1272,7 @@ impl Agent for LlmAgent {
                                             confirmation_decision;
                                     }
                                     response_content = Some(Content {
-                                        role: adk_core::types::Role::Custom("tool".to_string()),
+                                        role: adk_core::types::Role::Tool,
                                         parts: vec![Part::FunctionResponse {
                                             name: name.clone(),
                                             response: result,
@@ -1281,7 +1281,7 @@ impl Agent for LlmAgent {
                                     });
                                 } else {
                                     response_content = Some(Content {
-                                        role: adk_core::types::Role::Custom("tool".to_string()),
+                                        role: adk_core::types::Role::Tool,
                                         parts: vec![Part::FunctionResponse {
                                             name: name.clone(),
                                             response: serde_json::json!({

@@ -27,7 +27,7 @@ impl Llm for MockSummarizerLlm {
 }
 
 fn make_event(author: &str, text: &str) -> Event {
-    let mut event = Event::new("inv-test");
+    let mut event = Event::new(adk_core::types::InvocationId::try_from("inv-test").unwrap());
     event.author = author.to_string();
     event.set_content(Content {
         role: if author == "user" { adk_core::Role::User } else { adk_core::Role::Model },
@@ -104,7 +104,7 @@ async fn test_summarize_skips_non_text_parts() {
     let summarizer = LlmEventSummarizer::new(llm);
 
     // Event with function call (no text) — should be skipped in prompt formatting
-    let mut fc_event = Event::new("inv-test");
+    let mut fc_event = Event::new(adk_core::types::InvocationId::try_from("inv-test").unwrap());
     fc_event.author = "assistant".to_string();
     fc_event.set_content(Content {
         role: adk_core::Role::Model,

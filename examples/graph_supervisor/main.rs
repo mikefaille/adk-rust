@@ -119,7 +119,7 @@ async fn main() -> anyhow::Result<()> {
                 }
             );
 
-            adk_core::Content::new("user").with_text(&prompt)
+            adk_core::Content::user().with_text(&prompt)
         })
         .with_output_mapper(|events| {
             let mut updates = std::collections::HashMap::new();
@@ -153,7 +153,7 @@ async fn main() -> anyhow::Result<()> {
     let researcher_node = AgentNode::new(researcher_agent)
         .with_input_mapper(|state| {
             let task = state.get("task").and_then(|v| v.as_str()).unwrap_or("");
-            adk_core::Content::new("user").with_text(format!("Research this topic: {}", task))
+            adk_core::Content::user().with_text(format!("Research this topic: {}", task))
         })
         .with_output_mapper(|events| {
             let mut updates = std::collections::HashMap::new();
@@ -177,7 +177,7 @@ async fn main() -> anyhow::Result<()> {
         .with_input_mapper(|state| {
             let task = state.get("task").and_then(|v| v.as_str()).unwrap_or("");
             let research = state.get("research_output").and_then(|v| v.as_str()).unwrap_or("");
-            adk_core::Content::new("user")
+            adk_core::Content::user()
                 .with_text(format!("Write content about: {}\n\nResearch:\n{}", task, research))
         })
         .with_output_mapper(|events| {
@@ -201,7 +201,7 @@ async fn main() -> anyhow::Result<()> {
     let coder_node = AgentNode::new(coder_agent)
         .with_input_mapper(|state| {
             let task = state.get("task").and_then(|v| v.as_str()).unwrap_or("");
-            adk_core::Content::new("user").with_text(format!("Write code for: {}", task))
+            adk_core::Content::user().with_text(format!("Write code for: {}", task))
         })
         .with_output_mapper(|events| {
             let mut updates = std::collections::HashMap::new();
@@ -315,7 +315,7 @@ async fn main() -> anyhow::Result<()> {
         input.insert("history".to_string(), json!([]));
 
         let result =
-            graph.invoke(input, ExecutionConfig::new("supervisor-thread".to_string())).await?;
+            graph.invoke(input, ExecutionConfig::new(adk_core::types::SessionId::try_from("supervisor-thread").unwrap())).await?;
 
         println!("\n{}", "=".repeat(70));
         println!("{}", result.get("final_result").and_then(|v| v.as_str()).unwrap_or("No result"));

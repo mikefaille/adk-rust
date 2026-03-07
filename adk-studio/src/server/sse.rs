@@ -2,7 +2,7 @@ use crate::keystore::{KNOWN_PROVIDER_KEYS, Keystore};
 use crate::server::events::{DebugEvent, TraceEventV2};
 use crate::server::graph_runner::{GraphInterruptHandler, INTERRUPTED_SESSIONS};
 use crate::server::state::AppState;
-use adk_core::types::{SessionId, UserId};
+use adk_core::types::SessionId;
 use axum::{
     extract::{Path, Query, State},
     response::sse::{Event, Sse},
@@ -550,17 +550,16 @@ pub struct StreamQuery {
     api_key: Option<String>,
     #[serde(default)]
     binary_path: Option<String>,
-    #[serde(default)]
-    session_id: SessionId,
+    session_id: String,
 }
 
 async fn get_or_create_session(
-    session_id: &SessionId,
+    session_id: &str,
     binary_path: &str,
     merged_env: &HashMap<String, String>,
 ) -> Result<(), String> {
     let mut sessions = SESSIONS.lock().await;
-    if sessions.contains_key(session_id.as_str()) {
+    if sessions.contains_key(session_id) {
         return Ok(());
     }
 
@@ -568,7 +567,7 @@ async fn get_or_create_session(
     // The caller (stream_handler) has already merged keys from process env,
     // project env_vars, and the encrypted keystore in priority order.
     let mut cmd = Command::new(binary_path);
-    cmd.arg(session_id.to_string())
+    cmd.arg(session_id)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
@@ -739,7 +738,8 @@ pub async fn stream_handler(
         // Check if this is a webhook trigger (special input marker)
         let actual_input = if input == "__webhook__" {
             // Retrieve the webhook payload stored by the webhook trigger endpoint
-            if let Some(webhook_payload) = crate::server::handlers::get_webhook_payload(&session_id).await {
+            let parsed_session_id = SessionId::try_from(session_id.as_str()).unwrap();
+            if let Some(webhook_payload) = crate::server::handlers::get_webhook_payload(&parsed_session_id).await {
                 // Store webhook payload in execution state
                 exec_ctx.update_state("webhook_payload", webhook_payload.payload.clone());
                 exec_ctx.update_state("webhook_path", serde_json::Value::String(webhook_payload.path.clone()));
@@ -892,7 +892,7 @@ pub async fn stream_handler(
                         // Create interrupt handler and store the interrupted state
                         let handler = GraphInterruptHandler::new(INTERRUPTED_SESSIONS.clone());
                         handler.handle_interrupt(
-                            &session_id,
+                            &SessionId::try_from(session_id.as_str()).unwrap(),
                             interrupt_info.thread_id.clone(),
                             interrupt_info.checkpoint_id.clone(),
                             interrupt_info.node_id.clone(),
@@ -1295,7 +1295,7 @@ pub async fn send_resume_response(
 /// Check if a session exists and is active.
 pub async fn session_exists(session_id: &SessionId) -> bool {
     let sessions = SESSIONS.lock().await;
-    sessions.contains_key(&session_id.to_string())
+    sessions.contains_key(session_id.as_str())
 }
 
 /// Get the list of active session IDs.

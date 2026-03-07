@@ -6,7 +6,7 @@
 //! Required env:
 //!   GOOGLE_API_KEY (or GEMINI_API_KEY)
 
-use adk_core::{Content, Llm, LlmRequest, Part};
+use adk_core::{Content, Llm, LlmRequest};
 use adk_model::{GeminiModel, RetryConfig};
 use anyhow::Result;
 use futures::StreamExt;
@@ -17,7 +17,7 @@ fn google_api_key() -> Option<String> {
 }
 
 async fn call_once(model: &GeminiModel, prompt: &str) -> Result<String> {
-    let request = LlmRequest::new(model.name(), vec![Content::new("user").with_text(prompt)]);
+    let request = LlmRequest::new(model.name(), vec![Content::user().with_text(prompt)]);
     let mut stream = model.generate_content(request, false).await?;
     let mut output = String::new();
 
@@ -26,7 +26,7 @@ async fn call_once(model: &GeminiModel, prompt: &str) -> Result<String> {
         if let Some(content) = response.content {
             for part in content.parts {
                 if let Some(text) = part.as_text() {
-                    output.push_str(&text);
+                    output.push_str(text);
                 }
             }
         }

@@ -20,7 +20,7 @@
 
 use adk_agent::LlmAgentBuilder;
 use adk_core::types::{SessionId, UserId};
-use adk_core::{Content, ContextCacheConfig, Part};
+use adk_core::{Content, ContextCacheConfig};
 use adk_model::gemini::GeminiModel;
 use adk_runner::{CachePerformanceAnalyzer, Runner, RunnerConfig};
 use adk_session::{CreateRequest, GetRequest, InMemorySessionService, SessionService};
@@ -255,7 +255,7 @@ async fn ask(
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!(">> Turn {turn}: {question}\n");
 
-    let content = Content::new("user").with_text(question);
+    let content = Content::user().with_text(question);
     let mut stream =
         runner.run(UserId::new("user_1").unwrap(), session_id.clone(), content).await?;
 

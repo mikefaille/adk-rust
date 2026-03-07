@@ -488,7 +488,7 @@ impl Agent for RealtimeAgent {
                                 tool_event.author = agent_name.clone();
                                 tool_event.actions = actions.clone();
                                 tool_event.llm_response.content = Some(Content {
-                                    role: adk_core::types::Role::Custom("function".to_string()),
+                                    role: adk_core::types::Role::Function,
                                     parts: vec![Part::FunctionResponse {
                                         name: name.clone(),
                                         response: result.clone(),

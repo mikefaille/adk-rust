@@ -134,7 +134,7 @@ fn do_main() -> Result<(), Box<dyn std::error::Error>> {
         && let Some(parts) = &candidate.content.parts
     {
         for (i, part) in parts.iter().enumerate() {
-            if let Part::Text { text, thought, thought_signature } = part {
+            if let Part::Text { text: _, thought, thought_signature } = part {
                 let is_thought = thought.unwrap_or(false);
                 let has_signature = thought_signature.is_some();
                 info!(

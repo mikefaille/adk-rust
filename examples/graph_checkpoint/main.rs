@@ -76,7 +76,7 @@ async fn main() -> anyhow::Result<()> {
     let extractor_node = AgentNode::new(extractor_agent)
         .with_input_mapper(|state| {
             let text = state.get("text").and_then(|v| v.as_str()).unwrap_or("");
-            adk_core::Content::new("user").with_text(format!("Extract key points: {}", text))
+            adk_core::Content::user().with_text(format!("Extract key points: {}", text))
         })
         .with_output_mapper(|events| {
             let mut updates = std::collections::HashMap::new();
@@ -100,7 +100,7 @@ async fn main() -> anyhow::Result<()> {
     let analyzer_node = AgentNode::new(analyzer_agent)
         .with_input_mapper(|state| {
             let points = state.get("key_points").and_then(|v| v.as_str()).unwrap_or("");
-            adk_core::Content::new("user").with_text(format!("Analyze these points:\n{}", points))
+            adk_core::Content::user().with_text(format!("Analyze these points:\n{}", points))
         })
         .with_output_mapper(|events| {
             let mut updates = std::collections::HashMap::new();
@@ -124,7 +124,7 @@ async fn main() -> anyhow::Result<()> {
     let summarizer_node = AgentNode::new(summarizer_agent)
         .with_input_mapper(|state| {
             let analysis = state.get("analysis").and_then(|v| v.as_str()).unwrap_or("");
-            adk_core::Content::new("user").with_text(format!("Summarize:\n{}", analysis))
+            adk_core::Content::user().with_text(format!("Summarize:\n{}", analysis))
         })
         .with_output_mapper(|events| {
             let mut updates = std::collections::HashMap::new();
@@ -178,7 +178,7 @@ async fn main() -> anyhow::Result<()> {
     println!("[analyzer] Running...");
     println!("[summarizer] Running...");
 
-    let result = graph.invoke(input, ExecutionConfig::new(thread_id.to_string())).await?;
+    let result = graph.invoke(input, ExecutionConfig::new(adk_core::types::SessionId::try_from(thread_id).unwrap())).await?;
 
     println!("\n--- Results ---");
     println!(
@@ -252,7 +252,7 @@ async fn main() -> anyhow::Result<()> {
         let mut input = State::new();
         input.insert("text".to_string(), json!(text));
 
-        let result = graph.invoke(input, ExecutionConfig::new(thread.to_string())).await?;
+        let result = graph.invoke(input, ExecutionConfig::new(adk_core::types::SessionId::try_from(*thread).unwrap())).await?;
         println!(
             "\n{}: {}",
             thread,

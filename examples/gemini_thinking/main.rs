@@ -19,7 +19,6 @@
 //! ```
 
 use adk_agent::LlmAgentBuilder;
-use adk_core::types::{SessionId, UserId};
 use adk_core::{AdkError, Content, Llm, LlmRequest, Part, Result as AdkResult, ToolContext};
 use adk_model::gemini::GeminiModel;
 use adk_runner::{Runner, RunnerConfig};
@@ -106,7 +105,7 @@ async fn demo_thought_traces(model: &GeminiModel) -> Result<(), Box<dyn std::err
 
     let request = LlmRequest {
         model: String::new(),
-        contents: vec![Content::new("user").with_text(
+        contents: vec![Content::user().with_text(
             "A farmer has 17 sheep. All but 9 run away. How many sheep does the farmer have left? \
              Explain your reasoning step by step.",
         )],
@@ -216,7 +215,7 @@ async fn demo_thought_signature(model: Arc<GeminiModel>) -> Result<(), Box<dyn s
 
     // Turn 1: triggers thought + tool call with thought_signature
     println!(">> Turn 1: Multi-step problem requiring tools\n");
-    let content = Content::new("user").with_text(
+    let content = Content::user().with_text(
         "A train travels 120 km in 2 hours and 15 minutes. \
          What is its average speed in miles per hour?",
     );
@@ -264,14 +263,14 @@ async fn demo_thought_signature(model: Arc<GeminiModel>) -> Result<(), Box<dyn s
                     }
                 }
             }
-            if e.llm_response.turn_complete {
-                if let Some(usage) = &e.llm_response.usage_metadata {
-                    println!("\n\n  Token usage:");
-                    println!("    prompt:    {}", usage.prompt_token_count);
-                    println!("    output:    {}", usage.candidates_token_count);
-                    if let Some(thought) = usage.thinking_token_count {
-                        println!("    thought:  {thought}");
-                    }
+            if e.llm_response.turn_complete
+                && let Some(usage) = &e.llm_response.usage_metadata
+            {
+                println!("\n\n  Token usage:");
+                println!("    prompt:    {}", usage.prompt_token_count);
+                println!("    output:    {}", usage.candidates_token_count);
+                if let Some(thought) = usage.thinking_token_count {
+                    println!("    thought:  {thought}");
                 }
             }
         }
@@ -284,30 +283,30 @@ async fn demo_thought_signature(model: Arc<GeminiModel>) -> Result<(), Box<dyn s
 
     // Turn 2: follow-up that relies on preserved history (including thought_signature)
     println!("\n>> Turn 2: Follow-up (history includes thought_signature)\n");
-    let content = Content::new("user").with_text("Now convert that speed to km/h as well.");
+    let content = Content::user().with_text("Now convert that speed to km/h as well.");
 
     let mut stream = runner
         .run(adk_core::types::UserId::new("user_1").unwrap(), session_id.clone(), content)
         .await?;
 
     while let Some(event) = stream.next().await {
-        if let Ok(e) = event {
-            if let Some(content) = e.llm_response.content {
-                for part in &content.parts {
-                    match part {
-                        Part::Thinking { thought, .. } => {
-                            let preview = &thought[..thought.len().min(100)];
-                            println!("  💭 {preview}...");
-                        }
-                        Part::Text(text) => print!("{text}"),
-                        Part::FunctionCall { name, args, .. } => {
-                            println!("  🔧 Tool call: {name}({args})");
-                        }
-                        Part::FunctionResponse { response, .. } => {
-                            println!("  📋 Tool result: {}", response);
-                        }
-                        _ => {}
+        if let Ok(e) = event
+            && let Some(content) = e.llm_response.content
+        {
+            for part in &content.parts {
+                match part {
+                    Part::Thinking { thought, .. } => {
+                        let preview = &thought[..thought.len().min(100)];
+                        println!("  💭 {preview}...");
                     }
+                    Part::Text(text) => print!("{text}"),
+                    Part::FunctionCall { name, args, .. } => {
+                        println!("  🔧 Tool call: {name}({args})");
+                    }
+                    Part::FunctionResponse { response, .. } => {
+                        println!("  📋 Tool result: {}", response);
+                    }
+                    _ => {}
                 }
             }
         }

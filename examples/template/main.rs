@@ -100,7 +100,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             continue;
         }
 
-        let content = Content::new("user").with_text(input);
+        let content = Content::user().with_text(input);
         let mut events = runner
             .run(adk_core::types::UserId::new(user_id).unwrap(), session_id.clone(), content)
             .await?;

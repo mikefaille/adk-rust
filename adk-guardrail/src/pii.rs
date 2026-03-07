@@ -106,7 +106,7 @@ impl Guardrail for PiiRedactor {
         if any_redacted {
             let types_str: Vec<_> = redacted_types.iter().map(|t| format!("{:?}", t)).collect();
             GuardrailResult::Transform {
-                new_content: Content { role: content.role.clone(), parts: new_parts },
+                new_content: Content { role: content.role, parts: new_parts },
                 reason: format!("Redacted PII types: {}", types_str.join(", ")),
             }
         } else {
@@ -175,7 +175,7 @@ mod tests {
     #[tokio::test]
     async fn test_guardrail_transform() {
         let redactor = PiiRedactor::new();
-        let content = Content::new("user").with_text("Email: test@example.com");
+        let content = Content::user().with_text("Email: test@example.com");
         let result = redactor.validate(&content).await;
 
         match result {
@@ -190,7 +190,7 @@ mod tests {
     #[tokio::test]
     async fn test_guardrail_pass() {
         let redactor = PiiRedactor::new();
-        let content = Content::new("user").with_text("Hello world");
+        let content = Content::user().with_text("Hello world");
         let result = redactor.validate(&content).await;
         assert!(result.is_pass());
     }

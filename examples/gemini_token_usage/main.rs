@@ -53,7 +53,7 @@ async fn send_request(
 ) -> Result<(String, Option<UsageMetadata>), Box<dyn std::error::Error>> {
     let request = LlmRequest {
         model: String::new(),
-        contents: vec![Content::new("user").with_text(prompt)],
+        contents: vec![Content::user().with_text(prompt)],
         config: None,
         tools: HashMap::new(),
     };

@@ -52,7 +52,7 @@ impl adk_core::Agent for MockAgent {
         let s = stream! {
             // Yield nothing, but satisfy type inference
             if false {
-                yield Ok(adk_core::Event::new("mock"));
+                yield Ok(adk_core::Event::new(adk_core::types::InvocationId::try_from("mock").unwrap()));
             }
         };
         Ok(Box::pin(s))

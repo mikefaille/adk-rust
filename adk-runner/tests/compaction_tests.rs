@@ -207,28 +207,28 @@ fn test_conversation_history_respects_compaction() {
     let base_time = Utc::now() - Duration::minutes(10);
 
     // Build events: 4 old events + 1 compaction + 2 new events
-    let mut old_event_1 = Event::new("inv-1");
+    let mut old_event_1 = Event::new(adk_core::types::InvocationId::try_from("inv-1").unwrap());
     old_event_1.author = "user".to_string();
     old_event_1.timestamp = base_time;
     old_event_1.set_content(Content::new(Role::User).with_text("Old message 1"));
 
-    let mut old_event_2 = Event::new("inv-1");
+    let mut old_event_2 = Event::new(adk_core::types::InvocationId::try_from("inv-1").unwrap());
     old_event_2.author = "assistant".to_string();
     old_event_2.timestamp = base_time + Duration::seconds(1);
     old_event_2.set_content(Content::new(Role::Model).with_text("Old response 1"));
 
-    let mut old_event_3 = Event::new("inv-2");
+    let mut old_event_3 = Event::new(adk_core::types::InvocationId::try_from("inv-2").unwrap());
     old_event_3.author = "user".to_string();
     old_event_3.timestamp = base_time + Duration::seconds(2);
     old_event_3.set_content(Content::new(Role::User).with_text("Old message 2"));
 
-    let mut old_event_4 = Event::new("inv-2");
+    let mut old_event_4 = Event::new(adk_core::types::InvocationId::try_from("inv-2").unwrap());
     old_event_4.author = "assistant".to_string();
     old_event_4.timestamp = base_time + Duration::seconds(3);
     old_event_4.set_content(Content::new(Role::Model).with_text("Old response 2"));
 
     // Compaction event summarizing events 1-4
-    let mut compaction_event = Event::new("compaction");
+    let mut compaction_event = Event::new(adk_core::types::InvocationId::try_from("compaction").unwrap());
     compaction_event.author = "system".to_string();
     compaction_event.timestamp = base_time + Duration::seconds(4);
     compaction_event.actions = EventActions {
@@ -243,12 +243,12 @@ fn test_conversation_history_respects_compaction() {
     };
 
     // New events after compaction
-    let mut new_event_1 = Event::new("inv-3");
+    let mut new_event_1 = Event::new(adk_core::types::InvocationId::try_from("inv-3").unwrap());
     new_event_1.author = "user".to_string();
     new_event_1.timestamp = base_time + Duration::seconds(5);
     new_event_1.set_content(Content::new(Role::User).with_text("New message"));
 
-    let mut new_event_2 = Event::new("inv-3");
+    let mut new_event_2 = Event::new(adk_core::types::InvocationId::try_from("inv-3").unwrap());
     new_event_2.author = "assistant".to_string();
     new_event_2.timestamp = base_time + Duration::seconds(6);
     new_event_2.set_content(Content::new(Role::Model).with_text("New response"));
@@ -300,11 +300,11 @@ fn test_conversation_history_respects_compaction() {
 /// Test that conversation_history works normally when no compaction exists.
 #[test]
 fn test_conversation_history_without_compaction() {
-    let mut event_1 = Event::new("inv-1");
+    let mut event_1 = Event::new(adk_core::types::InvocationId::try_from("inv-1").unwrap());
     event_1.author = "user".to_string();
     event_1.set_content(Content::new(Role::User).with_text("Hello"));
 
-    let mut event_2 = Event::new("inv-1");
+    let mut event_2 = Event::new(adk_core::types::InvocationId::try_from("inv-1").unwrap());
     event_2.author = "assistant".to_string();
     event_2.set_content(Content::new(Role::Model).with_text("Hi there"));
 
