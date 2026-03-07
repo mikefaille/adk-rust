@@ -339,7 +339,7 @@ let multi_model = MistralRsMultiModel::from_config("models.toml").await?;
 
 // Or configure programmatically
 let config = MultiModelConfig::new()
-    .add_model("phi", ModelSource::huggingface("mistralai/Magistral-Small-2509"))
+    .add_model("magistral-small", ModelSource::huggingface("mistralai/Magistral-Small-2509"))
     .add_model("mistral", ModelSource::huggingface("mistralai/Mistral-7B-v0.1"))
     .default_model("phi");
 
