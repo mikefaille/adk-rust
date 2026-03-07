@@ -1,5 +1,6 @@
 use adk_core::{
-    CallbackContext, Content, EventActions, MemoryEntry, ReadonlyContext, Result, Role, Tool, ToolContext,
+    CallbackContext, Content, EventActions, MemoryEntry, ReadonlyContext, Result, Role, Tool,
+    ToolContext,
 };
 use adk_tool::FunctionTool;
 use async_trait::async_trait;

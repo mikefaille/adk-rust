@@ -65,10 +65,7 @@ impl MemoryService for InMemoryMemoryService {
         session_id: &SessionId,
         entries: Vec<MemoryEntry>,
     ) -> Result<()> {
-        let key = MemoryKey {
-            app_name: app_name.to_string(),
-            user_id: user_id.clone(),
-        };
+        let key = MemoryKey { app_name: app_name.to_string(), user_id: user_id.clone() };
 
         let stored_entries: Vec<StoredEntry> = entries
             .into_iter()

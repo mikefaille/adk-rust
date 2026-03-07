@@ -151,8 +151,7 @@ impl BedrockClient {
             AdkError::Model(format!("Bedrock response missing output for model={}", self.model_id))
         })?;
 
-        let adk_response =
-            bedrock_response_to_adk(&output, &response.stop_reason, response.usage);
+        let adk_response = bedrock_response_to_adk(&output, &response.stop_reason, response.usage);
 
         let response_stream = try_stream! {
             yield adk_response;

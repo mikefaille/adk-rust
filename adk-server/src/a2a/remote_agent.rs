@@ -170,7 +170,8 @@ fn convert_update_event(
                 return None;
             }
 
-            let mut event = Event::new(adk_core::types::InvocationId::new(invocation_id.to_string()).unwrap());
+            let mut event =
+                Event::new(adk_core::types::InvocationId::new(invocation_id.to_string()).unwrap());
             event.author = agent_name.to_string();
             event.llm_response.content =
                 Some(Content { role: adk_core::types::Role::Model, parts });
@@ -181,7 +182,9 @@ fn convert_update_event(
             // Only create event for final status updates with messages
             if status_event.final_update {
                 if let Some(msg) = status_event.status.message {
-                    let mut event = Event::new(adk_core::types::InvocationId::new(invocation_id.to_string()).unwrap());
+                    let mut event = Event::new(
+                        adk_core::types::InvocationId::new(invocation_id.to_string()).unwrap(),
+                    );
                     event.author = agent_name.to_string();
                     event.llm_response.content = Some(Content {
                         role: adk_core::types::Role::Model,
@@ -197,7 +200,8 @@ fn convert_update_event(
 }
 
 fn create_error_event(invocation_id: &str, agent_name: &str, error: &str) -> Event {
-    let mut event = Event::new(adk_core::types::InvocationId::new(invocation_id.to_string()).unwrap());
+    let mut event =
+        Event::new(adk_core::types::InvocationId::new(invocation_id.to_string()).unwrap());
     event.author = agent_name.to_string();
     event.llm_response.error_message = Some(error.to_string());
     event.llm_response.turn_complete = true;

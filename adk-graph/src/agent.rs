@@ -471,8 +471,10 @@ mod tests {
         assert_eq!(agent.description(), "Test agent");
 
         // Test direct invocation
-        let result =
-            agent.invoke(State::new(), ExecutionConfig::new(SessionId::new("test").unwrap())).await.unwrap();
+        let result = agent
+            .invoke(State::new(), ExecutionConfig::new(SessionId::new("test").unwrap()))
+            .await
+            .unwrap();
 
         assert_eq!(result.get("value"), Some(&json!(42)));
     }

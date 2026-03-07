@@ -1,4 +1,3 @@
-use mime_guess::mime;
 use crate::ServerConfig;
 use adk_core::{
     Role,
@@ -16,6 +15,7 @@ use futures::{
     StreamExt,
     stream::{self, Stream},
 };
+use mime_guess::mime;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::convert::Infallible;
@@ -213,7 +213,11 @@ fn build_content_with_attachments(
                     ));
                 }
                 content.parts.push(adk_core::Part::InlineData {
-                    mime_type: attachment.mime_type.clone().parse().unwrap_or(mime::APPLICATION_OCTET_STREAM),
+                    mime_type: attachment
+                        .mime_type
+                        .clone()
+                        .parse()
+                        .unwrap_or(mime::APPLICATION_OCTET_STREAM),
                     data: data.into(),
                 });
             }
@@ -253,7 +257,11 @@ fn build_content_from_parts(parts: &[MessagePart]) -> Result<adk_core::Content, 
                         ));
                     }
                     content.parts.push(adk_core::Part::InlineData {
-                        mime_type: inline_data.mime_type.clone().parse().unwrap_or_else(|_| "application/octet-stream".parse().unwrap()),
+                        mime_type: inline_data
+                            .mime_type
+                            .clone()
+                            .parse()
+                            .unwrap_or_else(|_| "application/octet-stream".parse().unwrap()),
                         data: data.into(),
                     });
                 }

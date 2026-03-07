@@ -1,5 +1,5 @@
+pub use crate::event::{FinishReason, UsageMetadata};
 use crate::{Result, types::Content};
-pub use crate::event::{UsageMetadata, FinishReason};
 use async_trait::async_trait;
 use futures::stream::Stream;
 use serde::{Deserialize, Serialize};
@@ -29,7 +29,7 @@ pub struct GenerateContentConfig {
     pub top_p: Option<f32>,
     pub top_k: Option<i32>,
     pub max_output_tokens: Option<i32>,
-    
+
     #[serde(skip_serializing_if = "Option::is_none")]
     pub response_schema: Option<serde_json::Value>,
 
@@ -286,6 +286,6 @@ mod tests {
     #[test]
     fn test_finish_reason() {
         assert_eq!(FinishReason::Stop, FinishReason::Stop);
-        assert_ne!(FinishReason::Stop, FinishReason::Length);
+        assert_ne!(FinishReason::Stop, FinishReason::MaxTokens);
     }
 }

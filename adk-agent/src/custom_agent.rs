@@ -54,7 +54,7 @@ impl Agent for CustomAgent {
         for callback in before_callbacks.as_ref() {
             match callback(ctx.clone() as Arc<dyn CallbackContext>).await {
                 Ok(Some(content)) => {
-                    let invocation_id = ctx.invocation_id().to_string();
+                    let _invocation_id = ctx.invocation_id().to_string();
                     let s = stream! {
                         let mut early_event = Event::new(ctx.invocation_id().clone());
                         early_event.author = agent_name.clone();

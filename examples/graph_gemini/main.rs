@@ -36,7 +36,7 @@ async fn call_gemini(model: &Arc<GeminiModel>, prompt: &str) -> Result<String, G
             && let Some(content) = response.content
         {
             for part in content.parts {
-                if let Some(text) = part.text() {
+                if let Some(text) = part.as_text() {
                     result.push_str(text);
                 }
             }

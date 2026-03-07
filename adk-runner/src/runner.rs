@@ -1,6 +1,7 @@
 use crate::cache::CacheManager;
 use crate::context::RunnerContext;
 use adk_artifact::ArtifactService;
+use adk_core::types::InvocationId;
 use adk_core::{
     Agent, CacheCapable, Content, ContextCacheConfig, EventStream, Memory, Result, RunConfig,
     types::{SessionId, UserId},
@@ -158,7 +159,7 @@ impl Runner {
             }
 
             let mut runner_ctx = RunnerContext::new(
-                invocation_id.clone(),
+                InvocationId::from(invocation_id.clone()),
                 agent_to_run.clone(),
                 user_id.clone(),
                 app_name.clone(),
@@ -193,7 +194,7 @@ impl Runner {
                     .await
                 {
                     Ok(Some(content)) => {
-                        let mut early_event = adk_core::Event::new(adk_core::types::InvocationId::try_from(invocation_id.as_str()).unwrap());
+                        let mut early_event = adk_core::Event::new(adk_core::types::InvocationId::from(invocation_id.as_str()));
                         early_event.author = agent_to_run.name().to_string();
                         early_event.llm_response.content = Some(content);
 
@@ -226,7 +227,7 @@ impl Runner {
                         effective_user_content = modified;
 
                         let mut refreshed_ctx = RunnerContext::with_mutable_session(
-                            invocation_id.clone(),
+                            InvocationId::from(invocation_id.clone()),
                             agent_to_run.clone(),
                             user_id.clone(),
                             app_name.clone(),
@@ -262,7 +263,7 @@ impl Runner {
             }
 
             // Append user message to session service (persistent storage)
-            let mut user_event = adk_core::Event::new(adk_core::types::InvocationId::try_from(invocation_id.as_str()).unwrap());
+            let mut user_event = adk_core::Event::new(adk_core::types::InvocationId::from(invocation_id.as_str()));
             user_event.author = "user".to_string();
             user_event.llm_response.content = Some(effective_user_content.clone());
 
@@ -321,7 +322,7 @@ impl Runner {
                         run_config.cached_content = Some(cache_name.to_string());
                         // Rebuild the invocation context with the updated run config
                         let mut refreshed_ctx = RunnerContext::with_mutable_session(
-                            invocation_id.clone(),
+                            InvocationId::from(invocation_id.clone()),
                             agent_to_run.clone(),
                             user_id.clone(),
                             app_name.clone(),
@@ -446,7 +447,7 @@ impl Runner {
                     // For transfers, we reuse the same mutable session to preserve state
                     let transfer_invocation_id = format!("inv-{}", uuid::Uuid::new_v4());
                     let mut transfer_ctx = RunnerContext::with_mutable_session(
-                        transfer_invocation_id.clone(),
+                        InvocationId::from(transfer_invocation_id.clone()),
                         target_agent.clone(),
                         user_id.clone(),
                         app_name.clone(),

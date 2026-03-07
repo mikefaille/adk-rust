@@ -1,3 +1,4 @@
+use adk_core::types::{SessionId, UserId};
 use adk_session::*;
 use serde_json::json;
 use std::collections::HashMap;
@@ -14,9 +15,9 @@ async fn test_create_session() {
     };
 
     let session = service.create(req).await.unwrap();
-    assert_eq!(session.id().as_ref(), "session1");
+    assert_eq!(session.id().as_str(), "session1");
     assert_eq!(session.app_name(), "test_app");
-    assert_eq!(session.user_id().as_ref(), "user1");
+    assert_eq!(session.user_id().as_str(), "user1");
 }
 
 #[tokio::test]
@@ -44,7 +45,7 @@ async fn test_get_session() {
         .await
         .unwrap();
 
-    assert_eq!(session.id().as_ref(), "session1");
+    assert_eq!(session.id().as_str(), "session1");
 }
 
 #[tokio::test]

@@ -28,7 +28,7 @@ async fn main() -> anyhow::Result<()> {
             user_id: UserId::new("user_123").unwrap(),
             session_id: SessionId::new("session_456").unwrap(),
             file_name: "notes.txt".to_string(),
-            part: Part::text("First version of notes".to_string() ),
+            part: Part::text("First version of notes".to_string()),
             version: None, // Auto-increment
         })
         .await?;
@@ -43,7 +43,10 @@ async fn main() -> anyhow::Result<()> {
             user_id: UserId::new("user_123").unwrap(),
             session_id: SessionId::new("session_456").unwrap(),
             file_name: "image.jpg".to_string(),
-            part: Part::InlineData { mime_type: "image/jpeg".parse().unwrap(), data: image_data.into() },
+            part: Part::InlineData {
+                mime_type: "image/jpeg".parse().unwrap(),
+                data: image_data.into(),
+            },
             version: None,
         })
         .await?;
@@ -57,7 +60,7 @@ async fn main() -> anyhow::Result<()> {
             user_id: UserId::new("user_123").unwrap(),
             session_id: SessionId::new("session_456").unwrap(),
             file_name: "notes.txt".to_string(),
-            part: Part::text("Updated notes - version 2".to_string() ),
+            part: Part::text("Updated notes - version 2".to_string()),
             version: None,
         })
         .await?;

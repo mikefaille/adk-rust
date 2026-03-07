@@ -1,5 +1,5 @@
-use adk_core::{Content, Part, Role};
 use adk_core::types::{SessionId, UserId};
+use adk_core::{Content, Part, Role};
 use adk_memory::*;
 use chrono::Utc;
 
@@ -20,7 +20,15 @@ async fn test_add_and_search() {
         },
     ];
 
-    service.add_session("app1", &UserId::new("user1").unwrap(), &SessionId::new("session1").unwrap(), entries).await.unwrap();
+    service
+        .add_session(
+            "app1",
+            &UserId::new("user1").unwrap(),
+            &SessionId::new("session1").unwrap(),
+            entries,
+        )
+        .await
+        .unwrap();
 
     let search_resp = service
         .search(SearchRequest {
@@ -47,7 +55,15 @@ async fn test_search_no_results() {
         timestamp: Utc::now(),
     }];
 
-    service.add_session("app1", &UserId::new("user1").unwrap(), &SessionId::new("session1").unwrap(), entries).await.unwrap();
+    service
+        .add_session(
+            "app1",
+            &UserId::new("user1").unwrap(),
+            &SessionId::new("session1").unwrap(),
+            entries,
+        )
+        .await
+        .unwrap();
 
     let search_resp = service
         .search(SearchRequest {
@@ -162,7 +178,15 @@ async fn test_empty_content_filtered() {
         timestamp: Utc::now(),
     }];
 
-    service.add_session("app1", &UserId::new("user1").unwrap(), &SessionId::new("session1").unwrap(), entries).await.unwrap();
+    service
+        .add_session(
+            "app1",
+            &UserId::new("user1").unwrap(),
+            &SessionId::new("session1").unwrap(),
+            entries,
+        )
+        .await
+        .unwrap();
 
     let search_resp = service
         .search(SearchRequest {

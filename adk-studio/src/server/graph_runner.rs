@@ -502,8 +502,11 @@ mod tests {
         let mut state = HashMap::new();
         state.insert("task".to_string(), serde_json::json!("Delete files"));
 
-        let session_state =
-            InterruptedSessionState::new(adk_core::types::SessionId::new("session-789").unwrap(), interrupt_data, state);
+        let session_state = InterruptedSessionState::new(
+            adk_core::types::SessionId::new("session-789").unwrap(),
+            interrupt_data,
+            state,
+        );
 
         // Store the session
         store.store(&SessionId::new("session-789").unwrap(), session_state.clone()).await;
@@ -595,7 +598,9 @@ mod tests {
         let cleared =
             handler.clear_interrupted_state(&SessionId::new("session-123").unwrap()).await;
         assert!(cleared.is_some());
-        assert!(!handler.is_interrupted(&adk_core::types::SessionId::new("session-123").unwrap()).await);
+        assert!(
+            !handler.is_interrupted(&adk_core::types::SessionId::new("session-123").unwrap()).await
+        );
     }
 
     #[tokio::test]
@@ -612,8 +617,11 @@ mod tests {
             1,
         );
 
-        let mut session_state =
-            InterruptedSessionState::new(adk_core::types::SessionId::new("old-session").unwrap(), interrupt_data, HashMap::new());
+        let mut session_state = InterruptedSessionState::new(
+            adk_core::types::SessionId::new("old-session").unwrap(),
+            interrupt_data,
+            HashMap::new(),
+        );
         // Set timestamp to 2 hours ago
         session_state.interrupted_at = current_timestamp_ms() - (2 * 60 * 60 * 1000);
 

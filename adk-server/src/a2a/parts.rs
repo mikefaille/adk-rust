@@ -75,7 +75,12 @@ pub fn a2a_parts_to_adk(parts: &[crate::a2a::Part]) -> Result<Vec<Part>> {
                         adk_core::AdkError::Agent(format!("Base64 decode error: {}", e))
                     })?;
                     Ok(Part::InlineData {
-                        mime_type: file.mime_type.clone().unwrap_or_else(|| "application/octet-stream".to_string()).parse().unwrap_or_else(|_| "application/octet-stream".parse().unwrap()),
+                        mime_type: file
+                            .mime_type
+                            .clone()
+                            .unwrap_or_else(|| "application/octet-stream".to_string())
+                            .parse()
+                            .unwrap_or_else(|_| "application/octet-stream".parse().unwrap()),
                         data: data.into(),
                     })
                 } else {

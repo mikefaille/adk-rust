@@ -96,7 +96,7 @@ impl MockContext {
             identity: AdkIdentity::default(),
             session: MockSession::new(),
             user_content: Content {
-                role: "user".to_string(),
+                role: adk_core::Role::Custom("user".to_string()),
                 parts: vec![Part::text(text.to_string())],
             },
             metadata: HashMap::new(),

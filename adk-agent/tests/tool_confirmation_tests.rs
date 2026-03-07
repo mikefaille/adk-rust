@@ -1,10 +1,10 @@
 use adk_agent::LlmAgentBuilder;
+use adk_core::types::{Role, SessionId, UserId};
 use adk_core::{
     Agent, CallbackContext, Content, FinishReason, InvocationContext, Llm, LlmRequest, LlmResponse,
-    LlmResponseStream, Part, Result, RunConfig, Session, State, Tool, 
-    ToolContext, ToolConfirmationDecision,
+    LlmResponseStream, Part, Result, RunConfig, Session, State, Tool, ToolConfirmationDecision,
+    ToolContext,
 };
-use adk_core::types::{Role, SessionId, UserId, InvocationId};
 use async_trait::async_trait;
 use futures::StreamExt;
 use serde_json::{Value, json};
@@ -45,10 +45,7 @@ impl SequencedModel {
 
     fn text_response(text: &str) -> LlmResponse {
         LlmResponse {
-            content: Some(Content {
-                role: Role::Model,
-                parts: vec![Part::text(text.to_string())],
-            }),
+            content: Some(Content { role: Role::Model, parts: vec![Part::text(text.to_string())] }),
             usage_metadata: None,
             finish_reason: Some(FinishReason::Stop),
             citation_metadata: None,
@@ -285,7 +282,9 @@ async fn test_tool_confirmation_deny_skips_tool_execution() {
         .unwrap();
 
     let mut run_config = RunConfig::default();
-    run_config.tool_confirmation_decisions.insert("test_tool".to_string(), ToolConfirmationDecision::Deny);
+    run_config
+        .tool_confirmation_decisions
+        .insert("test_tool".to_string(), ToolConfirmationDecision::Deny);
 
     let mut stream = agent.run(Arc::new(MockContext::new(run_config))).await.unwrap();
     let mut saw_denied_response = false;
@@ -326,7 +325,9 @@ async fn test_tool_confirmation_approve_executes_tool() {
         .unwrap();
 
     let mut run_config = RunConfig::default();
-    run_config.tool_confirmation_decisions.insert("test_tool".to_string(), ToolConfirmationDecision::Approve);
+    run_config
+        .tool_confirmation_decisions
+        .insert("test_tool".to_string(), ToolConfirmationDecision::Approve);
 
     let mut stream = agent.run(Arc::new(MockContext::new(run_config))).await.unwrap();
     let mut saw_tool_result = false;

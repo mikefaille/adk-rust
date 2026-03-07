@@ -114,7 +114,8 @@ impl GeminiModel {
                 match p {
                     adk_gemini::Part::Text { text, thought, thought_signature: _ } => {
                         if thought == &Some(true) {
-                            converted_parts.push(Part::Thinking { thought: text.clone(), signature: None });
+                            converted_parts
+                                .push(Part::Thinking { thought: text.clone(), signature: None });
                         } else {
                             converted_parts.push(Part::text(text.clone()));
                         }
@@ -325,7 +326,10 @@ impl GeminiModel {
                             }
                             Part::FileData { mime_type, file_uri } => {
                                 gemini_parts.push(adk_gemini::Part::Text {
-                                    text: attachment::file_attachment_to_text(mime_type.as_ref(), file_uri),
+                                    text: attachment::file_attachment_to_text(
+                                        mime_type.as_ref(),
+                                        file_uri,
+                                    ),
                                     thought: None,
                                     thought_signature: None,
                                 });
@@ -392,7 +396,7 @@ impl GeminiModel {
                     for part in &content.parts {
                         if let Part::FunctionResponse { name, response, .. } = part {
                             builder = builder
-                                .with_function_response(&*name, response.clone())
+                                .with_function_response(name, response.clone())
                                 .map_err(|e| adk_core::AdkError::Model(e.to_string()))?;
                         }
                     }

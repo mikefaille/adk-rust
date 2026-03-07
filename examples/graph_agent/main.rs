@@ -67,8 +67,12 @@ async fn main() -> anyhow::Result<()> {
             let mut updates = std::collections::HashMap::new();
             for event in events {
                 if let Some(content) = event.content() {
-                    let text: String =
-                        content.parts.iter().filter_map(|p| p.text()).collect::<Vec<_>>().join("");
+                    let text: String = content
+                        .parts
+                        .iter()
+                        .filter_map(|p| p.as_text())
+                        .collect::<Vec<_>>()
+                        .join("");
                     if !text.is_empty() {
                         updates.insert("translation".to_string(), json!(text));
                     }
@@ -86,8 +90,12 @@ async fn main() -> anyhow::Result<()> {
             let mut updates = std::collections::HashMap::new();
             for event in events {
                 if let Some(content) = event.content() {
-                    let text: String =
-                        content.parts.iter().filter_map(|p| p.text()).collect::<Vec<_>>().join("");
+                    let text: String = content
+                        .parts
+                        .iter()
+                        .filter_map(|p| p.as_text())
+                        .collect::<Vec<_>>()
+                        .join("");
                     if !text.is_empty() {
                         updates.insert("summary".to_string(), json!(text));
                     }
@@ -137,7 +145,7 @@ async fn main() -> anyhow::Result<()> {
                 let preview: String = content
                     .parts
                     .iter()
-                    .filter_map(|p| p.text())
+                    .filter_map(|p| p.as_text())
                     .collect::<Vec<_>>()
                     .join("")
                     .chars()

@@ -1,8 +1,8 @@
 //! Type conversion utilities for DeepSeek API.
 
 use crate::attachment;
-use bytes::Bytes;
 use adk_core::{Content, FinishReason, LlmResponse, Part, Role, UsageMetadata};
+use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 

@@ -1,11 +1,11 @@
 //! Node tests
 
+use adk_core::types::SessionId;
 use adk_graph::error::GraphError;
 use adk_graph::node::{
     ExecutionConfig, FunctionNode, Node, NodeContext, NodeOutput, PassthroughNode,
 };
 use adk_graph::state::State;
-use adk_core::types::SessionId;
 use serde_json::json;
 
 #[test]
@@ -129,7 +129,8 @@ fn test_execution_config() {
 
 #[test]
 fn test_execution_config_with_resume() {
-    let config = ExecutionConfig::new(SessionId::new("thread-123").unwrap()).with_resume_from("checkpoint-456");
+    let config = ExecutionConfig::new(SessionId::new("thread-123").unwrap())
+        .with_resume_from("checkpoint-456");
 
     assert_eq!(config.resume_from, Some("checkpoint-456".to_string()));
 }

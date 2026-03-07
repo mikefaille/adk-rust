@@ -1,5 +1,5 @@
-use adk_core::{Agent, Content, EventStream, InvocationContext, Part, Result, Role};
 use adk_core::types::{SessionId, UserId};
+use adk_core::{Agent, Content, EventStream, InvocationContext, Part, Result, Role};
 use adk_plugin::{Plugin, PluginConfig, PluginManager};
 use adk_runner::{Runner, RunnerConfig};
 use adk_session::{Event, Events, GetRequest, Session, SessionService, State};
@@ -186,8 +186,7 @@ async fn test_runner_run() {
     })
     .unwrap();
 
-    let content =
-        Content { role: Role::User, parts: vec![Part::text("Hello".to_string())] };
+    let content = Content { role: Role::User, parts: vec![Part::text("Hello".to_string())] };
 
     let result = runner
         .run(UserId::new("user123").unwrap(), SessionId::new("session456").unwrap(), content)
@@ -409,8 +408,10 @@ async fn test_plugin_callback_order_and_mutation() {
     .unwrap();
 
     let content = Content::new(Role::User).with_text("hello");
-    let mut stream =
-        runner.run(UserId::new("user123").unwrap(), SessionId::new("session456").unwrap(), content).await.unwrap();
+    let mut stream = runner
+        .run(UserId::new("user123").unwrap(), SessionId::new("session456").unwrap(), content)
+        .await
+        .unwrap();
 
     let mut events = Vec::new();
     while let Some(event) = stream.next().await {

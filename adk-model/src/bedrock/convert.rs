@@ -4,7 +4,9 @@
 //! and the Bedrock Converse API format used by `aws-sdk-bedrockruntime`.
 
 use super::config::{BedrockCacheConfig, BedrockCacheTtl};
-use adk_core::{Content, FinishReason, GenerateContentConfig, LlmResponse, Part, Role, UsageMetadata};
+use adk_core::{
+    Content, FinishReason, GenerateContentConfig, LlmResponse, Part, Role, UsageMetadata,
+};
 use aws_sdk_bedrockruntime::types::{
     self as bedrock, CachePointBlock, CachePointType, CacheTtl, ContentBlock, ContentBlockDelta,
     ContentBlockStart, ConversationRole, ConverseOutput, InferenceConfiguration, Message,
@@ -172,9 +174,9 @@ fn adk_tools_to_bedrock(
 ) -> ToolConfiguration {
     let mut specs = Vec::new();
     for (name, schema) in tools {
-        let mut spec_builder = ToolSpecification::builder().name(name).input_schema(
-            ToolInputSchema::Json(json_value_to_document(&schema["parameters"])),
-        );
+        let mut spec_builder = ToolSpecification::builder()
+            .name(name)
+            .input_schema(ToolInputSchema::Json(json_value_to_document(&schema["parameters"])));
 
         if let Some(desc) = schema.get("description").and_then(|v| v.as_str()) {
             spec_builder = spec_builder.description(desc);
@@ -188,7 +190,10 @@ fn adk_tools_to_bedrock(
         specs.push(Tool::CachePoint(build_cache_point_block(cache_config)));
     }
 
-    ToolConfiguration::builder().set_tools(Some(specs)).build().expect("ToolConfiguration should be valid")
+    ToolConfiguration::builder()
+        .set_tools(Some(specs))
+        .build()
+        .expect("ToolConfiguration should be valid")
 }
 
 /// Convert ADK Bedrock response to ADK `LlmResponse`.
@@ -330,9 +335,9 @@ pub fn json_value_to_document(value: &Value) -> Document {
         }
         Value::String(s) => Document::String(s.clone()),
         Value::Array(a) => Document::Array(a.iter().map(json_value_to_document).collect()),
-        Value::Object(o) => {
-            Document::Object(o.iter().map(|(k, v)| (k.clone(), json_value_to_document(v))).collect())
-        }
+        Value::Object(o) => Document::Object(
+            o.iter().map(|(k, v)| (k.clone(), json_value_to_document(v))).collect(),
+        ),
     }
 }
 
@@ -341,15 +346,13 @@ pub fn document_to_json_value(doc: &Document) -> Value {
     match doc {
         Document::Null => Value::Null,
         Document::Bool(b) => Value::Bool(*b),
-        Document::Number(n) => {
-            match n {
-                aws_smithy_types::Number::PosInt(u) => Value::Number((*u).into()),
-                aws_smithy_types::Number::NegInt(i) => Value::Number((*i).into()),
-                aws_smithy_types::Number::Float(f) => {
-                    serde_json::Number::from_f64(*f).map(Value::Number).unwrap_or(Value::Null)
-                }
+        Document::Number(n) => match n {
+            aws_smithy_types::Number::PosInt(u) => Value::Number((*u).into()),
+            aws_smithy_types::Number::NegInt(i) => Value::Number((*i).into()),
+            aws_smithy_types::Number::Float(f) => {
+                serde_json::Number::from_f64(*f).map(Value::Number).unwrap_or(Value::Null)
             }
-        }
+        },
         Document::String(s) => Value::String(s.clone()),
         Document::Array(a) => Value::Array(a.iter().map(document_to_json_value).collect()),
         Document::Object(o) => {
@@ -387,14 +390,8 @@ mod tests {
     #[test]
     fn test_system_message_extraction() {
         let contents = vec![
-            Content {
-                role: Role::System,
-                parts: vec![Part::text("You are helpful.".to_string())],
-            },
-            Content {
-                role: Role::User,
-                parts: vec![Part::text("Hello".to_string())],
-            },
+            Content { role: Role::System, parts: vec![Part::text("You are helpful.".to_string())] },
+            Content { role: Role::User, parts: vec![Part::text("Hello".to_string())] },
         ];
 
         let result = adk_request_to_bedrock(&contents, &HashMap::new(), None, None).unwrap();
@@ -405,18 +402,9 @@ mod tests {
     #[test]
     fn test_role_mapping() {
         let contents = vec![
-            Content {
-                role: Role::User,
-                parts: vec![Part::text("Hi".to_string())],
-            },
-            Content {
-                role: Role::Model,
-                parts: vec![Part::text("Hello".to_string())],
-            },
-            Content {
-                role: Role::Model,
-                parts: vec![Part::text("How can I help?".to_string())],
-            },
+            Content { role: Role::User, parts: vec![Part::text("Hi".to_string())] },
+            Content { role: Role::Model, parts: vec![Part::text("Hello".to_string())] },
+            Content { role: Role::Model, parts: vec![Part::text("How can I help?".to_string())] },
         ];
 
         let result = adk_request_to_bedrock(&contents, &HashMap::new(), None, None).unwrap();
@@ -472,12 +460,10 @@ mod tests {
             .signature("sig_123")
             .build()
             .unwrap();
-        let block = ContentBlock::ReasoningContent(bedrock::ReasoningContentBlock::ReasoningText(rt));
-        let message = Message::builder()
-            .role(ConversationRole::Assistant)
-            .content(block)
-            .build()
-            .unwrap();
+        let block =
+            ContentBlock::ReasoningContent(bedrock::ReasoningContentBlock::ReasoningText(rt));
+        let message =
+            Message::builder().role(ConversationRole::Assistant).content(block).build().unwrap();
         let output = ConverseOutput::Message(message);
 
         let response = bedrock_response_to_adk(&output, &StopReason::EndTurn, None);
@@ -518,8 +504,9 @@ mod tests {
     fn test_cache_point_injected_after_system_content() {
         let contents = vec![Content::new(Role::System).with_text("Be nice.")];
         let cache_cfg = BedrockCacheConfig { ttl: BedrockCacheTtl::FiveMinutes };
-        let result = adk_request_to_bedrock(&contents, &HashMap::new(), None, Some(&cache_cfg)).unwrap();
-        
+        let result =
+            adk_request_to_bedrock(&contents, &HashMap::new(), None, Some(&cache_cfg)).unwrap();
+
         // system[0] = text, system[1] = cache_point
         assert_eq!(result.system.len(), 2);
         assert!(matches!(result.system[1], SystemContentBlock::CachePoint(_)));
@@ -531,7 +518,7 @@ mod tests {
         tools.insert("t1".to_string(), serde_json::json!({"parameters": {}}));
         let cache_cfg = BedrockCacheConfig { ttl: BedrockCacheTtl::FiveMinutes };
         let result = adk_request_to_bedrock(&[], &tools, None, Some(&cache_cfg)).unwrap();
-        
+
         let tool_cfg = result.tool_config.unwrap();
         let tools = tool_cfg.tools();
         // tools[0] = spec, tools[1] = cache_point
@@ -543,8 +530,9 @@ mod tests {
     fn test_cache_point_with_one_hour_ttl() {
         let contents = vec![Content::new(Role::System).with_text("Be nice.")];
         let cache_cfg = BedrockCacheConfig { ttl: BedrockCacheTtl::OneHour };
-        let result = adk_request_to_bedrock(&contents, &HashMap::new(), None, Some(&cache_cfg)).unwrap();
-        
+        let result =
+            adk_request_to_bedrock(&contents, &HashMap::new(), None, Some(&cache_cfg)).unwrap();
+
         if let SystemContentBlock::CachePoint(cp) = &result.system[1] {
             assert_eq!(cp.ttl(), Some(&CacheTtl::OneHour));
         } else {
@@ -556,8 +544,9 @@ mod tests {
     fn test_cache_point_with_five_minutes_ttl_no_explicit_ttl() {
         let contents = vec![Content::new(Role::System).with_text("Be nice.")];
         let cache_cfg = BedrockCacheConfig { ttl: BedrockCacheTtl::FiveMinutes };
-        let result = adk_request_to_bedrock(&contents, &HashMap::new(), None, Some(&cache_cfg)).unwrap();
-        
+        let result =
+            adk_request_to_bedrock(&contents, &HashMap::new(), None, Some(&cache_cfg)).unwrap();
+
         if let SystemContentBlock::CachePoint(cp) = &result.system[1] {
             // Default TTL doesn't have an explicit value in the SDK's CachePointBlock
             assert!(cp.ttl().is_none());
