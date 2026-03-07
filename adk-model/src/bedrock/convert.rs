@@ -47,8 +47,8 @@ pub(crate) fn adk_request_to_bedrock(
     let mut system = Vec::new();
 
     for content in contents {
-        match content.role.as_str() {
-            "system" => {
+        match &content.role {
+            adk_core::types::Role::System => {
                 for part in &content.parts {
                     match part {
                         Part::Text { text } if !text.is_empty() => {
@@ -63,8 +63,8 @@ pub(crate) fn adk_request_to_bedrock(
             }
             role => {
                 let bedrock_role = match role {
-                    "user" | "function" | "tool" => ConversationRole::User,
-                    "model" | "assistant" => ConversationRole::Assistant,
+                    adk_core::types::Role::User | adk_core::types::Role::Tool => ConversationRole::User,
+                    adk_core::types::Role::Model => ConversationRole::Assistant,
                     _ => ConversationRole::User,
                 };
 
@@ -230,7 +230,7 @@ pub(crate) fn bedrock_response_to_adk(
     let content = match output {
         ConverseOutput::Message(message) => {
             let parts = bedrock_content_blocks_to_parts(&message.content);
-            if parts.is_empty() { None } else { Some(Content { role: "model".to_string(), parts }) }
+            if parts.is_empty() { None } else { Some(Content { role: adk_core::types::Role::Model, parts }) }
         }
         _ => None,
     };
@@ -325,7 +325,7 @@ pub(crate) fn bedrock_stream_content_start_to_adk(
             // The actual arguments will come in subsequent delta events.
             Some(LlmResponse {
                 content: Some(Content {
-                    role: "model".to_string(),
+                    role: adk_core::types::Role::Model,
                     parts: vec![Part::FunctionCall {
                         name: tool_start.name.clone(),
                         args: Value::Null,
@@ -358,7 +358,7 @@ pub(crate) fn bedrock_stream_delta_to_adk(delta: &ContentBlockDelta) -> Option<L
             } else {
                 Some(LlmResponse {
                     content: Some(Content {
-                        role: "model".to_string(),
+                        role: adk_core::types::Role::Model,
                         parts: vec![Part::Text { text: text.clone() }],
                     }),
                     usage_metadata: None,
@@ -380,7 +380,7 @@ pub(crate) fn bedrock_stream_delta_to_adk(delta: &ContentBlockDelta) -> Option<L
             } else {
                 Some(LlmResponse {
                     content: Some(Content {
-                        role: "model".to_string(),
+                        role: adk_core::types::Role::Model,
                         parts: vec![Part::Text { text: tool_delta.input.clone() }],
                     }),
                     usage_metadata: None,
@@ -401,7 +401,7 @@ pub(crate) fn bedrock_stream_delta_to_adk(delta: &ContentBlockDelta) -> Option<L
                 } else {
                     Some(LlmResponse {
                         content: Some(Content {
-                            role: "model".to_string(),
+                            role: adk_core::types::Role::Model,
                             parts: vec![Part::Thinking { thinking: text.clone(), signature: None }],
                         }),
                         usage_metadata: None,
@@ -543,7 +543,7 @@ mod tests {
                 parts: vec![Part::Text { text: "Hi".to_string() }],
             },
             Content {
-                role: "model".to_string(),
+                role: adk_core::types::Role::Model,
                 parts: vec![Part::Text { text: "Hello".to_string() }],
             },
             Content {
@@ -562,7 +562,7 @@ mod tests {
     #[test]
     fn test_function_call_conversion() {
         let contents = vec![Content {
-            role: "model".to_string(),
+            role: adk_core::types::Role::Model,
             parts: vec![Part::FunctionCall {
                 name: "get_weather".to_string(),
                 args: serde_json::json!({"city": "Seattle"}),

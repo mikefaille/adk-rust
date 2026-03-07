@@ -77,7 +77,7 @@ impl MockContext {
         Self {
             session: MockSession,
             user_content: Content {
-                role: "user".to_string(),
+                role: adk_core::types::Role::User,
                 parts: vec![Part::Text { text: text.to_string() }],
             },
         }

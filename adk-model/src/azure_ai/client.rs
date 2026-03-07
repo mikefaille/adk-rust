@@ -190,7 +190,7 @@ impl Llm for AzureAIClient {
 
                                             yield LlmResponse {
                                                 content: Some(adk_core::Content {
-                                                    role: "model".to_string(),
+                                                    role: adk_core::types::Role::Model,
                                                     parts,
                                                 }),
                                                 finish_reason: llm_resp.finish_reason,

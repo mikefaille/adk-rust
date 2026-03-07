@@ -208,7 +208,7 @@ fn test_event_compaction_serde_roundtrip() {
     let restored = deserialized.compaction.unwrap();
     assert_eq!(restored.start_timestamp, compaction.start_timestamp);
     assert_eq!(restored.end_timestamp, compaction.end_timestamp);
-    assert_eq!(restored.compacted_content.role, "model");
+    assert_eq!(restored.compacted_content.role, adk_core::types::Role::Model);
 
     let text = match &restored.compacted_content.parts[0] {
         Part::Text { text } => text.clone(),

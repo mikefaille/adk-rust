@@ -30,7 +30,7 @@ fn make_event(author: &str, text: &str) -> Event {
     let mut event = Event::new("inv-test");
     event.author = author.to_string();
     event.set_content(Content {
-        role: if author == "user" { "user" } else { "model" }.to_string(),
+        role: if author == "user" { adk_core::types::Role::User } else { adk_core::types::Role::Model },
         parts: vec![Part::Text { text: text.to_string() }],
     });
     event
@@ -71,7 +71,7 @@ async fn test_summarize_produces_compaction_event() {
     assert_eq!(compaction.end_timestamp, events[3].timestamp);
 
     // Compacted content should be the LLM summary
-    assert_eq!(compaction.compacted_content.role, "model");
+    assert_eq!(compaction.compacted_content.role, adk_core::types::Role::Model);
     let text = match &compaction.compacted_content.parts[0] {
         Part::Text { text } => text.clone(),
         _ => panic!("Expected text part"),
@@ -107,7 +107,7 @@ async fn test_summarize_skips_non_text_parts() {
     let mut fc_event = Event::new("inv-test");
     fc_event.author = "assistant".to_string();
     fc_event.set_content(Content {
-        role: "model".to_string(),
+        role: adk_core::types::Role::Model,
         parts: vec![Part::FunctionCall {
             name: "get_weather".to_string(),
             args: serde_json::json!({}),

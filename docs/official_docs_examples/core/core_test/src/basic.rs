@@ -7,12 +7,12 @@ fn main() {
 
     // From docs: Create text content
     let user_msg = Content::new("user").with_text("Hello!");
-    assert_eq!(user_msg.role, "user");
+    assert_eq!(user_msg.role, adk_core::types::Role::User);
     assert_eq!(user_msg.parts.len(), 1);
     println!("✓ Content::new().with_text() works");
 
     let model_msg = Content::new("model").with_text("Hi there!");
-    assert_eq!(model_msg.role, "model");
+    assert_eq!(model_msg.role, adk_core::types::Role::Model);
     println!("✓ Model content works");
 
     // From docs: Create multimodal content

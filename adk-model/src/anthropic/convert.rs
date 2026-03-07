@@ -24,9 +24,9 @@ pub fn content_to_message(
     content: &Content,
     prompt_caching: bool,
 ) -> Result<MessageParam, ConversionError> {
-    let role = match content.role.as_str() {
-        "user" | "function" | "tool" => MessageRole::User,
-        "model" | "assistant" => MessageRole::Assistant,
+    let role = match content.role {
+        adk_core::types::Role::User | adk_core::types::Role::Tool => MessageRole::User,
+        adk_core::types::Role::Model => MessageRole::Assistant,
         _ => MessageRole::User,
     };
 
@@ -193,7 +193,7 @@ pub fn from_anthropic_message(message: &Message) -> (LlmResponse, HashMap<String
     }
 
     let content =
-        if parts.is_empty() { None } else { Some(Content { role: "model".to_string(), parts }) };
+        if parts.is_empty() { None } else { Some(Content { role: adk_core::types::Role::Model, parts }) };
 
     let usage_metadata = Some(UsageMetadata {
         prompt_token_count: message.usage.input_tokens,
@@ -234,7 +234,7 @@ pub fn from_anthropic_message(message: &Message) -> (LlmResponse, HashMap<String
 pub fn from_text_delta(text: &str) -> LlmResponse {
     LlmResponse {
         content: Some(Content {
-            role: "model".to_string(),
+            role: adk_core::types::Role::Model,
             parts: vec![Part::Text { text: text.to_string() }],
         }),
         usage_metadata: None,
@@ -252,7 +252,7 @@ pub fn from_text_delta(text: &str) -> LlmResponse {
 pub fn from_thinking_delta(thinking_text: &str) -> LlmResponse {
     LlmResponse {
         content: Some(Content {
-            role: "model".to_string(),
+            role: adk_core::types::Role::Model,
             parts: vec![Part::Thinking { thinking: thinking_text.to_string(), signature: None }],
         }),
         partial: true,
@@ -304,7 +304,7 @@ pub fn create_tool_call_response(
         .collect();
 
     LlmResponse {
-        content: Some(Content { role: "model".to_string(), parts }),
+        content: Some(Content { role: adk_core::types::Role::Model, parts }),
         usage_metadata: None,
         finish_reason,
         citation_metadata: None,
@@ -372,7 +372,7 @@ mod tests {
     #[test]
     fn test_content_to_message_user() {
         let content = Content {
-            role: "user".to_string(),
+            role: adk_core::types::Role::User,
             parts: vec![Part::Text { text: "Hello".to_string() }],
         };
         let msg = content_to_message(&content, false).unwrap();
@@ -382,7 +382,7 @@ mod tests {
     #[test]
     fn test_content_to_message_assistant() {
         let content = Content {
-            role: "model".to_string(),
+            role: adk_core::types::Role::Model,
             parts: vec![Part::Text { text: "Hi there".to_string() }],
         };
         let msg = content_to_message(&content, false).unwrap();
@@ -392,7 +392,7 @@ mod tests {
     #[test]
     fn test_content_to_message_with_inline_image() {
         let content = Content {
-            role: "user".to_string(),
+            role: adk_core::types::Role::User,
             parts: vec![
                 Part::Text { text: "What is in this image?".to_string() },
                 Part::InlineData {
@@ -420,7 +420,7 @@ mod tests {
     #[test]
     fn test_content_to_message_unsupported_mime_type_falls_back_to_text() {
         let content = Content {
-            role: "user".to_string(),
+            role: adk_core::types::Role::User,
             parts: vec![
                 Part::Text { text: "Check this".to_string() },
                 Part::InlineData {
@@ -443,7 +443,7 @@ mod tests {
     #[test]
     fn test_content_to_message_multiple_images() {
         let content = Content {
-            role: "user".to_string(),
+            role: adk_core::types::Role::User,
             parts: vec![
                 Part::Text { text: "Compare".to_string() },
                 Part::InlineData { mime_type: "image/jpeg".to_string(), data: vec![0xFF, 0xD8] },
@@ -462,7 +462,7 @@ mod tests {
     #[test]
     fn test_content_to_message_pdf_inline_data_maps_to_document_block() {
         let content = Content {
-            role: "user".to_string(),
+            role: adk_core::types::Role::User,
             parts: vec![Part::InlineData {
                 mime_type: "application/pdf".to_string(),
                 data: b"%PDF-1.4".to_vec(),
@@ -481,7 +481,7 @@ mod tests {
     #[test]
     fn test_content_to_message_pdf_file_uri_maps_to_document_block() {
         let content = Content {
-            role: "user".to_string(),
+            role: adk_core::types::Role::User,
             parts: vec![Part::FileData {
                 mime_type: "application/pdf".to_string(),
                 file_uri: "https://example.com/test.pdf".to_string(),

@@ -60,7 +60,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ];
 
     let request = make_request(vec![Content {
-        role: "user".to_string(),
+        role: adk_core::types::Role::User,
         parts: vec![
             Part::InlineData { mime_type: "image/png".to_string(), data: red_pixel_png.clone() },
             Part::Text { text: "What do you see in this image? It's very small.".to_string() },
@@ -81,7 +81,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ];
 
     let request = make_request(vec![Content {
-        role: "user".to_string(),
+        role: adk_core::types::Role::User,
         parts: vec![
             Part::InlineData { mime_type: "image/png".to_string(), data: red_pixel_png.clone() },
             Part::InlineData { mime_type: "image/png".to_string(), data: blue_pixel_png },

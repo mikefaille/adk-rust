@@ -631,7 +631,7 @@ impl Agent for LlmAgent {
                     max_skill_chars,
                 ) {
                     conversation_history.push(Content {
-                        role: "user".to_string(),
+                        role: adk_core::types::Role::User,
                         parts: vec![Part::Text { text: skill_block }],
                     });
                 }
@@ -644,7 +644,7 @@ impl Agent for LlmAgent {
                 let global_inst = provider(ctx.clone() as Arc<dyn ReadonlyContext>).await?;
                 if !global_inst.is_empty() {
                     conversation_history.push(Content {
-                        role: "user".to_string(),
+                        role: adk_core::types::Role::User,
                         parts: vec![Part::Text { text: global_inst }],
                     });
                 }
@@ -653,7 +653,7 @@ impl Agent for LlmAgent {
                 let processed = adk_core::inject_session_state(ctx.as_ref(), template).await?;
                 if !processed.is_empty() {
                     conversation_history.push(Content {
-                        role: "user".to_string(),
+                        role: adk_core::types::Role::User,
                         parts: vec![Part::Text { text: processed }],
                     });
                 }
@@ -666,7 +666,7 @@ impl Agent for LlmAgent {
                 let inst = provider(ctx.clone() as Arc<dyn ReadonlyContext>).await?;
                 if !inst.is_empty() {
                     conversation_history.push(Content {
-                        role: "user".to_string(),
+                        role: adk_core::types::Role::User,
                         parts: vec![Part::Text { text: inst }],
                     });
                 }
@@ -675,7 +675,7 @@ impl Agent for LlmAgent {
                 let processed = adk_core::inject_session_state(ctx.as_ref(), template).await?;
                 if !processed.is_empty() {
                     conversation_history.push(Content {
-                        role: "user".to_string(),
+                        role: adk_core::types::Role::User,
                         parts: vec![Part::Text { text: processed }],
                     });
                 }
@@ -697,7 +697,7 @@ impl Agent for LlmAgent {
 
                     // Keep global and agent instructions (already added above)
                     let instruction_count = conversation_history.iter()
-                        .take_while(|c| c.role == "user" && c.parts.iter().any(|p| {
+                        .take_while(|c| c.role == adk_core::types::Role::User && c.parts.iter().any(|p| {
                             if let Part::Text { text } = p {
                                 // These are likely instructions, not user queries
                                 !text.is_empty()
@@ -712,7 +712,7 @@ impl Agent for LlmAgent {
 
                     // Take only the last user message (current turn)
                     if let Some(last) = conversation_history.last() {
-                        if last.role == "user" {
+                        if last.role == adk_core::types::Role::User {
                             filtered.push(last.clone());
                         }
                     }
@@ -1107,7 +1107,7 @@ impl Agent for LlmAgent {
                                 if !valid_target {
                                     // Return error to LLM so it can try again
                                     let error_content = Content {
-                                        role: "function".to_string(),
+                                        role: adk_core::types::Role::Tool,
                                         parts: vec![Part::FunctionResponse {
                                             function_response: FunctionResponseData {
                                                 name: name.clone(),
@@ -1160,7 +1160,7 @@ impl Agent for LlmAgent {
                                         tool_actions.tool_confirmation_decision =
                                             Some(ToolConfirmationDecision::Deny);
                                         response_content = Some(Content {
-                                            role: "function".to_string(),
+                                            role: adk_core::types::Role::Tool,
                                             parts: vec![Part::FunctionResponse {
                                                 function_response: FunctionResponseData {
                                                     name: name.clone(),
@@ -1182,7 +1182,7 @@ impl Agent for LlmAgent {
                                         confirmation_event.llm_response.interrupted = true;
                                         confirmation_event.llm_response.turn_complete = true;
                                         confirmation_event.llm_response.content = Some(Content {
-                                            role: "model".to_string(),
+                                            role: adk_core::types::Role::Model,
                                             parts: vec![Part::Text {
                                                 text: format!(
                                                     "Tool confirmation required for '{}'. Provide approve/deny decision to continue.",
@@ -1273,7 +1273,7 @@ impl Agent for LlmAgent {
                                             confirmation_decision;
                                     }
                                     response_content = Some(Content {
-                                        role: "function".to_string(),
+                                        role: adk_core::types::Role::Tool,
                                         parts: vec![Part::FunctionResponse {
                                             function_response: FunctionResponseData {
                                                 name: name.clone(),
@@ -1284,7 +1284,7 @@ impl Agent for LlmAgent {
                                     });
                                 } else {
                                     response_content = Some(Content {
-                                        role: "function".to_string(),
+                                        role: adk_core::types::Role::Tool,
                                         parts: vec![Part::FunctionResponse {
                                             function_response: FunctionResponseData {
                                                 name: name.clone(),

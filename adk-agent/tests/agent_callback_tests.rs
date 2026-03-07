@@ -23,7 +23,7 @@ impl adk_core::Llm for MockLlm {
         let s = async_stream::stream! {
             yield Ok(adk_core::LlmResponse {
                 content: Some(adk_core::Content {
-                    role: "model".to_string(),
+                    role: adk_core::types::Role::Model,
                     parts: vec![adk_core::Part::Text { text: "mock response".to_string() }],
                 }),
                 usage_metadata: None,
@@ -79,7 +79,7 @@ async fn test_before_agent_callback_skip_execution() {
             Box::pin(async move {
                 println!("BeforeAgent: Skipping agent execution");
                 Ok(Some(Content {
-                    role: "model".to_string(),
+                    role: adk_core::types::Role::Model,
                     parts: vec![Part::Text { text: "AGENT SKIPPED BY CALLBACK".to_string() }],
                 }))
             })
@@ -124,7 +124,7 @@ async fn test_after_agent_callback() {
                 *f.lock().unwrap() = true;
                 println!("AfterAgent callback executed");
                 Ok(Some(Content {
-                    role: "model".to_string(),
+                    role: adk_core::types::Role::Model,
                     parts: vec![Part::Text { text: "AFTER AGENT CALLBACK".to_string() }],
                 }))
             })
