@@ -342,7 +342,7 @@ mod real_benchmarks {
         group.bench_function("short_prompt", |b| {
             let request = LlmRequest {
                 contents: vec![Content {
-                    role: adk_core::Role::User,
+                    role: Role::User,
                     parts: vec![Part::text(config.short_prompt.to_string())],
                 }],
                 ..Default::default()
