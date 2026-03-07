@@ -520,7 +520,7 @@ impl RealtimeSession for GeminiRealtimeSession {
             tool_response: None,
             client_content: Some(GeminiClientContent {
                 turns: vec![GeminiTurn {
-                    role: "user".to_string(),
+                    role: adk_core::prelude::Role::User,
                     parts: vec![GeminiPart { text: Some(text.to_string()), inline_data: None }],
                 }],
                 turn_complete: true,

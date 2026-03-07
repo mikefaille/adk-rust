@@ -1636,7 +1636,7 @@ mod tests {
             item_path: "Agent".to_string(),
             item_type: ApiItemType::Trait,
             line_number: 10,
-            context: "use adk_core::Agent;".to_string(),
+            context: "use adk_core::prelude::*;".to_string(),
         };
 
         let suggestions = engine

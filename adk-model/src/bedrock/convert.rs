@@ -47,7 +47,7 @@ pub(crate) fn adk_request_to_bedrock(
     let mut system = Vec::new();
 
     for content in contents {
-        match content.role.as_str() {
+        match content.role.to_string().as_str() {
             "system" => {
                 for part in &content.parts {
                     match part {
@@ -230,7 +230,7 @@ pub(crate) fn bedrock_response_to_adk(
     let content = match output {
         ConverseOutput::Message(message) => {
             let parts = bedrock_content_blocks_to_parts(&message.content);
-            if parts.is_empty() { None } else { Some(Content { role: "model".to_string(), parts }) }
+            if parts.is_empty() { None } else { Some(Content { role: adk_core::prelude::Role::Model, parts }) }
         }
         _ => None,
     };
@@ -325,7 +325,7 @@ pub(crate) fn bedrock_stream_content_start_to_adk(
             // The actual arguments will come in subsequent delta events.
             Some(LlmResponse {
                 content: Some(Content {
-                    role: "model".to_string(),
+                    role: adk_core::prelude::Role::Model,
                     parts: vec![Part::FunctionCall {
                         name: tool_start.name.clone(),
                         args: Value::Null,
@@ -358,7 +358,7 @@ pub(crate) fn bedrock_stream_delta_to_adk(delta: &ContentBlockDelta) -> Option<L
             } else {
                 Some(LlmResponse {
                     content: Some(Content {
-                        role: "model".to_string(),
+                        role: adk_core::prelude::Role::Model,
                         parts: vec![Part::Text { text: text.clone() }],
                     }),
                     usage_metadata: None,
@@ -380,7 +380,7 @@ pub(crate) fn bedrock_stream_delta_to_adk(delta: &ContentBlockDelta) -> Option<L
             } else {
                 Some(LlmResponse {
                     content: Some(Content {
-                        role: "model".to_string(),
+                        role: adk_core::prelude::Role::Model,
                         parts: vec![Part::Text { text: tool_delta.input.clone() }],
                     }),
                     usage_metadata: None,
@@ -401,7 +401,7 @@ pub(crate) fn bedrock_stream_delta_to_adk(delta: &ContentBlockDelta) -> Option<L
                 } else {
                     Some(LlmResponse {
                         content: Some(Content {
-                            role: "model".to_string(),
+                            role: adk_core::prelude::Role::Model,
                             parts: vec![Part::Thinking { thinking: text.clone(), signature: None }],
                         }),
                         usage_metadata: None,
@@ -521,11 +521,11 @@ mod tests {
     fn test_system_message_extraction() {
         let contents = vec![
             Content {
-                role: "system".to_string(),
+                role: adk_core::prelude::Role::System,
                 parts: vec![Part::Text { text: "You are helpful.".to_string() }],
             },
             Content {
-                role: "user".to_string(),
+                role: adk_core::prelude::Role::User,
                 parts: vec![Part::Text { text: "Hello".to_string() }],
             },
         ];
@@ -539,11 +539,11 @@ mod tests {
     fn test_role_mapping() {
         let contents = vec![
             Content {
-                role: "user".to_string(),
+                role: adk_core::prelude::Role::User,
                 parts: vec![Part::Text { text: "Hi".to_string() }],
             },
             Content {
-                role: "model".to_string(),
+                role: adk_core::prelude::Role::Model,
                 parts: vec![Part::Text { text: "Hello".to_string() }],
             },
             Content {
@@ -562,7 +562,7 @@ mod tests {
     #[test]
     fn test_function_call_conversion() {
         let contents = vec![Content {
-            role: "model".to_string(),
+            role: adk_core::prelude::Role::Model,
             parts: vec![Part::FunctionCall {
                 name: "get_weather".to_string(),
                 args: serde_json::json!({"city": "Seattle"}),
@@ -582,7 +582,7 @@ mod tests {
     #[test]
     fn test_function_response_conversion() {
         let contents = vec![Content {
-            role: "user".to_string(),
+            role: adk_core::prelude::Role::User,
             parts: vec![Part::FunctionResponse {
                 function_response: FunctionResponseData {
                     name: "get_weather".to_string(),
@@ -834,7 +834,7 @@ mod tests {
     #[test]
     fn test_cache_point_not_injected_when_none() {
         let contents = vec![Content {
-            role: "system".to_string(),
+            role: adk_core::prelude::Role::System,
             parts: vec![Part::Text { text: "You are helpful.".to_string() }],
         }];
         let mut tools = HashMap::new();
@@ -859,7 +859,7 @@ mod tests {
     #[test]
     fn test_cache_point_injected_after_system_content() {
         let contents = vec![Content {
-            role: "system".to_string(),
+            role: adk_core::prelude::Role::System,
             parts: vec![Part::Text { text: "You are helpful.".to_string() }],
         }];
         let cache_config = BedrockCacheConfig::default();
@@ -875,7 +875,7 @@ mod tests {
     #[test]
     fn test_cache_point_not_injected_when_system_empty() {
         let contents = vec![Content {
-            role: "user".to_string(),
+            role: adk_core::prelude::Role::User,
             parts: vec![Part::Text { text: "Hello".to_string() }],
         }];
         let cache_config = BedrockCacheConfig::default();
@@ -909,7 +909,7 @@ mod tests {
     #[test]
     fn test_cache_point_with_one_hour_ttl() {
         let contents = vec![Content {
-            role: "system".to_string(),
+            role: adk_core::prelude::Role::System,
             parts: vec![Part::Text { text: "You are helpful.".to_string() }],
         }];
         let cache_config = BedrockCacheConfig { ttl: BedrockCacheTtl::OneHour };
@@ -925,7 +925,7 @@ mod tests {
     #[test]
     fn test_cache_point_with_five_minutes_ttl_no_explicit_ttl() {
         let contents = vec![Content {
-            role: "system".to_string(),
+            role: adk_core::prelude::Role::System,
             parts: vec![Part::Text { text: "You are helpful.".to_string() }],
         }];
         let cache_config = BedrockCacheConfig { ttl: BedrockCacheTtl::FiveMinutes };

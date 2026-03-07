@@ -254,7 +254,7 @@ process
     #[test]
     fn test_normalize_content() {
         let mut content = Content {
-            role: "model".to_string(),
+            role: adk_core::prelude::Role::Model,
             parts: vec![Part::Text {
                 text: r#"<tool_call>
 test_tool

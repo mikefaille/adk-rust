@@ -48,7 +48,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n=== Token Counting ===\n");
 
     let short_request = make_request(vec![Content {
-        role: "user".to_string(),
+        role: adk_core::prelude::Role::User,
         parts: vec![Part::Text { text: "Hello, Claude!".to_string() }],
     }]);
 
@@ -57,7 +57,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let long_request = make_request(vec![
         Content {
-            role: "system".to_string(),
+            role: adk_core::prelude::Role::System,
             parts: vec![Part::Text {
                 text: "You are a helpful coding assistant specializing in Rust. \
                        Always provide idiomatic, well-documented code examples."
@@ -65,7 +65,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }],
         },
         Content {
-            role: "user".to_string(),
+            role: adk_core::prelude::Role::User,
             parts: vec![Part::Text {
                 text: "Explain the difference between Box, Rc, and Arc in Rust. \
                        When should I use each one? Provide code examples for each."

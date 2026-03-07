@@ -47,7 +47,7 @@ impl ReadonlyContext for SimpleContext {
     fn user_content(&self) -> &Content {
         static CONTENT: std::sync::OnceLock<Content> = std::sync::OnceLock::new();
         CONTENT.get_or_init(|| Content {
-            role: "user".to_string(),
+            role: adk_core::prelude::Role::User,
             parts: vec![Part::Text { text: "init".to_string() }],
         })
     }

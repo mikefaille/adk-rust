@@ -316,7 +316,7 @@ If an action fails, explain what went wrong."#,
 
         // Create a simple task
         let task_content = Content {
-            role: "user".to_string(),
+            role: adk_core::prelude::Role::User,
             parts: vec![Part::Text {
                 text: "Navigate to https://example.com and tell me what the page title is."
                     .to_string(),

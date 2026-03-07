@@ -2,7 +2,7 @@ use crate::a2a::{
     Message, TaskState, TaskStatus, TaskStatusUpdateEvent, UpdateEvent, events::message_to_event,
     metadata::to_invocation_meta, processor::EventProcessor,
 };
-use adk_core::Result;
+use adk_core::prelude::*;
 use adk_runner::{Runner, RunnerConfig};
 use adk_session::{CreateRequest, GetRequest};
 use futures::StreamExt;

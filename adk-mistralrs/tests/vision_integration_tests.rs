@@ -100,7 +100,7 @@ async fn test_vision_streaming() {
 
     // Create request with image as inline data
     let content = Content {
-        role: adk_core::types::Role::User,
+        role: adk_core::prelude::Role::User,
         parts: vec![
             Part::InlineData { mime_type: "image/jpeg".to_string(), data: image_bytes },
             Part::Text { text: "What is in this image? Answer briefly.".to_string() },

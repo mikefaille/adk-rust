@@ -210,7 +210,7 @@ impl Llm for DeepSeekClient {
                                                     if thinking_enabled {
                                                         yield LlmResponse {
                                                             content: Some(adk_core::Content {
-                                                                role: "model".to_string(),
+                                                                role: adk_core::prelude::Role::Model,
                                                                 parts: vec![Part::Thinking {
                                                                     thinking: reasoning.clone(),
                                                                     signature: None,
@@ -309,7 +309,7 @@ impl Llm for DeepSeekClient {
                                                     None
                                                 } else {
                                                     Some(adk_core::Content {
-                                                        role: "model".to_string(),
+                                                        role: adk_core::prelude::Role::Model,
                                                         parts,
                                                     })
                                                 },
@@ -338,7 +338,7 @@ impl Llm for DeepSeekClient {
                                                     if !text.is_empty() {
                                                         yield LlmResponse {
                                                             content: Some(adk_core::Content {
-                                                                role: "model".to_string(),
+                                                                role: adk_core::prelude::Role::Model,
                                                                 parts: vec![Part::Text {
                                                                     text: text.clone(),
                                                                 }],

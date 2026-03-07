@@ -122,7 +122,7 @@ proptest! {
         text2 in arb_text(),
     ) {
         let content = Content {
-            role: adk_core::types::Role::User,
+            role: adk_core::prelude::Role::User,
             parts: vec![
                 Part::Text { text: text1.clone() },
                 Part::Text { text: text2.clone() },
@@ -195,7 +195,7 @@ fn test_image_part_to_mistralrs_with_unsupported_mime() {
 fn test_extract_images_from_content() {
     let png_data = generate_minimal_png();
     let content = Content {
-        role: adk_core::types::Role::User,
+        role: adk_core::prelude::Role::User,
         parts: vec![
             Part::Text { text: "Describe this image".to_string() },
             Part::InlineData { mime_type: "image/png".to_string(), data: png_data },
@@ -209,7 +209,7 @@ fn test_extract_images_from_content() {
 #[test]
 fn test_extract_images_from_content_no_images() {
     let content = Content {
-        role: adk_core::types::Role::User,
+        role: adk_core::prelude::Role::User,
         parts: vec![Part::Text { text: "Hello world".to_string() }],
     };
 

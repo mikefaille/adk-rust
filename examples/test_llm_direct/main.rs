@@ -35,7 +35,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let request = LlmRequest {
         model: "gpt-5-mini".to_string(),
         contents: vec![Content {
-            role: "user".to_string(),
+            role: adk_core::prelude::Role::User,
             parts: vec![Part::Text { text: "What is 25 * 17?".to_string() }],
         }],
         tools,

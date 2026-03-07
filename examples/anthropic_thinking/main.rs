@@ -33,7 +33,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let request = LlmRequest {
         model: String::new(),
         contents: vec![Content {
-            role: "user".to_string(),
+            role: adk_core::prelude::Role::User,
             parts: vec![Part::Text {
                 text: "A bat and a ball cost $1.10 in total. The bat costs $1.00 more \
                        than the ball. How much does the ball cost? Think carefully."

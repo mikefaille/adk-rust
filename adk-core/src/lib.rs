@@ -93,3 +93,6 @@ pub use model::{
 };
 pub use tool::{Tool, ToolContext, ToolPredicate, ToolRegistry, Toolset, ValidationMode};
 pub use types::{Content, FunctionResponseData, MAX_INLINE_DATA_SIZE, Part};
+
+
+pub mod prelude;

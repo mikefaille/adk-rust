@@ -64,7 +64,7 @@ mod llm_agent;
 pub mod tool_call_markup;
 mod workflow;
 
-pub use adk_core::Agent;
+pub use adk_core::prelude::*;
 pub use compaction::LlmEventSummarizer;
 pub use custom_agent::{CustomAgent, CustomAgentBuilder};
 pub use guardrails::GuardrailSet;

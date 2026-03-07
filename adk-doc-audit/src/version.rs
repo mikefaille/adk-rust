@@ -1144,7 +1144,7 @@ mod tests {
         );
 
         assert_eq!(
-            validator.extract_crate_name_from_context("use adk_core::Agent;"),
+            validator.extract_crate_name_from_context("use adk_core::prelude::*;"),
             Some("adk-core".to_string())
         );
 

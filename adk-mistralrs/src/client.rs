@@ -317,9 +317,9 @@ impl MistralRsModel {
 
         for content in &request.contents {
             let role = match &content.role {
-                adk_core::types::Role::User => TextMessageRole::User,
-                adk_core::types::Role::Model => TextMessageRole::Assistant,
-                adk_core::types::Role::System => TextMessageRole::System,
+                adk_core::prelude::Role::User => TextMessageRole::User,
+                adk_core::prelude::Role::Model => TextMessageRole::Assistant,
+                adk_core::prelude::Role::System => TextMessageRole::System,
                 _ => TextMessageRole::User, // Default to user for unknown roles
             };
 

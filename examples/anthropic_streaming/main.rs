@@ -34,7 +34,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let request = make_request(
         vec![
             Content {
-                role: "system".to_string(),
+                role: adk_core::prelude::Role::System,
                 parts: vec![Part::Text {
                     text: "You are a concise technical writer. Respond in short, \
                            well-structured paragraphs. Use bullet points for lists."
@@ -42,7 +42,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }],
             },
             Content {
-                role: "user".to_string(),
+                role: adk_core::prelude::Role::User,
                 parts: vec![Part::Text {
                     text: "Explain the key differences between TCP and UDP in networking. \
                            Keep it under 200 words."

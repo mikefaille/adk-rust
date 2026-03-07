@@ -1,5 +1,5 @@
 use crate::{Guardrail, GuardrailError, GuardrailResult, Result, Severity};
-use adk_core::Content;
+use adk_core::prelude::*;
 use futures::future::join_all;
 use std::sync::Arc;
 

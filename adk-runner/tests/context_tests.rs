@@ -108,7 +108,7 @@ fn test_context_creation() {
     let agent = Arc::new(MockAgent { name: "test_agent".to_string() });
 
     let content =
-        Content { role: "user".to_string(), parts: vec![Part::Text { text: "Hello".to_string() }] };
+        Content { role: adk_core::prelude::Role::User, parts: vec![Part::Text { text: "Hello".to_string() }] };
 
     let ctx = InvocationContext::new(
         "inv-123".to_string(),
@@ -126,7 +126,7 @@ fn test_context_creation() {
     assert_eq!(ctx.app_name(), "test-app");
     assert_eq!(ctx.session_id(), "session-789");
     assert_eq!(ctx.branch(), "");
-    assert_eq!(ctx.user_content().role, "user");
+    assert_eq!(ctx.user_content().role, adk_core::prelude::Role::User);
 }
 
 #[test]
@@ -343,7 +343,7 @@ fn test_mutable_session_event_accumulation() {
     let mut event1 = Event::new("inv-1");
     event1.author = "user".to_string();
     event1.llm_response.content = Some(Content {
-        role: "user".to_string(),
+        role: adk_core::prelude::Role::User,
         parts: vec![Part::Text { text: "Hello".to_string() }],
     });
     mutable.append_event(event1);
@@ -351,7 +351,7 @@ fn test_mutable_session_event_accumulation() {
     let mut event2 = Event::new("inv-1");
     event2.author = "assistant".to_string();
     event2.llm_response.content = Some(Content {
-        role: "model".to_string(),
+        role: adk_core::prelude::Role::Model,
         parts: vec![Part::Text { text: "Hi there!".to_string() }],
     });
     mutable.append_event(event2);
@@ -359,8 +359,8 @@ fn test_mutable_session_event_accumulation() {
     // Check conversation history
     let history = mutable.conversation_history();
     assert_eq!(history.len(), 2);
-    assert_eq!(history[0].role, "user");
-    assert_eq!(history[1].role, "model");
+    assert_eq!(history[0].role, adk_core::prelude::Role::User);
+    assert_eq!(history[1].role, adk_core::prelude::Role::Model);
 }
 
 #[test]
@@ -391,7 +391,7 @@ fn conversation_history_preserves_tool_role() {
     let mut user_event = Event::new("inv-1");
     user_event.author = "user".to_string();
     user_event.llm_response.content = Some(Content {
-        role: "user".to_string(),
+        role: adk_core::prelude::Role::User,
         parts: vec![Part::Text { text: "hello".into() }],
     });
     mutable.append_event(user_event);
@@ -400,7 +400,7 @@ fn conversation_history_preserves_tool_role() {
     let mut assistant_event = Event::new("inv-1");
     assistant_event.author = "my_agent".to_string();
     assistant_event.llm_response.content = Some(Content {
-        role: "model".to_string(),
+        role: adk_core::prelude::Role::Model,
         parts: vec![Part::FunctionCall {
             name: "browser_navigate".into(),
             args: serde_json::json!({"url": "https://example.com"}),
@@ -414,7 +414,7 @@ fn conversation_history_preserves_tool_role() {
     let mut tool_event = Event::new("inv-1");
     tool_event.author = "my_agent".to_string();
     tool_event.llm_response.content = Some(Content {
-        role: "function".to_string(),
+        role: adk_core::prelude::Role::Tool,
         parts: vec![Part::FunctionResponse {
             function_response: FunctionResponseData {
                 name: "browser_navigate".into(),
@@ -427,9 +427,9 @@ fn conversation_history_preserves_tool_role() {
 
     let history = mutable.conversation_history();
     assert_eq!(history.len(), 3);
-    assert_eq!(history[0].role, "user");
-    assert_eq!(history[1].role, "model");
-    assert_eq!(history[2].role, "function"); // NOT "model"
+    assert_eq!(history[0].role, adk_core::prelude::Role::User);
+    assert_eq!(history[1].role, adk_core::prelude::Role::Model);
+    assert_eq!(history[2].role, adk_core::prelude::Role::Tool); // NOT "model"
 }
 
 #[test]
@@ -441,11 +441,11 @@ fn conversation_history_maps_agent_events_to_model() {
     let mut event = Event::new("inv-1");
     event.author = "my_agent".to_string();
     event.llm_response.content = Some(Content {
-        role: "model".to_string(),
+        role: adk_core::prelude::Role::Model,
         parts: vec![Part::Text { text: "here are the results".into() }],
     });
     mutable.append_event(event);
 
     let history = mutable.conversation_history();
-    assert_eq!(history[0].role, "model");
+    assert_eq!(history[0].role, adk_core::prelude::Role::Model);
 }

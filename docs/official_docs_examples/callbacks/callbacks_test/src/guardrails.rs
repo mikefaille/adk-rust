@@ -35,7 +35,7 @@ async fn main() -> anyhow::Result<()> {
                             println!("[GUARDRAIL] Blocked content detected!");
                             // Return early with rejection message
                             return Ok(Some(Content {
-                                role: "model".to_string(),
+                                role: adk_core::prelude::Role::Model,
                                 parts: vec![Part::Text {
                                     text: "I cannot process that request.".to_string(),
                                 }],

@@ -1093,7 +1093,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }];
 
         let example = CodeExample {
-            content: "use adk_core::Agent;".to_string(),
+            content: "use adk_core::prelude::*;".to_string(),
             language: "rust".to_string(),
             line_number: 1,
             is_runnable: true,
@@ -1111,7 +1111,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let example = CodeExample {
             content: r#"
-use adk_core::Agent;
+use adk_core::prelude::*;
 use tokio;
 
 #[tokio::main]

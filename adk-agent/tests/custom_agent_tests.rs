@@ -38,12 +38,12 @@ impl MockContext {
     fn new() -> Self {
         Self {
             content: Content {
-                role: "user".to_string(),
+                role: adk_core::prelude::Role::User,
                 parts: vec![Part::Text { text: "test".to_string() }],
             },
             session: MockSession,
             user_content: Content {
-                role: "user".to_string(),
+                role: adk_core::prelude::Role::User,
                 parts: vec![Part::Text { text: "test".to_string() }],
             },
         }

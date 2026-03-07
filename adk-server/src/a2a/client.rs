@@ -2,7 +2,7 @@ use crate::a2a::{
     AgentCard, JsonRpcRequest, JsonRpcResponse, Message, MessageSendParams,
     TaskArtifactUpdateEvent, TaskStatusUpdateEvent, UpdateEvent,
 };
-use adk_core::Result;
+use adk_core::prelude::*;
 use futures::stream::Stream;
 use serde_json::Value;
 use std::pin::Pin;

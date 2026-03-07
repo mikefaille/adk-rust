@@ -88,7 +88,7 @@ fn create_sample_conversation() -> Vec<Event> {
     let mut e2 = Event::new(invocation_id);
     e2.author = "assistant".to_string();
     e2.set_content(Content {
-        role: "model".to_string(),
+        role: adk_core::prelude::Role::Model,
         parts: vec![Part::FunctionCall {
             name: "get_weather".to_string(),
             args: json!({"city": "Tokyo"}),
@@ -101,7 +101,7 @@ fn create_sample_conversation() -> Vec<Event> {
     let mut e3 = Event::new(invocation_id);
     e3.author = "get_weather".to_string();
     e3.set_content(Content {
-        role: "function".to_string(),
+        role: adk_core::prelude::Role::Tool,
         parts: vec![Part::FunctionResponse {
             function_response: FunctionResponseData {
                 name: "get_weather".to_string(),

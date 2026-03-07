@@ -85,7 +85,7 @@ impl AnthropicClient {
         let mut messages = Vec::new();
 
         for content in &request.contents {
-            if content.role == "system" {
+            if content.role == adk_core::prelude::Role::System {
                 // Requirement 1.1: Extract system-role content text parts
                 let text: String = content
                     .parts
@@ -613,11 +613,11 @@ mod tests {
     fn test_system_role_extracted_to_system_param() {
         let request = make_request(vec![
             Content {
-                role: "system".to_string(),
+                role: adk_core::prelude::Role::System,
                 parts: vec![Part::Text { text: "You are a helpful assistant.".to_string() }],
             },
             Content {
-                role: "user".to_string(),
+                role: adk_core::prelude::Role::User,
                 parts: vec![Part::Text { text: "Hello".to_string() }],
             },
         ]);
@@ -650,19 +650,19 @@ mod tests {
     fn test_instruction_rerouting_to_system() {
         let request = make_request(vec![
             Content {
-                role: "user".to_string(),
+                role: adk_core::prelude::Role::User,
                 parts: vec![Part::Text { text: "You are a coding assistant.".to_string() }],
             },
             Content {
-                role: "user".to_string(),
+                role: adk_core::prelude::Role::User,
                 parts: vec![Part::Text { text: "Always respond in Rust.".to_string() }],
             },
             Content {
-                role: "model".to_string(),
+                role: adk_core::prelude::Role::Model,
                 parts: vec![Part::Text { text: "Understood.".to_string() }],
             },
             Content {
-                role: "user".to_string(),
+                role: adk_core::prelude::Role::User,
                 parts: vec![Part::Text { text: "Write a function.".to_string() }],
             },
         ]);
@@ -695,15 +695,15 @@ mod tests {
     fn test_multiple_system_entries_concatenated() {
         let request = make_request(vec![
             Content {
-                role: "system".to_string(),
+                role: adk_core::prelude::Role::System,
                 parts: vec![Part::Text { text: "First system instruction.".to_string() }],
             },
             Content {
-                role: "system".to_string(),
+                role: adk_core::prelude::Role::System,
                 parts: vec![Part::Text { text: "Second system instruction.".to_string() }],
             },
             Content {
-                role: "user".to_string(),
+                role: adk_core::prelude::Role::User,
                 parts: vec![Part::Text { text: "Hello".to_string() }],
             },
         ]);
@@ -731,7 +731,7 @@ mod tests {
     fn test_no_system_content_omits_system_param() {
         // No system role, no assistant message → no instruction boundary → no system
         let request = make_request(vec![Content {
-            role: "user".to_string(),
+            role: adk_core::prelude::Role::User,
             parts: vec![Part::Text { text: "Hello".to_string() }],
         }]);
 
@@ -753,15 +753,15 @@ mod tests {
     fn test_heuristic_skipped_when_explicit_system_exists() {
         let request = make_request(vec![
             Content {
-                role: "system".to_string(),
+                role: adk_core::prelude::Role::System,
                 parts: vec![Part::Text { text: "Explicit system.".to_string() }],
             },
             Content {
-                role: "user".to_string(),
+                role: adk_core::prelude::Role::User,
                 parts: vec![Part::Text { text: "Instruction-like text.".to_string() }],
             },
             Content {
-                role: "model".to_string(),
+                role: adk_core::prelude::Role::Model,
                 parts: vec![Part::Text { text: "OK.".to_string() }],
             },
         ]);
@@ -790,7 +790,7 @@ mod tests {
     fn test_heuristic_skips_non_text_user_messages() {
         let request = make_request(vec![
             Content {
-                role: "user".to_string(),
+                role: adk_core::prelude::Role::User,
                 parts: vec![Part::FunctionResponse {
                     function_response: adk_core::FunctionResponseData {
                         name: "tool".to_string(),
@@ -800,7 +800,7 @@ mod tests {
                 }],
             },
             Content {
-                role: "model".to_string(),
+                role: adk_core::prelude::Role::Model,
                 parts: vec![Part::Text { text: "Got it.".to_string() }],
             },
         ]);
@@ -1119,7 +1119,7 @@ mod tests {
     /// Generator for a Content with role "system" containing 1..3 text parts.
     fn arb_system_content() -> impl Strategy<Value = Content> {
         prop::collection::vec(arb_system_text(), 1..=3).prop_map(|texts| Content {
-            role: "system".to_string(),
+            role: adk_core::prelude::Role::System,
             parts: texts.into_iter().map(|t| Part::Text { text: t }).collect(),
         })
     }
@@ -1127,13 +1127,13 @@ mod tests {
     /// Generator for a Content with role "user" containing a single text part.
     fn arb_user_text_content() -> impl Strategy<Value = Content> {
         arb_system_text()
-            .prop_map(|text| Content { role: "user".to_string(), parts: vec![Part::Text { text }] })
+            .prop_map(|text| Content { role: adk_core::prelude::Role::User, parts: vec![Part::Text { text }] })
     }
 
     /// Generator for a Content with role "model" (assistant) containing a single text part.
     fn arb_assistant_content() -> impl Strategy<Value = Content> {
         arb_system_text().prop_map(|text| Content {
-            role: "model".to_string(),
+            role: adk_core::prelude::Role::Model,
             parts: vec![Part::Text { text }],
         })
     }

@@ -23,7 +23,7 @@ impl SequencedModel {
     fn function_call_response(name: &str, args: Value, id: &str) -> LlmResponse {
         LlmResponse {
             content: Some(Content {
-                role: "model".to_string(),
+                role: adk_core::prelude::Role::Model,
                 parts: vec![Part::FunctionCall {
                     name: name.to_string(),
                     args,
@@ -45,7 +45,7 @@ impl SequencedModel {
     fn text_response(text: &str) -> LlmResponse {
         LlmResponse {
             content: Some(Content {
-                role: "model".to_string(),
+                role: adk_core::prelude::Role::Model,
                 parts: vec![Part::Text { text: text.to_string() }],
             }),
             usage_metadata: None,
