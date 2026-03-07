@@ -12,7 +12,6 @@ use async_openai::types::{
     CreateChatCompletionResponse, CreateChatCompletionStreamResponse, FunctionCall, FunctionObject,
     ImageDetail, ImageUrl, InputAudio, InputAudioFormat,
 };
-use bytes::Bytes;
 use mime;
 use std::collections::HashMap;
 
@@ -388,7 +387,7 @@ mod tests {
         let content = Content::user().with_text("What is in this image?").with_part(
             Part::inline_data(
                 "image/png",
-                Bytes::from_static(&[0x89, 0x50, 0x4E, 0x47]), // PNG magic bytes
+                bytes::Bytes::from_static(&[0x89, 0x50, 0x4E, 0x47]), // PNG magic bytes
             )
             .unwrap(),
         );
@@ -422,8 +421,8 @@ mod tests {
     fn test_user_message_with_multiple_attachments() {
         let content = Content::user()
             .with_text("Compare these")
-            .with_part(Part::inline_data("image/jpeg", Bytes::from_static(&[0xFF, 0xD8])).unwrap())
-            .with_part(Part::inline_data("image/png", Bytes::from_static(&[0x89, 0x50])).unwrap());
+            .with_part(Part::inline_data("image/jpeg", bytes::Bytes::from_static(&[0xFF, 0xD8])).unwrap())
+            .with_part(Part::inline_data("image/png", bytes::Bytes::from_static(&[0x89, 0x50])).unwrap());
         let msg = content_to_message(&content);
 
         if let ChatCompletionRequestMessage::User(user_msg) = &msg {
@@ -440,7 +439,7 @@ mod tests {
     #[test]
     fn test_user_message_with_audio_inline_data_uses_input_audio_part() {
         let content = Content::user().with_text("Transcribe this").with_part(
-            Part::inline_data("audio/wav", Bytes::from_static(&[0x52, 0x49, 0x46, 0x46])).unwrap(),
+            Part::inline_data("audio/wav", bytes::Bytes::from_static(&[0x52, 0x49, 0x46, 0x46])).unwrap(),
         );
         let msg = content_to_message(&content);
 
@@ -462,7 +461,7 @@ mod tests {
     #[test]
     fn test_user_message_with_pdf_inline_data_falls_back_to_text_part() {
         let content = Content::user()
-            .with_part(Part::inline_data("application/pdf", Bytes::from_static(b"%PDF")).unwrap());
+            .with_part(Part::inline_data("application/pdf", bytes::Bytes::from_static(b"%PDF")).unwrap());
         let msg = content_to_message(&content);
 
         if let ChatCompletionRequestMessage::User(user_msg) = &msg {

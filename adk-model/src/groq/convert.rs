@@ -3,7 +3,6 @@
 //! Groq uses OpenAI-compatible API format, so we can reuse most types from DeepSeek.
 
 use adk_core::{Content, FinishReason, LlmResponse, Part, Role, UsageMetadata};
-use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -342,7 +341,7 @@ mod tests {
     fn content_to_message_keeps_inline_attachment_payload() {
         let content = Content::user().with_part(Part::InlineData {
             mime_type: "application/octet-stream".parse().unwrap(),
-            data: Bytes::from_static(&[0xCA, 0xFE]),
+            data: bytes::Bytes::from_static(&[0xCA, 0xFE]),
         });
         let message = content_to_message(&content);
         let payload = message.content.unwrap_or_default();

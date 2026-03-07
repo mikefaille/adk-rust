@@ -1,7 +1,6 @@
 //! Type conversions between ADK core types and ollama-rs types.
 
 use adk_core::{Content, FinishReason, LlmResponse, Part, Role, UsageMetadata};
-use bytes::Bytes;
 use ollama_rs::generation::chat::{ChatMessage, ChatMessageResponse};
 
 /// Convert ADK Content to Ollama ChatMessage.
@@ -140,7 +139,7 @@ mod tests {
     #[test]
     fn content_to_chat_message_keeps_inline_attachment_payload() {
         let content = Content::user()
-            .with_inline_data("application/pdf", Bytes::from_static(b"%PDF"))
+            .with_inline_data("application/pdf", bytes::Bytes::from_static(b"%PDF"))
             .unwrap();
         let message = content_to_chat_message(&content).expect("message should be created");
         assert!(message.content.contains("[Inline Data: application/pdf]"));

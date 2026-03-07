@@ -6,7 +6,7 @@ use crate::server::events::ResumeEvent;
 use crate::server::graph_runner::{INTERRUPTED_SESSIONS, deserialize_interrupt_response};
 use crate::server::sse::send_resume_response;
 use crate::server::state::AppState;
-use adk_core::types::{SessionId, UserId};
+use adk_core::types::SessionId;
 use axum::{
     Json,
     extract::{Path, Query, State},

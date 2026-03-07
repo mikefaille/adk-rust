@@ -2,7 +2,7 @@ use crate::keystore::{KNOWN_PROVIDER_KEYS, Keystore};
 use crate::server::events::{DebugEvent, TraceEventV2};
 use crate::server::graph_runner::{GraphInterruptHandler, INTERRUPTED_SESSIONS};
 use crate::server::state::AppState;
-use adk_core::types::{SessionId, UserId};
+use adk_core::types::SessionId;
 use axum::{
     extract::{Path, Query, State},
     response::sse::{Event, Sse},

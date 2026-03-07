@@ -6,8 +6,7 @@
 //!   cd doc-test/callbacks/callbacks_test
 //!   GOOGLE_API_KEY=your_key cargo run --bin guardrails
 
-use adk_core::Part;
-use adk_core::types::{SessionId, UserId};
+use adk_core::types::UserId;
 use adk_rust::prelude::*;
 use std::sync::Arc;
 
