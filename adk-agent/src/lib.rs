@@ -57,12 +57,12 @@
 //!     .build()?;
 //! ```
 
-pub mod util;
 pub mod compaction;
 mod custom_agent;
 pub mod guardrails;
 mod llm_agent;
 pub mod tool_call_markup;
+pub mod util;
 mod workflow;
 
 pub use adk_core::Agent;

@@ -2,8 +2,8 @@
 
 use super::error::ConversionError;
 use crate::attachment;
-use bytes::Bytes;
 use adk_core::{Content, FinishReason, LlmResponse, Part, UsageMetadata};
+use bytes::Bytes;
 use claudius::ImageMediaType;
 use claudius::{
     Base64ImageSource, Base64PdfSource, CacheControlEphemeral, ContentBlock, DocumentBlock,
@@ -56,16 +56,16 @@ pub fn content_to_message(
                 }
                 Ok(Some(ContentBlock::ToolUse(block)))
             }
-            Part::FunctionResponse { name: _, response, id } => Ok(Some(ContentBlock::ToolResult(
-                ToolResultBlock {
+            Part::FunctionResponse { name: _, response, id } => {
+                Ok(Some(ContentBlock::ToolResult(ToolResultBlock {
                     tool_use_id: id.clone().unwrap_or_else(|| "unknown".to_string()),
                     content: Some(ToolResultBlockContent::String(
                         serde_json::to_string(&response).unwrap_or_default(),
                     )),
                     is_error: None,
                     cache_control: None,
-                },
-            ))),
+                })))
+            }
             Part::InlineData { mime_type, data } => {
                 let media_type = match mime_type.as_ref() {
                     "image/jpeg" => Some(ImageMediaType::Jpeg),
@@ -105,7 +105,10 @@ pub fn content_to_message(
                     Ok(None)
                 } else {
                     // Fallback to text if dedicated Thinking blocks are not supported in this claudius version
-                    Ok(Some(ContentBlock::Text(TextBlock::new(format!("<thinking>{}</thinking>", thinking)))))
+                    Ok(Some(ContentBlock::Text(TextBlock::new(format!(
+                        "<thinking>{}</thinking>",
+                        thinking
+                    )))))
                 }
             }
         }?;
@@ -376,11 +379,9 @@ mod tests {
 
     #[test]
     fn test_content_to_message_with_inline_image() {
-        let content =
-            Content::user().with_text("What is in this image?").with_part(
-                Part::inline_data("image/png", Bytes::from_static(&[0x89, 0x50, 0x4E, 0x47]))
-                    .unwrap(),
-            );
+        let content = Content::user().with_text("What is in this image?").with_part(
+            Part::inline_data("image/png", Bytes::from_static(&[0x89, 0x50, 0x4E, 0x47])).unwrap(),
+        );
         let msg = content_to_message(&content, false).unwrap();
         assert!(matches!(msg.role, MessageRole::User));
 
@@ -445,9 +446,8 @@ mod tests {
 
     #[test]
     fn test_content_to_message_pdf_file_uri_errors() {
-        let content = Content::user().with_part(
-            Part::file_data("application/pdf", "https://example.com/test.pdf"),
-        );
+        let content = Content::user()
+            .with_part(Part::file_data("application/pdf", "https://example.com/test.pdf"));
         let result = content_to_message(&content, false);
         assert!(matches!(result, Err(ConversionError::UnsupportedFileData)));
     }

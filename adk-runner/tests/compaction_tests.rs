@@ -1,10 +1,10 @@
 //! Tests for context compaction integration in the runner.
 
+use adk_core::types::{SessionId, UserId};
 use adk_core::{
     Agent, BaseEventsSummarizer, Content, Event, EventActions, EventCompaction, EventStream,
     EventsCompactionConfig, InvocationContext, Part, Result, Role,
 };
-use adk_core::types::{SessionId, UserId};
 use adk_runner::{MutableSession, Runner, RunnerConfig};
 use adk_session::{Events, GetRequest, Session, SessionService, State};
 use async_trait::async_trait;

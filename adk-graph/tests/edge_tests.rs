@@ -15,7 +15,7 @@ fn test_edge_target_from_str() {
 
     // Prove a node coincidentally named "end" is NOT evaluated as the framework's semantic End state
     assert_ne!(EdgeTarget::Node("end".to_string()), EdgeTarget::End);
-    
+
     // Prove a node injected with the END constant string is still distinct from the explicit End variant
     assert_ne!(EdgeTarget::Node(END.to_string()), EdgeTarget::End);
 }
@@ -65,7 +65,7 @@ fn test_by_bool_router() {
 fn test_max_iterations_router() {
     let router = Router::max_iterations("iteration_count", 5, "loop_node", "stop");
     let mut state = State::new();
-    
+
     // Missing iteration state defaults to allowing the loop
     assert_eq!(router(&state), "loop_node");
 
@@ -82,7 +82,7 @@ fn test_max_iterations_router() {
 fn test_on_error_router() {
     let router = Router::on_error("error", "handle_error", "next");
     let mut state = State::new();
-    
+
     // Empty state without errors proceeds cleanly
     assert_eq!(router(&state), "next");
 
@@ -100,14 +100,13 @@ fn test_custom_router() {
     });
 
     let mut state = State::new();
-    
+
     state.insert("score".to_string(), json!(90));
     assert_eq!(router(&state), "high");
 
     state.insert("score".to_string(), json!(50));
     assert_eq!(router(&state), "low");
 }
-
 
 #[test]
 fn test_edge_target_equality() {

@@ -19,8 +19,8 @@
 //! ```
 
 use adk_agent::LlmAgentBuilder;
-use adk_core::{Content, ContextCacheConfig, Part};
 use adk_core::types::{SessionId, UserId};
+use adk_core::{Content, ContextCacheConfig, Part};
 use adk_model::gemini::GeminiModel;
 use adk_runner::{CachePerformanceAnalyzer, Runner, RunnerConfig};
 use adk_session::{CreateRequest, GetRequest, InMemorySessionService, SessionService};
@@ -256,7 +256,8 @@ async fn ask(
     println!(">> Turn {turn}: {question}\n");
 
     let content = Content::new("user").with_text(question);
-    let mut stream = runner.run(UserId::new("user_1").unwrap(), session_id.clone(), content).await?;
+    let mut stream =
+        runner.run(UserId::new("user_1").unwrap(), session_id.clone(), content).await?;
 
     print!("   Assistant: ");
     let mut last_usage = None;
@@ -279,15 +280,15 @@ async fn ask(
     if let Some(usage) = &last_usage {
         println!("   Token usage:");
         println!("     prompt:         {}", usage.prompt_token_count);
-        println!("     candidates:     {}", usage.candidates_tokens);
-        println!("     total:          {}", usage.total_tokens);
+        println!("     candidates:     {}", usage.candidates_token_count);
+        println!("     total:          {}", usage.total_token_count);
         if let Some(cache_read) = usage.cache_read_input_token_count {
             println!("     cache read:     {cache_read}  ← tokens served from cache");
         }
         if let Some(cache_create) = usage.cache_creation_input_token_count {
             println!("     cache created:  {cache_create}  ← tokens used to populate cache");
         }
-        if let Some(thinking) = None {
+        if let Some(thinking) = usage.thinking_token_count {
             println!("     thinking:       {thinking}");
         }
     }
@@ -322,7 +323,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .create(CreateRequest {
             app_name: "gemini_prompt_caching".to_string(),
             user_id: UserId::new("user_1").unwrap(),
-            session_id: SessionId::new("new_session").unwrap(),
+            session_id: Some(SessionId::new("new_session").unwrap()),
             state: HashMap::new(),
         })
         .await?;
@@ -357,21 +358,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Watch for `cache read` tokens increasing after the first turn.\n");
 
     // Turn 1 — cache miss, populates cache
-    ask(&runner, &session_id, "How do I authenticate with OAuth 2.0 client credentials?", 1)
+    let session_id_typed = SessionId::new(session_id.clone()).unwrap();
+    ask(&runner, &session_id_typed, "How do I authenticate with OAuth 2.0 client credentials?", 1)
         .await?;
 
     // Turn 2 — should see cache hits
-    ask(&runner, &session_id, "What database services are available and what versions?", 2).await?;
+    ask(&runner, &session_id_typed, "What database services are available and what versions?", 2)
+        .await?;
 
     // Turn 3 — more cache hits
-    ask(&runner, &session_id, "Explain the auto-scaling configuration for services.", 3).await?;
+    ask(&runner, &session_id_typed, "Explain the auto-scaling configuration for services.", 3)
+        .await?;
 
     // Analyze cache performance from session events
     let session = session_service
         .get(GetRequest {
             app_name: "gemini_prompt_caching".to_string(),
             user_id: UserId::new("user_1").unwrap(),
-            session_id: session_id.clone(),
+            session_id: session_id_typed.clone(),
             num_recent_events: None,
             after: None,
         })

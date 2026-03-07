@@ -68,7 +68,7 @@ impl MockContext {
         Self {
             session: MockSession::new(),
             user_content: Content {
-                role: "user".to_string(),
+                role: adk_core::Role::User,
                 parts: vec![Part::text(text.to_string())],
             },
             identity: AdkIdentity::default(),
@@ -155,7 +155,7 @@ async fn test_multi_agent_workflow() {
             if let Some(content) = event.llm_response.content {
                 for part in content.parts {
                     if let Some(text) = part.as_text() {
-                        response_text.push_str(&text);
+                        response_text.push_str(text);
                     }
                 }
             }

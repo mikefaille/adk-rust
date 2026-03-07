@@ -53,17 +53,19 @@ struct MockContext {
 
 impl MockContext {
     fn new() -> Self {
+        let mut identity = AdkIdentity::default();
+        identity.invocation_id = adk_core::types::InvocationId::new("inv-1").unwrap();
         Self {
             content: Content {
-                role: "user".to_string(),
+                role: adk_core::Role::User,
                 parts: vec![Part::text("test".to_string())],
             },
             session: MockSession::new(),
             user_content: Content {
-                role: "user".to_string(),
+                role: adk_core::Role::User,
                 parts: vec![Part::text("test".to_string())],
             },
-            identity: AdkIdentity::default(),
+            identity,
             metadata: HashMap::new(),
         }
     }

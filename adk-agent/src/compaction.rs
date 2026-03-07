@@ -100,8 +100,13 @@ impl BaseEventsSummarizer for LlmEventSummarizer {
         let start_timestamp = events.first().map(|e| e.timestamp).unwrap_or_default();
         let end_timestamp = events.last().map(|e| e.timestamp).unwrap_or_default();
 
-        let compaction =
-            EventCompaction { start_timestamp, end_timestamp, compacted_content: summary, summary: None, truncate_before_id: "".to_string() };
+        let compaction = EventCompaction {
+            start_timestamp,
+            end_timestamp,
+            compacted_content: summary,
+            summary: None,
+            truncate_before_id: "".to_string(),
+        };
 
         let actions = EventActions { compaction: Some(compaction), ..Default::default() };
 

@@ -60,9 +60,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ];
 
     let request = make_request(vec![Content {
-        role: "user".to_string(),
+        role: adk_core::Role::Custom("user".to_string()),
         parts: vec![
-            Part::InlineData { mime_type: "image/png".to_string(), data: red_pixel_png.clone() },
+            Part::InlineData {
+                mime_type: "image/png".parse().unwrap(),
+                data: red_pixel_png.clone().into(),
+            },
             Part::text("What do you see in this image? It's very small.".to_string()),
         ],
     }]);
@@ -81,10 +84,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ];
 
     let request = make_request(vec![Content {
-        role: "user".to_string(),
+        role: adk_core::Role::Custom("user".to_string()),
         parts: vec![
-            Part::InlineData { mime_type: "image/png".to_string(), data: red_pixel_png.clone() },
-            Part::InlineData { mime_type: "image/png".to_string(), data: blue_pixel_png },
+            Part::InlineData {
+                mime_type: "image/png".parse().unwrap(),
+                data: red_pixel_png.clone().into(),
+            },
+            Part::InlineData {
+                mime_type: "image/png".parse().unwrap(),
+                data: blue_pixel_png.into(),
+            },
             Part::text(
                 "What is shown in this image and audio? Answer based on the provided context."
                     .to_string(),
@@ -105,7 +114,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Send multimodal content through the agent's console
     let app_name = "gemini_multimodal".to_string();
-    let user_id = "user1".to_string();
+    let user_id = adk_core::types::UserId::new("user1").unwrap();
 
     println!("Starting vision agent console. Try pasting image descriptions or ask about images.");
     println!("(The agent accepts text input via console — for programmatic multimodal input,");

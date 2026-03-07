@@ -2,8 +2,8 @@
 //!
 //! Demonstrates adding and searching long-term semantic memory.
 
-use adk_core::{Content, Role};
 use adk_core::types::{SessionId, UserId};
+use adk_core::{Content, Role};
 use adk_memory::{InMemoryMemoryService, MemoryEntry, MemoryService, SearchRequest};
 use chrono::Utc;
 
@@ -60,8 +60,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         timestamp: Utc::now(),
     }];
 
-    memory.add_session("app", &UserId::new("user-a").unwrap(), &SessionId::new("sess-1").unwrap(), entries_a).await?;
-    memory.add_session("app", &UserId::new("user-b").unwrap(), &SessionId::new("sess-1").unwrap(), entries_b).await?;
+    memory
+        .add_session(
+            "app",
+            &UserId::new("user-a").unwrap(),
+            &SessionId::new("sess-1").unwrap(),
+            entries_a,
+        )
+        .await?;
+    memory
+        .add_session(
+            "app",
+            &UserId::new("user-b").unwrap(),
+            &SessionId::new("sess-1").unwrap(),
+            entries_b,
+        )
+        .await?;
 
     let search_a = memory
         .search(SearchRequest {

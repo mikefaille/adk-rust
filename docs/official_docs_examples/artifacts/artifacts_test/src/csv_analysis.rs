@@ -36,7 +36,7 @@ async fn main() -> anyhow::Result<()> {
             user_id: UserId::new("user").unwrap(),
             session_id: SessionId::new("init").unwrap(),
             file_name: "user:sales.csv".to_string(),
-            part: Part::text(csv_data ),
+            part: Part::text(csv_data),
             version: None,
         })
         .await?;

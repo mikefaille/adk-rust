@@ -1,22 +1,54 @@
-use adk_agent::ToolContext;
-use adk_core::model::{Llm, LlmRequest, LlmResponse, LlmResponseStream};
-use adk_core::types::{Content, InvocationId, Part, Role, SessionId, UserId};
-use adk_core::{Result, Tool};
-use adk_session::{Session, State};
+use adk_agent::LlmAgentBuilder;
+use adk_core::types::{AdkIdentity, InvocationId, Role, SessionId, UserId};
+use adk_core::{
+    Agent, Content, FinishReason, InvocationContext, Llm, LlmRequest, LlmResponse,
+    LlmResponseStream, Part, Result, RunConfig, Session, State, ToolContext,
+};
+use adk_tool::Tool;
 use async_trait::async_trait;
-use serde_json::{json, Value};
+use futures::StreamExt;
+use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-// Mock LLM for testing
-struct MockLlm {
+// --- Mocks ---
+
+struct MockModel {
     response: LlmResponse,
 }
 
+impl MockModel {
+    fn new_function_call(name: &str, args: Value) -> Self {
+        let content = Content {
+            role: Role::Model,
+            parts: vec![Part::FunctionCall {
+                name: name.to_string(),
+                args,
+                id: Some(format!("call_{}", name)),
+                thought_signature: None,
+            }],
+        };
+
+        Self {
+            response: LlmResponse {
+                content: Some(content),
+                usage_metadata: None,
+                finish_reason: Some(FinishReason::Stop),
+                citation_metadata: None,
+                partial: false,
+                turn_complete: true,
+                interrupted: false,
+                error_code: None,
+                error_message: None,
+            },
+        }
+    }
+}
+
 #[async_trait]
-impl Llm for MockLlm {
+impl Llm for MockModel {
     fn name(&self) -> &str {
-        "mock"
+        "mock-model"
     }
 
     async fn generate_content(&self, _req: LlmRequest, _stream: bool) -> Result<LlmResponseStream> {
@@ -29,8 +61,8 @@ impl Llm for MockLlm {
 }
 
 struct MockTool {
-    captured_user_id: Arc<Mutex<Option<UserId>>>,
-    captured_session_id: Arc<Mutex<Option<SessionId>>>,
+    captured_user_id: Arc<Mutex<Option<String>>>,
+    captured_session_id: Arc<Mutex<Option<String>>>,
 }
 
 impl MockTool {
@@ -58,31 +90,22 @@ impl Tool for MockTool {
     }
 
     async fn execute(&self, ctx: Arc<dyn ToolContext>, _args: Value) -> Result<Value> {
-        // Capture context using typed IDs
-        *self.captured_user_id.lock().unwrap() = Some(ctx.user_id().clone());
-        *self.captured_session_id.lock().unwrap() = Some(ctx.session_id().clone());
+        // Capture context
+        *self.captured_user_id.lock().unwrap() = Some(ctx.user_id().to_string());
+        *self.captured_session_id.lock().unwrap() = Some(ctx.session_id().to_string());
 
         Ok(json!({ "status": "ok" }))
     }
 }
 
 struct MockSession {
-    id: SessionId,
+    session_id: SessionId,
     user_id: UserId,
-}
-
-impl MockSession {
-    fn new() -> Self {
-        Self {
-            id: SessionId::new("session-456").unwrap(),
-            user_id: UserId::new("user-123").unwrap(),
-        }
-    }
 }
 
 impl Session for MockSession {
     fn id(&self) -> &SessionId {
-        &self.id
+        &self.session_id
     }
     fn app_name(&self) -> &str {
         "test-app"
@@ -110,82 +133,95 @@ impl State for MockState {
 }
 
 struct MockContext {
-    identity: adk_core::types::AdkIdentity,
+    identity: AdkIdentity,
     session: MockSession,
     user_content: Content,
+    metadata: HashMap<String, String>,
 }
 
 impl MockContext {
     fn new() -> Self {
-        let mut identity = adk_core::types::AdkIdentity::default();
-        identity.invocation_id = "inv-1".into();
-        identity.agent_name = "test-agent".to_string();
-        identity.user_id = "user-123".into();
-        identity.app_name = "test-app".to_string();
-        identity.session_id = "session-456".into();
-        identity.branch = "main".to_string();
-
+        let identity = AdkIdentity {
+            invocation_id: InvocationId::new("inv-1").unwrap(),
+            user_id: UserId::new("user-123").unwrap(),
+            session_id: SessionId::new("session-456").unwrap(),
+            ..Default::default()
+        };
         Self {
             identity,
-            session: MockSession::new(),
-            user_content: Content::new(Role::User).with_text("run tool"),
+            session: MockSession {
+                session_id: SessionId::new("session-456").unwrap(),
+                user_id: UserId::new("user-123").unwrap(),
+            },
+            user_content: Content {
+                role: Role::User,
+                parts: vec![Part::Text("call tool".to_string())],
+            },
+            metadata: HashMap::new(),
         }
     }
 }
 
-#[async_trait]
-impl adk_agent::InvocationContext for MockContext {
-    fn invocation_id(&self) -> &InvocationId {
-        &self.identity.invocation_id
+impl adk_core::ReadonlyContext for MockContext {
+    fn identity(&self) -> &AdkIdentity {
+        &self.identity
+    }
+    fn metadata(&self) -> &HashMap<String, String> {
+        &self.metadata
     }
     fn user_content(&self) -> &Content {
         &self.user_content
     }
-    fn identity(&self) -> &adk_core::types::AdkIdentity {
-        &self.identity
+}
+
+#[async_trait]
+impl adk_core::CallbackContext for MockContext {
+    fn artifacts(&self) -> Option<Arc<dyn adk_core::Artifacts>> {
+        None
+    }
+}
+
+#[async_trait]
+impl InvocationContext for MockContext {
+    fn agent(&self) -> Arc<dyn Agent> {
+        unimplemented!()
+    }
+    fn memory(&self) -> Option<Arc<dyn adk_core::Memory>> {
+        None
     }
     fn session(&self) -> &dyn Session {
         &self.session
     }
-    fn metadata(&self) -> &HashMap<String, String> {
-        static EMPTY: std::sync::OnceLock<HashMap<String, String>> = std::sync::OnceLock::new();
-        EMPTY.get_or_init(HashMap::new)
+    fn run_config(&self) -> &RunConfig {
+        static RUN_CONFIG: std::sync::OnceLock<RunConfig> = std::sync::OnceLock::new();
+        RUN_CONFIG.get_or_init(RunConfig::default)
+    }
+    fn end_invocation(&self) {}
+    fn ended(&self) -> bool {
+        false
     }
 }
+
+// --- Tests ---
 
 #[tokio::test]
 async fn test_tool_context_propagation() {
     let tool = Arc::new(MockTool::new());
-    let tool_registry = vec![tool.clone() as Arc<dyn Tool>];
+    let model = Arc::new(MockModel::new_function_call("test_tool", json!({})));
 
-    let llm_response = LlmResponse {
-        content: Some(Content::new(Role::Model).with_part(Part::FunctionCall {
-            name: "test_tool".to_string(),
-            args: json!({}),
-            id: Some("call-1".to_string()),
-            thought_signature: None,
-        })),
-        ..Default::default()
-    };
-
-    let llm = Arc::new(MockLlm { response: llm_response });
-    let agent = adk_agent::LlmAgent::new("test-agent", llm, tool_registry);
+    let agent = LlmAgentBuilder::new("test-agent").model(model).tool(tool.clone()).build().unwrap();
 
     let ctx = Arc::new(MockContext::new());
+
     let mut stream = agent.run(ctx).await.unwrap();
 
-    // Run until tool call happens
-    while let Some(result) = stream.next().await {
-        let _ = result.unwrap();
-    }
+    // Consume stream to trigger tool execution
+    while (stream.next().await).is_some() {}
 
-    // Verify captured IDs are typed
-    assert_eq!(
-        *tool.captured_user_id.lock().unwrap(),
-        Some(UserId::new("user-123").unwrap())
-    );
-    assert_eq!(
-        *tool.captured_session_id.lock().unwrap(),
-        Some(SessionId::new("session-456").unwrap())
-    );
+    // Verify captured context
+    let captured_user = tool.captured_user_id.lock().unwrap().clone();
+    let captured_session = tool.captured_session_id.lock().unwrap().clone();
+
+    assert_eq!(captured_user, Some("user-123".to_string()));
+    assert_eq!(captured_session, Some("session-456".to_string()));
 }

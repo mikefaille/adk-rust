@@ -43,15 +43,18 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 
     // Prepare initial state
     let mut state = HashMap::new();
-    state.insert("user:name".to_string(), "Alice".to_string());
-    state.insert("user:language".to_string(), "French".to_string());
-    state.insert("user:expertise".to_string(), "intermediate".to_string());
+    state.insert("user:name".to_string(), serde_json::Value::String("Alice".to_string()));
+    state.insert("context:role".to_string(), serde_json::Value::String("developer".to_string()));
+    state.insert(
+        "user:expertise".to_string(),
+        serde_json::Value::String("intermediate".to_string()),
+    );
 
     // Create session with initial state
     let session = session_service
         .create(CreateRequest {
             app_name: app_name.to_string(),
-            user_id: UserId::new(user_id).unwrap(),
+            user_id: adk_core::types::UserId::new(user_id).unwrap(),
             session_id: None,
             state,
         })
@@ -98,8 +101,9 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         }
 
         let content = Content::new("user").with_text(input);
-        let mut events =
-            runner.run(UserId::new(user_id).unwrap(), session_id.clone(), content).await?;
+        let mut events = runner
+            .run(adk_core::types::UserId::new(user_id).unwrap(), session_id.clone(), content)
+            .await?;
 
         print!("Assistant: ");
         stdout.flush()?;
@@ -109,7 +113,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                 Ok(evt) => {
                     if let Some(content) = evt.llm_response.content {
                         for part in content.parts {
-                            if let Some(text) = part.text() {
+                            if let Some(text) = part.as_text() {
                                 print!("{}", text);
                                 stdout.flush()?;
                             }

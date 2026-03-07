@@ -68,7 +68,7 @@ impl TestContext {
             identity: AdkIdentity::default(),
             session: TestSession::new(),
             user_content: Content {
-                role: "user".to_string(),
+                role: adk_core::Role::User,
                 parts: vec![Part::text(text.to_string())],
             },
             metadata: HashMap::new(),
@@ -243,7 +243,7 @@ async fn main() -> Result<()> {
                 }
 
                 event.llm_response.content =
-                    Some(Content { role: "assistant".to_string(), parts: vec![Part::text(text)] });
+                    Some(Content { role: adk_core::Role::Model, parts: vec![Part::text(text)] });
 
                 Ok(Box::pin(futures::stream::iter(vec![Ok(event)])) as adk_core::EventStream)
             }

@@ -58,7 +58,7 @@ async fn main() -> Result<()> {
             let mut updates = std::collections::HashMap::new();
             for event in events {
                 if let Some(content) = event.content() {
-                    let text: String = content.parts.iter().filter_map(|p| p.text()).collect();
+                    let text: String = content.parts.iter().filter_map(|p| p.as_text()).collect();
                     if !text.is_empty() {
                         updates.insert("response".to_string(), json!(text));
                     }

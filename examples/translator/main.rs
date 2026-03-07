@@ -31,6 +31,7 @@
 
 use adk_agent::{LlmAgentBuilder, LoopAgent, SequentialAgent};
 use adk_cli::console::run_console;
+use adk_core::types::{SessionId, UserId};
 use adk_core::{Content, Part, ReadonlyContext};
 use adk_model::gemini::GeminiModel;
 use adk_runner::{Runner, RunnerConfig};
@@ -337,8 +338,9 @@ async fn run_translation(
     session_id: &SessionId,
     user_content: Content,
 ) -> anyhow::Result<String> {
-    let mut stream =
-        runner.run(UserId::new("batch_user").unwrap(), session_id.clone(), user_content).await?;
+    let mut stream = runner
+        .run(adk_core::types::UserId::new("batch_user").unwrap(), session_id.clone(), user_content)
+        .await?;
 
     // Process stream and collect any errors
     let mut last_text = String::new();
@@ -351,7 +353,7 @@ async fn run_translation(
                     for part in &content.parts {
                         if let Some(text) = part.as_text() {
                             if !text.is_empty() {
-                                last_text = text.clone();
+                                last_text = text.to_string();
                             }
                         }
                     }
@@ -371,7 +373,7 @@ async fn run_translation(
     let updated_session = session_service
         .get(GetRequest {
             app_name: "translator".to_string(),
-            user_id: UserId::new("batch_user").unwrap(),
+            user_id: adk_core::types::UserId::new("batch_user").unwrap(),
             session_id: session_id.clone(),
             num_recent_events: None,
             after: None,
@@ -382,7 +384,7 @@ async fn run_translation(
         updated_session.state().get("final_translation")
     {
         if !translation.is_empty() {
-            return Ok(clean_output(translation));
+            return Ok(clean_output(&translation));
         }
     }
 
@@ -391,7 +393,7 @@ async fn run_translation(
         updated_session.state().get("current_translation")
     {
         if !translation.is_empty() {
-            return Ok(clean_output(translation));
+            return Ok(clean_output(&translation));
         }
     }
 

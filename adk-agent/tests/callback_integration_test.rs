@@ -18,7 +18,7 @@ struct MockModel {
 impl MockModel {
     fn new_function_call(name: &str, args: Value) -> Self {
         let content = Content {
-            role: "model".to_string(),
+            role: adk_core::Role::Model,
             parts: vec![Part::FunctionCall {
                 name: name.to_string(),
                 args,
@@ -145,7 +145,7 @@ impl MockContext {
             identity,
             session: MockSession::new(),
             user_content: Content {
-                role: "user".to_string(),
+                role: adk_core::Role::User,
                 parts: vec![Part::text("start".to_string())],
             },
         }
@@ -236,7 +236,7 @@ async fn test_callback_short_circuit() {
         Box::pin(async move {
             // Return Some(content) to short-circuit
             Ok(Some(Content {
-                role: "assistant".to_string(),
+                role: adk_core::Role::Model,
                 parts: vec![Part::text("Short-circuited!".to_string())],
             }))
         })
@@ -257,7 +257,7 @@ async fn test_callback_short_circuit() {
     while let Some(result) = stream.next().await {
         let event = result.unwrap();
         if let Some(content) = event.llm_response.content {
-            if let Some(Part::text(text)) = content.parts.first() {
+            if let Some(Part::Text(text)) = content.parts.first() {
                 if text.contains("Short-circuited") {
                     found_short_circuit = true;
                 }

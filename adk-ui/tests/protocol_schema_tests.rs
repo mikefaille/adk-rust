@@ -1,4 +1,6 @@
-use adk_core::{Content, EventActions, ReadonlyContext, Role, Tool, ToolContext, types::AdkIdentity};
+use adk_core::{
+    Content, EventActions, ReadonlyContext, Role, Tool, ToolContext, types::AdkIdentity,
+};
 use adk_ui::tools::{RenderFormTool, RenderScreenTool};
 use async_trait::async_trait;
 use jsonschema::Validator;

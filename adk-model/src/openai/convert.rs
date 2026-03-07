@@ -1,9 +1,7 @@
 //! Type conversions between ADK and async-openai types.
 
 use crate::attachment;
-use bytes::Bytes;
 use adk_core::{Content, FinishReason, LlmResponse, Part, UsageMetadata};
-use mime;
 use async_openai::types::{
     ChatCompletionMessageToolCall, ChatCompletionRequestAssistantMessageArgs,
     ChatCompletionRequestMessage, ChatCompletionRequestMessageContentPartAudio,
@@ -14,6 +12,8 @@ use async_openai::types::{
     CreateChatCompletionResponse, CreateChatCompletionStreamResponse, FunctionCall, FunctionObject,
     ImageDetail, ImageUrl, InputAudio, InputAudioFormat,
 };
+use bytes::Bytes;
+use mime;
 use std::collections::HashMap;
 
 /// Convert ADK Content to OpenAI ChatCompletionRequestMessage.
@@ -52,7 +52,10 @@ pub fn content_to_message(content: &Content) -> ChatCompletionRequestMessage {
                         } else {
                             Some(ChatCompletionRequestUserMessageContentPart::Text(
                                 ChatCompletionRequestMessageContentPartText {
-                                    text: attachment::file_attachment_to_text(mime_type.as_ref(), file_uri),
+                                    text: attachment::file_attachment_to_text(
+                                        mime_type.as_ref(),
+                                        file_uri,
+                                    ),
                                 },
                             ))
                         }
@@ -382,11 +385,13 @@ mod tests {
 
     #[test]
     fn test_user_message_with_inline_data_produces_array_content() {
-        let content =
-            Content::user().with_text("What is in this image?").with_part(Part::inline_data(
+        let content = Content::user().with_text("What is in this image?").with_part(
+            Part::inline_data(
                 "image/png",
                 Bytes::from_static(&[0x89, 0x50, 0x4E, 0x47]), // PNG magic bytes
-            ).unwrap());
+            )
+            .unwrap(),
+        );
         let msg = content_to_message(&content);
 
         // Should produce a user message with Array content (not Text)
@@ -456,9 +461,8 @@ mod tests {
 
     #[test]
     fn test_user_message_with_pdf_inline_data_falls_back_to_text_part() {
-        let content = Content::user().with_part(
-            Part::inline_data("application/pdf", Bytes::from_static(b"%PDF")).unwrap(),
-        );
+        let content = Content::user()
+            .with_part(Part::inline_data("application/pdf", Bytes::from_static(b"%PDF")).unwrap());
         let msg = content_to_message(&content);
 
         if let ChatCompletionRequestMessage::User(user_msg) = &msg {
@@ -480,10 +484,8 @@ mod tests {
 
     #[test]
     fn test_user_message_with_file_data_image_uses_image_url_part() {
-        let content = Content::user().with_part(Part::file_data(
-            "image/jpeg",
-            "https://example.com/photo.jpg".to_string(),
-        ));
+        let content = Content::user()
+            .with_part(Part::file_data("image/jpeg", "https://example.com/photo.jpg".to_string()));
         let msg = content_to_message(&content);
 
         if let ChatCompletionRequestMessage::User(user_msg) = &msg {

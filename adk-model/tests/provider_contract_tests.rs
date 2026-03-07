@@ -1,4 +1,4 @@
-use adk_core::{types::Role, AdkError, Content, Llm, LlmRequest, LlmResponse, Part, Result};
+use adk_core::{AdkError, Content, Llm, LlmRequest, LlmResponse, Part, Result, types::Role};
 use adk_model::RetryConfig;
 use futures::StreamExt;
 use serde_json::json;
@@ -109,10 +109,7 @@ fn tools_request(model_name: &str) -> LlmRequest {
 
 fn response_has_text(response: &LlmResponse) -> bool {
     response.content.as_ref().is_some_and(|content| {
-        content
-            .parts
-            .iter()
-            .any(|part| matches!(part, Part::Text(text) if !text.trim().is_empty()))
+        content.parts.iter().any(|part| matches!(part, Part::Text(text) if !text.trim().is_empty()))
     })
 }
 
@@ -161,7 +158,8 @@ fn assert_response_invariants(spec: ProviderSpec, mode: &str, responses: &[LlmRe
 
         if let Some(content) = &response.content {
             assert_eq!(
-                content.role, Role::Model,
+                content.role,
+                Role::Model,
                 "{} {mode} chunk #{index} should use role=model when content is present",
                 spec.name
             );

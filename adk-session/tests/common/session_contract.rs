@@ -1,3 +1,4 @@
+use adk_core::types::{SessionId, UserId};
 use adk_session::{
     CreateRequest, DeleteRequest, Event, GetRequest, KEY_PREFIX_TEMP, ListRequest, SessionService,
 };
@@ -31,7 +32,7 @@ pub async fn assert_session_contract_with_users(
         .create(CreateRequest {
             app_name: app_name.to_string(),
             user_id: UserId::from(user_1.to_string()),
-            session_id: SessionId::new(None),
+            session_id: None,
             state: initial_state,
         })
         .await
@@ -134,7 +135,7 @@ pub async fn assert_session_contract_with_users(
         .create(CreateRequest {
             app_name: app_name.to_string(),
             user_id: UserId::from(user_2.to_string()),
-            session_id: SessionId::new(None),
+            session_id: None,
             state: HashMap::new(),
         })
         .await
@@ -167,7 +168,7 @@ pub async fn assert_session_contract_with_users(
         .create(CreateRequest {
             app_name: other_app_name.to_string(),
             user_id: UserId::from(user_1.to_string()),
-            session_id: SessionId::new(None),
+            session_id: None,
             state: HashMap::new(),
         })
         .await

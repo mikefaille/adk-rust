@@ -28,9 +28,7 @@
 //!     .build()?;
 //! ```
 
-use adk_core::{
-    Agent, Content, Event, EventStream, InvocationContext, Llm, LlmRequest, Part, Result,
-};
+use adk_core::{Agent, Content, Event, EventStream, InvocationContext, Llm, LlmRequest, Result};
 use adk_skill::{SelectionPolicy, SkillIndex, load_skill_index};
 use async_stream::stream;
 use async_trait::async_trait;
@@ -218,14 +216,14 @@ impl Agent for LlmConditionalAgent {
         let instruction = self.instruction.clone();
         let routes = self.routes.clone();
         let default_agent = self.default_agent.clone();
-        let invocation_id = run_ctx.invocation_id().to_string();
+        let _invocation_id = run_ctx.invocation_id().to_string();
         let agent_name = self.name.clone();
 
         let s = stream! {
             // Build classification request
             let user_content = run_ctx.user_content().clone();
             let user_text: String = user_content.parts.iter()
-                .filter_map(|p| if let Some(text) = p.as_text() { Some(text) } else { None })
+                .filter_map(|p| p.as_text().map(|text| text))
                 .collect::<Vec<_>>()
                 .join(" ");
 
@@ -259,7 +257,7 @@ impl Agent for LlmConditionalAgent {
                         if let Some(content) = chunk.content {
                             for part in content.parts {
                                 if let Some(text) = part.as_text() {
-                                    classification.push_str(&text);
+                                    classification.push_str(text);
                                 }
                             }
                         }

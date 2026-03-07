@@ -325,8 +325,7 @@ If an action fails, explain what went wrong."#,
         let task_content = Content {
             role: "user".to_string(),
             parts: vec![Part::text(
-                "Navigate to https://example.com and tell me what the page title is."
-                    .to_string(),
+                "Navigate to https://example.com and tell me what the page title is.".to_string(),
             )],
         };
 

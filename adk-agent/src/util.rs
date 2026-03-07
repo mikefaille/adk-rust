@@ -1,4 +1,4 @@
-use adk_core::{model, event};
+use adk_core::{event, model};
 
 pub fn map_finish_reason(reason: Option<model::FinishReason>) -> Option<event::FinishReason> {
     reason

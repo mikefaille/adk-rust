@@ -1,8 +1,6 @@
 //! Type conversion utilities for Azure AI Inference API.
 
-use adk_core::{
-    Content, FinishReason, LlmResponse, Part, Role, UsageMetadata,
-};
+use adk_core::{Content, FinishReason, LlmResponse, Part, Role, UsageMetadata};
 use serde_json::{Map, Value};
 use std::collections::HashMap;
 
@@ -40,7 +38,7 @@ pub fn build_request_body(
 
     // Add config parameters
     // Note: adk_core::RunConfig doesn't have model_config anymore, it has GenerateContentConfig in LlmRequest.
-    // However, the builder pattern might still be used. 
+    // However, the builder pattern might still be used.
     // Let's assume we use the defaults or provide them if available.
 
     body
@@ -51,7 +49,9 @@ fn content_to_message(content: &Content) -> Value {
     match content.role {
         Role::User => {
             let parts = extract_content_parts(&content.parts);
-            if parts.len() == 1 && matches!(parts[0], Value::Object(ref m) if m.get("type").and_then(Value::as_str) == Some("text")) {
+            if parts.len() == 1
+                && matches!(parts[0], Value::Object(ref m) if m.get("type").and_then(Value::as_str) == Some("text"))
+            {
                 // If it's just one text part, we can use a simple string for content (standard OpenAI/Azure AI style)
                 serde_json::json!({
                     "role": "user",
@@ -324,7 +324,11 @@ pub fn parse_sse_chunk(chunk: &Value) -> LlmResponse {
             if let Some(func) = tc.get("function") {
                 let name = func.get("name").and_then(Value::as_str).unwrap_or_default().to_string();
                 let args_str = func.get("arguments").and_then(Value::as_str).unwrap_or_default();
-                let args = if args_str.is_empty() { serde_json::json!({}) } else { serde_json::from_str(args_str).unwrap_or_default() };
+                let args = if args_str.is_empty() {
+                    serde_json::json!({})
+                } else {
+                    serde_json::from_str(args_str).unwrap_or_default()
+                };
                 let id = tc.get("id").and_then(Value::as_str).map(|s| s.to_string());
 
                 parts.push(Part::FunctionCall { name, args, id, thought_signature: None });

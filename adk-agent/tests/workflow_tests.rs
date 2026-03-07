@@ -1,10 +1,9 @@
 use adk_agent::{
-    ConditionalAgent, CustomAgentBuilder, LlmConditionalAgentBuilder, LoopAgent, ParallelAgent,
-    SequentialAgent,
+    CustomAgentBuilder, LlmConditionalAgentBuilder, LoopAgent, ParallelAgent, SequentialAgent,
 };
 use adk_core::{
-    Agent, Content, Event, InvocationContext, LlmRequest, Part, ReadonlyContext, RunConfig,
-    types::{AdkIdentity, SessionId, UserId, Role, InvocationId},
+    Agent, Content, Event, InvocationContext, LlmRequest, ReadonlyContext, RunConfig,
+    types::{AdkIdentity, Role, SessionId, UserId},
 };
 use async_trait::async_trait;
 use futures::stream;
@@ -45,9 +44,13 @@ impl adk_core::Session for MockSession {
 
 struct MockState;
 impl adk_core::State for MockState {
-    fn get(&self, _key: &str) -> Option<serde_json::Value> { None }
+    fn get(&self, _key: &str) -> Option<serde_json::Value> {
+        None
+    }
     fn set(&mut self, _key: String, _value: serde_json::Value) {}
-    fn all(&self) -> HashMap<String, serde_json::Value> { HashMap::new() }
+    fn all(&self) -> HashMap<String, serde_json::Value> {
+        HashMap::new()
+    }
 }
 
 struct TestContext {
@@ -157,7 +160,8 @@ async fn test_sequential_agent_execution_order() {
             async move {
                 let mut event = Event::new(inv_id);
                 event.author = "agent1".to_string();
-                event.llm_response.content = Some(Content::new(Role::Model).with_text("Response from agent1"));
+                event.llm_response.content =
+                    Some(Content::new(Role::Model).with_text("Response from agent1"));
                 Ok(Box::pin(stream::iter(vec![Ok(event)])) as adk_core::EventStream)
             }
         })
@@ -170,7 +174,8 @@ async fn test_sequential_agent_execution_order() {
             async move {
                 let mut event = Event::new(inv_id);
                 event.author = "agent2".to_string();
-                event.llm_response.content = Some(Content::new(Role::Model).with_text("Response from agent2"));
+                event.llm_response.content =
+                    Some(Content::new(Role::Model).with_text("Response from agent2"));
                 Ok(Box::pin(stream::iter(vec![Ok(event)])) as adk_core::EventStream)
             }
         })

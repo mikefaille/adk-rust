@@ -152,7 +152,8 @@ mod tests {
         let index = load_skill_index(root).unwrap();
         let policy = SelectionPolicy { top_k: 1, min_score: 0.1, ..SelectionPolicy::default() };
 
-        let mut content = Content::new(adk_core::Role::User).with_text("Please search this repository quickly");
+        let mut content =
+            Content::new(adk_core::Role::User).with_text("Please search this repository quickly");
         let matched = apply_skill_injection(&mut content, &index, &policy, 1000);
 
         assert!(matched.is_some());
