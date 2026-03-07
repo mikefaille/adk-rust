@@ -3,7 +3,7 @@
 //! This example shows how to use template variables in instructions that get
 //! replaced with values from session state at runtime.
 
-use adk_core::types::{SessionId, UserId};
+use adk_core::types::UserId;
 use adk_rust::futures::StreamExt;
 use adk_rust::prelude::*;
 use adk_rust::runner::{Runner, RunnerConfig};

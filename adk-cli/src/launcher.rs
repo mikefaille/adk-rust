@@ -139,7 +139,7 @@ impl Launcher {
         use std::collections::HashMap;
         use std::io::{self, BufRead, Write};
 
-        use adk_core::types::{SessionId, UserId};
+        use adk_core::types::UserId;
         let app_name = self.app_name.unwrap_or_else(|| self.agent.name().to_string());
         let user_id = UserId::new("user").unwrap();
 

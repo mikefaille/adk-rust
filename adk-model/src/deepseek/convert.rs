@@ -2,7 +2,6 @@
 
 use crate::attachment;
 use adk_core::{Content, FinishReason, LlmResponse, Part, Role, UsageMetadata};
-use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -378,7 +377,7 @@ mod tests {
     fn content_to_message_keeps_inline_attachment_payload() {
         let content = Content::user().with_part(Part::InlineData {
             mime_type: "application/pdf".parse().unwrap(),
-            data: Bytes::from_static(b"%PDF"),
+            data: bytes::Bytes::from_static(b"%PDF"),
         });
         let message = content_to_message(&content);
         let payload = message.content.unwrap_or_default();

@@ -10,7 +10,7 @@
 //!   cd doc-test/tools/mcp_test
 //!   GOOGLE_API_KEY=your_key cargo run --bin basic
 
-use adk_core::types::{SessionId, UserId};
+use adk_core::types::UserId;
 use adk_core::{Content, ReadonlyContext, Toolset};
 use adk_rust::prelude::*;
 use adk_tool::McpToolset;

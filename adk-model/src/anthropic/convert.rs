@@ -3,7 +3,6 @@
 use super::error::ConversionError;
 use crate::attachment;
 use adk_core::{Content, FinishReason, LlmResponse, Part, UsageMetadata};
-use bytes::Bytes;
 use claudius::ImageMediaType;
 use claudius::{
     Base64ImageSource, Base64PdfSource, CacheControlEphemeral, ContentBlock, DocumentBlock,
@@ -380,7 +379,7 @@ mod tests {
     #[test]
     fn test_content_to_message_with_inline_image() {
         let content = Content::user().with_text("What is in this image?").with_part(
-            Part::inline_data("image/png", Bytes::from_static(&[0x89, 0x50, 0x4E, 0x47])).unwrap(),
+            Part::inline_data("image/png", bytes::Bytes::from_static(&[0x89, 0x50, 0x4E, 0x47])).unwrap(),
         );
         let msg = content_to_message(&content, false).unwrap();
         assert!(matches!(msg.role, MessageRole::User));
@@ -401,7 +400,7 @@ mod tests {
     #[test]
     fn test_content_to_message_unsupported_mime_type_falls_back_to_text() {
         let content = Content::user().with_text("Check this").with_part(
-            Part::inline_data("audio/wav", Bytes::from_static(&[0x52, 0x49, 0x46, 0x46])).unwrap(),
+            Part::inline_data("audio/wav", bytes::Bytes::from_static(&[0x52, 0x49, 0x46, 0x46])).unwrap(),
         );
         let msg = content_to_message(&content, false).unwrap();
 
@@ -418,8 +417,8 @@ mod tests {
     fn test_content_to_message_multiple_images() {
         let content = Content::user()
             .with_text("Compare")
-            .with_part(Part::inline_data("image/jpeg", Bytes::from_static(&[0xFF, 0xD8])).unwrap())
-            .with_part(Part::inline_data("image/webp", Bytes::from_static(&[0x52, 0x49])).unwrap());
+            .with_part(Part::inline_data("image/jpeg", bytes::Bytes::from_static(&[0xFF, 0xD8])).unwrap())
+            .with_part(Part::inline_data("image/webp", bytes::Bytes::from_static(&[0x52, 0x49])).unwrap());
         let msg = content_to_message(&content, false).unwrap();
 
         let json = serde_json::to_value(&msg).unwrap();
@@ -432,7 +431,7 @@ mod tests {
     #[test]
     fn test_content_to_message_pdf_inline_data_maps_to_document_block() {
         let content = Content::user().with_part(
-            Part::inline_data("application/pdf", Bytes::from_static(b"%PDF-1.4")).unwrap(),
+            Part::inline_data("application/pdf", bytes::Bytes::from_static(b"%PDF-1.4")).unwrap(),
         );
         let msg = content_to_message(&content, false).unwrap();
 
