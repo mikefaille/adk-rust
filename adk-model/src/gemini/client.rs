@@ -192,7 +192,7 @@ impl GeminiModel {
         let content = if converted_parts.is_empty() {
             None
         } else {
-            Some(Content { role: "model".to_string(), parts: converted_parts })
+            Some(Content { role: adk_core::types::Role::Model, parts: converted_parts })
         };
 
         let usage_metadata = resp.usage_metadata.as_ref().map(|u| UsageMetadata {
@@ -299,8 +299,8 @@ impl GeminiModel {
 
         // Add contents using proper builder methods
         for content in &req.contents {
-            match content.role.as_str() {
-                "user" => {
+            match content.role {
+                adk_core::types::Role::User => {
                     // For user messages, build gemini Content with potentially multiple parts
                     let mut gemini_parts = Vec::new();
                     for part in &content.parts {
@@ -349,7 +349,7 @@ impl GeminiModel {
                         });
                     }
                 }
-                "model" => {
+                adk_core::types::Role::Model => {
                     // For model messages, build gemini Content
                     let mut gemini_parts = Vec::new();
                     for part in &content.parts {
@@ -392,7 +392,7 @@ impl GeminiModel {
                         });
                     }
                 }
-                "function" => {
+                adk_core::types::Role::Tool => {
                     // For function responses
                     for part in &content.parts {
                         if let Part::FunctionResponse { function_response, .. } = part {

@@ -39,7 +39,7 @@ impl TestContext {
     fn new(message: &str) -> Self {
         Self {
             content: Content {
-                role: "user".to_string(),
+                role: adk_core::types::Role::User,
                 parts: vec![Part::Text { text: message.to_string() }],
             },
             config: RunConfig::default(),
@@ -125,7 +125,7 @@ impl adk_core::Llm for MockRouterLlm {
         let s = async_stream::stream! {
             yield Ok(adk_core::LlmResponse {
                 content: Some(adk_core::Content {
-                    role: "model".to_string(),
+                    role: adk_core::types::Role::Model,
                     parts: vec![adk_core::Part::Text { text }],
                 }),
                 usage_metadata: None,
@@ -150,7 +150,7 @@ async fn test_sequential_agent_execution_order() {
             let mut event = Event::new("test-invocation");
             event.author = "agent1".to_string();
             event.llm_response.content = Some(Content {
-                role: "assistant".to_string(),
+                role: adk_core::types::Role::Model,
                 parts: vec![Part::Text { text: "Response from agent1".to_string() }],
             });
             Ok(Box::pin(stream::iter(vec![Ok(event)])) as adk_core::EventStream)
@@ -164,7 +164,7 @@ async fn test_sequential_agent_execution_order() {
             let mut event = Event::new("test-invocation");
             event.author = "agent2".to_string();
             event.llm_response.content = Some(Content {
-                role: "assistant".to_string(),
+                role: adk_core::types::Role::Model,
                 parts: vec![Part::Text { text: "Response from agent2".to_string() }],
             });
             Ok(Box::pin(stream::iter(vec![Ok(event)])) as adk_core::EventStream)

@@ -280,7 +280,7 @@ fn test_conversation_history_respects_compaction() {
     assert_eq!(summary_text, "Summary of old conversation");
 
     // Second entry should be the new user message
-    assert_eq!(history[1].role, "user");
+    assert_eq!(history[1].role, adk_core::types::Role::User);
     let new_msg = match &history[1].parts[0] {
         Part::Text { text } => text.clone(),
         _ => panic!("Expected text part"),
@@ -288,7 +288,7 @@ fn test_conversation_history_respects_compaction() {
     assert_eq!(new_msg, "New message");
 
     // Third entry should be the new model response
-    assert_eq!(history[2].role, "model");
+    assert_eq!(history[2].role, adk_core::types::Role::Model);
 }
 
 /// Test that conversation_history works normally when no compaction exists.
@@ -314,8 +314,8 @@ fn test_conversation_history_without_compaction() {
     let history = adk_core::Session::conversation_history(&mutable);
 
     assert_eq!(history.len(), 2);
-    assert_eq!(history[0].role, "user");
-    assert_eq!(history[1].role, "model");
+    assert_eq!(history[0].role, adk_core::types::Role::User);
+    assert_eq!(history[1].role, adk_core::types::Role::Model);
 }
 
 /// Integration test: runner triggers compaction after reaching the interval.

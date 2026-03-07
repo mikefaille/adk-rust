@@ -71,15 +71,15 @@ pub(crate) fn build_request_body(
 
 /// Convert a single ADK `Content` to an Azure AI message JSON object.
 fn content_to_message(content: &Content) -> Value {
-    match content.role.as_str() {
-        "user" => {
+    match content.role {
+        adk_core::types::Role::User => {
             let text = extract_text(&content.parts);
             serde_json::json!({
                 "role": "user",
                 "content": text,
             })
         }
-        "model" | "assistant" => {
+        adk_core::types::Role::Model => {
             let mut msg = serde_json::json!({
                 "role": "assistant",
             });
@@ -101,14 +101,14 @@ fn content_to_message(content: &Content) -> Value {
 
             msg
         }
-        "system" => {
+        adk_core::types::Role::System => {
             let text = extract_text(&content.parts);
             serde_json::json!({
                 "role": "system",
                 "content": text,
             })
         }
-        "function" | "tool" => {
+        adk_core::types::Role::Tool => {
             if let Some(Part::FunctionResponse { function_response, id }) = content.parts.first() {
                 let tool_call_id = id.clone().unwrap_or_else(|| "unknown".to_string());
                 serde_json::json!({
@@ -218,7 +218,7 @@ pub(crate) fn parse_response(body: &Value) -> LlmResponse {
             }
         }
 
-        if parts.is_empty() { None } else { Some(Content { role: "model".to_string(), parts }) }
+        if parts.is_empty() { None } else { Some(Content { role: adk_core::types::Role::Model, parts }) }
     });
 
     let finish_reason = body
@@ -312,7 +312,7 @@ pub(crate) fn parse_sse_chunk(chunk: &Value) -> LlmResponse {
             }
         }
 
-        if parts.is_empty() { None } else { Some(Content { role: "model".to_string(), parts }) }
+        if parts.is_empty() { None } else { Some(Content { role: adk_core::types::Role::Model, parts }) }
     });
 
     let finish_reason = chunk
@@ -435,7 +435,7 @@ mod tests {
     #[test]
     fn test_content_to_message_model_role() {
         let content = Content {
-            role: "model".to_string(),
+            role: adk_core::types::Role::Model,
             parts: vec![Part::Text { text: "Hello!".to_string() }],
         };
         let msg = content_to_message(&content);
@@ -456,7 +456,7 @@ mod tests {
     #[test]
     fn test_content_to_message_with_tool_calls() {
         let content = Content {
-            role: "model".to_string(),
+            role: adk_core::types::Role::Model,
             parts: vec![Part::FunctionCall {
                 name: "get_weather".to_string(),
                 args: serde_json::json!({"city": "Seattle"}),
@@ -493,7 +493,7 @@ mod tests {
 
     #[test]
     fn test_content_to_message_empty_assistant_gets_placeholder() {
-        let content = Content { role: "model".to_string(), parts: vec![] };
+        let content = Content { role: adk_core::types::Role::Model, parts: vec![] };
         let msg = content_to_message(&content);
         assert_eq!(msg["role"], "assistant");
         assert_eq!(msg["content"], " ");
@@ -724,7 +724,7 @@ mod tests {
     #[test]
     fn test_function_call_id_defaults() {
         let content = Content {
-            role: "model".to_string(),
+            role: adk_core::types::Role::Model,
             parts: vec![Part::FunctionCall {
                 name: "my_func".to_string(),
                 args: serde_json::json!({}),
@@ -770,7 +770,7 @@ mod tests {
     #[test]
     fn test_content_to_message_assistant_thinking_as_text() {
         let content = Content {
-            role: "model".to_string(),
+            role: adk_core::types::Role::Model,
             parts: vec![
                 Part::Thinking {
                     thinking: "Step 1: analyze the question".to_string(),

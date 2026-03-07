@@ -76,7 +76,7 @@ async fn test_execute_before_model_callbacks() {
         Box::pin(async move {
             *count.lock().unwrap() += 1;
             Ok(Some(Content {
-                role: "system".to_string(),
+                role: adk_core::types::Role::System,
                 parts: vec![Part::Text { text: "Before model 1".to_string() }],
             }))
         })
@@ -88,7 +88,7 @@ async fn test_execute_before_model_callbacks() {
         Box::pin(async move {
             *count.lock().unwrap() += 1;
             Ok(Some(Content {
-                role: "system".to_string(),
+                role: adk_core::types::Role::System,
                 parts: vec![Part::Text { text: "Before model 2".to_string() }],
             }))
         })
@@ -108,7 +108,7 @@ async fn test_execute_after_model_callbacks() {
     callbacks.add_after_model(Box::new(|_ctx| {
         Box::pin(async move {
             Ok(Some(Content {
-                role: "assistant".to_string(),
+                role: adk_core::types::Role::Model,
                 parts: vec![Part::Text { text: "After model".to_string() }],
             }))
         })
@@ -118,7 +118,7 @@ async fn test_execute_after_model_callbacks() {
     let results = callbacks.execute_after_model(ctx).await.unwrap();
 
     assert_eq!(results.len(), 1);
-    assert_eq!(results[0].role, "assistant");
+    assert_eq!(results[0].role, adk_core::types::Role::Model);
 }
 
 #[tokio::test]
@@ -128,7 +128,7 @@ async fn test_execute_before_tool_callbacks() {
     callbacks.add_before_tool(Box::new(|_ctx| {
         Box::pin(async move {
             Ok(Some(Content {
-                role: "system".to_string(),
+                role: adk_core::types::Role::System,
                 parts: vec![Part::Text { text: "Before tool".to_string() }],
             }))
         })
@@ -147,7 +147,7 @@ async fn test_execute_after_tool_callbacks() {
     callbacks.add_after_tool(Box::new(|_ctx| {
         Box::pin(async move {
             Ok(Some(Content {
-                role: "function".to_string(),
+                role: adk_core::types::Role::Tool,
                 parts: vec![Part::Text { text: "After tool".to_string() }],
             }))
         })

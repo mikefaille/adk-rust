@@ -276,7 +276,7 @@ impl Llm for OpenAICompatible {
 
                                 yield adk_core::LlmResponse {
                                     content: Some(adk_core::Content {
-                                        role: "model".to_string(),
+                                        role: adk_core::types::Role::Model,
                                         parts,
                                     }),
                                     usage_metadata: None,
@@ -300,7 +300,7 @@ impl Llm for OpenAICompatible {
                                 if !text.is_empty() {
                                     yield adk_core::LlmResponse {
                                         content: Some(adk_core::Content {
-                                            role: "model".to_string(),
+                                            role: adk_core::types::Role::Model,
                                             parts: vec![Part::Text { text: text.clone() }],
                                         }),
                                         usage_metadata: None,

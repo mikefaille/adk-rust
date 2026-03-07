@@ -258,7 +258,7 @@ impl BedrockClient {
 
                             yield LlmResponse {
                                 content: Some(adk_core::Content {
-                                    role: "model".to_string(),
+                                    role: adk_core::types::Role::Model,
                                     parts: vec![adk_core::Part::FunctionCall {
                                         name,
                                         args,
@@ -283,7 +283,7 @@ impl BedrockClient {
                         if let Some(sig) = reasoning_signature.take() {
                             yield LlmResponse {
                                 content: Some(adk_core::Content {
-                                    role: "model".to_string(),
+                                    role: adk_core::types::Role::Model,
                                     parts: vec![adk_core::Part::Thinking {
                                         thinking: String::new(),
                                         signature: Some(sig),

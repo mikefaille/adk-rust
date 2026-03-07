@@ -37,7 +37,7 @@ impl Llm for MockModel {
                 let is_last = i == chunks.len() - 1;
 
                 let content = Content {
-                    role: "model".to_string(),
+                    role: adk_core::types::Role::Model,
                     parts: vec![Part::Text { text: text.clone() }],
                 };
 
@@ -176,7 +176,7 @@ async fn test_streaming_chunks() {
             Self {
                 session: MockSession,
                 user_content: Content {
-                    role: "user".to_string(),
+                    role: adk_core::types::Role::User,
                     parts: vec![Part::Text { text: "Hi".to_string() }],
                 },
             }

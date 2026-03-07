@@ -33,7 +33,7 @@ impl adk_core::Llm for MockLlm {
         let s = async_stream::stream! {
             yield Ok(adk_core::LlmResponse {
                 content: Some(adk_core::Content {
-                    role: "model".to_string(),
+                    role: adk_core::types::Role::Model,
                     parts: vec![adk_core::Part::Text { text }],
                 }),
                 usage_metadata: None,
@@ -78,7 +78,7 @@ impl adk_core::Llm for SpyLlm {
         let s = async_stream::stream! {
             yield Ok(adk_core::LlmResponse {
                 content: Some(adk_core::Content {
-                    role: "model".to_string(),
+                    role: adk_core::types::Role::Model,
                     parts: vec![adk_core::Part::Text { text }],
                 }),
                 usage_metadata: None,
@@ -104,7 +104,7 @@ impl TestContext {
     fn new(message: &str) -> Self {
         Self {
             content: Content {
-                role: "user".to_string(),
+                role: adk_core::types::Role::User,
                 parts: vec![Part::Text { text: message.to_string() }],
             },
             config: RunConfig::default(),
@@ -395,7 +395,7 @@ fn test_llm_agent_builder_with_callbacks() {
             Box::pin(async move {
                 *flag.lock().unwrap() = true;
                 Ok(Some(Content {
-                    role: "system".to_string(),
+                    role: adk_core::types::Role::System,
                     parts: vec![Part::Text { text: "Before callback".to_string() }],
                 }))
             })
@@ -405,7 +405,7 @@ fn test_llm_agent_builder_with_callbacks() {
             Box::pin(async move {
                 *flag.lock().unwrap() = true;
                 Ok(Some(Content {
-                    role: "system".to_string(),
+                    role: adk_core::types::Role::System,
                     parts: vec![Part::Text { text: "After callback".to_string() }],
                 }))
             })

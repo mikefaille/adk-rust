@@ -619,7 +619,7 @@ impl UiResponse {
     pub fn to_content(self) -> adk_core::Content {
         let json = serde_json::to_vec(&self).unwrap_or_default();
         adk_core::Content {
-            role: "model".to_string(),
+            role: adk_core::types::Role::Model,
             parts: vec![adk_core::Part::InlineData {
                 mime_type: MIME_TYPE_UI.to_string(),
                 data: json,
@@ -745,7 +745,7 @@ impl UiUpdate {
     pub fn to_content(self) -> adk_core::Content {
         let json = serde_json::to_vec(&self).unwrap_or_default();
         adk_core::Content {
-            role: "model".to_string(),
+            role: adk_core::types::Role::Model,
             parts: vec![adk_core::Part::InlineData {
                 mime_type: MIME_TYPE_UI_UPDATE.to_string(),
                 data: json,

@@ -271,7 +271,7 @@ impl Llm for GroqClient {
                                                     None
                                                 } else {
                                                     Some(adk_core::Content {
-                                                        role: "model".to_string(),
+                                                        role: adk_core::types::Role::Model,
                                                         parts,
                                                     })
                                                 },
@@ -305,7 +305,7 @@ impl Llm for GroqClient {
                                                     if !text.is_empty() {
                                                         yield LlmResponse {
                                                             content: Some(adk_core::Content {
-                                                                role: "model".to_string(),
+                                                                role: adk_core::types::Role::Model,
                                                                 parts: vec![Part::Text {
                                                                     text: text.clone(),
                                                                 }],

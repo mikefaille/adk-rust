@@ -109,7 +109,7 @@ async fn main() -> Result<()> {
             let text = event
                 .llm_response
                 .content
-                .unwrap_or_else(|| Content { role: "model".to_string(), parts: vec![] })
+                .unwrap_or_else(|| Content { role: adk_core::types::Role::Model, parts: vec![] })
                 .parts
                 .iter()
                 .filter_map(|p| match p {

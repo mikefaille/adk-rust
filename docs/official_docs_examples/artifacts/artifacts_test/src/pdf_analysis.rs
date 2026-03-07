@@ -60,7 +60,7 @@ async fn main() -> anyhow::Result<()> {
                     .await
                 {
                     if let Some(last_content) = request.contents.last_mut() {
-                        if last_content.role == "user" {
+                        if last_content.role == adk_core::types::Role::User {
                             // Inject PDF as InlineData - Gemini processes it natively
                             last_content.parts.push(response.part);
                         }

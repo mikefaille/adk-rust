@@ -160,12 +160,12 @@ pub struct Usage {
 
 /// Convert ADK Content to Groq Message.
 pub fn content_to_message(content: &Content) -> Message {
-    let role = match content.role.as_str() {
-        "model" | "assistant" => "assistant",
-        "user" => "user",
-        "system" => "system",
-        "tool" | "function" => "tool",
-        other => other,
+    let role = match content.role {
+        adk_core::types::Role::Model => "assistant".to_string(),
+        adk_core::types::Role::User => "user".to_string(),
+        adk_core::types::Role::System => "system".to_string(),
+        adk_core::types::Role::Tool => "tool".to_string(),
+        adk_core::types::Role::Custom(ref c) => c.clone(),
     };
 
     let mut text_parts = Vec::new();
@@ -274,7 +274,7 @@ pub fn from_response(response: &ChatCompletionResponse) -> LlmResponse {
                 if parts.is_empty() {
                     None
                 } else {
-                    Some(Content { role: "model".to_string(), parts })
+                    Some(Content { role: adk_core::types::Role::Model, parts })
                 },
                 finish,
             )
@@ -330,7 +330,7 @@ pub fn create_tool_call_response(
         .collect();
 
     LlmResponse {
-        content: Some(Content { role: "model".to_string(), parts }),
+        content: Some(Content { role: adk_core::types::Role::Model, parts }),
         usage_metadata: None,
         finish_reason,
         citation_metadata: None,
@@ -349,7 +349,7 @@ mod tests {
     #[test]
     fn content_to_message_keeps_inline_attachment_payload() {
         let content = Content {
-            role: "user".to_string(),
+            role: adk_core::types::Role::User,
             parts: vec![Part::InlineData {
                 mime_type: "application/octet-stream".to_string(),
                 data: vec![0xCA, 0xFE],
@@ -364,7 +364,7 @@ mod tests {
     #[test]
     fn content_to_message_keeps_file_attachment_payload() {
         let content = Content {
-            role: "user".to_string(),
+            role: adk_core::types::Role::User,
             parts: vec![Part::FileData {
                 mime_type: "application/pdf".to_string(),
                 file_uri: "https://example.com/report.pdf".to_string(),

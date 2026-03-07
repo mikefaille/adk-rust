@@ -69,7 +69,7 @@ impl BaseEventsSummarizer for LlmEventSummarizer {
         let request = LlmRequest {
             model: self.llm.name().to_string(),
             contents: vec![Content {
-                role: "user".to_string(),
+                role: adk_core::types::Role::User,
                 parts: vec![Part::Text { text: prompt }],
             }],
             tools: Default::default(),
@@ -95,7 +95,7 @@ impl BaseEventsSummarizer for LlmEventSummarizer {
         };
 
         // Ensure the compacted content has the role 'model'
-        summary.role = "model".to_string();
+        summary.role = adk_core::types::Role::Model;
 
         let start_timestamp = events.first().map(|e| e.timestamp).unwrap_or_default();
         let end_timestamp = events.last().map(|e| e.timestamp).unwrap_or_default();

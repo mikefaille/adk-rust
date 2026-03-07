@@ -187,7 +187,7 @@ async fn test_runner_run() {
     .unwrap();
 
     let content =
-        Content { role: "user".to_string(), parts: vec![Part::Text { text: "Hello".to_string() }] };
+        Content { role: adk_core::types::Role::User, parts: vec![Part::Text { text: "Hello".to_string() }] };
 
     let result = runner.run("user123".to_string(), "session456".to_string(), content).await;
 

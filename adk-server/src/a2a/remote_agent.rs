@@ -172,7 +172,7 @@ fn convert_update_event(
 
             let mut event = Event::new(invocation_id.to_string());
             event.author = agent_name.to_string();
-            event.llm_response.content = Some(Content { role: "model".to_string(), parts });
+            event.llm_response.content = Some(Content { role: adk_core::types::Role::Model, parts });
             event.llm_response.partial = !artifact_event.last_chunk;
             Some(event)
         }
@@ -183,7 +183,7 @@ fn convert_update_event(
                     let mut event = Event::new(invocation_id.to_string());
                     event.author = agent_name.to_string();
                     event.llm_response.content = Some(Content {
-                        role: "model".to_string(),
+                        role: adk_core::types::Role::Model,
                         parts: vec![Part::Text { text: msg }],
                     });
                     event.llm_response.turn_complete = true;

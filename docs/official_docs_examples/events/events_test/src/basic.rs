@@ -44,7 +44,7 @@ fn main() {
     let mut tool_event = Event::new("inv-456");
     tool_event.author = "assistant".to_string();
     tool_event.set_content(Content {
-        role: "model".to_string(),
+        role: adk_core::types::Role::Model,
         parts: vec![Part::FunctionCall {
             name: "get_weather".to_string(),
             args: json!({"city": "Tokyo"}),

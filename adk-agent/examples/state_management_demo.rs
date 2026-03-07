@@ -50,7 +50,7 @@ impl TestContext {
         Self {
             session: TestSession,
             user_content: Content {
-                role: "user".to_string(),
+                role: adk_core::types::Role::User,
                 parts: vec![Part::Text { text: text.to_string() }],
             },
         }
@@ -234,7 +234,7 @@ async fn main() -> Result<()> {
                 }
 
                 event.llm_response.content = Some(Content {
-                    role: "assistant".to_string(),
+                    role: adk_core::types::Role::Model,
                     parts: vec![Part::Text { text }],
                 });
 

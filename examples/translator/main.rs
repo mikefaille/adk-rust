@@ -300,7 +300,7 @@ async fn run_batch_mode(
         let prompt = format!("Translate the following content to {}:\n\n{}", name, content);
 
         let user_content =
-            Content { role: "user".to_string(), parts: vec![Part::Text { text: prompt }] };
+            Content { role: adk_core::types::Role::User, parts: vec![Part::Text { text: prompt }] };
 
         // Run pipeline
         let session_id = session.id().to_string();

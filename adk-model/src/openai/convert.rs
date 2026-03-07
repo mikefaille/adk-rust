@@ -16,8 +16,8 @@ use std::collections::HashMap;
 
 /// Convert ADK Content to OpenAI ChatCompletionRequestMessage.
 pub fn content_to_message(content: &Content) -> ChatCompletionRequestMessage {
-    match content.role.as_str() {
-        "user" => {
+    match content.role {
+        adk_core::types::Role::User => {
             let has_attachments = content
                 .parts
                 .iter()
@@ -76,7 +76,7 @@ pub fn content_to_message(content: &Content) -> ChatCompletionRequestMessage {
                     .into()
             }
         }
-        "model" | "assistant" => {
+        adk_core::types::Role::Model => {
             let mut builder = ChatCompletionRequestAssistantMessageArgs::default();
 
             // Extract text content
@@ -99,11 +99,11 @@ pub fn content_to_message(content: &Content) -> ChatCompletionRequestMessage {
 
             builder.build().unwrap().into()
         }
-        "system" => {
+        adk_core::types::Role::System => {
             let text = extract_text(&content.parts);
             ChatCompletionRequestSystemMessageArgs::default().content(text).build().unwrap().into()
         }
-        "function" | "tool" => {
+        adk_core::types::Role::Tool => {
             // Tool response message
             if let Some(Part::FunctionResponse { function_response, id }) = content.parts.first() {
                 let tool_call_id = id.clone().unwrap_or_else(|| "unknown".to_string());
@@ -257,7 +257,7 @@ pub fn from_openai_response(resp: &CreateChatCompletionResponse) -> LlmResponse 
             }
         }
 
-        Content { role: "model".to_string(), parts }
+        Content { role: adk_core::types::Role::Model, parts }
     });
 
     let usage_metadata = resp.usage.as_ref().map(|u| {
@@ -336,7 +336,7 @@ pub fn from_openai_chunk(chunk: &CreateChatCompletionStreamResponse) -> LlmRespo
 
         // Only return content if there are actual parts
         // This prevents empty Content from being accumulated in conversation history
-        if parts.is_empty() { None } else { Some(Content { role: "model".to_string(), parts }) }
+        if parts.is_empty() { None } else { Some(Content { role: adk_core::types::Role::Model, parts }) }
     });
 
     let finish_reason = chunk.choices.first().and_then(|c| c.finish_reason).map(|fr| match fr {
@@ -378,7 +378,7 @@ mod tests {
     #[test]
     fn test_user_message_with_inline_data_produces_array_content() {
         let content = Content {
-            role: "user".to_string(),
+            role: adk_core::types::Role::User,
             parts: vec![
                 Part::Text { text: "What is in this image?".to_string() },
                 Part::InlineData {
@@ -416,7 +416,7 @@ mod tests {
     #[test]
     fn test_user_message_with_multiple_attachments() {
         let content = Content {
-            role: "user".to_string(),
+            role: adk_core::types::Role::User,
             parts: vec![
                 Part::Text { text: "Compare these".to_string() },
                 Part::InlineData { mime_type: "image/jpeg".to_string(), data: vec![0xFF, 0xD8] },
@@ -439,7 +439,7 @@ mod tests {
     #[test]
     fn test_user_message_with_audio_inline_data_uses_input_audio_part() {
         let content = Content {
-            role: "user".to_string(),
+            role: adk_core::types::Role::User,
             parts: vec![
                 Part::Text { text: "Transcribe this".to_string() },
                 Part::InlineData {
@@ -468,7 +468,7 @@ mod tests {
     #[test]
     fn test_user_message_with_pdf_inline_data_falls_back_to_text_part() {
         let content = Content {
-            role: "user".to_string(),
+            role: adk_core::types::Role::User,
             parts: vec![Part::InlineData {
                 mime_type: "application/pdf".to_string(),
                 data: b"%PDF".to_vec(),
@@ -496,7 +496,7 @@ mod tests {
     #[test]
     fn test_user_message_with_file_data_falls_back_to_text_part() {
         let content = Content {
-            role: "user".to_string(),
+            role: adk_core::types::Role::User,
             parts: vec![Part::FileData {
                 mime_type: "application/pdf".to_string(),
                 file_uri: "https://example.com/report.pdf".to_string(),
@@ -524,7 +524,7 @@ mod tests {
     #[test]
     fn test_user_message_text_only_stays_text_content() {
         let content = Content {
-            role: "user".to_string(),
+            role: adk_core::types::Role::User,
             parts: vec![Part::Text { text: "Hello".to_string() }],
         };
         let msg = content_to_message(&content);
