@@ -86,7 +86,6 @@ async fn main() -> anyhow::Result<()> {
                         .filter_map(|p| p.as_text())
                         .collect::<Vec<_>>()
                         .join("");
-                    content.parts.iter().filter_map(|p| p.as_text()).collect::<Vec<_>>().join("");
 
                     if !text.is_empty() {
                         // Extract risk level from response

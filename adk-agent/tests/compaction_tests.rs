@@ -20,7 +20,7 @@ impl Llm for MockSummarizerLlm {
     }
 
     async fn generate_content(&self, _req: LlmRequest, _stream: bool) -> Result<LlmResponseStream> {
-        let content = Content::new("model").with_text(&self.summary_text);
+        let content = Content::new(adk_core::Role::Model).with_text(&self.summary_text);
         let response = LlmResponse::new(content);
         Ok(Box::pin(futures::stream::once(async { Ok(response) })))
     }
