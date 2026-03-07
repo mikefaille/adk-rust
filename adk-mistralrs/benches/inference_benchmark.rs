@@ -149,7 +149,7 @@ fn conversion_benchmark(c: &mut Criterion) {
 
     // Simple content conversion
     let simple_content = Content {
-        role: adk_core::Role::User,
+        role: Role::User,
         parts: vec![Part::text("Hello, world!".to_string())],
     };
 
