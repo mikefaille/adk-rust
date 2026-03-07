@@ -29,7 +29,7 @@ fn test_llm_request_creation() {
 
     assert_eq!(request.model, "test-model");
     assert_eq!(request.contents.len(), 1);
-    assert_eq!(request.contents[0].role, adk_core::types::Role::User);
+    assert_eq!(request.contents[0].role, adk_core::prelude::Role::User);
 }
 
 #[test]

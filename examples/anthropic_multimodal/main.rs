@@ -47,7 +47,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== Example 1: Describe an image from URL ===\n");
 
     let request = make_request(vec![Content {
-        role: "user".to_string(),
+        role: adk_core::prelude::Role::User,
         parts: vec![
             Part::FileData {
                 mime_type: "image/jpeg".to_string(),
@@ -73,7 +73,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ];
 
     let request = make_request(vec![Content {
-        role: "user".to_string(),
+        role: adk_core::prelude::Role::User,
         parts: vec![
             Part::InlineData { mime_type: "image/png".to_string(), data: red_pixel_png },
             Part::Text { text: "What do you see in this image? It's very small.".to_string() },
@@ -85,7 +85,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n=== Example 3: Compare two images via URL ===\n");
 
     let request = make_request(vec![Content {
-        role: "user".to_string(),
+        role: adk_core::prelude::Role::User,
         parts: vec![
             Part::FileData {
                 mime_type: "image/jpeg".to_string(),
@@ -106,7 +106,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n=== Example 4: Unsupported MIME type (graceful error) ===\n");
 
     let request = make_request(vec![Content {
-        role: "user".to_string(),
+        role: adk_core::prelude::Role::User,
         parts: vec![Part::InlineData { mime_type: "audio/wav".to_string(), data: vec![0; 10] }],
     }]);
 

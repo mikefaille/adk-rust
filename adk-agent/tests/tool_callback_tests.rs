@@ -22,7 +22,7 @@ impl SequencedModel {
     fn function_call_response(name: &str, args: Value, id: &str) -> LlmResponse {
         LlmResponse {
             content: Some(Content {
-                role: "model".to_string(),
+                role: adk_core::prelude::Role::Model,
                 parts: vec![Part::FunctionCall {
                     name: name.to_string(),
                     args,
@@ -44,7 +44,7 @@ impl SequencedModel {
     fn text_response(text: &str) -> LlmResponse {
         LlmResponse {
             content: Some(Content {
-                role: "model".to_string(),
+                role: adk_core::prelude::Role::Model,
                 parts: vec![Part::Text { text: text.to_string() }],
             }),
             usage_metadata: None,
@@ -241,7 +241,7 @@ async fn test_before_tool_callback_short_circuits_tool_execution() {
         .before_tool_callback(Box::new(|_ctx| {
             Box::pin(async move {
                 Ok(Some(Content {
-                    role: "function".to_string(),
+                    role: adk_core::prelude::Role::Tool,
                     parts: vec![Part::Text { text: "blocked".to_string() }],
                 }))
             })
@@ -297,7 +297,7 @@ async fn test_after_tool_callback_overrides_result_and_order() {
             Box::pin(async move {
                 after_order.lock().unwrap().push("after_tool".to_string());
                 Ok(Some(Content {
-                    role: "function".to_string(),
+                    role: adk_core::prelude::Role::Tool,
                     parts: vec![Part::Text { text: "after-override".to_string() }],
                 }))
             })

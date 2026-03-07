@@ -18,7 +18,7 @@ struct MockModel {
 impl MockModel {
     fn new_function_call(name: &str, args: Value) -> Self {
         let content = Content {
-            role: "model".to_string(),
+            role: adk_core::prelude::Role::Model,
             parts: vec![Part::FunctionCall {
                 name: name.to_string(),
                 args,
@@ -120,7 +120,7 @@ impl MockContext {
         Self {
             session: MockSession,
             user_content: Content {
-                role: "user".to_string(),
+                role: adk_core::prelude::Role::User,
                 parts: vec![Part::Text { text: "start".to_string() }],
             },
         }
@@ -221,7 +221,7 @@ async fn test_callback_short_circuit() {
         Box::pin(async move {
             // Return Some(content) to short-circuit
             Ok(Some(Content {
-                role: "assistant".to_string(),
+                role: adk_core::prelude::Role::Model,
                 parts: vec![Part::Text { text: "Short-circuited!".to_string() }],
             }))
         })

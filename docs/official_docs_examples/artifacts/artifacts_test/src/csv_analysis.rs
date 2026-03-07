@@ -60,7 +60,7 @@ async fn main() -> anyhow::Result<()> {
                     .await
                 {
                     if let Some(last_content) = request.contents.last_mut() {
-                        if last_content.role == "user" {
+                        if last_content.role == adk_core::prelude::Role::User {
                             if let Part::Text { text } = &response.part {
                                 last_content.parts.insert(
                                     0,

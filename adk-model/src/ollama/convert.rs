@@ -24,7 +24,7 @@ pub fn content_to_chat_message(content: &Content) -> Option<ChatMessage> {
         .collect::<Vec<_>>()
         .join("\n");
 
-    match content.role.as_str() {
+    match content.role.to_string().as_str() {
         "user" => Some(ChatMessage::user(text)),
         "model" | "assistant" => Some(ChatMessage::assistant(text)),
         "system" => Some(ChatMessage::system(text)),
@@ -78,7 +78,7 @@ pub fn chat_response_to_llm_response(response: &ChatMessageResponse, partial: bo
     }
 
     let content =
-        if parts.is_empty() { None } else { Some(Content { role: "model".to_string(), parts }) };
+        if parts.is_empty() { None } else { Some(Content { role: adk_core::prelude::Role::Model, parts }) };
 
     // Determine finish reason
     let finish_reason = if response.done { Some(FinishReason::Stop) } else { None };
@@ -108,7 +108,7 @@ pub fn chat_response_to_llm_response(response: &ChatMessageResponse, partial: bo
 pub fn text_delta_response(text: &str) -> LlmResponse {
     LlmResponse {
         content: Some(Content {
-            role: "model".to_string(),
+            role: adk_core::prelude::Role::Model,
             parts: vec![Part::Text { text: text.to_string() }],
         }),
         usage_metadata: None,
@@ -125,7 +125,7 @@ pub fn text_delta_response(text: &str) -> LlmResponse {
 pub fn thinking_delta_response(thinking: &str) -> LlmResponse {
     LlmResponse {
         content: Some(Content {
-            role: "model".to_string(),
+            role: adk_core::prelude::Role::Model,
             parts: vec![Part::Thinking { thinking: thinking.to_string(), signature: None }],
         }),
         usage_metadata: None,
@@ -146,7 +146,7 @@ mod tests {
     #[test]
     fn content_to_chat_message_keeps_inline_attachment_payload() {
         let content = Content {
-            role: "user".to_string(),
+            role: adk_core::prelude::Role::User,
             parts: vec![Part::InlineData {
                 mime_type: "application/pdf".to_string(),
                 data: b"%PDF".to_vec(),
@@ -160,7 +160,7 @@ mod tests {
     #[test]
     fn content_to_chat_message_keeps_file_attachment_payload() {
         let content = Content {
-            role: "user".to_string(),
+            role: adk_core::prelude::Role::User,
             parts: vec![Part::FileData {
                 mime_type: "text/csv".to_string(),
                 file_uri: "https://example.com/data.csv".to_string(),

@@ -1,5 +1,5 @@
 use crate::a2a::{AgentCapabilities, AgentCard, AgentSkill};
-use adk_core::Agent;
+use adk_core::prelude::*;
 
 pub fn build_agent_skills(agent: &dyn Agent) -> Vec<AgentSkill> {
     let mut skills = build_primary_skills(agent);

@@ -132,7 +132,7 @@ async fn run_agent(
     task: &str,
 ) -> Result<String, Box<dyn std::error::Error>> {
     let content =
-        Content { role: "user".to_string(), parts: vec![Part::Text { text: task.to_string() }] };
+        Content { role: adk_core::prelude::Role::User, parts: vec![Part::Text { text: task.to_string() }] };
 
     let ctx = Arc::new(AgentContext {
         agent: agent.clone(),

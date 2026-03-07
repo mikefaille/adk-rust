@@ -15,15 +15,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &model,
         vec![
             Content {
-                role: "user".to_string(),
+                role: adk_core::prelude::Role::User,
                 parts: vec![Part::Text { text: "Hello".to_string() }],
             },
             Content {
-                role: "model".to_string(),
+                role: adk_core::prelude::Role::Model,
                 parts: vec![], // Empty parts - this creates an empty assistant message!
             },
             Content {
-                role: "user".to_string(),
+                role: adk_core::prelude::Role::User,
                 parts: vec![Part::Text { text: "Say more".to_string() }],
             },
         ],
@@ -36,15 +36,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &model,
         vec![
             Content {
-                role: "user".to_string(),
+                role: adk_core::prelude::Role::User,
                 parts: vec![Part::Text { text: "Hello".to_string() }],
             },
             Content {
-                role: "model".to_string(),
+                role: adk_core::prelude::Role::Model,
                 parts: vec![Part::Text { text: "".to_string() }], // Empty text
             },
             Content {
-                role: "user".to_string(),
+                role: adk_core::prelude::Role::User,
                 parts: vec![Part::Text { text: "Say more".to_string() }],
             },
         ],
@@ -57,19 +57,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &model,
         vec![
             Content {
-                role: "user".to_string(),
+                role: adk_core::prelude::Role::User,
                 parts: vec![Part::Text { text: "Hello".to_string() }],
             },
             Content {
-                role: "model".to_string(),
+                role: adk_core::prelude::Role::Model,
                 parts: vec![Part::Text { text: "Hi".to_string() }],
             },
             Content {
-                role: "model".to_string(),
+                role: adk_core::prelude::Role::Model,
                 parts: vec![Part::Text { text: "How are you?".to_string() }],
             },
             Content {
-                role: "user".to_string(),
+                role: adk_core::prelude::Role::User,
                 parts: vec![Part::Text { text: "Fine".to_string() }],
             },
         ],
@@ -82,11 +82,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &model,
         vec![
             Content {
-                role: "user".to_string(),
+                role: adk_core::prelude::Role::User,
                 parts: vec![Part::Text { text: "Hello".to_string() }],
             },
             Content {
-                role: "user".to_string(),
+                role: adk_core::prelude::Role::User,
                 parts: vec![Part::Text { text: "Are you there?".to_string() }],
             },
         ],
@@ -98,7 +98,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     test_request(
         &model,
         vec![Content {
-            role: "user".to_string(),
+            role: adk_core::prelude::Role::User,
             parts: vec![Part::Text { text: "".to_string() }],
         }],
         HashMap::new(),
@@ -111,11 +111,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &model,
         vec![
             Content {
-                role: "user".to_string(),
+                role: adk_core::prelude::Role::User,
                 parts: vec![Part::Text { text: "Analyze this".to_string() }],
             },
             Content {
-                role: "model".to_string(),
+                role: adk_core::prelude::Role::Model,
                 parts: vec![
                     Part::Text { text: "Technical view: ...".to_string() },
                     Part::Text { text: "Business view: ...".to_string() },
@@ -123,7 +123,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ],
             },
             Content {
-                role: "user".to_string(),
+                role: adk_core::prelude::Role::User,
                 parts: vec![Part::Text { text: "Thanks".to_string() }],
             },
         ],

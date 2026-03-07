@@ -161,7 +161,7 @@ fn assert_response_invariants(spec: ProviderSpec, mode: &str, responses: &[LlmRe
 
         if let Some(content) = &response.content {
             assert_eq!(
-                content.role, "model",
+                content.role, adk_core::prelude::Role::Model,
                 "{} {mode} chunk #{index} should use role=model when content is present",
                 spec.name
             );

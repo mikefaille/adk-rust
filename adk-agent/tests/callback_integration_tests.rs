@@ -62,7 +62,7 @@ async fn test_callback_execution() {
         Box::pin(async move {
             *flag.lock().unwrap() = true;
             Ok(Some(Content {
-                role: "system".to_string(),
+                role: adk_core::prelude::Role::System,
                 parts: vec![Part::Text { text: "Before callback executed".to_string() }],
             }))
         })
@@ -76,7 +76,7 @@ async fn test_callback_execution() {
         Box::pin(async move {
             *flag.lock().unwrap() = true;
             Ok(Some(Content {
-                role: "system".to_string(),
+                role: adk_core::prelude::Role::System,
                 parts: vec![Part::Text { text: "After callback executed".to_string() }],
             }))
         })

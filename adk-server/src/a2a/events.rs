@@ -49,7 +49,7 @@ pub fn message_to_event(message: &Message, invocation_id: String) -> Result<Even
 
     let mut event = Event::new(invocation_id);
     event.author = author;
-    event.llm_response.content = Some(Content { role: "user".to_string(), parts: adk_parts });
+    event.llm_response.content = Some(Content { role: adk_core::prelude::Role::User, parts: adk_parts });
     event.actions = actions;
     Ok(event)
 }

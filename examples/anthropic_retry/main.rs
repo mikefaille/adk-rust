@@ -47,7 +47,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n=== Successful Request ===\n");
 
     let request = make_request(vec![Content {
-        role: "user".to_string(),
+        role: adk_core::prelude::Role::User,
         parts: vec![Part::Text { text: "Say 'hello' and nothing else.".to_string() }],
     }]);
 
@@ -84,7 +84,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .with_retry_config(RetryConfig::disabled());
 
     let request = make_request(vec![Content {
-        role: "user".to_string(),
+        role: adk_core::prelude::Role::User,
         parts: vec![Part::Text { text: "test".to_string() }],
     }]);
 
@@ -112,7 +112,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  (Errors will not be retried — useful for testing)\n");
 
     let request = make_request(vec![Content {
-        role: "user".to_string(),
+        role: adk_core::prelude::Role::User,
         parts: vec![Part::Text { text: "Quick test with no retry.".to_string() }],
     }]);
 
