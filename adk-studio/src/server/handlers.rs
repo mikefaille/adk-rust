@@ -734,7 +734,7 @@ pub async fn webhook_trigger(
     }
 
     // Generate a session ID for this webhook execution
-    let session_id = SessionId::new(uuid::Uuid::new_v4().to_string()).unwrap();
+    let session_id = SessionId::try_from(uuid::Uuid::new_v4().to_string()).unwrap();
 
     // Store the webhook payload in a temporary location for the stream handler
     // The stream handler will inject this into the workflow state
@@ -829,7 +829,7 @@ pub async fn webhook_trigger_get(
     }
 
     // Generate a session ID for this webhook execution
-    let session_id = SessionId::new(uuid::Uuid::new_v4().to_string()).unwrap();
+    let session_id = SessionId::try_from(uuid::Uuid::new_v4().to_string()).unwrap();
 
     // Convert query params to JSON payload
     let payload = serde_json::to_value(&params).unwrap_or(serde_json::Value::Null);
@@ -975,13 +975,13 @@ pub async fn webhook_execute(
             success: false,
             response: None,
             error: Some("Project not built. Build the project first using the UI.".to_string()),
-            session_id: SessionId::new(String::new()).unwrap(),
+            session_id: SessionId::try_from("unknown-session-id").unwrap(),
             duration_ms: start_time.elapsed().as_millis() as u64,
         }));
     }
 
     // Generate a session ID
-    let session_id = SessionId::new(uuid::Uuid::new_v4().to_string()).unwrap();
+    let session_id = SessionId::try_from(uuid::Uuid::new_v4().to_string()).unwrap();
 
     tracing::info!(
         project_id = %id,
@@ -1533,7 +1533,7 @@ pub async fn event_trigger(
     }
 
     // Generate a session ID for this event execution
-    let session_id = SessionId::new(uuid::Uuid::new_v4().to_string()).unwrap();
+    let session_id = SessionId::try_from(uuid::Uuid::new_v4().to_string()).unwrap();
 
     // Build the full event payload
     let event_payload = serde_json::json!({

@@ -506,7 +506,10 @@ mod tests {
 
         // First part should be Thinking
         assert!(content.parts[0].is_thinking());
-        assert_eq!(content.parts[0].as_thinking(), Some("Let me reason through this step by step..."));
+        assert_eq!(
+            content.parts[0].as_thinking(),
+            Some("Let me reason through this step by step...")
+        );
 
         // Second part should be Text
         assert!(!content.parts[1].is_thinking());

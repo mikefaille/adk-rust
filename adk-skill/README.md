@@ -288,7 +288,7 @@ use adk_skill::{SelectionPolicy, apply_skill_injection, load_skill_index};
 
 let index = load_skill_index(".")?;
 let policy = SelectionPolicy { min_score: 0.1, ..SelectionPolicy::default() };
-let mut content = Content::new("user").with_text("Search this repository for TODO markers");
+let mut content = Content::user().with_text("Search this repository for TODO markers");
 
 let matched = apply_skill_injection(&mut content, &index, &policy, 1500);
 if let Some(m) = matched {

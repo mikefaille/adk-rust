@@ -31,11 +31,15 @@ pub fn to_invocation_meta(
     context_id: &str,
     user_id: Option<&str>,
 ) -> InvocationMeta {
-    let user_id = UserId::new(
-        user_id.map(|s| s.to_string()).unwrap_or_else(|| format!("A2A_USER_{}", context_id)),
-    )
-    .unwrap();
-    let session_id = SessionId::new(context_id.to_string()).unwrap();
+    let safe_user_id = user_id
+        .map(|s| s.replace(':', "-"))
+        .unwrap_or_else(|| format!("A2A_USER_{}", context_id).replace(':', "-"));
+    let user_id = UserId::try_from(safe_user_id.as_str())
+        .unwrap_or_else(|_| UserId::try_from("A2A_USER_UNKNOWN").unwrap());
+
+    let safe_session_id = context_id.replace(':', "-");
+    let session_id = SessionId::try_from(safe_session_id.as_str())
+        .unwrap_or_else(|_| SessionId::try_from("A2A_SESSION_UNKNOWN").unwrap());
 
     let mut event_meta = HashMap::new();
     event_meta.insert(to_a2a_meta_key("app_name"), Value::String(app_name.to_string()));

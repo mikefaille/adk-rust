@@ -234,8 +234,12 @@ impl AgentToolInvocationContext {
     ) -> Self {
         let mut identity = parent_ctx.identity().clone();
         identity.agent_name = agent.name().to_string();
+        let safe_agent_name = agent.name().replace(':', "-");
         identity.invocation_id =
-            InvocationId::new(format!("{}-sub-{}", identity.invocation_id, agent.name())).unwrap();
+            InvocationId::new(format!("{}-sub-{}", identity.invocation_id, safe_agent_name))
+                .unwrap_or_else(|_| {
+                    InvocationId::new(format!("{}-sub", identity.invocation_id)).unwrap()
+                });
 
         Self {
             parent_ctx,

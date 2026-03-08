@@ -138,7 +138,9 @@ mod tests {
         let message = content_to_chat_message(&content).expect("message should be created");
 
         // Default `adk-core` has base64 feature enabled. The mocked output reflects this.
-        assert!(message.content.contains("<attachment mime_type=\"application/pdf\" encoding=\"base64\">JVBERg==</attachment>"));
+        assert!(message.content.contains(
+            "<attachment mime_type=\"application/pdf\" encoding=\"base64\">JVBERg==</attachment>"
+        ));
     }
 
     #[test]

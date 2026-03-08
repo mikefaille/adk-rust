@@ -96,9 +96,9 @@ async fn stream_response(
 
     let session = match svc
         .get(GetRequest {
-            app_name: "studio"),
-            user_id: UserId::new( "user"),
-            session_id: SessionId::new(session_id.clone()).unwrap(),
+            app_name: "studio".to_string(),
+            user_id: UserId::try_from("user").unwrap(),
+            session_id: SessionId::try_from(session_id.as_str()).map_err(|e| e.to_string())?,
             num_recent_events: None,
             after: None,
         })
@@ -107,9 +107,9 @@ async fn stream_response(
         Ok(s) => s,
         Err(_) => {
             svc.create(CreateRequest {
-                app_name: "studio"),
-                user_id: UserId::new( "user"),
-                session_id: SessionId::new( Some(session_id),
+                app_name: "studio".to_string(),
+                user_id: UserId::try_from("user").unwrap(),
+                session_id: Some(SessionId::try_from(session_id.as_str()).unwrap_or_else(|_| SessionId::try_from("unknown").unwrap())),
                 state: HashMap::new(),
             })
             .await?
@@ -117,7 +117,7 @@ async fn stream_response(
     };
 
     let runner = Runner::new(RunnerConfig {
-        app_name: "studio"),
+        app_name: "studio".to_string(),
         agent,
         session_service: svc,
         artifact_service: None,

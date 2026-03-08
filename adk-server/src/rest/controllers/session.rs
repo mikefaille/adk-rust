@@ -34,7 +34,7 @@ impl SessionController {
         SessionResponse {
             id: session.id().to_string(),
             app_name: session.app_name().to_string(),
-            user_id: UserId::new(session.user_id().to_string()).unwrap(),
+            user_id: session.user_id().clone(),
             last_update_time: session.last_update_time().timestamp(),
             events,
             state: session.state().all(),
@@ -103,8 +103,9 @@ pub async fn get_session(
         .session_service
         .get(adk_session::GetRequest {
             app_name,
-            user_id: UserId::new(user_id).unwrap(),
-            session_id: SessionId::new(session_id).unwrap(),
+            user_id: UserId::try_from(user_id.as_str()).map_err(|_| StatusCode::BAD_REQUEST)?,
+            session_id: SessionId::try_from(session_id.as_str())
+                .map_err(|_| StatusCode::BAD_REQUEST)?,
             num_recent_events: None,
             after: None,
         })
@@ -122,8 +123,9 @@ pub async fn delete_session(
         .session_service
         .delete(adk_session::DeleteRequest {
             app_name,
-            user_id: UserId::new(user_id).unwrap(),
-            session_id: SessionId::new(session_id).unwrap(),
+            user_id: UserId::try_from(user_id.as_str()).map_err(|_| StatusCode::BAD_REQUEST)?,
+            session_id: SessionId::try_from(session_id.as_str())
+                .map_err(|_| StatusCode::BAD_REQUEST)?,
         })
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -197,8 +199,11 @@ pub async fn create_session_from_path(
         .session_service
         .create(adk_session::CreateRequest {
             app_name: params.app_name.clone(),
-            user_id: UserId::new(params.user_id.clone()).unwrap(),
-            session_id: Some(SessionId::new(session_id).unwrap()),
+            user_id: UserId::try_from(params.user_id.as_str())
+                .map_err(|_| StatusCode::BAD_REQUEST)?,
+            session_id: Some(
+                SessionId::try_from(session_id.as_str()).map_err(|_| StatusCode::BAD_REQUEST)?,
+            ),
             state: match body {
                 Some(b) => {
                     let s = b.0.state;
@@ -228,8 +233,10 @@ pub async fn get_session_from_path(
         .session_service
         .get(adk_session::GetRequest {
             app_name: params.app_name,
-            user_id: UserId::new(params.user_id).unwrap(),
-            session_id: SessionId::new(session_id).unwrap(),
+            user_id: UserId::try_from(params.user_id.as_str())
+                .map_err(|_| StatusCode::BAD_REQUEST)?,
+            session_id: SessionId::try_from(session_id.as_str())
+                .map_err(|_| StatusCode::BAD_REQUEST)?,
             num_recent_events: None,
             after: None,
         })
@@ -250,8 +257,10 @@ pub async fn delete_session_from_path(
         .session_service
         .delete(adk_session::DeleteRequest {
             app_name: params.app_name,
-            user_id: UserId::new(params.user_id).unwrap(),
-            session_id: SessionId::new(session_id).unwrap(),
+            user_id: UserId::try_from(params.user_id.as_str())
+                .map_err(|_| StatusCode::BAD_REQUEST)?,
+            session_id: SessionId::try_from(session_id.as_str())
+                .map_err(|_| StatusCode::BAD_REQUEST)?,
         })
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -274,7 +283,8 @@ pub async fn list_sessions(
         .session_service
         .list(adk_session::ListRequest {
             app_name: params.app_name.clone(),
-            user_id: UserId::new(params.user_id.clone()).unwrap(),
+            user_id: UserId::try_from(params.user_id.as_str())
+                .map_err(|_| StatusCode::BAD_REQUEST)?,
         })
         .await
         .map_err(|e| {

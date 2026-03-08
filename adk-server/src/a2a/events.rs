@@ -47,7 +47,11 @@ pub fn message_to_event(message: &Message, invocation_id: String) -> Result<Even
         Role::Agent => "agent".to_string(),
     };
 
-    let mut event = Event::new(adk_core::types::InvocationId::new(invocation_id).unwrap());
+    let safe_id = invocation_id.replace(':', "-");
+    let mut event = Event::new(
+        adk_core::types::InvocationId::try_from(safe_id.as_str())
+            .unwrap_or_else(|_| adk_core::types::InvocationId::try_from("fallback-id").unwrap()),
+    );
     event.author = author;
     event.llm_response.content =
         Some(Content { role: adk_core::types::Role::User, parts: adk_parts });

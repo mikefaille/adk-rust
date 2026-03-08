@@ -571,10 +571,7 @@ mod tests {
 
     #[test]
     fn role_preserves_custom_values() {
-        assert_eq!(
-            "critic".parse::<Role>().unwrap(),
-            Role::Other("critic".into())
-        );
+        assert_eq!("critic".parse::<Role>().unwrap(), Role::Other("critic".into()));
     }
 
     #[test]

@@ -294,14 +294,19 @@ pub async fn run_sse(
             "resolved ui protocol profile for runtime request"
         );
 
+        let parsed_user_id = UserId::try_from(user_id.as_str())
+            .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid user_id: {}", e)))?;
+        let parsed_session_id = SessionId::try_from(session_id.as_str())
+            .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid session_id: {}", e)))?;
+
         // Validate session exists
         controller
             .config
             .session_service
             .get(adk_session::GetRequest {
                 app_name: app_name.clone(),
-                user_id: UserId::new(user_id.clone()).unwrap(),
-                session_id: SessionId::new(session_id.clone()).unwrap(),
+                user_id: parsed_user_id.clone(),
+                session_id: parsed_session_id.clone(),
                 num_recent_events: None,
                 after: None,
             })
@@ -339,7 +344,7 @@ pub async fn run_sse(
 
         // Run agent
         let event_stream = runner
-            .run(UserId::new(user_id).unwrap(), SessionId::new(session_id).unwrap(), content)
+            .run(parsed_user_id, parsed_session_id, content)
             .await
             .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "failed to run agent".to_string()))?;
 
@@ -397,14 +402,19 @@ pub async fn run_sse_compat(
         );
     }
 
+    let parsed_user_id = UserId::try_from(user_id.as_str())
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid user_id: {}", e)))?;
+    let parsed_session_id = SessionId::try_from(session_id.as_str())
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid session_id: {}", e)))?;
+
     // Validate session exists or create it
     let session_result = controller
         .config
         .session_service
         .get(adk_session::GetRequest {
             app_name: app_name.clone(),
-            user_id: UserId::new(user_id.clone()).unwrap(),
-            session_id: SessionId::new(session_id.clone()).unwrap(),
+            user_id: parsed_user_id.clone(),
+            session_id: parsed_session_id.clone(),
             num_recent_events: None,
             after: None,
         })
@@ -417,8 +427,8 @@ pub async fn run_sse_compat(
             .session_service
             .create(adk_session::CreateRequest {
                 app_name: app_name.clone(),
-                user_id: UserId::new(user_id.clone()).unwrap(),
-                session_id: Some(SessionId::new(session_id.clone()).unwrap()),
+                user_id: parsed_user_id.clone(),
+                session_id: Some(parsed_session_id.clone()),
                 state: std::collections::HashMap::new(),
             })
             .await

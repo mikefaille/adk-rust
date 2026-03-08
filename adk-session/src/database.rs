@@ -141,8 +141,9 @@ impl DatabaseSessionService {
 #[async_trait]
 impl SessionService for DatabaseSessionService {
     async fn create(&self, req: CreateRequest) -> Result<Box<dyn Session>> {
-        let session_id =
-            req.session_id.unwrap_or_else(|| SessionId::new(Uuid::new_v4().to_string()).unwrap());
+        let session_id = req
+            .session_id
+            .unwrap_or_else(|| SessionId::try_from(Uuid::new_v4().to_string()).unwrap());
         let now = Utc::now();
 
         let (app_delta, user_delta, session_state) = Self::extract_state_deltas(&req.state);
@@ -233,7 +234,8 @@ impl SessionService for DatabaseSessionService {
 
         Ok(Box::new(DatabaseSession {
             app_name: req.app_name,
-            user_id: UserId::new(req.user_id).unwrap(),
+            user_id: UserId::try_from(req.user_id.as_str())
+                .map_err(|e| crate::Error::Database(format!("Invalid user_id: {}", e)))?,
             session_id,
             state: merged_state,
             events: Vec::new(),
@@ -302,8 +304,10 @@ impl SessionService for DatabaseSessionService {
 
         Ok(Box::new(DatabaseSession {
             app_name: req.app_name,
-            user_id: UserId::new(req.user_id).unwrap(),
-            session_id: SessionId::new(req.session_id).unwrap(),
+            user_id: UserId::try_from(req.user_id.as_str())
+                .map_err(|e| crate::Error::Database(format!("Invalid user_id: {}", e)))?,
+            session_id: SessionId::try_from(req.session_id.as_str())
+                .map_err(|e| crate::Error::Database(format!("Invalid session_id: {}", e)))?,
             state,
             events,
             updated_at,
@@ -331,8 +335,10 @@ impl SessionService for DatabaseSessionService {
 
             sessions.push(Box::new(DatabaseSession {
                 app_name: req.app_name.clone(),
-                user_id: UserId::new(req.user_id.clone()).unwrap(),
-                session_id: SessionId::new(row.get::<String, _>("session_id")).unwrap(),
+                user_id: UserId::try_from(req.user_id.as_str())
+                    .map_err(|e| crate::Error::Database(format!("Invalid user_id: {}", e)))?,
+                session_id: SessionId::try_from(row.get::<String, _>("session_id").as_str())
+                    .map_err(|e| crate::Error::Database(format!("Invalid session_id: {}", e)))?,
                 state,
                 events: Vec::new(),
                 updated_at,

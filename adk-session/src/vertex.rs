@@ -394,7 +394,8 @@ impl SessionService for VertexAiSessionService {
                 ))
             })?;
 
-        let session_id = SessionId::new(session_id).unwrap();
+        let session_id = SessionId::try_from(session_id.as_str())
+            .map_err(|e| crate::Error::Config(format!("Invalid Session ID: {}", e)))?;
 
         self.remember_session_scope(&session_id, &req.app_name, &req.user_id);
 
@@ -499,8 +500,10 @@ impl SessionService for VertexAiSessionService {
                     ))
                 })?;
 
-                let session_id = SessionId::new(session_id).unwrap();
-                let payload_user_id = UserId::new(payload.user_id).unwrap();
+                let session_id = SessionId::try_from(session_id)
+                    .unwrap_or_else(|_| SessionId::try_from("unknown-session").unwrap());
+                let payload_user_id = UserId::try_from(payload.user_id.as_str())
+                    .unwrap_or_else(|_| UserId::try_from("unknown-user").unwrap());
 
                 self.remember_session_scope(&session_id, &req.app_name, &payload_user_id);
 
