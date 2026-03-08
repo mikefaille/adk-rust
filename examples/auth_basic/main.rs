@@ -5,11 +5,11 @@
 //! Run: cargo run --example auth_basic
 
 use adk_auth::{AccessControl, AuthMiddleware, Permission, Role};
+use adk_core::types::UserId;
 use adk_core::{Result, Tool, ToolContext};
 use async_trait::async_trait;
 use serde_json::Value;
 use std::sync::Arc;
-use adk_core::types::UserId;
 
 // Simple tools for demonstration
 struct SearchTool;

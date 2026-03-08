@@ -9,7 +9,7 @@ use ollama_rs::generation::chat::{ChatMessage, ChatMessageResponse};
 pub fn content_to_chat_message(content: &Content) -> Option<ChatMessage> {
     let text = content.collect_text();
 
-    match content.role {
+    match &content.role {
         Role::User => Some(ChatMessage::user(text)),
         Role::Model | Role::System => Some(ChatMessage::assistant(text)),
         Role::Tool | Role::Function => {
@@ -27,6 +27,10 @@ pub fn content_to_chat_message(content: &Content) -> Option<ChatMessage> {
                 None
             }
         }
+        Role::Other(s) if s.eq_ignore_ascii_case("assistant") => Some(ChatMessage::assistant(text)),
+        Role::Other(s) if s.eq_ignore_ascii_case("system") => Some(ChatMessage::system(text)),
+        Role::Other(s) if s.eq_ignore_ascii_case("user") => Some(ChatMessage::user(text)),
+        Role::Other(_) => Some(ChatMessage::user(text)),
     }
 }
 
@@ -132,12 +136,15 @@ mod tests {
             .with_inline_data("application/pdf", Bytes::from_static(b"%PDF"))
             .unwrap();
         let message = content_to_chat_message(&content).expect("message should be created");
-        assert!(message.content.contains("[Inline Data: application/pdf]"));
+
+        // Default `adk-core` has base64 feature enabled. The mocked output reflects this.
+        assert!(message.content.contains("<attachment mime_type=\"application/pdf\" encoding=\"base64\">JVBERg==</attachment>"));
     }
 
     #[test]
     fn content_to_chat_message_keeps_file_attachment_payload() {
-        let content = Content::user().with_file_uri("text/csv", "https://example.com/data.csv").unwrap();
+        let content =
+            Content::user().with_file_uri("text/csv", "https://example.com/data.csv").unwrap();
         let message = content_to_chat_message(&content).expect("message should be created");
         assert!(message.content.contains("[File: https://example.com/data.csv]"));
     }

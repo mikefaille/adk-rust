@@ -178,7 +178,12 @@ async fn main() -> anyhow::Result<()> {
     println!("[analyzer] Running...");
     println!("[summarizer] Running...");
 
-    let result = graph.invoke(input, ExecutionConfig::new(adk_core::types::SessionId::try_from(thread_id).unwrap())).await?;
+    let result = graph
+        .invoke(
+            input,
+            ExecutionConfig::new(adk_core::types::SessionId::try_from(thread_id).unwrap()),
+        )
+        .await?;
 
     println!("\n--- Results ---");
     println!(
@@ -252,7 +257,12 @@ async fn main() -> anyhow::Result<()> {
         let mut input = State::new();
         input.insert("text".to_string(), json!(text));
 
-        let result = graph.invoke(input, ExecutionConfig::new(adk_core::types::SessionId::try_from(*thread).unwrap())).await?;
+        let result = graph
+            .invoke(
+                input,
+                ExecutionConfig::new(adk_core::types::SessionId::try_from(*thread).unwrap()),
+            )
+            .await?;
         println!(
             "\n{}: {}",
             thread,

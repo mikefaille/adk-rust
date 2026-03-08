@@ -27,7 +27,7 @@ type ProjectStreamContext = (
 );
 
 lazy_static::lazy_static! {
-    static ref SESSIONS: Arc<Mutex<HashMap<String, SessionProcess>>> = Arc::new(Mutex::new(HashMap::new()));
+    static ref SESSIONS: Arc<Mutex<HashMap<SessionId, SessionProcess>>> = Arc::new(Mutex::new(HashMap::new()));
 }
 
 struct SessionProcess {
@@ -550,11 +550,11 @@ pub struct StreamQuery {
     api_key: Option<String>,
     #[serde(default)]
     binary_path: Option<String>,
-    session_id: String,
+    session_id: SessionId,
 }
 
 async fn get_or_create_session(
-    session_id: &str,
+    session_id: &SessionId,
     binary_path: &str,
     merged_env: &HashMap<String, String>,
 ) -> Result<(), String> {
@@ -567,7 +567,7 @@ async fn get_or_create_session(
     // The caller (stream_handler) has already merged keys from process env,
     // project env_vars, and the encrypted keystore in priority order.
     let mut cmd = Command::new(binary_path);
-    cmd.arg(session_id)
+    cmd.arg(session_id.as_str())
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
@@ -605,7 +605,7 @@ async fn get_or_create_session(
     });
 
     sessions.insert(
-        session_id.to_string(),
+        session_id.clone(),
         SessionProcess {
             stdin,
             stdout_rx,
@@ -738,8 +738,7 @@ pub async fn stream_handler(
         // Check if this is a webhook trigger (special input marker)
         let actual_input = if input == "__webhook__" {
             // Retrieve the webhook payload stored by the webhook trigger endpoint
-            let parsed_session_id = SessionId::try_from(session_id.as_str()).unwrap();
-            if let Some(webhook_payload) = crate::server::handlers::get_webhook_payload(&parsed_session_id).await {
+            if let Some(webhook_payload) = crate::server::handlers::get_webhook_payload(&session_id).await {
                 // Store webhook payload in execution state
                 exec_ctx.update_state("webhook_payload", webhook_payload.payload.clone());
                 exec_ctx.update_state("webhook_path", serde_json::Value::String(webhook_payload.path.clone()));
@@ -892,7 +891,7 @@ pub async fn stream_handler(
                         // Create interrupt handler and store the interrupted state
                         let handler = GraphInterruptHandler::new(INTERRUPTED_SESSIONS.clone());
                         handler.handle_interrupt(
-                            &SessionId::try_from(session_id.as_str()).unwrap(),
+                            &session_id,
                             interrupt_info.thread_id.clone(),
                             interrupt_info.checkpoint_id.clone(),
                             interrupt_info.node_id.clone(),
@@ -1226,9 +1225,9 @@ fn capitalize(s: &str) -> String {
     }
 }
 
-pub async fn kill_session(Path(session_id): Path<String>) -> &'static str {
+pub async fn kill_session(Path(session_id): Path<SessionId>) -> &'static str {
     let mut sessions = SESSIONS.lock().await;
-    if let Some(mut session) = sessions.remove(session_id.as_str()) {
+    if let Some(mut session) = sessions.remove(&session_id) {
         // Kill the child process explicitly
         if let Err(e) = session._child.kill().await {
             tracing::warn!("Failed to kill session {}: {}", session_id, e);
@@ -1267,7 +1266,7 @@ pub async fn send_resume_response(
     let mut sessions = SESSIONS.lock().await;
 
     let session = sessions
-        .get_mut(session_id.as_str())
+        .get_mut(session_id)
         .ok_or_else(|| format!("Session '{}' not found", session_id))?;
 
     // Format the response as a JSON string to send to the subprocess
@@ -1295,11 +1294,11 @@ pub async fn send_resume_response(
 /// Check if a session exists and is active.
 pub async fn session_exists(session_id: &SessionId) -> bool {
     let sessions = SESSIONS.lock().await;
-    sessions.contains_key(session_id.as_str())
+    sessions.contains_key(session_id)
 }
 
 /// Get the list of active session IDs.
-pub async fn list_active_sessions() -> Vec<String> {
+pub async fn list_active_sessions() -> Vec<SessionId> {
     let sessions = SESSIONS.lock().await;
     sessions.keys().cloned().collect()
 }

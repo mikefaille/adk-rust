@@ -68,7 +68,10 @@ mod tests {
             .build();
 
         let event = message_to_event(&message, "inv-123".to_string()).unwrap();
-        assert_eq!(event.invocation_id, adk_core::types::InvocationId::try_from("inv-123").unwrap());
+        assert_eq!(
+            event.invocation_id,
+            adk_core::types::InvocationId::try_from("inv-123").unwrap()
+        );
         assert_eq!(event.author, "user");
     }
 }

@@ -221,6 +221,7 @@
 //! use adk_rust::session::{SessionService, CreateRequest};
 //! use adk_rust::serde_json::json;
 //! use std::collections::HashMap;
+//! use adk_rust::types::UserId;
 //!
 //! # async fn example() -> Result<()> {
 //! let session_service = InMemorySessionService::new();
@@ -228,8 +229,8 @@
 //! // Create a session
 //! let session = session_service.create(CreateRequest {
 //!     app_name: "my_app".to_string(),
-//!     user_id: UserId::new( "user_123".to_string()),
-//!     session_id: SessionId::new( None,
+//!     user_id: UserId::new( "user_123").unwrap(),
+//!     session_id: None,
 //!     state: HashMap::new(),
 //! }).await?;
 //!
@@ -278,6 +279,7 @@
 //! ```no_run
 //! use adk_rust::prelude::*;
 //! use adk_rust::artifact::{ArtifactService, SaveRequest, LoadRequest};
+//! use adk_rust::types::{UserId, SessionId};
 //!
 //! # async fn example() -> Result<()> {
 //! let artifact_service = InMemoryArtifactService::new();
@@ -285,8 +287,8 @@
 //! // Save an artifact
 //! let response = artifact_service.save(SaveRequest {
 //!     app_name: "my_app".to_string(),
-//!     user_id: UserId::new( "user_123".to_string(),
-//!     session_id: SessionId::new( "session_456".to_string(),
+//!     user_id: UserId::new("user_123").unwrap(),
+//!     session_id: SessionId::new("session_456").unwrap(),
 //!     file_name: "sales_chart.png".to_string(),
 //!     part: Part::text("chart data".to_string()),
 //!     version: None,
@@ -295,8 +297,8 @@
 //! // Load an artifact
 //! let loaded = artifact_service.load(LoadRequest {
 //!     app_name: "my_app".to_string(),
-//!     user_id: UserId::new( "user_123".to_string(),
-//!     session_id: SessionId::new( "session_456".to_string(),
+//!     user_id: UserId::new("user_123").unwrap(),
+//!     session_id: SessionId::new("session_456").unwrap(),
 //!     file_name: "sales_chart.png".to_string(),
 //!     version: None,
 //! }).await?;

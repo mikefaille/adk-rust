@@ -151,7 +151,7 @@ impl ContentData {
 
     /// Convert to ADK Content
     pub fn to_adk_content(&self) -> adk_core::Content {
-        let mut content = adk_core::Content::new(self.role);
+        let mut content = adk_core::Content::new(self.role.clone());
         for part in &self.parts {
             match part {
                 Part::Text { text, .. } => {

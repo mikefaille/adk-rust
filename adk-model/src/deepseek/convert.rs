@@ -184,10 +184,12 @@ pub struct Usage {
 
 /// Convert ADK Content to DeepSeek Message.
 pub fn content_to_message(content: &Content) -> Message {
-    let role = match content.role {
+    let role = match &content.role {
         Role::User => Role::User,
         Role::Model | Role::System => Role::Model,
         Role::Tool | Role::Function => Role::Tool,
+        Role::Other(s) if s.eq_ignore_ascii_case("assistant") => Role::Model,
+        Role::Other(_) => Role::User,
     };
 
     let mut text_parts = Vec::new();

@@ -158,7 +158,6 @@ define_id_type!(SessionId, Session);
 define_id_type!(InvocationId, Agent);
 define_id_type!(UserId, Agent);
 
-
 /// A consolidated identity capsule for ADK execution.
 ///
 /// This struct groups the foundational identifiers that define a specific "run"
@@ -192,27 +191,15 @@ impl Default for AdkIdentity {
 pub const MAX_INLINE_DATA_SIZE: usize = 10 * 1024 * 1024;
 
 /// Represents the role of the author of a message.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize, Display)]
-#[serde(rename_all = "lowercase")]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub enum Role {
     #[default]
-    #[serde(alias = "human")]
-    #[display("user")]
     User,
-
-    #[serde(alias = "assistant")]
-    #[display("model")]
     Model,
-
-    #[serde(alias = "developer")]
-    #[display("system")]
     System,
-
-    #[display("tool")]
     Tool,
-
-    #[display("function")]
     Function,
+    Other(String),
 }
 
 impl Role {
@@ -223,6 +210,7 @@ impl Role {
             Role::System => "system",
             Role::Tool => "tool",
             Role::Function => "function",
+            Role::Other(s) => s.as_str(),
         }
     }
 
@@ -247,19 +235,19 @@ impl std::str::FromStr for Role {
     type Err = crate::AdkError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if s.eq_ignore_ascii_case("user") || s.eq_ignore_ascii_case("human") {
-            Ok(Role::User)
-        } else if s.eq_ignore_ascii_case("model") || s.eq_ignore_ascii_case("assistant") {
-            Ok(Role::Model)
-        } else if s.eq_ignore_ascii_case("system") || s.eq_ignore_ascii_case("developer") {
-            Ok(Role::System)
-        } else if s.eq_ignore_ascii_case("tool") {
-            Ok(Role::Tool)
-        } else if s.eq_ignore_ascii_case("function") {
-            Ok(Role::Function)
-        } else {
-            Err(crate::AdkError::Config(format!("Invalid role: {s}")))
+        let raw = s.trim();
+        if raw.is_empty() {
+            return Err(crate::AdkError::Config("role cannot be empty".into()));
         }
+
+        Ok(match raw.to_ascii_lowercase().as_str() {
+            "user" | "human" => Role::User,
+            "model" | "assistant" => Role::Model,
+            "system" | "developer" => Role::System,
+            "tool" => Role::Tool,
+            "function" => Role::Function,
+            _ => Role::Other(raw.to_string()),
+        })
     }
 }
 
@@ -280,6 +268,31 @@ impl TryFrom<&str> for Role {
 impl From<Role> for String {
     fn from(role: Role) -> String {
         role.as_str().to_string()
+    }
+}
+
+impl serde::Serialize for Role {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Role {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        std::str::FromStr::from_str(&s).map_err(serde::de::Error::custom)
+    }
+}
+
+impl std::fmt::Display for Role {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
     }
 }
 
@@ -304,8 +317,10 @@ impl Content {
         Self { role, parts: Vec::new() }
     }
 
-    pub fn try_new(role: impl TryInto<Role>) -> Result<Self, crate::AdkError> {
-        let role = role.try_into().map_err(|_| crate::AdkError::Config("Invalid role".into()))?;
+    pub fn try_new(
+        role: impl TryInto<Role, Error = crate::AdkError>,
+    ) -> Result<Self, crate::AdkError> {
+        let role = role.try_into()?;
         Ok(Self { role, parts: Vec::new() })
     }
 
@@ -426,7 +441,10 @@ impl Part {
         Part::Thinking { thought: thought.into(), signature: None }
     }
 
-    pub fn file_data(mime_type: impl Into<String>, file_uri: impl Into<String>) -> crate::Result<Self> {
+    pub fn file_data(
+        mime_type: impl Into<String>,
+        file_uri: impl Into<String>,
+    ) -> crate::Result<Self> {
         let mime_str = mime_type.into();
         let mime = mime_str
             .parse::<Mime>()
@@ -442,6 +460,20 @@ impl Part {
     }
 
     pub fn as_text(&self) -> Option<&str> {
+        match self {
+            Part::Text(text) => Some(text),
+            _ => None,
+        }
+    }
+
+    pub fn as_thinking(&self) -> Option<&str> {
+        match self {
+            Part::Thinking { thought, .. } => Some(thought),
+            _ => None,
+        }
+    }
+
+    pub fn as_any_text(&self) -> Option<&str> {
         match self {
             Part::Text(text) => Some(text),
             Part::Thinking { thought, .. } => Some(thought),
@@ -529,6 +561,29 @@ mod tests {
     #[test]
     fn test_role_display() {
         assert_eq!(Role::User.to_string(), "user");
+    }
+
+    #[test]
+    fn role_parses_known_aliases() {
+        assert_eq!("assistant".parse::<Role>().unwrap(), Role::Model);
+        assert_eq!("developer".parse::<Role>().unwrap(), Role::System);
+    }
+
+    #[test]
+    fn role_preserves_custom_values() {
+        assert_eq!(
+            "critic".parse::<Role>().unwrap(),
+            Role::Other("critic".into())
+        );
+    }
+
+    #[test]
+    fn role_round_trips_custom_json() {
+        let role = Role::Other("critic".into());
+        let json = serde_json::to_string(&role).unwrap();
+        assert_eq!(json, "\"critic\"");
+        let parsed: Role = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, role);
     }
 
     #[test]

@@ -139,8 +139,8 @@ mod tests {
     #[tokio::test]
     async fn test_json_in_markdown() {
         let validator = SchemaValidator::new(&test_schema()).unwrap();
-        let content = Content::model()
-            .with_text("Here is the result:\n```json\n{\"name\": \"Bob\"}\n```");
+        let content =
+            Content::model().with_text("Here is the result:\n```json\n{\"name\": \"Bob\"}\n```");
         let result = validator.validate(&content).await;
         assert!(result.is_pass());
     }

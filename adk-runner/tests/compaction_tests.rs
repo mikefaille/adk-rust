@@ -228,7 +228,8 @@ fn test_conversation_history_respects_compaction() {
     old_event_4.set_content(Content::new(Role::Model).with_text("Old response 2"));
 
     // Compaction event summarizing events 1-4
-    let mut compaction_event = Event::new(adk_core::types::InvocationId::try_from("compaction").unwrap());
+    let mut compaction_event =
+        Event::new(adk_core::types::InvocationId::try_from("compaction").unwrap());
     compaction_event.author = "system".to_string();
     compaction_event.timestamp = base_time + Duration::seconds(4);
     compaction_event.actions = EventActions {

@@ -236,7 +236,14 @@ async fn main() -> anyhow::Result<()> {
         let mut input = State::new();
         input.insert("message".to_string(), json!(message));
 
-        let result = graph.invoke(input, ExecutionConfig::new(adk_core::types::SessionId::try_from(format!("test-{}", i)).unwrap())).await?;
+        let result = graph
+            .invoke(
+                input,
+                ExecutionConfig::new(
+                    adk_core::types::SessionId::try_from(format!("test-{}", i)).unwrap(),
+                ),
+            )
+            .await?;
 
         println!(
             "\nResponse:\n{}",

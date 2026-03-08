@@ -109,8 +109,7 @@ async fn main() -> anyhow::Result<()> {
     let executor_node = AgentNode::new(executor_agent)
         .with_input_mapper(|state| {
             let plan = state.get("plan").and_then(|v| v.as_str()).unwrap_or("");
-            adk_core::Content::user()
-                .with_text(format!("Execute this approved plan:\n{}", plan))
+            adk_core::Content::user().with_text(format!("Execute this approved plan:\n{}", plan))
         })
         .with_output_mapper(|events| {
             let mut updates = std::collections::HashMap::new();
@@ -180,7 +179,12 @@ async fn main() -> anyhow::Result<()> {
     let mut input = State::new();
     input.insert("task".to_string(), json!("Read and summarize the README.md file"));
 
-    let result = graph.invoke(input, ExecutionConfig::new(adk_core::types::SessionId::try_from("low-risk-001").unwrap())).await?;
+    let result = graph
+        .invoke(
+            input,
+            ExecutionConfig::new(adk_core::types::SessionId::try_from("low-risk-001").unwrap()),
+        )
+        .await?;
 
     println!("\nResult:\n{}", result.get("result").and_then(|v| v.as_str()).unwrap_or("None"));
 
@@ -193,7 +197,12 @@ async fn main() -> anyhow::Result<()> {
     input.insert("task".to_string(), json!("Delete all backup files from the production server"));
 
     let thread_id = "high-risk-001";
-    let result = graph.invoke(input, ExecutionConfig::new(adk_core::types::SessionId::try_from(thread_id).unwrap())).await;
+    let result = graph
+        .invoke(
+            input,
+            ExecutionConfig::new(adk_core::types::SessionId::try_from(thread_id).unwrap()),
+        )
+        .await;
 
     match result {
         Err(GraphError::Interrupted(interrupted)) => {
@@ -213,8 +222,12 @@ async fn main() -> anyhow::Result<()> {
 
             // Resume execution
             println!("\n*** RESUMING EXECUTION ***\n");
-            let final_result =
-                graph.invoke(State::new(), ExecutionConfig::new(adk_core::types::SessionId::try_from(thread_id).unwrap())).await?;
+            let final_result = graph
+                .invoke(
+                    State::new(),
+                    ExecutionConfig::new(adk_core::types::SessionId::try_from(thread_id).unwrap()),
+                )
+                .await?;
 
             println!(
                 "\nFinal Result:\n{}",
@@ -279,8 +292,12 @@ async fn main() -> anyhow::Result<()> {
     let mut input = State::new();
     input.insert("task".to_string(), json!("Organize project files"));
 
-    let result =
-        graph_static.invoke(input, ExecutionConfig::new(adk_core::types::SessionId::try_from("static-interrupt").unwrap())).await;
+    let result = graph_static
+        .invoke(
+            input,
+            ExecutionConfig::new(adk_core::types::SessionId::try_from("static-interrupt").unwrap()),
+        )
+        .await;
 
     match result {
         Err(GraphError::Interrupted(interrupted)) => {

@@ -136,7 +136,7 @@ async fn test_custom_agent_run() {
     let agent = CustomAgent::builder("echo_agent")
         .description("Echoes input")
         .handler(|ctx| async move {
-            let mut event = Event::new(InvocationId::try_from(ctx.invocation_id().as_str()).unwrap());
+            let mut event = Event::new(ctx.invocation_id().clone());
             event.llm_response.content = Some(ctx.user_content().clone());
 
             let stream = async_stream::stream! {

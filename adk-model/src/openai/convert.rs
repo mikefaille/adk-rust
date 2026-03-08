@@ -485,8 +485,9 @@ mod tests {
 
     #[test]
     fn test_user_message_with_file_data_image_uses_image_url_part() {
-        let content = Content::user()
-            .with_part(Part::file_data("image/jpeg", "https://example.com/photo.jpg".to_string()).unwrap());
+        let content = Content::user().with_part(
+            Part::file_data("image/jpeg", "https://example.com/photo.jpg".to_string()).unwrap(),
+        );
         let msg = content_to_message(&content);
 
         if let ChatCompletionRequestMessage::User(user_msg) = &msg {
@@ -508,10 +509,10 @@ mod tests {
 
     #[test]
     fn test_user_message_with_file_data_falls_back_to_text_part() {
-        let content = Content::user().with_part(Part::file_data(
-            "application/pdf",
-            "https://example.com/report.pdf".to_string(),
-        ).unwrap());
+        let content = Content::user().with_part(
+            Part::file_data("application/pdf", "https://example.com/report.pdf".to_string())
+                .unwrap(),
+        );
         let msg = content_to_message(&content);
 
         if let ChatCompletionRequestMessage::User(user_msg) = &msg {

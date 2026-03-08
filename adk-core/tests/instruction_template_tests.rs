@@ -109,15 +109,13 @@ impl ReadonlyContext for MockContext {
     fn identity(&self) -> &adk_core::types::AdkIdentity {
         static IDENTITY: std::sync::OnceLock<adk_core::types::AdkIdentity> =
             std::sync::OnceLock::new();
-        IDENTITY.get_or_init(|| {
-        adk_core::types::AdkIdentity {
+        IDENTITY.get_or_init(|| adk_core::types::AdkIdentity {
             invocation_id: adk_core::types::InvocationId::new("inv-1").unwrap(),
             agent_name: "test-agent".to_string(),
             user_id: adk_core::types::UserId::new("user-1").unwrap(),
             app_name: "test-app".to_string(),
             session_id: adk_core::types::SessionId::new("session-1").unwrap(),
             branch: "main".to_string(),
-        }
         })
     }
     fn user_content(&self) -> &Content {

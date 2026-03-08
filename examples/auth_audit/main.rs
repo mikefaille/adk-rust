@@ -8,11 +8,11 @@ use adk_auth::{
     AccessControl, AuditEvent, AuditOutcome, AuditSink, AuthError, AuthMiddleware, FileAuditSink,
     Permission, Role,
 };
+use adk_core::types::UserId;
 use adk_core::{Result, Tool, ToolContext};
 use async_trait::async_trait;
 use serde_json::Value;
 use std::sync::{Arc, Mutex};
-use adk_core::types::UserId;
 
 // In-memory audit sink for demonstration
 struct MemoryAuditSink {

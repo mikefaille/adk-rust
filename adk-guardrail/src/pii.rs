@@ -106,7 +106,7 @@ impl Guardrail for PiiRedactor {
         if any_redacted {
             let types_str: Vec<_> = redacted_types.iter().map(|t| format!("{:?}", t)).collect();
             GuardrailResult::Transform {
-                new_content: Content { role: content.role, parts: new_parts },
+                new_content: Content { role: content.role.clone(), parts: new_parts },
                 reason: format!("Redacted PII types: {}", types_str.join(", ")),
             }
         } else {

@@ -230,7 +230,8 @@ async fn test_find_agent_to_run_with_history() {
 
     // Session with assistant event
     let mut events = vec![];
-    let mut event = adk_session::Event::new(adk_core::types::InvocationId::try_from("inv-1").unwrap());
+    let mut event =
+        adk_session::Event::new(adk_core::types::InvocationId::try_from("inv-1").unwrap());
     event.author = "assistant".to_string();
     events.push(event);
 
@@ -268,7 +269,8 @@ async fn test_find_agent_to_run_skips_user_events() {
 
     // Session with only user events
     let mut events = vec![];
-    let mut event = adk_session::Event::new(adk_core::types::InvocationId::try_from("inv-1").unwrap());
+    let mut event =
+        adk_session::Event::new(adk_core::types::InvocationId::try_from("inv-1").unwrap());
     event.author = "user".to_string();
     events.push(event);
 
@@ -336,7 +338,7 @@ impl Agent for EchoUserContentAgent {
             })
             .unwrap_or_default();
 
-        let mut event = Event::new(adk_core::types::InvocationId::try_from(ctx.invocation_id().as_str()).unwrap());
+        let mut event = Event::new(ctx.invocation_id().clone());
         event.author = "echo".to_string();
         event.llm_response.content =
             Some(Content::new(Role::Model).with_text(format!("agent-saw:{input_text}")));
