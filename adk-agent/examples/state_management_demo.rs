@@ -235,7 +235,7 @@ async fn main() -> Result<()> {
             let state = all_state.clone();
             async move {
                 let mut event =
-                    Event::new(adk_core::types::InvocationId::try_from("demo-invocation").unwrap());
+                    Event::new(adk_core::types::InvocationId::try_from("demo-invocation").expect("static invocation ID should be valid"));
                 event.author = "state_reader".to_string();
 
                 let mut text = String::from("State summary:\n");
