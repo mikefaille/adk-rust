@@ -8,11 +8,12 @@ use adk_core::{AdkError, Llm, LlmRequest, LlmResponseStream};
 use async_openai::{
     Client,
     config::AzureConfig as AsyncAzureConfig,
-    types::{CreateChatCompletionRequestArgs, ResponseFormat, ResponseFormatJsonSchema},
+    types::chat::{
+        CreateChatCompletionRequestArgs, ReasoningEffort, ResponseFormat, ResponseFormatJsonSchema,
+    },
 };
 use async_stream::try_stream;
 use async_trait::async_trait;
-use futures::StreamExt;
 
 /// OpenAI client for standard OpenAI API and OpenAI-compatible APIs.
 pub struct OpenAIClient {
@@ -22,20 +23,28 @@ pub struct OpenAIClient {
 impl OpenAIClient {
     /// Create a new OpenAI client.
     pub fn new(config: OpenAIConfig) -> Result<Self, AdkError> {
-        let OpenAIConfig { api_key, model, organization_id, project_id, base_url } = config;
+        let reasoning_effort = config.reasoning_effort.map(|e| match e {
+            super::config::ReasoningEffort::Low => ReasoningEffort::Low,
+            super::config::ReasoningEffort::Medium => ReasoningEffort::Medium,
+            super::config::ReasoningEffort::High => ReasoningEffort::High,
+        });
 
-        let mut config = OpenAICompatibleConfig::new(api_key, model).with_provider_name("openai");
-        if let Some(base_url) = base_url {
-            config = config.with_base_url(base_url);
+        let mut compat_config =
+            OpenAICompatibleConfig::new(config.api_key, config.model).with_provider_name("openai");
+        if let Some(base_url) = config.base_url {
+            compat_config = compat_config.with_base_url(base_url);
         }
-        if let Some(org_id) = organization_id {
-            config = config.with_organization(org_id);
+        if let Some(org_id) = config.organization_id {
+            compat_config = compat_config.with_organization(org_id);
         }
-        if let Some(project_id) = project_id {
-            config = config.with_project(project_id);
+        if let Some(project_id) = config.project_id {
+            compat_config = compat_config.with_project(project_id);
+        }
+        if let Some(effort) = reasoning_effort {
+            compat_config = compat_config.with_reasoning_effort(effort);
         }
 
-        Ok(Self { inner: OpenAICompatible::new(config)? })
+        Ok(Self { inner: OpenAICompatible::new(compat_config)? })
     }
 
     /// Create a client for an OpenAI-compatible API.
@@ -135,7 +144,7 @@ impl Llm for AzureOpenAIClient {
         let request_for_retry = request.clone();
 
         let stream = try_stream! {
-            let mut stream = execute_with_retry(&retry_config, is_retryable_model_error, || {
+            let response = execute_with_retry(&retry_config, is_retryable_model_error, || {
                 let deployment_id = deployment_id.clone();
                 let client = client.clone();
                 let request = request_for_retry.clone();
@@ -162,7 +171,7 @@ impl Llm for AzureOpenAIClient {
                             request_builder.top_p(top_p);
                         }
                         if let Some(max_tokens) = config.max_output_tokens {
-                            request_builder.max_tokens(max_tokens as u32);
+                            request_builder.max_completion_tokens(max_tokens as u32);
                         }
 
                         if let Some(schema) = &config.response_schema {
@@ -186,29 +195,21 @@ impl Llm for AzureOpenAIClient {
 
                     let openai_request = request_builder
                         .build()
-                        .map_err(|e| AdkError::Model(format!("Failed to build request: {}", e)))?;
+                        .map_err(|e| AdkError::Model(format!("Failed to build request: {e}")))?;
 
+                    // Use non-streaming create() — async-openai 0.33's create_stream() has a
+                    // reqwest-eventsource compatibility bug. See openai_compatible.rs.
                     client
                         .chat()
-                        .create_stream(openai_request)
+                        .create(openai_request)
                         .await
-                        .map_err(|e| AdkError::Model(format!("Azure OpenAI API error: {}", e)))
+                        .map_err(|e| AdkError::Model(format!("Azure OpenAI API error: {e}")))
                 }
             })
             .await?;
 
-            // Process stream chunks
-            while let Some(result) = stream.next().await {
-                match result {
-                    Ok(chunk) => {
-                        let response = convert::from_openai_chunk(&chunk);
-                        yield response;
-                    }
-                    Err(e) => {
-                        yield Err(AdkError::Model(format!("Stream error: {}", e)))?;
-                    }
-                }
-            }
+            let adk_response = convert::from_openai_response(&response);
+            yield adk_response;
         };
 
         Ok(Box::pin(stream))

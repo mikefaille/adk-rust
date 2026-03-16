@@ -6,11 +6,16 @@ use adk_session::*;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("🔍 Verifying existing database...\n");
 
-    let service = DatabaseSessionService::new("sqlite:test_adk.db").await?;
+    let service = SqliteSessionService::new("sqlite:test_adk.db").await?;
 
     // List all sessions
     let sessions = service
-        .list(ListRequest { app_name: "test_app".to_string(), user_id: "user1".to_string() })
+        .list(ListRequest {
+            app_name: "test_app".to_string(),
+            user_id: "user1".to_string(),
+            limit: None,
+            offset: None,
+        })
         .await?;
 
     println!("📊 Found {} session(s) in database:", sessions.len());

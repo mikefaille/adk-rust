@@ -161,6 +161,8 @@ fn test_runner_creation() {
         compaction_config: None,
         context_cache_config: None,
         cache_capable: None,
+        request_context: None,
+        cancellation_token: None,
     });
 
     assert!(runner.is_ok());
@@ -183,6 +185,8 @@ async fn test_runner_run() {
         compaction_config: None,
         context_cache_config: None,
         cache_capable: None,
+        request_context: None,
+        cancellation_token: None,
     })
     .unwrap();
 
@@ -404,6 +408,8 @@ async fn test_plugin_callback_order_and_mutation() {
         compaction_config: None,
         context_cache_config: None,
         cache_capable: None,
+        request_context: None,
+        cancellation_token: None,
     })
     .unwrap();
 
@@ -460,6 +466,8 @@ async fn test_plugin_error_propagates_from_on_user_message() {
         compaction_config: None,
         context_cache_config: None,
         cache_capable: None,
+        request_context: None,
+        cancellation_token: None,
     })
     .unwrap();
 
@@ -508,6 +516,8 @@ async fn test_skill_injector_plugin_mutates_user_prompt() {
         compaction_config: None,
         context_cache_config: None,
         cache_capable: None,
+        request_context: None,
+        cancellation_token: None,
     })
     .unwrap();
 
@@ -557,6 +567,8 @@ async fn test_runner_with_auto_skills_mutates_user_prompt() {
         compaction_config: None,
         context_cache_config: None,
         cache_capable: None,
+        request_context: None,
+        cancellation_token: None,
     })
     .unwrap()
     .with_auto_skills(
@@ -590,4 +602,68 @@ async fn test_runner_with_auto_skills_mutates_user_prompt() {
 
     assert!(text.contains("agent-saw:[skill:search]"));
     assert!(text.contains("Use `rg` first."));
+}
+
+#[test]
+fn test_compute_transfer_context_for_sub_agent() {
+    // Build a tree: root -> [sourcing_agent, ranking_agent, tailoring_agent]
+    let sourcing: Arc<dyn Agent> = Arc::new(MockAgent { name: "sourcing_agent".to_string() });
+    let ranking: Arc<dyn Agent> = Arc::new(MockAgent { name: "ranking_agent".to_string() });
+    let tailoring: Arc<dyn Agent> = Arc::new(MockAgent { name: "tailoring_agent".to_string() });
+
+    let root: Arc<dyn Agent> = Arc::new(MockAgentWithSubs {
+        name: "coordinator".to_string(),
+        sub_agents: vec![sourcing.clone(), ranking.clone(), tailoring.clone()],
+    });
+
+    // For sourcing_agent: parent=coordinator, peers=[ranking_agent, tailoring_agent]
+    let (parent, peers) = Runner::compute_transfer_context(&root, "sourcing_agent");
+    assert_eq!(parent, Some("coordinator".to_string()));
+    assert_eq!(peers.len(), 2);
+    assert!(peers.contains(&"ranking_agent".to_string()));
+    assert!(peers.contains(&"tailoring_agent".to_string()));
+    assert!(!peers.contains(&"sourcing_agent".to_string()));
+}
+
+#[test]
+fn test_compute_transfer_context_for_root() {
+    let root: Arc<dyn Agent> = Arc::new(MockAgent { name: "root".to_string() });
+
+    // Root has no parent or peers
+    let (parent, peers) = Runner::compute_transfer_context(&root, "root");
+    assert_eq!(parent, None);
+    assert!(peers.is_empty());
+}
+
+#[test]
+fn test_compute_transfer_context_not_found() {
+    let root: Arc<dyn Agent> = Arc::new(MockAgent { name: "root".to_string() });
+
+    // Agent not in tree
+    let (parent, peers) = Runner::compute_transfer_context(&root, "nonexistent");
+    assert_eq!(parent, None);
+    assert!(peers.is_empty());
+}
+
+#[test]
+fn test_compute_transfer_context_nested() {
+    // Build: root -> [mid] -> [leaf_a, leaf_b]
+    let leaf_a: Arc<dyn Agent> = Arc::new(MockAgent { name: "leaf_a".to_string() });
+    let leaf_b: Arc<dyn Agent> = Arc::new(MockAgent { name: "leaf_b".to_string() });
+    let mid: Arc<dyn Agent> = Arc::new(MockAgentWithSubs {
+        name: "mid".to_string(),
+        sub_agents: vec![leaf_a.clone(), leaf_b.clone()],
+    });
+    let root: Arc<dyn Agent> =
+        Arc::new(MockAgentWithSubs { name: "root".to_string(), sub_agents: vec![mid.clone()] });
+
+    // leaf_a's parent is mid, peer is leaf_b
+    let (parent, peers) = Runner::compute_transfer_context(&root, "leaf_a");
+    assert_eq!(parent, Some("mid".to_string()));
+    assert_eq!(peers, vec!["leaf_b".to_string()]);
+
+    // mid's parent is root, no peers
+    let (parent, peers) = Runner::compute_transfer_context(&root, "mid");
+    assert_eq!(parent, Some("root".to_string()));
+    assert!(peers.is_empty());
 }

@@ -48,15 +48,18 @@
 //! ### Feature Presets
 //!
 //! ```toml
-//! # Full (default) - Everything included
-//! adk-rust = "0.3"
+//! # Standard (default) — agents, models, tools, sessions, runner, guardrails, auth
+//! adk-rust = "0.4"
 //!
-//! # Minimal - Agents + Gemini + Runner only
-//! adk-rust = { version = "0.3", default-features = false, features = ["minimal"] }
+//! # Full — standard + graph, browser, eval, realtime, audio, RAG, code, sandbox
+//! adk-rust = { version = "0.4", features = ["full"] }
 //!
-//! # Custom - Pick exactly what you need
-//! adk-rust = { version = "0.3", default-features = false, features = [
-//!     "agents", "gemini", "tools", "sessions"
+//! # Minimal — just agents + Gemini + runner (fastest build)
+//! adk-rust = { version = "0.4", default-features = false, features = ["minimal"] }
+//!
+//! # Custom — pick exactly what you need
+//! adk-rust = { version = "0.4", default-features = false, features = [
+//!     "agents", "gemini", "tools", "sessions", "openai"
 //! ] }
 //! ```
 //!
@@ -396,20 +399,31 @@
 //!
 //! ## Feature Flags
 //!
-//! | Feature | Description | Default |
-//! |---------|-------------|---------|
-//! | `agents` | Agent implementations | ✅ |
-//! | `models` | Model integrations | ✅ |
-//! | `gemini` | Gemini model support | ✅ |
-//! | `tools` | Tool system | ✅ |
-//! | `mcp` | MCP integration | ✅ |
-//! | `sessions` | Session management | ✅ |
-//! | `artifacts` | Artifact storage | ✅ |
-//! | `memory` | Semantic memory | ✅ |
-//! | `runner` | Execution runtime | ✅ |
-//! | `server` | HTTP server | ✅ |
-//! | `telemetry` | OpenTelemetry | ✅ |
-//! | `cli` | CLI launcher | ✅ |
+//! | Feature | Description | Preset |
+//! |---------|-------------|--------|
+//! | `agents` | Agent implementations | standard |
+//! | `models` | Model integrations | standard |
+//! | `gemini` | Gemini model support | standard |
+//! | `tools` | Tool system | standard |
+//! | `skills` | Skill discovery | standard |
+//! | `sessions` | Session management | standard |
+//! | `artifacts` | Artifact storage | standard |
+//! | `memory` | Semantic memory | standard |
+//! | `runner` | Execution runtime | standard |
+//! | `telemetry` | OpenTelemetry | standard |
+//! | `guardrail` | Input/output validation | standard |
+//! | `auth` | Access control | standard |
+//! | `plugin` | Plugin system | standard |
+//! | `server` | HTTP server + A2A | standard |
+//! | `cli` | CLI launcher | standard |
+//! | `graph` | Graph workflows | full |
+//! | `browser` | Browser automation | full |
+//! | `eval` | Agent evaluation | full |
+//! | `realtime` | Voice/audio streaming | full |
+//! | `rag` | RAG pipeline | full |
+//! | `audio` | Audio processing | full |
+//! | `code` | Code execution | full |
+//! | `sandbox` | Sandboxed execution | full |
 //!
 //! ## Examples
 //!
@@ -626,47 +640,45 @@ pub mod graph {
     pub use adk_graph::*;
 }
 
-/// Dynamic UI generation for agents.
+/// Code execution substrate.
 ///
-/// Enables agents to render rich user interfaces via tool calls:
-/// - [`UiToolset`](ui::UiToolset) - All UI rendering tools
-/// - [`UiResponse`](ui::UiResponse) - UI component tree
-/// - [`UiEvent`](ui::UiEvent) - User interaction events
-/// - [`UiUpdate`](ui::UiUpdate) - Streaming UI updates
+/// First-class code execution for agents, Studio, and generated projects:
+/// - [`CodeExecutor`](code::CodeExecutor) - Backend trait for execution
+/// - [`ExecutionRequest`](code::ExecutionRequest) - Typed execution request
+/// - [`ExecutionResult`](code::ExecutionResult) - Structured execution result
+/// - [`SandboxPolicy`](code::SandboxPolicy) - Sandbox capability model
+/// - [`Workspace`](code::Workspace) - Collaborative project context
 ///
-/// Available with feature: `ui`
-#[cfg(feature = "ui")]
-#[cfg_attr(docsrs, doc(cfg(feature = "ui")))]
-pub mod ui {
-    pub use adk_ui::*;
+/// Available with feature: `code`
+#[cfg(feature = "code")]
+#[cfg_attr(docsrs, doc(cfg(feature = "code")))]
+pub mod code {
+    pub use adk_code::*;
 }
 
-/// Documentation audit system.
+/// Isolated code execution runtime.
 ///
-/// Validates ADK-Rust documentation against actual crate implementations:
-/// - [`AuditOrchestrator`](doc_audit::AuditOrchestrator) - Main audit coordinator
-/// - [`DocumentationParser`](doc_audit::DocumentationParser) - Parse markdown files
-/// - [`CodeAnalyzer`](doc_audit::CodeAnalyzer) - Analyze Rust source code
-/// - [`ExampleValidator`](doc_audit::ExampleValidator) - Validate code examples
-/// - [`ReportGenerator`](doc_audit::ReportGenerator) - Generate audit reports
+/// Provides the [`SandboxBackend`](sandbox::SandboxBackend) trait and built-in backends:
+/// - [`ProcessBackend`](sandbox::ProcessBackend) - Subprocess execution with timeout and env isolation
+/// - [`WasmBackend`](sandbox::WasmBackend) - In-process WASM execution via wasmtime (requires `wasm` feature)
+/// - [`SandboxTool`](sandbox::SandboxTool) - Tool trait implementation for agent integration
 ///
-/// Available with feature: `doc-audit`
-#[cfg(feature = "doc-audit")]
-#[cfg_attr(docsrs, doc(cfg(feature = "doc-audit")))]
-pub mod doc_audit {
-    pub use adk_doc_audit::*;
+/// Available with feature: `sandbox`
+#[cfg(feature = "sandbox")]
+#[cfg_attr(docsrs, doc(cfg(feature = "sandbox")))]
+pub mod sandbox {
+    pub use adk_sandbox::*;
 }
 
 /// CLI launcher for running agents.
 ///
 /// Quick way to run agents in console or server mode:
 /// - [`Launcher`] - Main entry point for CLI apps
-/// - [`SingleAgentLoader`] - Load a single agent
 ///
 /// Available with feature: `cli`
 #[cfg(feature = "cli")]
 #[cfg_attr(docsrs, doc(cfg(feature = "cli")))]
-pub use adk_cli::{Launcher, SingleAgentLoader};
+pub use adk_cli::Launcher;
 
 /// Real-time bidirectional streaming (voice, video).
 ///
@@ -747,6 +759,23 @@ pub mod plugin {
     pub use adk_plugin::*;
 }
 
+/// Audio processing pipeline (TTS, STT, music, FX).
+///
+/// Provides audio capabilities for agents:
+/// - [`TtsProvider`](audio::TtsProvider) - Text-to-speech synthesis
+/// - [`SttProvider`](audio::SttProvider) - Speech-to-text transcription
+/// - [`AudioProcessor`](audio::AudioProcessor) - Audio effects processing
+/// - [`AudioPipeline`](audio::AudioPipeline) - Composable audio pipelines
+/// - Cloud providers: ElevenLabs, OpenAI, Gemini, Cartesia, Deepgram, AssemblyAI
+/// - Local inference: MLX (Apple Silicon), ONNX Runtime
+///
+/// Available with feature: `audio`
+#[cfg(feature = "audio")]
+#[cfg_attr(docsrs, doc(cfg(feature = "audio")))]
+pub mod audio {
+    pub use adk_audio::*;
+}
+
 /// Retrieval-Augmented Generation (RAG) pipeline.
 ///
 /// Modular RAG system with trait-based components:
@@ -819,23 +848,10 @@ pub mod prelude {
     #[cfg(feature = "ollama")]
     pub use crate::model::ollama::{OllamaConfig, OllamaModel};
 
-    #[cfg(feature = "fireworks")]
-    pub use crate::model::fireworks::{FireworksClient, FireworksConfig};
-
-    #[cfg(feature = "together")]
-    pub use crate::model::together::{TogetherClient, TogetherConfig};
-
-    #[cfg(feature = "mistral")]
-    pub use crate::model::mistral::{MistralClient, MistralConfig};
-
-    #[cfg(feature = "perplexity")]
-    pub use crate::model::perplexity::{PerplexityClient, PerplexityConfig};
-
-    #[cfg(feature = "cerebras")]
-    pub use crate::model::cerebras::{CerebrasClient, CerebrasConfig};
-
-    #[cfg(feature = "sambanova")]
-    pub use crate::model::sambanova::{SambaNovaClient, SambaNovaConfig};
+    // OpenAI-compatible providers: use OpenAICompatible with provider presets
+    // e.g. OpenAICompatibleConfig::fireworks(api_key, model)
+    #[cfg(feature = "openai")]
+    pub use crate::model::openai_compatible::{OpenAICompatible, OpenAICompatibleConfig};
 
     #[cfg(feature = "bedrock")]
     pub use crate::model::bedrock::{BedrockClient, BedrockConfig};
@@ -872,10 +888,6 @@ pub mod prelude {
     // Graph workflows
     #[cfg(feature = "graph")]
     pub use crate::graph::{END, GraphAgent, NodeOutput, Router, START, StateGraph};
-
-    // UI
-    #[cfg(feature = "ui")]
-    pub use crate::ui::UiToolset;
 
     // Realtime
     #[cfg(feature = "realtime")]

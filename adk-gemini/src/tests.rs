@@ -111,12 +111,24 @@ fn test_function_call_with_thought_signature() {
     assert_eq!(function_call.args["param"], "value");
     assert_eq!(function_call.thought_signature, Some("test_thought_signature".to_string()));
 
-    // Test serialization
-    let serialized = serde_json::to_string(&function_call).unwrap();
-    println!("Serialized FunctionCall: {}", serialized);
+    // The Gemini wire format carries thoughtSignature on the enclosing Part, not inside
+    // functionCall. Standalone FunctionCall serialization must omit it.
+    let serialized = serde_json::to_value(&function_call).unwrap();
+    assert_eq!(
+        serialized,
+        json!({
+            "name": "test_function",
+            "args": {"param": "value"}
+        })
+    );
 
-    // Test deserialization
-    let deserialized: FunctionCall = serde_json::from_str(&serialized).unwrap();
+    // Accept both camelCase and legacy snake_case on input.
+    let deserialized: FunctionCall = serde_json::from_value(json!({
+        "name": "test_function",
+        "args": {"param": "value"},
+        "thoughtSignature": "test_thought_signature"
+    }))
+    .unwrap();
     assert_eq!(deserialized, function_call);
 }
 
@@ -131,8 +143,8 @@ fn test_function_call_without_thought_signature() {
 
     // Test serialization should not include thought_signature field when None
     let serialized = serde_json::to_string(&function_call).unwrap();
-    println!("Serialized FunctionCall without thought: {}", serialized);
     assert!(!serialized.contains("thought_signature"));
+    assert!(!serialized.contains("thoughtSignature"));
 }
 
 #[test]
@@ -160,13 +172,23 @@ fn test_multi_turn_content_structure() {
     assert!(model_content.parts.is_some());
     assert_eq!(model_content.role, Some(Role::Model));
 
-    // Test serialization of the complete structure first
-    let serialized = serde_json::to_string(&model_content).unwrap();
-    println!("Serialized multi-turn content: {}", serialized);
-
-    // Verify it contains the thought signature
-    assert!(serialized.contains("thoughtSignature"));
-    assert!(serialized.contains("sample_thought_signature"));
+    // thoughtSignature is skip_serializing — must NOT appear in serialized output
+    // (Gemini API rejects it in request payloads)
+    let serialized = serde_json::to_value(&model_content).unwrap();
+    assert_eq!(
+        serialized,
+        json!({
+            "parts": [
+                {
+                    "functionCall": {
+                        "name": "get_weather",
+                        "args": {"location": "Tokyo"}
+                    }
+                }
+            ],
+            "role": "model"
+        })
+    );
 
     let parts = model_content.parts.unwrap();
     assert_eq!(parts.len(), 1);
@@ -178,6 +200,32 @@ fn test_multi_turn_content_structure() {
         }
         _ => panic!("Expected FunctionCall part"),
     }
+}
+
+#[test]
+fn test_function_response_wraps_array_payloads() {
+    use crate::Content;
+
+    let content = Content::function_response_json("rag_search", json!([{ "id": "pricing" }]));
+    let serialized = serde_json::to_value(&content).unwrap();
+
+    assert_eq!(
+        serialized,
+        json!({
+            "parts": [
+                {
+                    "functionResponse": {
+                        "name": "rag_search",
+                        "response": {
+                            "result": [
+                                { "id": "pricing" }
+                            ]
+                        }
+                    }
+                }
+            ]
+        })
+    );
 }
 
 #[test]
@@ -297,17 +345,13 @@ fn test_content_creation_with_thought_signature() {
         _ => panic!("Expected Text part"),
     }
 
-    // Test serialization
+    // thoughtSignature is skip_serializing — must NOT appear in serialized output
     let serialized = serde_json::to_string(&content).unwrap();
-    println!("Serialized content with thought signature: {}", serialized);
-    assert!(serialized.contains("thoughtSignature"));
-    assert!(serialized.contains("test_signature_123"));
+    assert!(!serialized.contains("thoughtSignature"));
 
-    // Test serialization of thought content
+    // thought field IS serialized (it's not skip_serializing)
     let serialized_thought = serde_json::to_string(&thought_content).unwrap();
-    println!("Serialized thought content: {}", serialized_thought);
-    assert!(serialized_thought.contains("thoughtSignature"));
-    assert!(serialized_thought.contains("thought_signature_456"));
+    assert!(!serialized_thought.contains("thoughtSignature"));
     assert!(serialized_thought.contains("\"thought\":true"));
 }
 
@@ -327,4 +371,68 @@ fn test_vertex_numeric_enum_deserialization() {
 
     let modality: Modality = serde_json::from_value(json!(4)).unwrap();
     assert_eq!(modality, Modality::Audio);
+}
+
+#[test]
+fn test_thinking_level_serialization() {
+    use crate::ThinkingLevel;
+
+    // ThinkingLevel serializes as lowercase
+    let level = ThinkingLevel::Low;
+    let json = serde_json::to_value(level).unwrap();
+    assert_eq!(json, json!("low"));
+
+    let level = ThinkingLevel::High;
+    let json = serde_json::to_value(level).unwrap();
+    assert_eq!(json, json!("high"));
+
+    // Round-trip all variants
+    for (variant, expected) in [
+        (ThinkingLevel::Minimal, "minimal"),
+        (ThinkingLevel::Low, "low"),
+        (ThinkingLevel::Medium, "medium"),
+        (ThinkingLevel::High, "high"),
+    ] {
+        let serialized = serde_json::to_string(&variant).unwrap();
+        assert_eq!(serialized, format!("\"{expected}\""));
+        let deserialized: ThinkingLevel = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(deserialized, variant);
+    }
+}
+
+#[test]
+fn test_thinking_config_with_level() {
+    use crate::{ThinkingConfig, ThinkingLevel};
+
+    // Builder method sets thinking_level
+    let config = ThinkingConfig::new()
+        .with_thinking_level(ThinkingLevel::Medium)
+        .with_thoughts_included(true);
+
+    assert_eq!(config.thinking_level, Some(ThinkingLevel::Medium));
+    assert_eq!(config.include_thoughts, Some(true));
+    assert_eq!(config.thinking_budget, None);
+
+    // Serializes correctly with camelCase
+    let json = serde_json::to_value(&config).unwrap();
+    assert_eq!(json["thinkingLevel"], json!("medium"));
+    assert_eq!(json["includeThoughts"], json!(true));
+    assert!(json.get("thinkingBudget").is_none());
+}
+
+#[test]
+fn test_thinking_config_budget_and_level_independent() {
+    use crate::{ThinkingConfig, ThinkingLevel};
+
+    // Budget-only config (Gemini 2.5 style)
+    let budget_config = ThinkingConfig::new().with_thinking_budget(2048);
+    let json = serde_json::to_value(&budget_config).unwrap();
+    assert_eq!(json["thinkingBudget"], json!(2048));
+    assert!(json.get("thinkingLevel").is_none());
+
+    // Level-only config (Gemini 3 style)
+    let level_config = ThinkingConfig::new().with_thinking_level(ThinkingLevel::High);
+    let json = serde_json::to_value(&level_config).unwrap();
+    assert_eq!(json["thinkingLevel"], json!("high"));
+    assert!(json.get("thinkingBudget").is_none());
 }

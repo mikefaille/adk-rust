@@ -1,6 +1,6 @@
 # ADK-Rust
 
-Rust Agent Development Kit — a modular workspace of 25 publishable crates for building AI agents with tool calling, multi-model support, real-time voice, graph workflows, and a visual studio.
+Rust Agent Development Kit — a modular workspace of publishable crates for building AI agents with tool calling, multi-model support, real-time voice, graph workflows, and more.
 
 ## Dev environment
 
@@ -19,7 +19,7 @@ Run all three before every commit. CI enforces them — save yourself the round-
 ```bash
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
+cargo nextest run --workspace
 ```
 
 ### AI Agent Workflow (`devenv`)
@@ -29,7 +29,7 @@ Use these shorthand scripts instead of raw `cargo` to ensure `sccache` wrap and 
 | Action | Command | Description |
 | :--- | :--- | :--- |
 | **Check** | `devenv shell check` | Fast workspace compilation check. |
-| **Test** | `devenv shell test` | Run all non-ignored tests. |
+| **Test** | `devenv shell test` | Run all non-ignored tests (nextest). |
 | **Lint** | `devenv shell clippy` | Clippy with `-D warnings` (zero tolerance). |
 | **Format** | `devenv shell fmt` | Enforce Rust Edition 2024 style. |
 
@@ -62,14 +62,12 @@ adk-realtime/    Real-time bidirectional audio/video streaming (OpenAI, Gemini L
                  LiveKit, WebRTC)
 adk-browser/     Browser automation tools via WebDriver
 adk-eval/        Evaluation framework: trajectory, semantic, rubric, LLM-judge
-adk-ui/          Dynamic UI generation: forms, cards, tables, charts, modals
 adk-telemetry/   OpenTelemetry integration for agent observability
 adk-guardrail/   Input/output guardrails: validation, content filtering, PII redaction
 adk-auth/        Authentication: API keys, JWT, OAuth2, OIDC, SSO
 adk-plugin/      Plugin system for agent lifecycle hooks
 adk-skill/       Skill discovery, parsing, and convention-based agent capabilities
 adk-cli/         Command-line launcher for agents
-adk-studio/      Visual agent builder: Axum backend (src/) + React/ReactFlow frontend (ui/)
 adk-doc-audit/   Documentation audit: rustdoc coverage, link checking, crate validation
 adk-rust/        Umbrella crate re-exporting all of the above
 ```
@@ -80,15 +78,24 @@ adk-rust/        Umbrella crate re-exporting all of the above
 adk-mistralrs/   Local LLM inference via mistral.rs (GPU deps — build explicitly)
                  Excluded so `--all-features` works without CUDA toolkit.
                  Has its own CI workflow (.github/workflows/mistralrs-tests.yml).
+
+adk-studio/      Visual agent builder — extracted to standalone repo.
+                 Repo: https://github.com/zavora-ai/adk-studio
+                 Local dev: ../adk-studio/ with path deps back to this workspace.
+                 Build: cargo check --manifest-path ../adk-studio/Cargo.toml
+
+adk-ui/          Dynamic UI generation (forms, cards, tables, charts) — extracted to standalone repo.
+                 Repo: https://github.com/zavora-ai/adk-ui
+                 Local dev: ../adk-ui/ with git dep on adk-core.
+                 UI protocol constants are inlined in adk-server/src/ui_protocol.rs.
 ```
 
 ### Examples and docs
 
 ```
-examples/              120+ working examples organized by provider/feature
+examples/              7 essential examples (full collection in adk-playground repo)
 examples/ralph/        Standalone autonomous agent crate (own Cargo.toml + tests/)
 docs/official_docs/    Comprehensive documentation site content
-docs/official_docs_examples/  Compilable code snippets validating every doc page
 ```
 
 ## Feature flags
@@ -98,10 +105,10 @@ docs/official_docs_examples/  Compilable code snippets validating every doc page
 `gemini` is the default. All others are opt-in:
 
 - `gemini` (default), `openai`, `anthropic`, `deepseek`, `ollama`, `groq`
-- `fireworks`, `together`, `mistral`, `perplexity`, `cerebras`, `sambanova` — OpenAI-compatible providers
 - `bedrock` — Amazon Bedrock via AWS SDK Converse API
 - `azure-ai` — Azure AI Inference endpoints
-- `all-providers` — enables all fourteen
+- `all-providers` — enables all eight real feature flags
+- `fireworks`, `together`, `mistral`, `perplexity`, `cerebras`, `sambanova`, `xai` — backward-compat aliases for `openai`. Use `OpenAICompatibleConfig` presets instead of separate client types.
 
 ### adk-realtime
 
@@ -117,7 +124,13 @@ All opt-in, no defaults:
 
 ### adk-rust (umbrella)
 
-`full` is the default, which enables all component features. Individual features like `agents`, `models`, `tools`, `sessions`, `runner`, `server`, `graph`, `realtime`, `eval`, `browser`, `auth`, `guardrail`, `plugin`, `telemetry`, `cli`, `ui`, `doc-audit`, `skills`, `artifacts`, `memory` can be selected individually.
+Three presets control which crates are compiled:
+
+- `standard` **(default)** — agents, models, gemini, tools, skills, sessions, artifacts, memory, runner, telemetry, guardrail, auth, plugin. Everything needed to build and run agents.
+- `full` — standard + graph, code, sandbox, realtime, browser, eval, rag, audio. All specialist crates.
+- `minimal` — agents, gemini, runner. Fastest possible build.
+
+Individual features (`agents`, `models`, `tools`, `sessions`, `server`, `graph`, `realtime`, `eval`, `browser`, `auth`, `guardrail`, `plugin`, `telemetry`, `cli`, `skills`, `artifacts`, `memory`, etc.) can be selected independently.
 
 ## Rust conventions
 
@@ -201,11 +214,14 @@ See `adk-gemini/AGENTS.md` for the full tracing conventions. The key rules:
 ## Testing
 
 ```bash
-cargo test --workspace                                    # full workspace
-cargo test -p adk-core                                    # single crate
-cargo test -p adk-realtime --features full                # with features
-cargo test -p ralph                                       # standalone example crate
+cargo nextest run --workspace                                # full workspace (parallel)
+cargo nextest run -p adk-core                                # single crate
+cargo nextest run -p adk-realtime --features full            # with features
+cargo test -p ralph                                          # standalone example crate
 ```
+
+- Prefer `cargo nextest run` over `cargo test` for speed (~10x faster via parallel test binary execution).
+- Use `cargo test` only for doctests (nextest doesn't run them) or when you need `--doc` specifically.
 
 - Unit tests: `#[cfg(test)]` modules in source files.
 - Integration tests: `tests/*.rs` in each crate.
@@ -231,7 +247,7 @@ cargo test -p ralph                                       # standalone example c
 2. Add feature flag to `adk-model/Cargo.toml`
 3. Re-export from `adk-model/src/lib.rs` behind the feature
 4. Add example under `examples/<provider>_basic/`
-5. Update `adk-studio` codegen if the provider should be available in Studio
+5. Update `adk-studio` codegen if the provider should be available in Studio (separate repo: `../adk-studio/`)
 
 ### New tool
 
@@ -285,7 +301,7 @@ test(eval): add trajectory property tests
 - If you change `Cargo.toml` or `Cargo.lock`, run `cargo check --workspace` to verify resolution.
 - Internal crate dependencies use workspace inheritance: `adk-core = { workspace = true }` in member crates.
 - The root `Cargo.toml` `[workspace.dependencies]` section pins all internal crate versions.
-- `adk-plugin` has a hardcoded `adk-core` dep (not workspace ref) — keep it in sync manually.
+- `adk-plugin` now uses workspace inheritance for `adk-core` (previously hardcoded).
 
 ## Publishing to crates.io
 
@@ -302,15 +318,14 @@ Tier 3: adk-session
 Tier 4: adk-tool, adk-model, adk-ui, adk-browser
 Tier 5: adk-agent, adk-graph
 Tier 6: adk-runner, adk-realtime, adk-eval
-Tier 7: adk-server, adk-cli, adk-studio, adk-doc-audit
+Tier 7: adk-server, adk-cli
 Tier 8: adk-rust (umbrella — always last)
 ```
 
 ### Publish workflow
 
 1. Ensure all quality gates pass and the version is bumped in `[workspace.package]` and all `[workspace.dependencies]` entries.
-2. Bump `adk-plugin/Cargo.toml` manually — it has a hardcoded `adk-core` dep.
-3. Tag the release: `git tag v<version> && git push origin v<version>`.
+2. Tag the release: `git tag v<version> && git push origin v<version>`.
 4. Publish one crate at a time with verification:
 
 ```bash
@@ -323,8 +338,7 @@ cargo publish -p <crate-name>
 ### Version checklist
 
 - [ ] `[workspace.package] version` in root `Cargo.toml`
-- [ ] All 23 `adk-*` entries in `[workspace.dependencies]`
-- [ ] `adk-plugin/Cargo.toml` hardcoded `adk-core` version
+- [ ] All `adk-*` entries in `[workspace.dependencies]`
 - [ ] `CHANGELOG.md` updated
 - [ ] Git tag created and pushed
 - [ ] GitHub release created with release notes
@@ -333,17 +347,19 @@ cargo publish -p <crate-name>
 
 - `adk-gemini/AGENTS.md` — Gemini client tracing conventions and instrumentation patterns
 
-## adk-studio (frontend)
+## adk-studio (separate repo)
 
-The `adk-studio/ui/` directory is a Vite + React + TypeScript app using ReactFlow. It has its own toolchain:
+`adk-studio` has been extracted to a standalone repository at `../adk-studio/` (or `https://github.com/zavora-ai/adk-studio`). It depends on ADK crates via local path references for development.
 
 ```bash
-cd adk-studio/ui
+# Build the studio
+cargo check --manifest-path ../adk-studio/Cargo.toml
+
+# Frontend (Vite + React + TypeScript + ReactFlow)
+cd ../adk-studio/ui
 pnpm install          # install deps
 pnpm run dev          # dev server
 pnpm run build        # production build (tsc + vite)
 pnpm run lint         # eslint
 pnpm run test         # vitest (single run)
 ```
-
-When making changes to the Studio frontend, run `pnpm run lint` and `pnpm run test` before committing. The Rust backend in `adk-studio/src/` follows the normal Cargo quality gates.

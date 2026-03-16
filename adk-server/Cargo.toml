@@ -20,8 +20,7 @@ adk-runner.workspace = true
 adk-session.workspace = true
 adk-artifact.workspace = true
 adk-telemetry.workspace = true
-adk-ui.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["sync", "signal", "macros", "rt", "time"] }
 tokio-stream.workspace = true
 async-trait.workspace = true
 async-stream.workspace = true
@@ -40,6 +39,10 @@ base64 = "0.22"
 rust-embed = "8.9.0"
 mime_guess = "2.0.5"
 reqwest.workspace = true
+tokio-util = { version = "0.7", features = ["rt"] }
+
+[features]
+default = []
 
 [dev-dependencies]
 async-stream.workspace = true
@@ -49,3 +52,4 @@ async-trait = "0.1"
 chrono = "0.4"
 hyper = "1.8.1"
 http-body-util = "0.1.3"
+proptest = "1.4"

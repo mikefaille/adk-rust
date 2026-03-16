@@ -14,10 +14,10 @@ categories = ["api-bindings", "asynchronous", "web-programming"]
 readme = "README.md"
 
 [features]
-default = ["full"]
+default = ["standard"]
 
-# Full installation (everything)
-full = [
+# Standard — everything needed to build, run, and test agents (~30s clean build)
+standard = [
     "agents",
     "models",
     "gemini",
@@ -28,19 +28,28 @@ full = [
     "memory",
     "runner",
     "server",
-    "telemetry",
     "cli",
+    "telemetry",
+    "plugin",
+    "guardrail",
+    "auth",
+]
+
+# Full — standard + all specialist crates (~2min clean build)
+full = [
+    "standard",
     "graph",
-    "ui",
-    "doc-audit",
+    "code",
+    "sandbox",
     "realtime",
     "browser",
     "eval",
-    "guardrail",
-    "auth",
-    "plugin",
-    "rag"
+    "rag",
+    "audio",
 ]
+
+# Minimal — just agents + Gemini + runner (fastest possible build)
+minimal = ["agents", "gemini", "runner"]
 
 # CLI launcher support
 cli = ["dep:adk-cli", "runner", "server", "sessions", "telemetry"]
@@ -57,8 +66,8 @@ runner = ["dep:adk-runner"]
 server = ["dep:adk-server"]
 telemetry = ["dep:adk-telemetry"]
 graph = ["dep:adk-graph"]
-ui = ["dep:adk-ui"]
-doc-audit = ["dep:adk-doc-audit"]
+code = ["dep:adk-code"]
+sandbox = ["dep:adk-sandbox"]
 realtime = ["dep:adk-realtime"]
 browser = ["dep:adk-browser"]
 eval = ["dep:adk-eval"]
@@ -67,11 +76,9 @@ auth = ["dep:adk-auth"]
 plugin = ["dep:adk-plugin"]
 rag = ["dep:adk-rag"]
 
-# Minimal preset (just agents + models + runner)
-minimal = ["agents", "models", "runner"]
-
 # Model provider features (forwarded to adk-model)
 gemini = ["models", "adk-model/gemini"]
+gemini-vertex = ["gemini", "adk-model/gemini-vertex"]
 openai = ["models", "adk-model/openai"]
 anthropic = ["models", "adk-model/anthropic"]
 deepseek = ["models", "adk-model/deepseek"]
@@ -86,10 +93,42 @@ sambanova = ["models", "adk-model/sambanova"]
 bedrock = ["models", "adk-model/bedrock"]
 azure-ai = ["models", "adk-model/azure-ai"]
 
+# Production backend features (forwarded to adk-session, adk-memory, adk-auth)
+# These require external infrastructure (PostgreSQL, Redis, MongoDB, Firestore, Neo4j) and are NOT included in `full`
+postgres-session = ["sessions", "adk-session/postgres"]
+redis-session = ["sessions", "adk-session/redis"]
+mongodb-session = ["sessions", "adk-session/mongodb"]
+firestore-session = ["sessions", "adk-session/firestore"]
+neo4j-session = ["sessions", "adk-session/neo4j"]
+database-memory = ["memory", "adk-memory/database-memory"]
+sqlite-memory = ["memory", "adk-memory/sqlite-memory"]
+redis-memory = ["memory", "adk-memory/redis-memory"]
+mongodb-memory = ["memory", "adk-memory/mongodb-memory"]
+neo4j-memory = ["memory", "adk-memory/neo4j-memory"]
+auth-bridge = ["auth", "server", "adk-auth/auth-bridge"]
+
 # Realtime transport features (forwarded to adk-realtime)
 vertex-live = ["realtime", "adk-realtime/vertex-live"]
 livekit = ["realtime", "adk-realtime/livekit"]
 openai-webrtc = ["realtime", "adk-realtime/openai-webrtc"]
+
+# Audio features (forwarded to adk-audio)
+audio = ["dep:adk-audio"]
+audio-tts = ["audio", "adk-audio/tts"]
+audio-stt = ["audio", "adk-audio/stt"]
+audio-fx = ["audio", "adk-audio/fx"]
+audio-mlx = ["audio", "adk-audio/mlx"]
+audio-onnx = ["audio", "adk-audio/onnx"]
+audio-all = ["audio", "adk-audio/all"]
+
+# ONNX audio model features (forwarded to adk-audio)
+whisper-onnx = ["audio", "adk-audio/whisper-onnx"]
+distil-whisper = ["audio", "adk-audio/distil-whisper"]
+moonshine = ["audio", "adk-audio/moonshine"]
+qwen3-tts = ["audio", "adk-audio/qwen3-tts"]
+all-onnx = ["audio", "adk-audio/all-onnx"]
+kokoro = ["audio", "adk-audio/kokoro"]
+chatterbox = ["audio", "adk-audio/chatterbox"]
 
 [dependencies]
 # Core is always included
@@ -108,8 +147,8 @@ adk-server = { workspace = true, optional = true }
 adk-telemetry = { workspace = true, optional = true }
 adk-cli = { workspace = true, optional = true }
 adk-graph = { workspace = true, optional = true }
-adk-ui = { workspace = true, optional = true }
-adk-doc-audit = { workspace = true, optional = true }
+adk-code = { workspace = true, optional = true }
+adk-sandbox = { workspace = true, optional = true }
 adk-realtime = { workspace = true, optional = true }
 adk-browser = { workspace = true, optional = true }
 adk-eval = { workspace = true, optional = true }
@@ -117,9 +156,10 @@ adk-guardrail = { workspace = true, optional = true }
 adk-auth = { workspace = true, optional = true }
 adk-plugin = { workspace = true, optional = true }
 adk-rag = { workspace = true, optional = true }
+adk-audio = { workspace = true, optional = true }
 
 # Re-export common dependencies
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "time", "macros", "net", "signal", "fs", "process", "io-util"] }
 async-trait = { workspace = true }
 futures = { workspace = true }
 serde = { workspace = true }
@@ -127,7 +167,7 @@ serde_json = { workspace = true }
 anyhow = { workspace = true }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["full"] }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "time", "macros", "net", "signal", "fs", "process", "io-util", "test-util"] }
 
 [package.metadata.docs.rs]
 all-features = true

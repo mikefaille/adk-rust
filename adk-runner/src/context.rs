@@ -1,6 +1,7 @@
 use adk_core::{
-    Agent, Artifacts, CallbackContext, Content, Event, InvocationContext as InvocationContextTrait,
-    Memory, ReadonlyContext, RunConfig,
+    AdkIdentity, Agent, AppName, Artifacts, CallbackContext, Content, Event, ExecutionIdentity,
+    InvocationContext as InvocationContextTrait, InvocationId, Memory, ReadonlyContext,
+    RequestContext, RunConfig, SessionId, UserId,
 };
 use adk_session::Session as AdkSession;
 use async_trait::async_trait;
@@ -68,6 +69,73 @@ impl MutableSession {
         let events = self.events.read().unwrap();
         events.clone()
     }
+
+    /// Build conversation history, optionally filtered for a specific agent.
+    ///
+    /// When `agent_name` is `Some`, events authored by other agents (not "user",
+    /// not the named agent, and not function/tool responses) are excluded. This
+    /// prevents a transferred sub-agent from seeing the parent's tool calls
+    /// mapped as "model" role, which would cause the LLM to think work is
+    /// already done.
+    ///
+    /// When `agent_name` is `None`, all events are included (backward-compatible).
+    pub fn conversation_history_for_agent_impl(
+        &self,
+        agent_name: Option<&str>,
+    ) -> Vec<adk_core::Content> {
+        let events = self.events.read().unwrap();
+        let mut history = Vec::new();
+
+        // Find the most recent compaction event — everything before its
+        // end_timestamp has been summarized and should be replaced by the
+        // compacted content.
+        let mut compaction_boundary = None;
+        for event in events.iter().rev() {
+            if let Some(ref compaction) = event.actions.compaction {
+                history.push(compaction.compacted_content.clone());
+                compaction_boundary = Some(compaction.end_timestamp);
+                break;
+            }
+        }
+
+        for event in events.iter() {
+            // Skip the compaction event itself
+            if event.actions.compaction.is_some() {
+                continue;
+            }
+
+            // Skip events that were already compacted
+            if let Some(boundary) = compaction_boundary {
+                if event.timestamp <= boundary {
+                    continue;
+                }
+            }
+
+            // When filtering for a specific agent, skip events from other agents.
+            // Keep: user messages and the agent's own events.
+            // Skip: other agents' events entirely (model-role, function calls,
+            // and function/tool responses). This prevents the sub-agent from
+            // seeing orphaned function responses without their preceding calls.
+            if let Some(name) = agent_name {
+                if event.author != "user" && event.author != name {
+                    continue;
+                }
+            }
+
+            if let Some(content) = &event.llm_response.content {
+                let mut mapped_content = content.clone();
+                mapped_content.role = match (event.author.as_str(), content.role.as_str()) {
+                    ("user", _) => "user",
+                    (_, "function" | "tool") => content.role.as_str(),
+                    _ => "model",
+                }
+                .to_string();
+                history.push(mapped_content);
+            }
+        }
+
+        history
+    }
 }
 
 impl adk_core::Session for MutableSession {
@@ -90,48 +158,11 @@ impl adk_core::Session for MutableSession {
     }
 
     fn conversation_history(&self) -> Vec<adk_core::Content> {
-        let events = self.events.read().unwrap();
-        let mut history = Vec::new();
+        self.conversation_history_for_agent_impl(None)
+    }
 
-        // Find the most recent compaction event — everything before its
-        // end_timestamp has been summarized and should be replaced by the
-        // compacted content.
-        let mut compaction_boundary = None;
-        for event in events.iter().rev() {
-            if let Some(ref compaction) = event.actions.compaction {
-                // Insert the summary as the first history entry
-                history.push(compaction.compacted_content.clone());
-                compaction_boundary = Some(compaction.end_timestamp);
-                break;
-            }
-        }
-
-        for event in events.iter() {
-            // Skip the compaction event itself (author == "system" with compaction data)
-            if event.actions.compaction.is_some() {
-                continue;
-            }
-
-            // Skip events that were already compacted
-            if let Some(boundary) = compaction_boundary {
-                if event.timestamp <= boundary {
-                    continue;
-                }
-            }
-
-            if let Some(content) = &event.llm_response.content {
-                let mut mapped_content = content.clone();
-                mapped_content.role = match (event.author.as_str(), content.role.as_str()) {
-                    ("user", _) => "user",
-                    (_, "function" | "tool") => content.role.as_str(),
-                    _ => "model",
-                }
-                .to_string();
-                history.push(mapped_content);
-            }
-        }
-
-        history
+    fn conversation_history_for_agent(&self, agent_name: &str) -> Vec<adk_core::Content> {
+        self.conversation_history_for_agent_impl(Some(agent_name))
     }
 }
 
@@ -153,12 +184,8 @@ impl adk_core::State for MutableSession {
 }
 
 pub struct InvocationContext {
-    invocation_id: String,
+    identity: ExecutionIdentity,
     agent: Arc<dyn Agent>,
-    user_id: String,
-    app_name: String,
-    session_id: String,
-    branch: String,
     user_content: Content,
     artifacts: Option<Arc<dyn Artifacts>>,
     memory: Option<Arc<dyn Memory>>,
@@ -168,6 +195,10 @@ pub struct InvocationContext {
     /// This is shared across all agents in a workflow, enabling state
     /// propagation between sequential/parallel agents.
     session: Arc<MutableSession>,
+    /// Optional request context from the server's auth middleware bridge.
+    /// When present, `user_id()` returns `request_context.user_id` and
+    /// `user_scopes()` returns `request_context.scopes`.
+    request_context: Option<RequestContext>,
 }
 
 impl InvocationContext {
@@ -180,19 +211,26 @@ impl InvocationContext {
         user_content: Content,
         session: Arc<dyn AdkSession>,
     ) -> Self {
-        Self {
-            invocation_id,
-            agent,
-            user_id,
-            app_name,
-            session_id,
+        let identity = ExecutionIdentity {
+            adk: AdkIdentity {
+                app_name: AppName::new_unchecked(app_name),
+                user_id: UserId::new_unchecked(user_id),
+                session_id: SessionId::new_unchecked(session_id),
+            },
+            invocation_id: InvocationId::new_unchecked(invocation_id),
             branch: String::new(),
+            agent_name: agent.name().to_string(),
+        };
+        Self {
+            identity,
+            agent,
             user_content,
             artifacts: None,
             memory: None,
             run_config: RunConfig::default(),
             ended: Arc::new(AtomicBool::new(false)),
             session: Arc::new(MutableSession::new(session)),
+            request_context: None,
         }
     }
 
@@ -208,24 +246,31 @@ impl InvocationContext {
         user_content: Content,
         session: Arc<MutableSession>,
     ) -> Self {
-        Self {
-            invocation_id,
-            agent,
-            user_id,
-            app_name,
-            session_id,
+        let identity = ExecutionIdentity {
+            adk: AdkIdentity {
+                app_name: AppName::new_unchecked(app_name),
+                user_id: UserId::new_unchecked(user_id),
+                session_id: SessionId::new_unchecked(session_id),
+            },
+            invocation_id: InvocationId::new_unchecked(invocation_id),
             branch: String::new(),
+            agent_name: agent.name().to_string(),
+        };
+        Self {
+            identity,
+            agent,
             user_content,
             artifacts: None,
             memory: None,
             run_config: RunConfig::default(),
             ended: Arc::new(AtomicBool::new(false)),
             session,
+            request_context: None,
         }
     }
 
     pub fn with_branch(mut self, branch: String) -> Self {
-        self.branch = branch;
+        self.identity.branch = branch;
         self
     }
 
@@ -244,6 +289,18 @@ impl InvocationContext {
         self
     }
 
+    /// Set the request context from the server's auth middleware bridge.
+    ///
+    /// When set, `user_id()` returns `request_context.user_id` (overriding
+    /// the session-scoped identity), and `user_scopes()` returns
+    /// `request_context.scopes`. This is the explicit authenticated user
+    /// override — `RequestContext` remains separate from `ExecutionIdentity`
+    /// and `AdkIdentity` (it does not carry session or invocation IDs).
+    pub fn with_request_context(mut self, ctx: RequestContext) -> Self {
+        self.request_context = Some(ctx);
+        self
+    }
+
     /// Get a reference to the mutable session.
     /// This allows the Runner to apply state deltas when events are processed.
     pub fn mutable_session(&self) -> &Arc<MutableSession> {
@@ -254,7 +311,7 @@ impl InvocationContext {
 #[async_trait]
 impl ReadonlyContext for InvocationContext {
     fn invocation_id(&self) -> &str {
-        &self.invocation_id
+        self.identity.invocation_id.as_ref()
     }
 
     fn agent_name(&self) -> &str {
@@ -262,19 +319,24 @@ impl ReadonlyContext for InvocationContext {
     }
 
     fn user_id(&self) -> &str {
-        &self.user_id
+        // Explicit authenticated user override: when a RequestContext is
+        // present (set via with_request_context from the auth middleware
+        // bridge), the authenticated user_id takes precedence over the
+        // session-scoped identity. This keeps auth binding explicit and
+        // ensures the runtime reflects the verified caller identity.
+        self.request_context.as_ref().map_or(self.identity.adk.user_id.as_ref(), |rc| &rc.user_id)
     }
 
     fn app_name(&self) -> &str {
-        &self.app_name
+        self.identity.adk.app_name.as_ref()
     }
 
     fn session_id(&self) -> &str {
-        &self.session_id
+        self.identity.adk.session_id.as_ref()
     }
 
     fn branch(&self) -> &str {
-        &self.branch
+        &self.identity.branch
     }
 
     fn user_content(&self) -> &Content {
@@ -313,5 +375,18 @@ impl InvocationContextTrait for InvocationContext {
 
     fn ended(&self) -> bool {
         self.ended.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn user_scopes(&self) -> Vec<String> {
+        self.request_context.as_ref().map_or_else(Vec::new, |rc| rc.scopes.clone())
+    }
+
+    fn request_metadata(&self) -> HashMap<String, serde_json::Value> {
+        self.request_context.as_ref().map_or_else(HashMap::new, |rc| {
+            rc.metadata
+                .iter()
+                .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
+                .collect()
+        })
     }
 }

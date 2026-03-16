@@ -2,13 +2,15 @@ use crate::InvocationContext;
 use crate::cache::CacheManager;
 use adk_artifact::ArtifactService;
 use adk_core::{
-    Agent, CacheCapable, Content, ContextCacheConfig, EventStream, Memory, Result, RunConfig,
+    Agent, CacheCapable, Content, ContextCacheConfig, EventStream, Memory, ReadonlyContext, Result,
+    RunConfig,
 };
 use adk_plugin::PluginManager;
 use adk_session::SessionService;
 use adk_skill::{SkillInjector, SkillInjectorConfig};
 use async_stream::stream;
 use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
 pub struct RunnerConfig {
@@ -33,6 +35,12 @@ pub struct RunnerConfig {
     /// Optional cache-capable model reference for automatic cache management.
     /// Set this to the same model used by the agent if it supports caching.
     pub cache_capable: Option<Arc<dyn CacheCapable>>,
+    /// Optional request context from the server's auth middleware bridge.
+    /// When set, the runner passes it to `InvocationContext` so that
+    /// `user_scopes()` and `user_id()` reflect the authenticated identity.
+    pub request_context: Option<adk_core::RequestContext>,
+    /// Optional cooperative cancellation token for externally managed runs.
+    pub cancellation_token: Option<CancellationToken>,
 }
 
 pub struct Runner {
@@ -48,6 +56,8 @@ pub struct Runner {
     context_cache_config: Option<ContextCacheConfig>,
     cache_capable: Option<Arc<dyn CacheCapable>>,
     cache_manager: Option<Arc<tokio::sync::Mutex<CacheManager>>>,
+    request_context: Option<adk_core::RequestContext>,
+    cancellation_token: Option<CancellationToken>,
 }
 
 impl Runner {
@@ -69,6 +79,8 @@ impl Runner {
             context_cache_config: config.context_cache_config,
             cache_capable: config.cache_capable,
             cache_manager,
+            request_context: config.request_context,
+            cancellation_token: config.cancellation_token,
         })
     }
 
@@ -109,6 +121,8 @@ impl Runner {
         let context_cache_config = self.context_cache_config.clone();
         let cache_capable = self.cache_capable.clone();
         let cache_manager_ref = self.cache_manager.clone();
+        let request_context = self.request_context.clone();
+        let cancellation_token = self.cancellation_token.clone();
 
         let s = stream! {
             // Get or create session
@@ -182,6 +196,11 @@ impl Runner {
             // Apply run config (streaming mode, etc.)
             invocation_ctx = invocation_ctx.with_run_config(run_config.clone());
 
+            // Apply request context from auth middleware bridge if present
+            if let Some(rc) = request_context.clone() {
+                invocation_ctx = invocation_ctx.with_request_context(rc);
+            }
+
             let mut ctx = Arc::new(invocation_ctx);
 
             if let Some(manager) = plugin_manager.as_ref() {
@@ -190,12 +209,12 @@ impl Runner {
                     .await
                 {
                     Ok(Some(content)) => {
-                        let mut early_event = adk_core::Event::new(&invocation_id);
+                        let mut early_event = adk_core::Event::new(ctx.invocation_id());
                         early_event.author = agent_to_run.name().to_string();
                         early_event.llm_response.content = Some(content);
 
                         ctx.mutable_session().append_event(early_event.clone());
-                        if let Err(e) = session_service.append_event(&session_id, early_event.clone()).await {
+                        if let Err(e) = session_service.append_event(ctx.session_id(), early_event.clone()).await {
                             yield Err(e);
                             return;
                         }
@@ -223,11 +242,11 @@ impl Runner {
                         effective_user_content = modified;
 
                         let mut refreshed_ctx = InvocationContext::with_mutable_session(
-                            invocation_id.clone(),
+                            ctx.invocation_id().to_string(),
                             agent_to_run.clone(),
-                            user_id.clone(),
-                            app_name.clone(),
-                            session_id.clone(),
+                            ctx.user_id().to_string(),
+                            ctx.app_name().to_string(),
+                            ctx.session_id().to_string(),
                             effective_user_content.clone(),
                             ctx.mutable_session().clone(),
                         );
@@ -235,9 +254,9 @@ impl Runner {
                         if let Some(service) = artifact_service_clone.clone() {
                             let scoped = adk_artifact::ScopedArtifacts::new(
                                 service,
-                                app_name.clone(),
-                                user_id.clone(),
-                                session_id.clone(),
+                                ctx.app_name().to_string(),
+                                ctx.user_id().to_string(),
+                                ctx.session_id().to_string(),
                             );
                             refreshed_ctx = refreshed_ctx.with_artifacts(Arc::new(scoped));
                         }
@@ -245,6 +264,9 @@ impl Runner {
                             refreshed_ctx = refreshed_ctx.with_memory(memory);
                         }
                         refreshed_ctx = refreshed_ctx.with_run_config(run_config.clone());
+                        if let Some(rc) = request_context.clone() {
+                            refreshed_ctx = refreshed_ctx.with_request_context(rc);
+                        }
                         ctx = Arc::new(refreshed_ctx);
                     }
                     Ok(None) => {}
@@ -259,7 +281,7 @@ impl Runner {
             }
 
             // Append user message to session service (persistent storage)
-            let mut user_event = adk_core::Event::new(&invocation_id);
+            let mut user_event = adk_core::Event::new(ctx.invocation_id());
             user_event.author = "user".to_string();
             user_event.llm_response.content = Some(effective_user_content.clone());
 
@@ -267,7 +289,7 @@ impl Runner {
             // Note: adk_session::Event is a re-export of adk_core::Event, so we can use it directly
             ctx.mutable_session().append_event(user_event.clone());
 
-            if let Err(e) = session_service.append_event(&session_id, user_event).await {
+            if let Err(e) = session_service.append_event(ctx.session_id(), user_event).await {
                 if let Some(manager) = plugin_manager.as_ref() {
                     manager.run_after_run(ctx.clone() as Arc<dyn adk_core::InvocationContext>).await;
                 }
@@ -318,20 +340,20 @@ impl Runner {
                         run_config.cached_content = Some(cache_name.to_string());
                         // Rebuild the invocation context with the updated run config
                         let mut refreshed_ctx = InvocationContext::with_mutable_session(
-                            invocation_id.clone(),
+                            ctx.invocation_id().to_string(),
                             agent_to_run.clone(),
-                            user_id.clone(),
-                            app_name.clone(),
-                            session_id.clone(),
+                            ctx.user_id().to_string(),
+                            ctx.app_name().to_string(),
+                            ctx.session_id().to_string(),
                             effective_user_content.clone(),
                             ctx.mutable_session().clone(),
                         );
                         if let Some(service) = artifact_service_clone.clone() {
                             let scoped = adk_artifact::ScopedArtifacts::new(
                                 service,
-                                app_name.clone(),
-                                user_id.clone(),
-                                session_id.clone(),
+                                ctx.app_name().to_string(),
+                                ctx.user_id().to_string(),
+                                ctx.session_id().to_string(),
                             );
                             refreshed_ctx = refreshed_ctx.with_artifacts(Arc::new(scoped));
                         }
@@ -339,6 +361,9 @@ impl Runner {
                             refreshed_ctx = refreshed_ctx.with_memory(memory);
                         }
                         refreshed_ctx = refreshed_ctx.with_run_config(run_config.clone());
+                        if let Some(rc) = request_context.clone() {
+                            refreshed_ctx = refreshed_ctx.with_request_context(rc);
+                        }
                         ctx = Arc::new(refreshed_ctx);
                     }
                 }
@@ -347,10 +372,12 @@ impl Runner {
             // Run the agent with instrumentation (ADK-Go style attributes)
             let agent_span = tracing::info_span!(
                 "agent.execute",
-                "gcp.vertex.agent.invocation_id" = %invocation_id,
-                "gcp.vertex.agent.session_id" = %session_id,
-                "gcp.vertex.agent.event_id" = %invocation_id, // Use invocation_id as event_id for agent spans
-                "gen_ai.conversation.id" = %session_id,
+                "gcp.vertex.agent.invocation_id" = ctx.invocation_id(),
+                "gcp.vertex.agent.session_id" = ctx.session_id(),
+                "gcp.vertex.agent.event_id" = ctx.invocation_id(), // Use invocation_id as event_id for agent spans
+                "gen_ai.conversation.id" = ctx.session_id(),
+                "adk.app_name" = ctx.app_name(),
+                "adk.user_id" = ctx.user_id(),
                 "agent.name" = %agent_to_run.name(),
                 "adk.skills.selected_name" = %selected_skill_name,
                 "adk.skills.selected_id" = %selected_skill_id
@@ -371,7 +398,17 @@ impl Runner {
             use futures::StreamExt;
             let mut transfer_target: Option<String> = None;
 
-            while let Some(result) = agent_stream.next().await {
+            while let Some(result) = {
+                if let Some(token) = cancellation_token.as_ref() {
+                    if token.is_cancelled() {
+                        if let Some(manager) = plugin_manager.as_ref() {
+                            manager.run_after_run(ctx.clone() as Arc<dyn adk_core::InvocationContext>).await;
+                        }
+                        return;
+                    }
+                }
+                agent_stream.next().await
+            } {
                 match result {
                     Ok(event) => {
                         let mut event = event;
@@ -414,12 +451,19 @@ impl Runner {
                         ctx.mutable_session().append_event(event.clone());
 
                         // Append event to session service (persistent storage)
-                        if let Err(e) = session_service.append_event(&session_id, event.clone()).await {
-                            if let Some(manager) = plugin_manager.as_ref() {
-                                manager.run_after_run(ctx.clone() as Arc<dyn adk_core::InvocationContext>).await;
+                        // Skip partial streaming chunks — only persist the final
+                        // event. Streaming chunks share the same event ID, so
+                        // persisting each one would violate the primary key
+                        // constraint. The final chunk (partial=false) carries the
+                        // complete accumulated content.
+                        if !event.llm_response.partial {
+                            if let Err(e) = session_service.append_event(ctx.session_id(), event.clone()).await {
+                                if let Some(manager) = plugin_manager.as_ref() {
+                                    manager.run_after_run(ctx.clone() as Arc<dyn adk_core::InvocationContext>).await;
+                                }
+                                yield Err(e);
+                                return;
                             }
-                            yield Err(e);
-                            return;
                         }
                         yield Ok(event);
                     }
@@ -433,97 +477,158 @@ impl Runner {
                 }
             }
 
-            // If a transfer was requested, automatically invoke the target agent
-            if let Some(target_name) = transfer_target {
-                if let Some(target_agent) = Self::find_agent(&root_agent, &target_name) {
-                    // For transfers, we reuse the same mutable session to preserve state
-                    let transfer_invocation_id = format!("inv-{}", uuid::Uuid::new_v4());
-                    let mut transfer_ctx = InvocationContext::with_mutable_session(
-                        transfer_invocation_id.clone(),
-                        target_agent.clone(),
-                        user_id.clone(),
-                        app_name.clone(),
-                        session_id.clone(),
-                        effective_user_content.clone(),
-                        ctx.mutable_session().clone(),
+            // ===== TRANSFER LOOP =====
+            // Support multi-hop transfers with a max-depth guard.
+            // When an agent emits transfer_to_agent, the runner resolves the
+            // target from the root agent tree, computes transfer_targets
+            // (parent + peers) for the new agent, and runs it. This repeats
+            // until no further transfer is requested or the depth limit is hit.
+            const MAX_TRANSFER_DEPTH: u32 = 10;
+            let mut transfer_depth: u32 = 0;
+            let mut current_transfer_target = transfer_target;
+
+            while let Some(target_name) = current_transfer_target.take() {
+                transfer_depth += 1;
+                if transfer_depth > MAX_TRANSFER_DEPTH {
+                    tracing::warn!(
+                        depth = transfer_depth,
+                        target = %target_name,
+                        "max transfer depth exceeded, stopping transfer chain"
                     );
+                    break;
+                }
 
-                    if let Some(service) = artifact_service_clone {
-                        let scoped = adk_artifact::ScopedArtifacts::new(
-                            service,
-                            app_name.clone(),
-                            user_id.clone(),
-                            session_id.clone(),
-                        );
-                        transfer_ctx = transfer_ctx.with_artifacts(Arc::new(scoped));
+                let target_agent = match Self::find_agent(&root_agent, &target_name) {
+                    Some(a) => a,
+                    None => {
+                        tracing::warn!(target = %target_name, "transfer target not found in agent tree");
+                        break;
                     }
-                    if let Some(memory) = memory_service_clone {
-                        transfer_ctx = transfer_ctx.with_memory(memory);
+                };
+
+                // Compute transfer_targets for the target agent:
+                // - parent: the agent that transferred to it (or root if applicable)
+                // - peers: siblings in the agent tree
+                // - children: handled by the agent itself via sub_agents()
+                let (parent_name, peer_names) = Self::compute_transfer_context(&root_agent, &target_name);
+
+                let mut transfer_run_config = run_config.clone();
+                let mut targets = Vec::new();
+                if let Some(ref parent) = parent_name {
+                    targets.push(parent.clone());
+                }
+                targets.extend(peer_names);
+                transfer_run_config.transfer_targets = targets;
+                transfer_run_config.parent_agent = parent_name;
+
+                // For transfers, we reuse the same mutable session to preserve state
+                let transfer_invocation_id = format!("inv-{}", uuid::Uuid::new_v4());
+                let mut transfer_ctx = InvocationContext::with_mutable_session(
+                    transfer_invocation_id.clone(),
+                    target_agent.clone(),
+                    ctx.user_id().to_string(),
+                    ctx.app_name().to_string(),
+                    ctx.session_id().to_string(),
+                    effective_user_content.clone(),
+                    ctx.mutable_session().clone(),
+                );
+
+                if let Some(ref service) = artifact_service_clone {
+                    let scoped = adk_artifact::ScopedArtifacts::new(
+                        service.clone(),
+                        ctx.app_name().to_string(),
+                        ctx.user_id().to_string(),
+                        ctx.session_id().to_string(),
+                    );
+                    transfer_ctx = transfer_ctx.with_artifacts(Arc::new(scoped));
+                }
+                if let Some(ref memory) = memory_service_clone {
+                    transfer_ctx = transfer_ctx.with_memory(memory.clone());
+                }
+                transfer_ctx = transfer_ctx.with_run_config(transfer_run_config);
+                if let Some(rc) = request_context.clone() {
+                    transfer_ctx = transfer_ctx.with_request_context(rc);
+                }
+
+                let transfer_ctx = Arc::new(transfer_ctx);
+
+                // Run the transferred agent
+                let mut transfer_stream = match target_agent.run(transfer_ctx.clone()).await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        if let Some(manager) = plugin_manager.as_ref() {
+                            manager.run_after_run(ctx.clone() as Arc<dyn adk_core::InvocationContext>).await;
+                        }
+                        yield Err(e);
+                        return;
                     }
+                };
 
-                    let transfer_ctx = Arc::new(transfer_ctx);
-
-                    // Run the transferred agent
-                    let mut transfer_stream = match target_agent.run(transfer_ctx.clone()).await {
-                        Ok(s) => s,
-                        Err(e) => {
+                // Stream events from the transferred agent, capturing any further transfer
+                while let Some(result) = {
+                    if let Some(token) = cancellation_token.as_ref() {
+                        if token.is_cancelled() {
                             if let Some(manager) = plugin_manager.as_ref() {
                                 manager.run_after_run(ctx.clone() as Arc<dyn adk_core::InvocationContext>).await;
                             }
-                            yield Err(e);
                             return;
                         }
-                    };
-
-                    // Stream events from the transferred agent
-                    while let Some(result) = transfer_stream.next().await {
-                        match result {
-                            Ok(event) => {
-                                let mut event = event;
-                                if let Some(manager) = plugin_manager.as_ref() {
-                                    match manager
-                                        .run_on_event(
-                                            transfer_ctx.clone() as Arc<dyn adk_core::InvocationContext>,
-                                            event.clone(),
-                                        )
-                                        .await
-                                    {
-                                        Ok(Some(modified)) => {
-                                            event = modified;
-                                        }
-                                        Ok(None) => {}
-                                        Err(e) => {
-                                            manager.run_after_run(ctx.clone() as Arc<dyn adk_core::InvocationContext>).await;
-                                            yield Err(e);
-                                            return;
-                                        }
+                    }
+                    transfer_stream.next().await
+                } {
+                    match result {
+                        Ok(event) => {
+                            let mut event = event;
+                            if let Some(manager) = plugin_manager.as_ref() {
+                                match manager
+                                    .run_on_event(
+                                        transfer_ctx.clone() as Arc<dyn adk_core::InvocationContext>,
+                                        event.clone(),
+                                    )
+                                    .await
+                                {
+                                    Ok(Some(modified)) => {
+                                        event = modified;
+                                    }
+                                    Ok(None) => {}
+                                    Err(e) => {
+                                        manager.run_after_run(ctx.clone() as Arc<dyn adk_core::InvocationContext>).await;
+                                        yield Err(e);
+                                        return;
                                     }
                                 }
+                            }
 
-                                // Apply state delta for transferred agent too
-                                if !event.actions.state_delta.is_empty() {
-                                    transfer_ctx.mutable_session().apply_state_delta(&event.actions.state_delta);
-                                }
+                            // Capture further transfer requests
+                            if let Some(target) = &event.actions.transfer_to_agent {
+                                current_transfer_target = Some(target.clone());
+                            }
 
-                                // Add to mutable session
-                                transfer_ctx.mutable_session().append_event(event.clone());
+                            // Apply state delta for transferred agent too
+                            if !event.actions.state_delta.is_empty() {
+                                transfer_ctx.mutable_session().apply_state_delta(&event.actions.state_delta);
+                            }
 
-                                if let Err(e) = session_service.append_event(&session_id, event.clone()).await {
+                            // Add to mutable session
+                            transfer_ctx.mutable_session().append_event(event.clone());
+
+                            if !event.llm_response.partial {
+                                if let Err(e) = session_service.append_event(ctx.session_id(), event.clone()).await {
                                     if let Some(manager) = plugin_manager.as_ref() {
                                         manager.run_after_run(ctx.clone() as Arc<dyn adk_core::InvocationContext>).await;
                                     }
                                     yield Err(e);
                                     return;
                                 }
-                                yield Ok(event);
                             }
-                            Err(e) => {
-                                if let Some(manager) = plugin_manager.as_ref() {
-                                    manager.run_after_run(ctx.clone() as Arc<dyn adk_core::InvocationContext>).await;
-                                }
-                                yield Err(e);
-                                return;
+                            yield Ok(event);
+                        }
+                        Err(e) => {
+                            if let Some(manager) = plugin_manager.as_ref() {
+                                manager.run_after_run(ctx.clone() as Arc<dyn adk_core::InvocationContext>).await;
                             }
+                            yield Err(e);
+                            return;
                         }
                     }
                 }
@@ -570,7 +675,7 @@ impl Runner {
                             Ok(Some(compaction_event)) => {
                                 // Persist the compaction event
                                 if let Err(e) = session_service.append_event(
-                                    &session_id,
+                                    ctx.session_id(),
                                     compaction_event.clone(),
                                 ).await {
                                     tracing::warn!(error = %e, "Failed to persist compaction event");
@@ -656,5 +761,47 @@ impl Runner {
         }
 
         None
+    }
+
+    /// Compute the parent name and peer names for a given agent in the tree.
+    /// Returns `(parent_name, peer_names)`.
+    ///
+    /// Walks the agent tree to find the parent of `target_name`, then collects
+    /// the parent's name and the sibling agent names (excluding the target itself).
+    pub fn compute_transfer_context(
+        root: &Arc<dyn Agent>,
+        target_name: &str,
+    ) -> (Option<String>, Vec<String>) {
+        // If the target is the root itself, there's no parent or peers
+        if root.name() == target_name {
+            return (None, Vec::new());
+        }
+
+        // BFS/DFS to find the parent of target_name
+        fn find_parent(current: &Arc<dyn Agent>, target: &str) -> Option<Arc<dyn Agent>> {
+            for sub in current.sub_agents() {
+                if sub.name() == target {
+                    return Some(current.clone());
+                }
+                if let Some(found) = find_parent(sub, target) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+
+        match find_parent(root, target_name) {
+            Some(parent) => {
+                let parent_name = parent.name().to_string();
+                let peers: Vec<String> = parent
+                    .sub_agents()
+                    .iter()
+                    .filter(|a| a.name() != target_name)
+                    .map(|a| a.name().to_string())
+                    .collect();
+                (Some(parent_name), peers)
+            }
+            None => (None, Vec::new()),
+        }
     }
 }

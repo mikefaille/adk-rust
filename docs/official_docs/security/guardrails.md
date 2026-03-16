@@ -15,10 +15,10 @@ Guardrails validate and transform agent inputs and outputs to ensure safety, com
 
 ```toml
 [dependencies]
-adk-guardrail = "0.3.0"
+adk-guardrail = "0.4"
 
 # For JSON schema validation
-adk-guardrail = { version = "0.3.0", features = ["schema"] }
+adk-guardrail = { version = "0.4", features = ["schema"] }
 ```
 
 ## Core Concepts
@@ -249,6 +249,8 @@ impl Guardrail for ProfanityFilter {
 ## Integration with Agents
 
 Guardrails integrate with `LlmAgentBuilder`:
+
+Configured input guardrails run before model execution, and configured output guardrails run on generated responses before they are returned to the caller.
 
 ```rust
 use adk_agent::LlmAgentBuilder;

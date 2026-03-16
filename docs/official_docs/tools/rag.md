@@ -29,10 +29,10 @@ This means your agent can answer questions about product docs, company policies,
 ```toml
 [dependencies]
 # Core only (in-memory store, all chunkers, no external deps)
-adk-rag = "0.3"
+adk-rag = "0.4"
 
 # With Gemini embeddings (recommended for getting started)
-adk-rag = { version = "0.3", features = ["gemini"] }
+adk-rag = { version = "0.4", features = ["gemini"] }
 ```
 
 ---
@@ -110,6 +110,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ## Step 2: Add RAG to an Agent
 
 The real power of RAG is when an agent uses it as a tool. `RagTool` wraps the pipeline as an `adk_core::Tool` — the agent calls `rag_search` whenever it needs information.
+
+When you use `RagTool` with Gemini-backed agents, ADK automatically normalizes the tool result into a Gemini-compatible function response. This matters because `rag_search` naturally returns a list of chunks, while Gemini expects `functionResponse.response` to be a JSON object on the wire.
 
 ```rust
 use std::sync::Arc;
@@ -351,13 +353,13 @@ Only pull the dependencies you need:
 
 ```toml
 # Just core
-adk-rag = "0.3"
+adk-rag = "0.4"
 
 # With Gemini embeddings
-adk-rag = { version = "0.3", features = ["gemini"] }
+adk-rag = { version = "0.4", features = ["gemini"] }
 
 # Everything
-adk-rag = { version = "0.3", features = ["full"] }
+adk-rag = { version = "0.4", features = ["full"] }
 ```
 
 > **Note:** The `lancedb` feature requires `protoc` installed. Install with `brew install protobuf` (macOS) or `apt install protobuf-compiler` (Ubuntu).

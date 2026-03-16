@@ -1,3 +1,4 @@
+use crate::identity::{AdkIdentity, AppName, ExecutionIdentity, InvocationId, SessionId, UserId};
 use crate::{Agent, Result, types::Content};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -14,6 +15,95 @@ pub trait ReadonlyContext: Send + Sync {
     fn session_id(&self) -> &str;
     fn branch(&self) -> &str;
     fn user_content(&self) -> &Content;
+
+    /// Returns the application name as a typed [`AppName`].
+    ///
+    /// Parses the value returned by [`app_name()`](Self::app_name). Returns an
+    /// error if the raw string fails validation (empty, null bytes, or exceeds
+    /// the maximum length).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AdkError::Config`](crate::AdkError::Config) when the
+    /// underlying string is not a valid identifier.
+    fn try_app_name(&self) -> Result<AppName> {
+        Ok(AppName::try_from(self.app_name())?)
+    }
+
+    /// Returns the user identifier as a typed [`UserId`].
+    ///
+    /// Parses the value returned by [`user_id()`](Self::user_id). Returns an
+    /// error if the raw string fails validation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AdkError::Config`](crate::AdkError::Config) when the
+    /// underlying string is not a valid identifier.
+    fn try_user_id(&self) -> Result<UserId> {
+        Ok(UserId::try_from(self.user_id())?)
+    }
+
+    /// Returns the session identifier as a typed [`SessionId`].
+    ///
+    /// Parses the value returned by [`session_id()`](Self::session_id).
+    /// Returns an error if the raw string fails validation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AdkError::Config`](crate::AdkError::Config) when the
+    /// underlying string is not a valid identifier.
+    fn try_session_id(&self) -> Result<SessionId> {
+        Ok(SessionId::try_from(self.session_id())?)
+    }
+
+    /// Returns the invocation identifier as a typed [`InvocationId`].
+    ///
+    /// Parses the value returned by [`invocation_id()`](Self::invocation_id).
+    /// Returns an error if the raw string fails validation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AdkError::Config`](crate::AdkError::Config) when the
+    /// underlying string is not a valid identifier.
+    fn try_invocation_id(&self) -> Result<InvocationId> {
+        Ok(InvocationId::try_from(self.invocation_id())?)
+    }
+
+    /// Returns the stable session-scoped [`AdkIdentity`] triple.
+    ///
+    /// Combines [`try_app_name()`](Self::try_app_name),
+    /// [`try_user_id()`](Self::try_user_id), and
+    /// [`try_session_id()`](Self::try_session_id) into a single composite
+    /// identity value.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any of the three constituent identifiers fail
+    /// validation.
+    fn try_identity(&self) -> Result<AdkIdentity> {
+        Ok(AdkIdentity {
+            app_name: self.try_app_name()?,
+            user_id: self.try_user_id()?,
+            session_id: self.try_session_id()?,
+        })
+    }
+
+    /// Returns the full per-invocation [`ExecutionIdentity`].
+    ///
+    /// Combines [`try_identity()`](Self::try_identity) with the invocation,
+    /// branch, and agent name from this context.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any of the four typed identifiers fail validation.
+    fn try_execution_identity(&self) -> Result<ExecutionIdentity> {
+        Ok(ExecutionIdentity {
+            adk: self.try_identity()?,
+            invocation_id: self.try_invocation_id()?,
+            branch: self.branch().to_string(),
+            agent_name: self.agent_name().to_string(),
+        })
+    }
 }
 
 // State management traits
@@ -65,15 +155,126 @@ pub trait Session: Send + Sync {
     fn state(&self) -> &dyn State;
     /// Returns the conversation history from this session as Content items
     fn conversation_history(&self) -> Vec<Content>;
+    /// Returns conversation history filtered for a specific agent.
+    ///
+    /// When provided, events authored by other agents (not "user", not the
+    /// named agent, and not function/tool responses) are excluded. This
+    /// prevents a transferred sub-agent from seeing the parent's tool calls
+    /// mapped as "model" role, which would cause the LLM to think work is
+    /// already done.
+    ///
+    /// Default implementation delegates to [`conversation_history`](Self::conversation_history).
+    fn conversation_history_for_agent(&self, _agent_name: &str) -> Vec<Content> {
+        self.conversation_history()
+    }
     /// Append content to conversation history (for sequential agent support)
     fn append_to_history(&self, _content: Content) {
         // Default no-op - implementations can override to track history
     }
+
+    /// Returns the application name as a typed [`AppName`].
+    ///
+    /// Parses the value returned by [`app_name()`](Self::app_name). Returns an
+    /// error if the raw string fails validation (empty, null bytes, or exceeds
+    /// the maximum length).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AdkError::Config`](crate::AdkError::Config) when the
+    /// underlying string is not a valid identifier.
+    fn try_app_name(&self) -> Result<AppName> {
+        Ok(AppName::try_from(self.app_name())?)
+    }
+
+    /// Returns the user identifier as a typed [`UserId`].
+    ///
+    /// Parses the value returned by [`user_id()`](Self::user_id). Returns an
+    /// error if the raw string fails validation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AdkError::Config`](crate::AdkError::Config) when the
+    /// underlying string is not a valid identifier.
+    fn try_user_id(&self) -> Result<UserId> {
+        Ok(UserId::try_from(self.user_id())?)
+    }
+
+    /// Returns the session identifier as a typed [`SessionId`].
+    ///
+    /// Parses the value returned by [`id()`](Self::id). Returns an error if
+    /// the raw string fails validation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AdkError::Config`](crate::AdkError::Config) when the
+    /// underlying string is not a valid identifier.
+    fn try_session_id(&self) -> Result<SessionId> {
+        Ok(SessionId::try_from(self.id())?)
+    }
+
+    /// Returns the stable session-scoped [`AdkIdentity`] triple.
+    ///
+    /// Combines [`try_app_name()`](Self::try_app_name),
+    /// [`try_user_id()`](Self::try_user_id), and
+    /// [`try_session_id()`](Self::try_session_id) into a single composite
+    /// identity value.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any of the three constituent identifiers fail
+    /// validation.
+    fn try_identity(&self) -> Result<AdkIdentity> {
+        Ok(AdkIdentity {
+            app_name: self.try_app_name()?,
+            user_id: self.try_user_id()?,
+            session_id: self.try_session_id()?,
+        })
+    }
+}
+
+/// Structured metadata about a completed tool execution.
+///
+/// Available via [`CallbackContext::tool_outcome()`] in after-tool callbacks,
+/// plugins, and telemetry hooks. Provides structured access to execution
+/// results without requiring JSON error parsing.
+///
+/// # Fields
+///
+/// - `tool_name` — Name of the tool that was executed.
+/// - `tool_args` — Arguments passed to the tool as a JSON value.
+/// - `success` — Whether the tool execution succeeded. Derived from the
+///   Rust `Result` / timeout path, never from JSON content inspection.
+/// - `duration` — Wall-clock duration of the tool execution.
+/// - `error_message` — Error message if the tool failed; `None` on success.
+/// - `attempt` — Retry attempt number (0 = first attempt, 1 = first retry, etc.).
+///   Always 0 when retries are not configured.
+#[derive(Debug, Clone)]
+pub struct ToolOutcome {
+    /// Name of the tool that was executed.
+    pub tool_name: String,
+    /// Arguments passed to the tool (JSON value).
+    pub tool_args: serde_json::Value,
+    /// Whether the tool execution succeeded.
+    pub success: bool,
+    /// Wall-clock duration of the tool execution.
+    pub duration: std::time::Duration,
+    /// Error message if the tool failed. `None` on success.
+    pub error_message: Option<String>,
+    /// Retry attempt number (0 = first attempt, 1 = first retry, etc.).
+    /// Always 0 when retries are not configured.
+    pub attempt: u32,
 }
 
 #[async_trait]
 pub trait CallbackContext: ReadonlyContext {
     fn artifacts(&self) -> Option<Arc<dyn Artifacts>>;
+
+    /// Returns structured metadata about the most recent tool execution.
+    /// Available in after-tool callbacks and plugin hooks.
+    /// Returns `None` when not in a tool execution context.
+    fn tool_outcome(&self) -> Option<ToolOutcome> {
+        None // default for backward compatibility
+    }
 }
 
 #[async_trait]
@@ -84,6 +285,23 @@ pub trait InvocationContext: CallbackContext {
     fn run_config(&self) -> &RunConfig;
     fn end_invocation(&self);
     fn ended(&self) -> bool;
+
+    /// Returns the scopes granted to the current user for this invocation.
+    ///
+    /// When a [`RequestContext`](crate::RequestContext) is present (set by the
+    /// server's auth middleware bridge), this returns the scopes from that
+    /// context. The default returns an empty vec (no scopes granted).
+    fn user_scopes(&self) -> Vec<String> {
+        vec![]
+    }
+
+    /// Returns the request metadata from the auth middleware bridge, if present.
+    ///
+    /// This provides access to custom key-value pairs extracted from the HTTP
+    /// request by the [`RequestContextExtractor`](crate::RequestContext).
+    fn request_metadata(&self) -> HashMap<String, serde_json::Value> {
+        HashMap::new()
+    }
 }
 
 // Placeholder service traits
@@ -97,6 +315,14 @@ pub trait Artifacts: Send + Sync {
 #[async_trait]
 pub trait Memory: Send + Sync {
     async fn search(&self, query: &str) -> Result<Vec<MemoryEntry>>;
+
+    /// Verify backend connectivity.
+    ///
+    /// The default implementation succeeds, which is suitable for in-memory
+    /// implementations and adapters without an external dependency.
+    async fn health_check(&self) -> Result<()> {
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -201,6 +427,14 @@ pub struct RunConfig {
     /// this name to their `GenerateContentConfig` so the LLM provider can
     /// reuse cached system instructions and tool definitions.
     pub cached_content: Option<String>,
+    /// Valid agent names this agent can transfer to (parent, peers, children).
+    /// Set by the runner when invoking agents in a multi-agent tree.
+    /// When non-empty, the `transfer_to_agent` tool is injected and validation
+    /// uses this list instead of only checking `sub_agents`.
+    pub transfer_targets: Vec<String>,
+    /// The name of the parent agent, if this agent was invoked via transfer.
+    /// Used by the agent to apply `disallow_transfer_to_parent` filtering.
+    pub parent_agent: Option<String>,
 }
 
 impl Default for RunConfig {
@@ -209,6 +443,8 @@ impl Default for RunConfig {
             streaming_mode: StreamingMode::SSE,
             tool_confirmation_decisions: HashMap::new(),
             cached_content: None,
+            transfer_targets: Vec::new(),
+            parent_agent: None,
         }
     }
 }

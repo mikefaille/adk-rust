@@ -62,9 +62,33 @@ mod function_tool;
 pub mod mcp;
 pub mod toolset;
 
-pub use adk_core::{Tool, ToolContext, Toolset};
+#[cfg(feature = "code")]
+pub mod code_execution;
+
+pub use adk_core::{AdkError, Result, Tool, ToolContext, Toolset};
+pub use adk_macros::tool;
 pub use agent_tool::{AgentTool, AgentToolConfig};
+/// Re-exported for use by the `#[tool]` macro.
+pub use async_trait::async_trait;
 pub use builtin::{ExitLoopTool, GoogleSearchTool, LoadArtifactsTool};
 pub use function_tool::FunctionTool;
 pub use mcp::{McpAuth, McpHttpClientBuilder, McpTaskConfig, McpToolset, OAuth2Config};
-pub use toolset::{BasicToolset, string_predicate};
+pub use toolset::{
+    BasicToolset, FilteredToolset, MergedToolset, PrefixedToolset, string_predicate,
+};
+
+#[cfg(feature = "code")]
+#[allow(deprecated)]
+pub use code_execution::RustCodeTool;
+
+#[cfg(feature = "code")]
+pub use code_execution::CodeTool;
+
+#[cfg(feature = "code")]
+pub use code_execution::FrontendCodeTool;
+
+#[cfg(feature = "code")]
+pub use code_execution::JavaScriptCodeTool;
+
+#[cfg(feature = "code")]
+pub use code_execution::PythonCodeTool;

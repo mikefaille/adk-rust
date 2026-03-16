@@ -5,19 +5,313 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.4.0] - 2026-03-16
+
+### Added
+
+#### `cargo-adk` Scaffolding CLI
+- **Project scaffolding**: New `cargo-adk` binary for generating agent projects from templates. `cargo adk new my-agent` scaffolds a working project with the right dependencies, feature flags, and boilerplate. Templates: `basic`, `tools` (#[tool] macro), `rag` (vector search), `api` (REST server), `openai`. Supports `--provider` flag for OpenAI/Anthropic/Gemini.
+
+#### `#[tool]` Proc Macro (adk-macros)
+- **Zero-boilerplate tool registration**: New `#[tool]` attribute macro turns an async function into a full `Tool` implementation. Doc comments become the description, argument types derive JSON schemas via schemars, and a PascalCase struct is generated implementing `adk_core::Tool`. Supports both standalone functions and functions with `Arc<dyn ToolContext>` parameter. Schema output is automatically cleaned for LLM API compatibility (strips `$schema`, simplifies nullable types).
+
+#### Development Infrastructure
+- **cargo-nextest integration**: Switched from `cargo test` to `cargo nextest run` for workspace test execution. Parallel test binary execution reduces test wall-clock time from ~1m47s to ~9s (~11x speedup). Added `.config/nextest.toml` with default and CI profiles (CI profile includes retry-on-flaky and slow-test warnings). `devenv.nix` updated with `ws-test` (nextest), `ws-test-ci` (nextest CI profile), and `ws-test-slow` (fallback `cargo test` for doctests) scripts.
+
+#### Vision / Multimodal Support (adk-model)
+- **Bedrock**: `InlineData` with image MIME types (jpeg/png/gif/webp) now maps to `ContentBlock::Image`; document MIME types (pdf/csv/html/md/txt/doc/docx) map to `ContentBlock::Document`. Response-side `ContentBlock::Image` converts back to `Part::InlineData`. `FileData` with image/document URLs becomes a text reference (Bedrock only supports S3 URIs natively).
+- **OpenAI**: `FileData` with `image/*` MIME types now maps to `ImageUrl` content part instead of falling back to text, enabling direct image URL vision.
+- **Anthropic**: `FileData` with image MIME types (jpeg/png/gif/webp) now maps to `ImageBlock` with `UrlImageSource` instead of text fallback, enabling direct image URL vision.
+
+#### OpenAI Reasoning Model Support (adk-model)
+- **Reasoning content extraction**: OpenAI-compatible client now uses direct reqwest calls instead of async-openai's HTTP client, enabling extraction of `reasoning_content` from reasoning models (o3, o4-mini, gpt-5-mini) that async-openai 0.33 silently drops. Reasoning content maps to `Part::Thinking`.
+- **Empty text filtering**: `from_openai_response` and new `from_raw_openai_response` now filter empty text parts produced by reasoning models when all tokens go to internal chain-of-thought.
 
 ### Changed
+
+#### adk-rust (umbrella crate)
+- **Tiered feature presets**: Default changed from `full` to `standard`. Three presets: `minimal` (agents + Gemini + runner, ~30s build), `standard` (+ tools, sessions, memory, telemetry, guardrail, auth, plugin, ~51s build), `full` (+ server, CLI, graph, browser, eval, realtime, RAG, audio, ~2min build). Users who need server/CLI/specialist crates add `features = ["full"]`.
+- **Minimal tokio features**: `adk-rust` umbrella crate now declares explicit tokio features (`rt`, `rt-multi-thread`, `sync`, `time`, `macros`, `net`, `signal`, `fs`, `process`, `io-util`) instead of `"full"`. Binary crates (`adk-cli`, examples) retain `"full"`. This follows the Rust convention that library crates should never use `tokio = { features = ["full"] }`.
+
+#### adk-core
+- **AdkError documentation**: All 9 error variants now have doc comments describing their use (Agent, Model, Tool, Session, Artifact, Memory, Config, Io, Serde).
+
+#### Examples
+- **openai_basic**: Default model changed from `gpt-5-mini` to `gpt-4o-mini`, `max_output_tokens` increased from 64 to 256 (reasoning models need headroom). Supports `OPENAI_MODEL` env var override.
+- **vision_test**: OpenAI model changed from `gpt-5-mini` to `gpt-4o-mini`.
+- **Cleanup**: Removed 20 non-essential `openai_*` example directories (full collection in adk-playground repo).
+
+#### adk-model
+- **Consolidated OpenAI-compatible providers**: Replaced 7 near-identical provider modules (fireworks, together, mistral, perplexity, cerebras, sambanova, xai) with `OpenAICompatibleConfig` presets. Each was ~150 lines wrapping the same `OpenAICompatible` client — now 7 preset constructors totaling 63 lines. Usage: `OpenAICompatible::new(OpenAICompatibleConfig::fireworks(key, model))`. Feature flags preserved as backward-compatible aliases (`fireworks = ["openai"]`). `all-providers` simplified from 15 to 8 flags.
+
+#### adk-telemetry
+- **Proper error type**: Replaced `Box<dyn std::error::Error>` with `TelemetryError` (thiserror) in all init functions. Convention-compliant typed errors.
+
+#### adk-plugin
+- **Removed unused dependencies**: `async-trait` and `serde` removed from Cargo.toml (never imported).
+
+#### adk-memory
+- **Shared text utilities**: Extracted `extract_text()`, `extract_words()`, and `extract_words_from_content()` into `adk_memory::text` module. Removed duplicate implementations from 5 backends (postgres, sqlite, mongodb, neo4j, redis) and inmemory.
+
+#### Documentation (Tier 2 crates)
+- **adk-artifact**: Documented all request/response structs, `ArtifactService` trait methods, `InMemoryArtifactService`.
+- **adk-guardrail**: Documented `GuardrailError` variants, `GuardrailSet` methods, `ExecutionResult` fields.
+- **adk-skill**: Documented 8 public functions (`select_skills`, `apply_skill_injection`, `discover_skill_files`, `parse_skill_markdown`, `load_skill_index`, etc.).
+- **adk-gemini**: Removed `println!` debug statements from tests.
+- **README versions**: Bumped 0.3→0.4 in adk-telemetry, adk-memory, adk-artifact, adk-plugin, adk-guardrail, adk-gemini.
+
+### Removed
+- **adk-doc-audit**: Removed from workspace (docs.rs provides this functionality). Backed up to standalone directory.
+
+#### adk-mistralrs
+- **Minimal tokio features**: Changed from `tokio = { features = ["full"] }` to `tokio = { features = ["rt", "sync", "macros"] }` — the minimal set actually used by the crate.
+
+#### CI
+- **nextest in CI**: GitHub Actions workflow now uses `ws-test-ci` (cargo-nextest with CI profile) instead of `cargo test --workspace`. Summary parser updated to handle nextest output format with fallback for `cargo test` format.
+
+#### adk-model (OpenAI / OpenAI-compatible providers)
+- **async-openai 0.33**: Upgraded from 0.27 to 0.33. Breaking API changes adapted: types moved to `types::chat::*`, `ChatCompletionToolType` removed, `FunctionObject.parameters` changed to `Option<serde_json::Value>`, `max_tokens` replaced with `max_completion_tokens`.
+- **Non-streaming workaround**: OpenAI and Azure OpenAI providers temporarily use non-streaming `create()` instead of `create_stream()` due to a `reqwest-eventsource` compatibility bug in async-openai 0.33 that causes "Invalid header value" errors on SSE connections. Responses arrive as a single chunk. Streaming will be restored when the upstream bug is fixed.
+- **reqwest default features restored**: Root workspace `reqwest` dependency no longer sets `default-features = false`, fixing transitive feature resolution issues.
+
+### Added
+
+#### adk-sandbox (NEW CRATE)
+- New `adk-sandbox` crate: isolated code execution runtime for ADK agents
+- `SandboxBackend` trait with `execute(ExecRequest) -> Result<ExecResult, SandboxError>` and `capabilities()` methods
+- `ProcessBackend`: subprocess execution via `tokio::process::Command` with timeout enforcement, environment isolation (`env_clear()`), output truncation (1 MB, UTF-8 safe), and `kill_on_drop(true)`. Supports Rust, Python, JavaScript, TypeScript, and shell commands
+- `WasmBackend`: in-process WASM execution via `wasmtime` with epoch-based timeout, memory limits via `StoreLimitsBuilder`, WASI stdin/stdout/stderr capture, and no filesystem or network access (behind `wasm` feature)
+- `SandboxTool`: `adk_core::Tool` implementation delegating to any `SandboxBackend`, with error-as-information pattern (errors returned as structured JSON, never `ToolError`)
+- `ExecRequest` and `ExecResult` types with explicit timeout (no `Default` impl), `Language` enum, and `SandboxError` enum
+- `BackendCapabilities` with honest `EnforcedLimits` reporting what each backend actually enforces
+- Feature flags: `process` (default), `wasm` (optional, requires `wasmtime`)
+
+### Changed
+
+#### Repository structure
+- `adk-deploy-server` and `adk-deploy-console` have been hard-migrated out of the `adk-rust` workspace into the sibling `adk-platform` repo, while `adk-deploy` remains in `adk-rust` as the shared deployment manifest and bundling utility crate
+
+#### adk-code
+- Redesigned with `RustExecutor`: check → build → execute pipeline delegating to `SandboxBackend` from `adk-sandbox`
+- New `CodeTool` implementing `adk_core::Tool` with structured diagnostic passthrough (compile errors as JSON, not `ToolError`)
+- New `CodeError` enum with `CompileError` (structured `Vec<RustDiagnostic>`), `DependencyNotFound`, `Sandbox`, `InvalidCode` variants
+- Extracted `harness.rs` (harness template, source validation) and `diagnostics.rs` (rustc JSON diagnostic parser) as shared modules
+- `EmbeddedJsExecutor` capabilities fixed: now honestly reports `true` for network/filesystem/environment enforcement (isolation by omission via `boa_engine`)
+- `DockerExecutor` Drop safety fixed: uses `Handle::try_current()` before spawning cleanup, logs warning when no runtime is available
+- Migration compatibility layer in `compat` module with deprecated type aliases for one release cycle
+
+### Deprecated
+
+#### adk-tool
+- `RustCodeTool` is deprecated in favor of `adk_code::CodeTool`
+
+#### adk-code
+- `CodeExecutor`, `ExecutionRequest`, `ExecutionResult`, `RustSandboxExecutor`, `RustSandboxConfig` type aliases deprecated (use `adk-sandbox` and new `adk-code` types instead). Will be removed in v0.6.0
+
+## [0.4.0] - 2026-03-12
+
+### Added
+
+#### adk-code (NEW CRATE)
+- New `adk-code` crate: first-class code execution substrate for ADK-Rust
+- Core types: `CodeExecutor` trait, `ExecutionRequest`, `ExecutionResult`, `ExecutionLanguage`, `SandboxPolicy`, `BackendCapabilities`, `ExecutionIsolation`
+- `CodeExecutor` lifecycle methods: `start()`, `stop()`, `restart()`, `is_running()` for persistent execution environments (default no-ops for simple backends)
+- `RustSandboxExecutor`: flagship Rust-authored code execution with host-local process isolation and strict defaults (30s timeout, 1MB output limits)
+- `EmbeddedJsExecutor`: secondary in-process JavaScript backend via `boa_engine` for lightweight transforms (behind `embedded-js` feature)
+- `DockerExecutor`: persistent Docker container executor using `bollard` SDK (behind `docker` feature) — matches AutoGen's `DockerCommandLineCodeExecutor` lifecycle model (start once, execute many, stop when done)
+- `DockerConfig` presets: `python()`, `node()`, `custom(image)` with builder methods `.pip_install()`, `.npm_install()`, `.with_network()`, `.env()`, `.bind_mount()`
+- `ContainerCommandExecutor`: CLI-based ephemeral container executor for Python, JavaScript, and command execution
+- `WasmGuestExecutor`: guest-module backend for precompiled `.wasm` modules with explicit boundary validation
+- `Workspace` and `CollaborationEvent`: shared project context for multi-agent code generation with typed collaboration events (NeedWork, WorkClaimed, WorkPublished, FeedbackRequested, FeedbackProvided, Blocked, Completed)
+- A2A-compatible collaboration event mapping for future remote specialist execution
+- `ExecutionMetadata` and `ArtifactRef` for telemetry correlation and artifact storage references
+- Fail-closed sandbox policy validation: backends reject unsupported controls before executing user code
+- 10 correctness properties validated by proptest (100+ iterations each)
+
+#### adk-tool
+- `RustCodeTool`: primary Rust-first code execution tool with `code:execute` and `code:execute:rust` scopes
+- `JavaScriptCodeTool`: secondary JavaScript execution tool — uses real `EmbeddedJsExecutor` when `code-embedded-js` feature is enabled, returns descriptive error otherwise
+- `PythonCodeTool`: container-backed Python execution tool, supports custom executors via `with_executor()` (e.g., `DockerExecutor` for persistent containers)
+- `FrontendCodeTool`: container-backed Node.js execution tool for React/frontend code, supports custom executors via `with_executor()`
+- New feature flags: `code-embedded-js` (enables boa_engine JS backend), `code-docker` (enables Docker SDK persistent containers)
+- Workspace-friendly presets: `RustCodeTool::backend()`, `FrontendCodeTool::react()` for collaborative project builds
+
+#### adk-studio
+- Rust-first code execution: Studio live runner executes authored Rust through `adk-code` `RustSandboxExecutor` instead of returning placeholder errors
+- Generated Studio projects reuse the same authored Rust body for code nodes
+- Rust is the primary code authoring mode; JavaScript/TypeScript available as secondary scripting
+- Sandbox settings map to backend-enforceable capabilities with incompatibility surfacing
+
+#### adk-deploy
+- `adk-deploy` manifest coverage now includes telemetry, auth, guardrails, realtime, A2A, graph/HITL, plugins, skills, and richer service binding validation for self-hosted deployment workflows
+- Bundle creation now rejects asset paths that escape the project root
+- `adk-cli` deploy login now validates operator-provided bearer tokens against the external platform API and stores them in the OS credential store instead of plaintext config
+- Deployment manifests can now publish operator interaction metadata for manual, webhook, schedule, and event triggers, and Studio carries trigger configuration into that manifest for external platform consumers
+
+### Fixed
+
+#### adk-gemini
+- **Citation metadata deserialization**: `CitationMetadata` now deserializes correctly when Gemini returns `citationMetadata` without a `citationSources` field. Previously this caused a deserialization error for grounded responses using Google Search or URL context tools. ([#178](https://github.com/zavora-ai/adk-rust/issues/178))
+- **Vertex AI global endpoint**: The Vertex endpoint builder now correctly produces `https://aiplatform.googleapis.com` when `location` is `"global"`, instead of the invalid `https://global-aiplatform.googleapis.com`. No custom base URL workaround is needed for Gemini 3 models on the global endpoint. ([#179](https://github.com/zavora-ai/adk-rust/issues/179))
+- **Feature-gated Google Cloud dependencies**: `google-cloud-aiplatform-v1`, `google-cloud-auth`, and `google-cloud-gax` are now optional dependencies behind the `vertex` feature flag. Users who only need the Gemini Developer API (AI Studio) can compile with `--no-default-features --features studio` to avoid pulling in heavy Google Cloud crates. Default features include `vertex` for backward compatibility. ([#181](https://github.com/zavora-ai/adk-rust/issues/181))
+
+### Added
+
+#### adk-gemini
+- **Gemini 3 thinking level**: `ThinkingLevel` enum (`Minimal`, `Low`, `Medium`, `High`) and `thinking_level` field on `ThinkingConfig` for native Gemini 3 level-based reasoning control. Builder method `with_thinking_level()` available on both `ThinkingConfig` and `ContentBuilder`. Existing Gemini 2.5 budget-based APIs (`with_thinking_budget`, `with_dynamic_thinking`) are unchanged. ([#177](https://github.com/zavora-ai/adk-rust/issues/177))
+
+#### adk-model
+- **OpenAI reasoning effort**: `ReasoningEffort` enum (`Low`, `Medium`, `High`) and `reasoning_effort` field on `OpenAIConfig` for OpenAI reasoning models (o1, o3, etc.). Builder method `with_reasoning_effort()` wires through to the `reasoning_effort` API field. Also available on `OpenAICompatibleConfig` for compatible providers. ([#177](https://github.com/zavora-ai/adk-rust/issues/177))
+
+#### adk-core
+- **Typed identity module**: New `adk_core::identity` module with `AppName`, `UserId`, `SessionId`, `InvocationId` newtypes, `AdkIdentity` (session-scoped triple), `ExecutionIdentity` (per-invocation capsule), and `IdentityError`. All leaf types implement `Clone`, `Debug`, `Eq`, `Hash`, `Ord`, `Display`, `AsRef<str>`, `Borrow<str>`, `FromStr`, `TryFrom<&str>`, `TryFrom<String>`, `Serialize`, `Deserialize` with `#[serde(transparent)]`. Validation rejects empty values, null bytes, and strings exceeding 512 bytes. `SessionId::generate()` and `InvocationId::generate()` produce UUID-based identifiers.
+- **Typed context helpers on `ReadonlyContext`**: Additive default methods `try_app_name()`, `try_user_id()`, `try_session_id()`, `try_invocation_id()`, `try_identity()`, and `try_execution_identity()` parse existing string fields into typed identifiers, returning `IdentityError` on invalid values instead of panicking.
+- **Typed session helpers on `Session`**: Additive default methods `try_app_name()`, `try_user_id()`, `try_session_id()`, and `try_identity()` on the `Session` trait.
+- **`ToolOutcome` struct**: Structured metadata for tool execution results — carries tool name, arguments, success/failure, execution duration, optional error message, and retry attempt number. Available via `CallbackContext::tool_outcome()` in after-tool callbacks.
+- **`tool_outcome()` default method on `CallbackContext`**: Returns `Option<ToolOutcome>`, defaulting to `None` for full backward compatibility with existing implementors.
+- **`RetryBudget` struct**: Configurable retry policy with `max_retries` and `delay` for automatic tool retry on transient failures.
+- **`OnToolErrorCallback` type**: Promoted to `adk-core` as the canonical, framework-level tool-error callback type. Previously defined locally in `adk-agent` and `adk-plugin`.
+- **`AfterToolCallbackFull` type**: V2 rich after-tool callback aligned with Python/Go ADK model. Receives `(CallbackContext, Tool, args, response)` and can inspect or replace the tool response sent to the LLM.
+
+#### adk-auth
+- **Typed auth-boundary user validation**: `JwtRequestContextExtractor` now validates the mapped auth user against `UserId` before returning `RequestContext`. Invalid mapped user IDs now fail with `RequestContextError::ExtractionFailed` instead of slipping deeper into the runtime. `ClaimsMapper` remains responsible only for claim selection.
+
+#### adk-agent
+- **`.toolset()` builder method**: `LlmAgentBuilder` now accepts `Arc<dyn Toolset>` for dynamic per-invocation tool resolution. Toolsets are resolved at the start of each `run()` call using the current `ReadonlyContext`, enabling context-dependent tools (e.g., per-user browser sessions). Static `.tool()` and dynamic `.toolset()` can be mixed freely.
+- **`.default_retry_budget()` and `.tool_retry_budget()`**: Configure automatic retry for transient tool failures. Per-tool budgets override the default. When retries are exhausted, the final failure is reported to the LLM.
+- **`.circuit_breaker_threshold()`**: Tracks consecutive tool failures per tool name within an invocation. After the configured threshold, the tool is temporarily disabled with an immediate error response to the LLM. Resets at the start of each new invocation.
+- **`.on_tool_error()` callback**: Register fallback handlers invoked when a tool fails (after retries are exhausted). Callbacks can return a substitute `Value` used as the function response, or `None` to pass through to the next handler. If no handler provides a fallback, the original error is reported to the LLM.
+- **`ToolOutcome` in after-tool callbacks**: `CallbackContext::tool_outcome()` returns structured execution metadata (success, duration, error, attempt number) without requiring JSON error parsing.
+- **`.after_tool_callback_full()` builder method**: V2 rich after-tool callback that receives the tool, arguments, and response. Runs after the legacy `AfterToolCallback` chain. Aligned with Python/Go ADK model for first-class tool result handling.
+
+#### adk-realtime
+- **`.toolset()` builder method on `RealtimeAgentBuilder`**: Dynamic per-invocation tool resolution for realtime voice agents, matching `LlmAgentBuilder` parity. Toolsets are resolved before the realtime session connects, with the same duplicate detection (static-vs-toolset, toolset-vs-toolset) as `LlmAgent`. Static `.tool()` and dynamic `.toolset()` can be mixed freely. Fully backward compatible.
+
+#### adk-tool
+- **Toolset composition utilities**: Three reusable toolset wrappers for complex agent configurations:
+  - `FilteredToolset` — wraps any toolset and filters tools by predicate (allow-list via `string_predicate()` or custom `ToolPredicate`)
+  - `MergedToolset` — combines multiple toolsets into one with first-wins deduplication and `tracing::warn` on name conflicts
+  - `PrefixedToolset` — namespaces all tool names with a configurable prefix to avoid collisions across toolsets
+  All three implement `Toolset` and compose with any toolset implementation including `McpToolset` and `BrowserToolset`.
+
+#### adk-browser
+- **Pool-backed `BrowserToolset`**: `BrowserToolset::with_pool()` and `BrowserToolset::with_pool_and_profile()` constructors resolve per-user browser sessions from `BrowserSessionPool` using the invocation's `user_id`. This is the production path for multi-tenant browser agents. Existing `new()` and `with_profile()` constructors are unchanged.
+- **`try_all_tools()`**: Explicit error handling for pool-backed toolsets where `all_tools()` cannot resolve without context.
+- **`ensure_started()` auto-recovery**: All public `BrowserSession` methods that access the WebDriver now go through a centralized lifecycle-safe path that auto-starts or reconnects stale sessions. Tools no longer fail with "Browser session not started" errors. Explicit `start()` and `stop()` remain for manual lifecycle control.
+- **Navigation tool page context**: `NavigateTool`, `BackTool`, `ForwardTool`, and `RefreshTool` now include a `"page"` field in responses with the current page context (URL, title, truncated text), matching the format used by interaction tools. If page context capture fails, a `"page_context_error"` field is included instead.
+
+#### Examples
+- **`browser_pool`**: Multi-tenant pool-backed `BrowserToolset` with per-user session isolation, `.toolset()` API, and `ensure_started()` auto-recovery. Requires `--features browser`.
+- **`resilient_agent`**: Retry budgets, circuit breakers, `on_tool_error` fallback callbacks, and `ToolOutcome` metadata in after-tool callbacks. Uses mock flaky/broken/reliable tools.
+- **`toolset_composition`**: `FilteredToolset`, `MergedToolset`, `PrefixedToolset`, `BasicToolset`, `string_predicate`, and full composition chains.
+- **`server_compaction`**: `ServerConfig::with_compaction()`, `EventsCompactionConfig`, and custom `BaseEventsSummarizer`.
+
+#### adk-session
+- **Typed identity session APIs**: `AppendEventRequest` struct and `SessionService::append_event_for_identity()` default method accept `AdkIdentity` for unambiguous session-scoped event appending. Additive `get_for_identity()` and `delete_for_identity()` default methods for typed get/delete. All 8 backends (InMemory, SQLite, PostgreSQL, Redis, MongoDB, Firestore, Neo4j, Vertex) override `append_event_for_identity()`. `InMemorySessionService` uses `AdkIdentity` as its internal HashMap key instead of delimiter-concatenated strings. Typed request helpers on `GetRequest`, `DeleteRequest`, `ListRequest`, and `CreateRequest`.
+- **Legacy append guidance**: The typed `AdkIdentity` path is now the preferred session API for new code. The legacy `append_event(&str, ...)` method remains for migration only and is the first legacy identity API slated for deprecation after internal callers complete their move to typed identity.
+- **Schema migrations**: Versioned, forward-only migration system for all database backends (SQLite, PostgreSQL, MongoDB, Neo4j). Each backend tracks applied migrations in a `_schema_migrations` registry table with checksums and timestamps. Migrations are idempotent — calling `migrate()` on an already-current database is a no-op.
+- **Baseline detection**: `migrate()` detects pre-existing tables created before the migration system and registers them as already applied, avoiding destructive re-creation.
+- **`schema_version()` method**: All database backends expose `schema_version()` returning the current migration version (0 if no migrations applied).
+- **`from_pool()` / `pool()` methods on `SqliteSessionService`**: Parity with other backends for constructing from an existing connection pool and accessing the inner pool.
+
+#### adk-memory
+- **Schema migrations**: Same versioned migration system as `adk-session`, applied to all `adk-memory` database backends (SQLite, PostgreSQL, MongoDB, Neo4j). Each backend has its own migration registry and version tracking.
+- **`schema_version()` method**: All database backends expose `schema_version()`.
+
+#### adk-cli / adk-server
+- **Production app builder path**: `Launcher` now exposes `build_app()` and `build_app_with_a2a(...)`, making it possible to reuse ADK server wiring while still owning the Axum router, middleware stack, and serve loop in production applications.
+- **Launcher A2A and telemetry configuration**: `Launcher` now supports `with_a2a_base_url(...)` and `with_telemetry(...)`, so A2A routes and telemetry initialization are configurable instead of hardcoded in serve mode.
+- **Server runtime passthrough**: `ServerConfig` now exposes `with_compaction(...)` and `with_context_cache(...)`, and the SSE + A2A runtime controllers now forward those settings into `RunnerConfig`.
+
+#### adk-runner
+- **Typed execution identity**: `InvocationContext` stores `ExecutionIdentity` internally, providing validated typed identity throughout the agent execution lifecycle. Event creation and agent transfers use typed invocation identity after boundary parsing.
+
+#### adk-server / adk-studio
+- **Boundary identity parsing**: HTTP and Studio ingress handlers parse user-controlled `app_name`, `user_id`, and `session_id` values into typed identifiers at the boundary, returning `400 Bad Request` on invalid input instead of panicking downstream.
+
+### Changed
+
+#### adk-session
+- **`DatabaseSessionService` renamed to `SqliteSessionService`**: The struct, source file (`database.rs` → `sqlite.rs`), and test file (`database_tests.rs` → `sqlite_tests.rs`) have been renamed to accurately reflect the SQLite-only backend. A deprecated type alias `DatabaseSessionService` is provided for backward compatibility. The `database` feature flag remains as an alias for `sqlite`.
 
 #### adk-realtime
 - **LiveKit re-exports**: Replaced glob `pub use livekit::prelude::*` with explicit type re-exports in `adk_realtime::livekit` module, eliminating semver hazard from upstream prelude changes
 - **Breaking**: Removed crate-level `pub use ::livekit` and `pub use ::livekit_api` re-exports that collided with the `livekit` module namespace — use `adk_realtime::livekit::{AccessToken, VideoGrants}` instead of `adk_realtime::livekit_api::access_token::{AccessToken, VideoGrants}`
 - Added `AudioFrame` re-export to `adk_realtime::livekit` for downstream audio processing
 
+#### adk-core
+- **`ToolOutcome` struct**: Structured metadata for tool execution results — carries tool name, arguments, success/failure, execution duration, optional error message, and retry attempt number. Available via `CallbackContext::tool_outcome()` in after-tool callbacks.
+- **`tool_outcome()` default method on `CallbackContext`**: Returns `Option<ToolOutcome>`, defaulting to `None` for full backward compatibility with existing implementors.
+- **`RetryBudget` struct**: Configurable retry policy with `max_retries` and `delay` for automatic tool retry on transient failures.
+- **`OnToolErrorCallback` type**: Promoted to `adk-core` as the canonical, framework-level tool-error callback type shared by `adk-agent` and `adk-plugin`.
+- **`AfterToolCallbackFull` type**: V2 rich after-tool callback aligned with Python/Go ADK model. Receives `(CallbackContext, Tool, args, response)` and can inspect or replace the tool response sent to the LLM.
+
+#### adk-agent
+- **`.toolset()` builder method**: `LlmAgentBuilder` now accepts `Arc<dyn Toolset>` for dynamic per-invocation tool resolution. Toolsets are resolved at the start of each `run()` call using the current `ReadonlyContext`, enabling context-dependent tools (e.g., per-user browser sessions). Static `.tool()` and dynamic `.toolset()` can be mixed freely.
+- **`.default_retry_budget()` and `.tool_retry_budget()`**: Configure automatic retry for transient tool failures. Per-tool budgets override the default. When retries are exhausted, the final failure is reported to the LLM.
+- **`.circuit_breaker_threshold()`**: Tracks consecutive tool failures per tool name within an invocation. After the configured threshold, the tool is temporarily disabled with an immediate error response to the LLM. Resets at the start of each new invocation.
+- **`.on_tool_error()` callback**: Register fallback handlers invoked when a tool fails (after retries are exhausted). Callbacks can return a substitute `Value` used as the function response, or `None` to pass through to the next handler.
+- **`.after_tool_callback_full()` builder method**: V2 rich after-tool callback that receives the tool, arguments, and response. Aligned with Python/Go ADK model for first-class tool result handling.
+
+#### adk-browser
+- **`BrowserSessionPool`**: Multi-tenant session pool for managing browser sessions across concurrent agent invocations. Supports configurable pool size and session lifecycle management.
+- **`BrowserProfile` enum**: Pool-aware toolset creation with `Shared` (pooled) and `Dedicated` (single-session) profiles.
+- **JS string escaping**: `escape_js_string()` utility for safe JavaScript injection in evaluate tool.
+
+#### adk-tool
+- **Toolset composition**: `adk-tool/src/toolset/` module with composable toolset support for combining multiple tool sources.
+
+#### adk-cli
+- **Global provider flags**: `--provider`, `--model`, `--api-key` flags available on all subcommands.
+- **First-run setup wizard**: Interactive provider selection and API key configuration on first launch.
+- **Default to REPL**: Running `adk-rust` with no subcommand starts an interactive session.
+
+### Fixed
+
+#### adk-auth
+- **Cross-role deny precedence**: `AccessControl` and `SsoAccessControl` now evaluate deny rules across all assigned roles before allowing access. Previously, the first allowing role could bypass a deny from another role, making authorization depend on role assignment order.
+- **Verified email identity mapping**: `ClaimsMapper::user_id_from_email()` and `TokenClaims::user_id()` now require `email_verified == true` before using an email claim as the effective identity. Unverified emails fall back to `sub`.
+- **SSO validation hardening**: OIDC discovery now rejects issuer mismatches, provider validators now enforce `nbf`, JWKS refreshes are single-flight with a cache key cap, and Azure multi-tenant validation can be restricted with `with_allowed_tenants(...)`.
+- **Auth bridge implementation**: The `auth-bridge` feature now provides `JwtRequestContextExtractor` for `adk-server`, mapping Bearer tokens into `RequestContext` with validated user IDs and JWT scopes.
+- **FileAuditSink mutex poisoning**: `FileAuditSink` now recovers from poisoned mutex instead of panicking, using `unwrap_or_else` to reclaim the lock guard.
+- **TokenError placeholder**: `TokenError::placeholder()` now returns a proper error variant instead of a debug-only stub that could mask real token validation failures.
+- **ScopedTool/ProtectedTool macro consolidation**: Eliminated duplicated trait implementations between `ScopedTool` and `ProtectedTool` by extracting shared logic into macros, reducing maintenance surface.
+
+#### adk-gemini
+- **FunctionCall serialization**: Fixed `thought_signature` leaking inside the `functionCall` JSON object when serializing `Part::FunctionCall`. The Gemini API expects `thoughtSignature` at the Part level only, not inside `functionCall`. The conversion layer in `adk-model` now correctly places the signature at the Part level and omits it from the inner `FunctionCall` struct.
+- **Broken serde attributes**: Restored missing `#[serde(skip_serializing_if = "Option::is_none")]` attributes on `FunctionDeclaration`, `FunctionCall`, `FunctionResponse`, and `ToolConfig` fields that had been replaced with invalid placeholder text, causing compilation failures.
+- **Non-object tool responses**: Gemini-backed agents now normalize array/scalar tool outputs into a valid object payload before sending `functionResponse.response`. This fixes Gemini tool-calling flows for tools like `RagTool` that naturally return lists of results.
+
+#### adk-agent / adk-runner / adk-core
+- **Multi-agent transfer round-trip**: Sub-agents can now transfer back to their parent and peer agents. The runner computes valid transfer targets (parent + peers) and passes them via `RunConfig::transfer_targets`. Previously, sub-agents with no children had an empty valid-agents list, making all transfers fail.
+- **Transfer chain support**: The runner now loops on transfers (up to 10 hops) instead of handling only a single transfer. This enables coordinator → sub-agent → coordinator round-trip patterns.
+- **Sub-agent conversation history isolation**: When a sub-agent is invoked via transfer, it now receives filtered conversation history that excludes other agents' events. Previously, the sub-agent's LLM saw the parent's tool calls mapped as "model" role, causing it to think work was already done and return immediately.
+- **Transfer tool schema**: The `transfer_to_agent` tool declaration now includes valid target names as an `enum` in the JSON schema and lists them in the description, so the LLM knows which agents it can transfer to.
+- **`disallow_transfer_to_parent` / `disallow_transfer_to_peers`**: These `LlmAgent` builder flags are now wired up and actively filter the transfer targets list. Previously they were stored but never checked.
+- **Agent runtime hardening**: `LlmAgent` now enforces configured input/output guardrails at runtime, normalizes XML tool-call markup before tool dispatch, preserves unique `function_call_id` values per tool invocation, and rejects duplicate sub-agent names during builder validation.
+- **Workflow agent contract fixes**: `ParallelAgent` and `ConditionalAgent` now execute their registered before/after callbacks, `IncludeContents::None` now keeps only the current user turn plus injected instructions, and `LoopAgent` maintains local conversation history for direct workflow use outside `adk-runner`.
+- **Deterministic LLM routing**: `LlmConditionalAgent` now resolves overlapping route labels deterministically, preferring exact matches and then the longest matching label.
+
+#### adk-browser
+- **Centralized `ensure_started()`**: All WebDriver-accessing methods now go through a single session initialization path, eliminating race conditions on first use.
+- **Navigation tool response alignment**: `navigate` tool returns consistent structured responses across success and error paths.
+- **Tool hardening**: `click`, `evaluate`, `extract`, `type_text`, and `wait` tools handle edge cases (stale elements, timeouts, JS errors) with actionable error messages.
+
+#### adk-model
+- **DeepSeek reasoning content**: `Part::Thinking` content is now correctly placed in `reasoning_content` field instead of being mixed into the main `content` field.
+
+#### adk-server
+- **Compaction config wiring**: `compaction_config` from server config is now passed through to `RunnerConfig` in both runtime and A2A controllers.
+
+#### adk-agent (Added)
+- **Regression test suite**: New `review_regression_tests.rs` with 10 targeted tests covering guardrail runtime enforcement, parallel/conditional agent callbacks, function_call_id uniqueness, `IncludeContents::None` filtering, deterministic LLM routing, sub-agent name uniqueness validation, and tool_call_markup normalization.
+- **README accuracy**: Updated README to reflect all current builder methods, correct examples, and accurate feature descriptions.
+- **Guardrail example update**: Removed outdated caveat from `guardrail_agent` example that incorrectly stated guardrails were builder-only; example now documents that guardrails are enforced at runtime.
+
 ## [0.3.2] - 2026-02-17
 
 ### ⭐ Highlights
-- **8 New LLM Providers**: Fireworks AI, Together AI, Mistral AI, Perplexity, Cerebras, SambaNova (OpenAI-compatible), Amazon Bedrock (AWS SDK), and Azure AI Inference (reqwest) — all feature-gated with contract tests
+- **9 New LLM Providers**: xAI, Fireworks AI, Together AI, Mistral AI, Perplexity, Cerebras, SambaNova (OpenAI-compatible), Amazon Bedrock (AWS SDK), and Azure AI Inference (reqwest) — all feature-gated with contract tests
 - **adk-rag**: New RAG crate with modular pipeline, 6 vector store backends (InMemory, Qdrant, LanceDB, pgvector, SurrealDB), 3 chunking strategies, and agentic retrieval via `RagTool`
 - **Generation Config on Agents**: `LlmAgentBuilder` now supports `temperature()`, `top_p()`, `top_k()`, `max_output_tokens()` convenience methods and full `generate_content_config()` for agent-level LLM tuning
 - **Gemini Model URL Fix**: `Model::Custom` variant now correctly prefixes `models/` in API URLs, fixing `PerformRequestNew` errors for all Gemini tool-calling examples

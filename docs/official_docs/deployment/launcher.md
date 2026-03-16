@@ -144,6 +144,23 @@ In server mode, the Launcher:
 3. Starts an HTTP server with REST API endpoints
 4. Serves a web UI for interacting with your agent
 
+### Production Escape Hatch
+
+For production applications that need custom routes, middleware, metrics, or
+ownership of the serve loop, use `build_app()`:
+
+```rust
+let app = Launcher::new(Arc::new(agent))
+    .with_a2a_base_url("https://agent.example.com")
+    .build_app()?;
+
+let app = app.merge(my_admin_routes());
+let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await?;
+axum::serve(listener, app).await?;
+```
+
+Use `build_app_with_a2a(...)` if you want the A2A routes enabled explicitly.
+
 ### Available Endpoints
 
 The server exposes the following REST API endpoints:
@@ -242,7 +259,7 @@ cargo run -- serve --port 8080
 2. **Error Handling**: Use proper error handling with `Result` types
 3. **Graceful Shutdown**: The Launcher handles Ctrl+C gracefully in both modes
 4. **Port Selection**: Choose ports that don't conflict with other services (default 8080)
-5. **Session Management**: In production, consider using `DatabaseSessionService` instead of in-memory sessions
+5. **Session Management**: In production, consider using `PostgresSessionService` or `SqliteSessionService` instead of in-memory sessions
 
 ## Related
 

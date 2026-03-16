@@ -15,7 +15,7 @@ Add dependencies to `Cargo.toml`:
 
 ```toml
 [dependencies]
-adk-rust = "0.3.0"
+adk-rust = "0.4"
 tokio = { version = "1.40", features = ["full"] }
 dotenvy = "0.15"
 ```
@@ -422,7 +422,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     );
 
     // LLM classifies the query and routes accordingly
-    let router = LlmConditionalAgent::new("smart_router", model.clone())
+    let router = LlmConditionalAgent::builder("smart_router", model.clone())
         .instruction("Classify the user's question as exactly ONE of: \
                      'technical' (coding, debugging, architecture), \
                      'general' (facts, knowledge, how-to), \

@@ -8,6 +8,11 @@ const CONVENTION_FILES: &[&str] =
 const IGNORED_DIRS: &[&str] =
     &[".git", ".hg", ".svn", "target", "node_modules", ".next", "dist", "build", "coverage"];
 
+/// Discovers all Markdown skill files under the `.skills` directory at `root`.
+///
+/// Recursively walks `.skills/`, collecting `.md` files and excluding known
+/// support subdirectories (e.g. `references/`, `agents/`, `scripts/`). Returns
+/// an empty list if the `.skills` directory does not exist.
 pub fn discover_skill_files(root: impl AsRef<Path>) -> SkillResult<Vec<PathBuf>> {
     let skill_root = root.as_ref().join(".skills");
     if !skill_root.exists() {
@@ -22,6 +27,7 @@ pub fn discover_skill_files(root: impl AsRef<Path>) -> SkillResult<Vec<PathBuf>>
         .filter_map(std::result::Result::ok)
         .filter(|entry| entry.file_type().is_file())
         .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "md"))
+        .filter(|entry| !is_skill_support_file(entry.path()))
         .map(|entry| entry.into_path())
         .collect::<Vec<_>>();
 
@@ -29,6 +35,21 @@ pub fn discover_skill_files(root: impl AsRef<Path>) -> SkillResult<Vec<PathBuf>>
     Ok(files)
 }
 
+/// Returns true for files inside known supporting subdirectories of a skill
+/// (e.g. `references/`, `agents/`, `scripts/`). These are resources referenced
+/// by a `SKILL.md`, not skill definitions themselves.
+fn is_skill_support_file(path: &Path) -> bool {
+    const SUPPORT_DIRS: &[&str] = &["references", "agents", "scripts"];
+    path.components().any(|c| {
+        let s = c.as_os_str().to_string_lossy();
+        SUPPORT_DIRS.iter().any(|d| s.eq_ignore_ascii_case(d))
+    })
+}
+
+/// Discovers all instruction files: both `.skills/` Markdown files and
+/// convention files (e.g. `AGENTS.md`, `CLAUDE.md`, `SOUL.md`) found anywhere
+/// in the project tree, excluding common build and dependency directories.
+/// Results are sorted and deduplicated.
 pub fn discover_instruction_files(root: impl AsRef<Path>) -> SkillResult<Vec<PathBuf>> {
     let root = root.as_ref();
     let mut files = discover_skill_files(root)?;
