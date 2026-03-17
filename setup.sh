@@ -29,7 +29,47 @@ install_nix() {
     else
         log "Installing Nix..."
         curl -L https://nixos.org/nix/install | sh -s -- --daemon
-        log "Nix installed. Please restart your shell or run: source /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh"
+        log "Nix installed."
+    fi
+
+    # Source the Nix profile so commands are immediately available in this script
+    if [ -e '/nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh' ]; then
+        . '/nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh'
+    elif [ -e "$HOME/.nix-profile/etc/profile.d/nix.sh" ]; then
+        . "$HOME/.nix-profile/etc/profile.d/nix.sh"
+    fi
+
+    # Configure Nix to enable flakes and nix-command
+    log "Configuring Nix..."
+    local nix_conf_dir
+    if [ "${EUID:-$(id -u)}" -eq 0 ]; then
+        nix_conf_dir="/etc/nix"
+    else
+        nix_conf_dir="$HOME/.config/nix"
+    fi
+    mkdir -p "$nix_conf_dir"
+    local nix_conf="$nix_conf_dir/nix.conf"
+    if [ ! -f "$nix_conf" ] || ! grep -q "experimental-features" "$nix_conf"; then
+        echo "experimental-features = nix-command flakes" >> "$nix_conf"
+    fi
+    if ! grep -q "warn-dirty = false" "$nix_conf"; then
+        echo "warn-dirty = false" >> "$nix_conf"
+    fi
+    if ! grep -q "accept-flake-config = true" "$nix_conf"; then
+        echo "accept-flake-config = true" >> "$nix_conf"
+    fi
+
+    # Ensure Nix is available in non-login bash shells
+    touch "$HOME/.bashrc"
+    if ! grep -q "nix-daemon.sh" "$HOME/.bashrc" && ! grep -q "nix.sh" "$HOME/.bashrc"; then
+        echo "" >> "$HOME/.bashrc"
+        echo "# Load Nix environment for non-login shells" >> "$HOME/.bashrc"
+        echo "if [ -e '/nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh' ]; then" >> "$HOME/.bashrc"
+        echo "  . '/nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh'" >> "$HOME/.bashrc"
+        echo "elif [ -e \"\$HOME/.nix-profile/etc/profile.d/nix.sh\" ]; then" >> "$HOME/.bashrc"
+        echo "  . \"\$HOME/.nix-profile/etc/profile.d/nix.sh\"" >> "$HOME/.bashrc"
+        echo "fi" >> "$HOME/.bashrc"
+        log "Added Nix profile sourcing to .bashrc"
     fi
 }
 
