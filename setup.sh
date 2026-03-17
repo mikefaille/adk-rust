@@ -8,7 +8,7 @@
 set -euo pipefail
 
 # --- Constants ---
-DEVENV_VERSION="v1.11.2"
+DEVENV_VERSION="v2.0.5"
 
 # --- Helper Functions ---
 
@@ -49,11 +49,17 @@ install_cachix() {
 install_devenv() {
     log "Checking devenv installation"
     if command_exists "devenv"; then
-        log "devenv is already installed."
+        local current_version
+        current_version=$(devenv --version 2>/dev/null | head -n1 || echo "unknown")
+        if [[ "$current_version" == *"${DEVENV_VERSION#v}"* ]]; then
+            log "devenv $DEVENV_VERSION is already installed."
+            return
+        fi
+        log "Updating devenv to $DEVENV_VERSION..."
     else
         log "Installing devenv $DEVENV_VERSION..."
-        nix profile install "github:cachix/devenv/$DEVENV_VERSION"
     fi
+    nix profile install "github:cachix/devenv/$DEVENV_VERSION"
 }
 
 install_direnv() {
