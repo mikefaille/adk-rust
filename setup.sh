@@ -29,7 +29,14 @@ install_nix() {
     else
         log "Installing Nix..."
         curl -L https://nixos.org/nix/install | sh -s -- --daemon
-        log "Nix installed. Please restart your shell or run: source /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh"
+        if [ -e "/nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh" ]; then
+            source "/nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh"
+        elif [ -e "$HOME/.nix-profile/etc/profile.d/nix.sh" ]; then
+            source "$HOME/.nix-profile/etc/profile.d/nix.sh"
+        fi
+        export PATH="$HOME/.nix-profile/bin:/nix/var/nix/profiles/default/bin:$PATH"
+        hash -r
+        log "Nix installed and environment configured."
     fi
 }
 
@@ -52,7 +59,7 @@ install_devenv() {
         log "devenv is already installed."
     else
         log "Installing devenv $DEVENV_VERSION..."
-        nix profile install "github:cachix/devenv/$DEVENV_VERSION"
+        nix profile install --extra-experimental-features "nix-command flakes" "github:cachix/devenv/$DEVENV_VERSION#devenv"
     fi
 }
 
