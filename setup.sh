@@ -61,16 +61,21 @@ install_nix() {
 
     # Ensure Nix is available in non-login bash shells
     touch "$HOME/.bashrc"
-    if ! grep -q "nix-daemon.sh" "$HOME/.bashrc" && ! grep -q "nix.sh" "$HOME/.bashrc"; then
+    if ! grep -q "nix-daemon.sh" "$HOME/.bashrc" && ! grep -q "nix.sh" "$HOME/.bashrc" && ! grep -q "\$HOME/.nix-profile/bin" "$HOME/.bashrc"; then
         echo "" >> "$HOME/.bashrc"
         echo "# Load Nix environment for non-login shells" >> "$HOME/.bashrc"
         echo "if [ -e '/nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh' ]; then" >> "$HOME/.bashrc"
         echo "  . '/nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh'" >> "$HOME/.bashrc"
         echo "elif [ -e \"\$HOME/.nix-profile/etc/profile.d/nix.sh\" ]; then" >> "$HOME/.bashrc"
         echo "  . \"\$HOME/.nix-profile/etc/profile.d/nix.sh\"" >> "$HOME/.bashrc"
+        echo "else" >> "$HOME/.bashrc"
+        echo "  export PATH=\"\$HOME/.nix-profile/bin:/nix/var/nix/profiles/default/bin:\$PATH\"" >> "$HOME/.bashrc"
         echo "fi" >> "$HOME/.bashrc"
         log "Added Nix profile sourcing to .bashrc"
     fi
+
+    # Generic PATH fallback for the current script execution
+    export PATH="$HOME/.nix-profile/bin:/nix/var/nix/profiles/default/bin:$PATH"
 }
 
 install_cachix() {
