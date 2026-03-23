@@ -17,6 +17,8 @@ use std::sync::{Arc, RwLock, atomic::AtomicBool};
 pub struct MutableSession {
     /// The original session snapshot (for metadata like id, app_name, user_id)
     inner: Arc<dyn AdkSession>,
+    /// Cached typed identity built from the inner session's string accessors
+    cached_identity: AdkIdentity,
     /// Shared mutable state - updated when events are processed
     /// This is the key difference from the old SessionAdapter which used immutable snapshots
     state: Arc<RwLock<HashMap<String, serde_json::Value>>>,
@@ -32,9 +34,16 @@ impl MutableSession {
         let initial_state = session.state().all();
         // Clone the initial events
         let initial_events = session.events().all();
+        // Build typed identity from the session's string accessors
+        let cached_identity = AdkIdentity::new(
+            AppName::new_unchecked(session.app_name()),
+            UserId::new_unchecked(session.user_id()),
+            SessionId::new_unchecked(session.id()),
+        );
 
         Self {
             inner: session,
+            cached_identity,
             state: Arc::new(RwLock::new(initial_state)),
             events: Arc::new(RwLock::new(initial_events)),
         }
@@ -140,15 +149,15 @@ impl MutableSession {
 
 impl adk_core::Session for MutableSession {
     fn id(&self) -> &str {
-        self.inner.id()
+        &self.cached_identity.session_id
     }
 
     fn app_name(&self) -> &str {
-        self.inner.app_name()
+        &self.cached_identity.app_name
     }
 
     fn user_id(&self) -> &str {
-        self.inner.user_id()
+        &self.cached_identity.user_id
     }
 
     fn state(&self) -> &dyn adk_core::State {
@@ -311,11 +320,11 @@ impl InvocationContext {
 #[async_trait]
 impl ReadonlyContext for InvocationContext {
     fn invocation_id(&self) -> &str {
-        self.identity.invocation_id.as_ref()
+        &self.identity.invocation_id
     }
 
     fn agent_name(&self) -> &str {
-        self.agent.name()
+        &self.identity.agent_name
     }
 
     fn user_id(&self) -> &str {
@@ -324,15 +333,19 @@ impl ReadonlyContext for InvocationContext {
         // bridge), the authenticated user_id takes precedence over the
         // session-scoped identity. This keeps auth binding explicit and
         // ensures the runtime reflects the verified caller identity.
-        self.request_context.as_ref().map_or(self.identity.adk.user_id.as_ref(), |rc| &rc.user_id)
+        if let Some(ref rc) = self.request_context {
+            &rc.user_id
+        } else {
+            &self.identity.adk.user_id
+        }
     }
 
     fn app_name(&self) -> &str {
-        self.identity.adk.app_name.as_ref()
+        &self.identity.adk.app_name
     }
 
     fn session_id(&self) -> &str {
-        self.identity.adk.session_id.as_ref()
+        &self.identity.adk.session_id
     }
 
     fn branch(&self) -> &str {

@@ -1,4 +1,4 @@
-use crate::{CallbackContext, EventActions, MemoryEntry, Result};
+use crate::{CallbackContext, EventActions, MemoryEntry, ReadonlyContext, Result};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -51,7 +51,7 @@ pub trait Tool: Send + Sync {
 }
 
 #[async_trait]
-pub trait ToolContext: CallbackContext {
+pub trait ToolContext: CallbackContext + ReadonlyContext {
     fn function_call_id(&self) -> &str;
     /// Get the current event actions. Returns an owned copy for thread safety.
     fn actions(&self) -> EventActions;
@@ -153,7 +153,7 @@ mod tests {
     #[allow(dead_code)]
     struct TestContext {
         content: Content,
-        config: RunConfig,
+        exec_id: ExecutionIdentity,
         actions: Mutex<EventActions>,
     }
 
@@ -161,7 +161,16 @@ mod tests {
         fn new() -> Self {
             Self {
                 content: Content::new("user"),
-                config: RunConfig::default(),
+                exec_id: ExecutionIdentity {
+                    adk: AdkIdentity::new(
+                        AppName::try_from("test-app").unwrap(),
+                        UserId::try_from("user-1").unwrap(),
+                        SessionId::try_from("session-1").unwrap(),
+                    ),
+                    invocation_id: InvocationId::try_from("inv-1").unwrap(),
+                    branch: "main".to_string(),
+                    agent_name: "test-agent".to_string(),
+                },
                 actions: Mutex::new(EventActions::default()),
             }
         }
@@ -169,23 +178,8 @@ mod tests {
 
     #[async_trait]
     impl ReadonlyContext for TestContext {
-        fn invocation_id(&self) -> &str {
-            "test"
-        }
-        fn agent_name(&self) -> &str {
-            "test"
-        }
-        fn user_id(&self) -> &str {
-            "user"
-        }
-        fn app_name(&self) -> &str {
-            "app"
-        }
-        fn session_id(&self) -> &str {
-            "session"
-        }
-        fn branch(&self) -> &str {
-            ""
+        fn execution_identity(&self) -> &ExecutionIdentity {
+            &self.exec_id
         }
         fn user_content(&self) -> &Content {
             &self.content

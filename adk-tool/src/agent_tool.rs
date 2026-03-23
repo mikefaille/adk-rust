@@ -28,9 +28,11 @@
 //! ```
 
 use adk_core::{
-    Agent, Artifacts, CallbackContext, Content, Event, InvocationContext, Memory, Part,
-    ReadonlyContext, Result, RunConfig, Session, State, Tool, ToolContext,
+    AdkIdentity, Agent, Artifacts, CallbackContext, Content, Event, ExecutionIdentity,
+    InvocationContext, Memory, Part, ReadonlyContext, Result, RunConfig, Session, State, Tool,
+    ToolContext,
 };
+use adk_core::identity::{AppName, InvocationId, SessionId, UserId};
 use async_trait::async_trait;
 use futures::StreamExt;
 use serde_json::{Value, json};
@@ -325,7 +327,7 @@ struct AgentToolInvocationContext {
     parent_ctx: Arc<dyn ToolContext>,
     agent: Arc<dyn Agent>,
     user_content: Content,
-    invocation_id: String,
+    identity: ExecutionIdentity,
     ended: Arc<AtomicBool>,
     forward_artifacts: bool,
     session: Arc<AgentToolSession>,
@@ -338,12 +340,23 @@ impl AgentToolInvocationContext {
         user_content: Content,
         forward_artifacts: bool,
     ) -> Self {
-        let invocation_id = format!("agent-tool-{}", uuid::Uuid::new_v4());
+        let invocation_id_str = format!("agent-tool-{}", uuid::Uuid::new_v4());
+        let parent_identity = parent_ctx.execution_identity();
+        let identity = ExecutionIdentity {
+            adk: AdkIdentity {
+                session_id: SessionId::new_unchecked(&invocation_id_str),
+                app_name: parent_identity.adk.app_name.clone(),
+                user_id: parent_identity.adk.user_id.clone(),
+            },
+            invocation_id: InvocationId::new_unchecked(&invocation_id_str),
+            agent_name: agent.name().to_string(),
+            branch: String::new(),
+        };
         Self {
             parent_ctx,
             agent,
             user_content,
-            invocation_id,
+            identity,
             ended: Arc::new(AtomicBool::new(false)),
             forward_artifacts,
             session: Arc::new(AgentToolSession::new()),
@@ -353,29 +366,8 @@ impl AgentToolInvocationContext {
 
 #[async_trait]
 impl ReadonlyContext for AgentToolInvocationContext {
-    fn invocation_id(&self) -> &str {
-        &self.invocation_id
-    }
-
-    fn agent_name(&self) -> &str {
-        self.agent.name()
-    }
-
-    fn user_id(&self) -> &str {
-        self.parent_ctx.user_id()
-    }
-
-    fn app_name(&self) -> &str {
-        self.parent_ctx.app_name()
-    }
-
-    fn session_id(&self) -> &str {
-        // Use a unique session ID for the sub-agent
-        &self.invocation_id
-    }
-
-    fn branch(&self) -> &str {
-        ""
+    fn execution_identity(&self) -> &ExecutionIdentity {
+        &self.identity
     }
 
     fn user_content(&self) -> &Content {
@@ -423,30 +415,27 @@ impl InvocationContext for AgentToolInvocationContext {
 
 // Minimal session for sub-agent execution
 struct AgentToolSession {
-    id: String,
+    cached_identity: AdkIdentity,
     state: std::sync::RwLock<HashMap<String, Value>>,
 }
 
 impl AgentToolSession {
     fn new() -> Self {
+        let session_id_str = format!("agent-tool-session-{}", uuid::Uuid::new_v4());
         Self {
-            id: format!("agent-tool-session-{}", uuid::Uuid::new_v4()),
+            cached_identity: AdkIdentity {
+                session_id: SessionId::new_unchecked(&session_id_str),
+                app_name: AppName::new_unchecked("agent-tool"),
+                user_id: UserId::new_unchecked("agent-tool-user"),
+            },
             state: Default::default(),
         }
     }
 }
 
 impl Session for AgentToolSession {
-    fn id(&self) -> &str {
-        &self.id
-    }
-
-    fn app_name(&self) -> &str {
-        "agent-tool"
-    }
-
-    fn user_id(&self) -> &str {
-        "agent-tool-user"
+    fn identity(&self) -> &AdkIdentity {
+        &self.cached_identity
     }
 
     fn state(&self) -> &dyn State {

@@ -209,12 +209,12 @@ impl Runner {
                     .await
                 {
                     Ok(Some(content)) => {
-                        let mut early_event = adk_core::Event::new(ctx.invocation_id());
+                        let mut early_event = adk_core::Event::new(ctx.invocation_id().as_ref());
                         early_event.author = agent_to_run.name().to_string();
                         early_event.llm_response.content = Some(content);
 
                         ctx.mutable_session().append_event(early_event.clone());
-                        if let Err(e) = session_service.append_event(ctx.session_id(), early_event.clone()).await {
+                        if let Err(e) = session_service.append_event(ctx.session_id().as_ref(), early_event.clone()).await {
                             yield Err(e);
                             return;
                         }
@@ -281,7 +281,7 @@ impl Runner {
             }
 
             // Append user message to session service (persistent storage)
-            let mut user_event = adk_core::Event::new(ctx.invocation_id());
+            let mut user_event = adk_core::Event::new(ctx.invocation_id().as_ref());
             user_event.author = "user".to_string();
             user_event.llm_response.content = Some(effective_user_content.clone());
 
@@ -289,7 +289,7 @@ impl Runner {
             // Note: adk_session::Event is a re-export of adk_core::Event, so we can use it directly
             ctx.mutable_session().append_event(user_event.clone());
 
-            if let Err(e) = session_service.append_event(ctx.session_id(), user_event).await {
+            if let Err(e) = session_service.append_event(ctx.session_id().as_ref(), user_event).await {
                 if let Some(manager) = plugin_manager.as_ref() {
                     manager.run_after_run(ctx.clone() as Arc<dyn adk_core::InvocationContext>).await;
                 }
@@ -372,12 +372,12 @@ impl Runner {
             // Run the agent with instrumentation (ADK-Go style attributes)
             let agent_span = tracing::info_span!(
                 "agent.execute",
-                "gcp.vertex.agent.invocation_id" = ctx.invocation_id(),
-                "gcp.vertex.agent.session_id" = ctx.session_id(),
-                "gcp.vertex.agent.event_id" = ctx.invocation_id(), // Use invocation_id as event_id for agent spans
-                "gen_ai.conversation.id" = ctx.session_id(),
-                "adk.app_name" = ctx.app_name(),
-                "adk.user_id" = ctx.user_id(),
+                "gcp.vertex.agent.invocation_id" = %ctx.invocation_id(),
+                "gcp.vertex.agent.session_id" = %ctx.session_id(),
+                "gcp.vertex.agent.event_id" = %ctx.invocation_id(), // Use invocation_id as event_id for agent spans
+                "gen_ai.conversation.id" = %ctx.session_id(),
+                "adk.app_name" = %ctx.app_name(),
+                "adk.user_id" = %ctx.user_id(),
                 "agent.name" = %agent_to_run.name(),
                 "adk.skills.selected_name" = %selected_skill_name,
                 "adk.skills.selected_id" = %selected_skill_id
@@ -457,7 +457,7 @@ impl Runner {
                         // constraint. The final chunk (partial=false) carries the
                         // complete accumulated content.
                         if !event.llm_response.partial {
-                            if let Err(e) = session_service.append_event(ctx.session_id(), event.clone()).await {
+                            if let Err(e) = session_service.append_event(ctx.session_id().as_ref(), event.clone()).await {
                                 if let Some(manager) = plugin_manager.as_ref() {
                                     manager.run_after_run(ctx.clone() as Arc<dyn adk_core::InvocationContext>).await;
                                 }
@@ -613,7 +613,7 @@ impl Runner {
                             transfer_ctx.mutable_session().append_event(event.clone());
 
                             if !event.llm_response.partial {
-                                if let Err(e) = session_service.append_event(ctx.session_id(), event.clone()).await {
+                                if let Err(e) = session_service.append_event(ctx.session_id().as_ref(), event.clone()).await {
                                     if let Some(manager) = plugin_manager.as_ref() {
                                         manager.run_after_run(ctx.clone() as Arc<dyn adk_core::InvocationContext>).await;
                                     }
@@ -675,7 +675,7 @@ impl Runner {
                             Ok(Some(compaction_event)) => {
                                 // Persist the compaction event
                                 if let Err(e) = session_service.append_event(
-                                    ctx.session_id(),
+                                    ctx.session_id().as_ref(),
                                     compaction_event.clone(),
                                 ).await {
                                     tracing::warn!(error = %e, "Failed to persist compaction event");

@@ -45,9 +45,6 @@ pub trait ReadonlyContext: Send + Sync {
 
     /// Returns the session identifier as a typed [`SessionId`].
     ///
-    /// Parses the value returned by [`session_id()`](Self::session_id).
-    /// Returns an error if the raw string fails validation.
-    ///
     /// # Errors
     ///
     /// Returns [`AdkError::Config`](crate::AdkError::Config) when the
@@ -69,7 +66,7 @@ pub trait ReadonlyContext: Send + Sync {
         Ok(InvocationId::try_from(self.invocation_id())?)
     }
 
-    /// Returns the stable session-scoped [`AdkIdentity`] triple.
+    /// Returns a copy of the stable session-scoped [`AdkIdentity`] triple.
     ///
     /// Combines [`try_app_name()`](Self::try_app_name),
     /// [`try_user_id()`](Self::try_user_id), and
@@ -152,6 +149,7 @@ pub trait Session: Send + Sync {
     fn id(&self) -> &str;
     fn app_name(&self) -> &str;
     fn user_id(&self) -> &str;
+
     fn state(&self) -> &dyn State;
     /// Returns the conversation history from this session as Content items
     fn conversation_history(&self) -> Vec<Content>;
@@ -187,9 +185,6 @@ pub trait Session: Send + Sync {
     }
 
     /// Returns the user identifier as a typed [`UserId`].
-    ///
-    /// Parses the value returned by [`user_id()`](Self::user_id). Returns an
-    /// error if the raw string fails validation.
     ///
     /// # Errors
     ///

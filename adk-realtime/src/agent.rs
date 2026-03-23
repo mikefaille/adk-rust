@@ -57,8 +57,8 @@ use crate::events::{ServerEvent, ToolResponse};
 use adk_core::{
     AdkError, AfterAgentCallback, AfterToolCallback, Agent, BeforeAgentCallback,
     BeforeToolCallback, CallbackContext, Content, Event, EventActions, EventStream,
-    GlobalInstructionProvider, InstructionProvider, InvocationContext, MemoryEntry, Part,
-    ReadonlyContext, Result, Tool, ToolContext, Toolset,
+    ExecutionIdentity, GlobalInstructionProvider, InstructionProvider, InvocationContext,
+    MemoryEntry, Part, ReadonlyContext, Result, Tool, ToolContext, Toolset,
 };
 use async_stream::stream;
 use async_trait::async_trait;
@@ -868,28 +868,8 @@ impl RealtimeToolContext {
 
 #[async_trait]
 impl ReadonlyContext for RealtimeToolContext {
-    fn invocation_id(&self) -> &str {
-        self.parent_ctx.invocation_id()
-    }
-
-    fn agent_name(&self) -> &str {
-        self.parent_ctx.agent_name()
-    }
-
-    fn user_id(&self) -> &str {
-        self.parent_ctx.user_id()
-    }
-
-    fn app_name(&self) -> &str {
-        self.parent_ctx.app_name()
-    }
-
-    fn session_id(&self) -> &str {
-        self.parent_ctx.session_id()
-    }
-
-    fn branch(&self) -> &str {
-        self.parent_ctx.branch()
+    fn execution_identity(&self) -> &ExecutionIdentity {
+        self.parent_ctx.execution_identity()
     }
 
     fn user_content(&self) -> &Content {
