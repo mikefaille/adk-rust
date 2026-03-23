@@ -27,8 +27,11 @@
 //! ```
 
 pub mod init;
+pub mod langsmith;
 pub mod span_exporter;
 pub mod spans;
+pub mod trace_context;
+pub mod visitor;
 
 // Re-export tracing macros for convenience
 pub use tracing::{Span, debug, error, info, instrument, trace, warn};

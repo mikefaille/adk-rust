@@ -31,14 +31,27 @@ pub fn init_telemetry(service_name: &str) -> Result<(), TelemetryError> {
             .or_else(|_| EnvFilter::try_new("info"))
             .expect("Failed to create env filter");
 
+        let fmt_layer = tracing_subscriber::fmt::layer()
+            .with_target(true)
+            .with_thread_ids(true)
+            .with_line_number(true);
+
+        // Optional LangSmith integration if API key is present
+        let ls_layer = if let Ok(_api_key) = std::env::var("LANGSMITH_API_KEY") {
+            let _project =
+                std::env::var("LANGSMITH_PROJECT").unwrap_or_else(|_| "default".to_string());
+            let _endpoint = std::env::var("LANGSMITH_ENDPOINT")
+                .unwrap_or_else(|_| "https://api.smith.langchain.com".to_string());
+
+            Some(crate::langsmith::LangSmithLayer::new())
+        } else {
+            None
+        };
+
         tracing_subscriber::registry()
             .with(filter)
-            .with(
-                tracing_subscriber::fmt::layer()
-                    .with_target(true)
-                    .with_thread_ids(true)
-                    .with_line_number(true),
-            )
+            .with(fmt_layer)
+            .with(ls_layer)
             .init();
 
         tracing::info!(service.name = service_name, "telemetry initialized");
