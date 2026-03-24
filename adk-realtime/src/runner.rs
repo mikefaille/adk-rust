@@ -311,6 +311,13 @@ impl RealtimeRunner {
         guard.as_ref().map(|s| s.session_id().to_string())
     }
 
+    /// Update the session configuration.
+    pub async fn update_session(&self, config: serde_json::Value) -> Result<()> {
+        let guard = self.session.read().await;
+        let session = guard.as_ref().ok_or_else(|| RealtimeError::connection("Not connected"))?;
+        session.send_event(crate::events::ClientEvent::SessionUpdate { session: config }).await
+    }
+
     /// Send audio to the session.
     pub async fn send_audio(&self, audio_base64: &str) -> Result<()> {
         let guard = self.session.read().await;
