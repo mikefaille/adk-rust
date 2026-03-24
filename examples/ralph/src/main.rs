@@ -21,7 +21,7 @@
 
 use adk_agent::LoopAgent;
 use adk_core::Tool;
-use adk_core::types::{SessionId, UserId};
+use adk_core::types::UserId;
 use anyhow::Result;
 use colored::Colorize;
 use std::sync::{Arc, Mutex};
