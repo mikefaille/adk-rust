@@ -197,8 +197,10 @@ pub const MAX_INLINE_DATA_SIZE: usize = 10 * 1024 * 1024;
 
 /// Represents the role of the author of a message.
 #[derive(Debug, Clone, PartialEq, Eq, Display)]
+#[derive(Default)]
 pub enum Role {
     #[display("user")]
+    #[default]
     User,
     #[display("model")]
     Model,
@@ -286,12 +288,6 @@ impl Role {
             Role::Custom(s) => s == "tool" || s == "function",
             _ => false,
         }
-    }
-}
-
-impl Default for Role {
-    fn default() -> Role {
-        Role::User
     }
 }
 
