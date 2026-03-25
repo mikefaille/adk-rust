@@ -324,7 +324,7 @@ impl RealtimeRunner {
         let session = guard.as_ref().ok_or_else(|| RealtimeError::connection("Not connected"))?;
         let config_value = serde_json::to_value(&config).map_err(|e| {
             RealtimeError::config(format!(
-                "Failed to serialize session update config: {e}. Ensure all SessionUpdateConfig fields implement serde::Serialize and contain valid values (config: {config:?})"
+                "Failed to serialize session update config: {e}. Ensure all SessionUpdateConfig fields implement serde::Serialize and contain valid values"
             ))
         })?;
         session
@@ -373,13 +373,14 @@ impl RealtimeRunner {
     ///
     /// ```rust,ignore
     /// use adk_realtime::events::ServerEvent;
+    /// use tracing::{info, error};
     ///
     /// async fn process_events(runner: &adk_realtime::RealtimeRunner) {
     ///     while let Some(event) = runner.next_event().await {
     ///         match event {
-    ///             Ok(ServerEvent::SpeechStarted { .. }) => println!("User is speaking"),
-    ///             Ok(_) => println!("Received other event"),
-    ///             Err(e) => eprintln!("Error: {}", e),
+    ///             Ok(ServerEvent::SpeechStarted { .. }) => info!("User is speaking"),
+    ///             Ok(_) => info!("Received other event"),
+    ///             Err(e) => error!("Error: {e}"),
     ///         }
     ///     }
     /// }

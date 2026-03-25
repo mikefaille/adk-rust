@@ -3,6 +3,7 @@
 use crate::audio::AudioEncoding;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::ops::{Deref, DerefMut};
 
 /// Voice Activity Detection mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -201,6 +202,20 @@ pub struct RealtimeConfig {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct SessionUpdateConfig(pub RealtimeConfig);
+
+impl Deref for SessionUpdateConfig {
+    type Target = RealtimeConfig;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl DerefMut for SessionUpdateConfig {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
 
 impl From<RealtimeConfig> for SessionUpdateConfig {
     fn from(config: RealtimeConfig) -> Self {
