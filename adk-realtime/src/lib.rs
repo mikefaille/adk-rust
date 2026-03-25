@@ -85,7 +85,6 @@ pub mod events;
 pub mod model;
 pub mod runner;
 pub mod session;
-pub mod universal;
 
 // Provider implementations
 #[cfg(feature = "openai")]
