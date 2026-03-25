@@ -312,7 +312,9 @@ impl RealtimeRunner {
         let config_value = serde_json::to_value(config).map_err(|e| {
             RealtimeError::config(format!("Failed to serialize session update config: {}", e))
         })?;
-        session.send_event(crate::events::ClientEvent::SessionUpdate { session: config_value }).await
+        session
+            .send_event(crate::events::ClientEvent::SessionUpdate { session: config_value })
+            .await
     }
 
     /// Send audio to the session.
