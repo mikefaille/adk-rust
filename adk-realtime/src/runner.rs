@@ -386,11 +386,7 @@ impl RealtimeRunner {
     /// ```
     pub async fn next_event(&self) -> Option<Result<ServerEvent>> {
         let guard = self.session.read().await;
-        if let Some(session) = guard.as_ref() {
-            session.next_event().await
-        } else {
-            Some(Err(RealtimeError::connection("Not connected")))
-        }
+        if let Some(session) = guard.as_ref() { session.next_event().await } else { None }
     }
 
     /// Send a tool response to the session.
