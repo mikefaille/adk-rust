@@ -93,24 +93,12 @@ pub struct ToolDefinition {
     /// JSON Schema for parameters.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parameters: Option<Value>,
-    /// Internal purpose (Ignored by the LLM adapter).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub purpose: Option<String>,
-    /// Does this tool require authorization (e.g. verified PIN)?
-    #[serde(default)]
-    pub requires_auth: bool,
 }
 
 impl ToolDefinition {
     /// Create a new tool definition.
     pub fn new(name: impl Into<String>) -> Self {
-        Self {
-            name: name.into(),
-            description: None,
-            parameters: None,
-            purpose: None,
-            requires_auth: false,
-        }
+        Self { name: name.into(), description: None, parameters: None }
     }
 
     /// Set the tool description.
@@ -122,18 +110,6 @@ impl ToolDefinition {
     /// Set the parameters schema.
     pub fn with_parameters(mut self, schema: Value) -> Self {
         self.parameters = Some(schema);
-        self
-    }
-
-    /// Set the internal purpose of the tool.
-    pub fn with_purpose(mut self, purpose: impl Into<String>) -> Self {
-        self.purpose = Some(purpose.into());
-        self
-    }
-
-    /// Set whether the tool requires authorization.
-    pub fn requires_auth(mut self, requires: bool) -> Self {
-        self.requires_auth = requires;
         self
     }
 }
