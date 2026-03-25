@@ -306,11 +306,26 @@ impl RealtimeRunner {
     }
 
     /// Update the session configuration.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use adk_realtime::config::{SessionUpdateConfig, RealtimeConfig};
+    ///
+    /// async fn example(runner: &adk_realtime::RealtimeRunner) {
+    ///     let update = SessionUpdateConfig(
+    ///         RealtimeConfig::default().with_instruction("You are now a pirate.")
+    ///     );
+    ///     runner.update_session(update).await.unwrap();
+    /// }
+    /// ```
     pub async fn update_session(&self, config: SessionUpdateConfig) -> Result<()> {
         let guard = self.session.read().await;
         let session = guard.as_ref().ok_or_else(|| RealtimeError::connection("Not connected"))?;
-        let config_value = serde_json::to_value(config).map_err(|e| {
-            RealtimeError::config(format!("Failed to serialize session update config: {}", e))
+        let config_value = serde_json::to_value(&config).map_err(|e| {
+            RealtimeError::config(format!(
+                "Failed to serialize session update config: {e}. Ensure all SessionUpdateConfig fields implement serde::Serialize and contain valid values (config: {config:?})"
+            ))
         })?;
         session
             .send_event(crate::events::ClientEvent::SessionUpdate { session: config_value })
@@ -353,6 +368,22 @@ impl RealtimeRunner {
     }
 
     /// Get the next raw event from the session.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use adk_realtime::events::ServerEvent;
+    ///
+    /// async fn process_events(runner: &adk_realtime::RealtimeRunner) {
+    ///     while let Some(event) = runner.next_event().await {
+    ///         match event {
+    ///             Ok(ServerEvent::SpeechStarted { .. }) => println!("User is speaking"),
+    ///             Ok(_) => println!("Received other event"),
+    ///             Err(e) => eprintln!("Error: {}", e),
+    ///         }
+    ///     }
+    /// }
+    /// ```
     pub async fn next_event(&self) -> Option<Result<ServerEvent>> {
         let guard = self.session.read().await;
         if let Some(session) = guard.as_ref() {
@@ -363,6 +394,21 @@ impl RealtimeRunner {
     }
 
     /// Send a tool response to the session.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use adk_realtime::events::ToolResponse;
+    /// use serde_json::json;
+    ///
+    /// async fn example(runner: &adk_realtime::RealtimeRunner) {
+    ///     let response = ToolResponse {
+    ///         call_id: "call_123".to_string(),
+    ///         output: json!({"temperature": 72}),
+    ///     };
+    ///     runner.send_tool_response(response).await.unwrap();
+    /// }
+    /// ```
     pub async fn send_tool_response(&self, response: ToolResponse) -> Result<()> {
         let guard = self.session.read().await;
         let session = guard.as_ref().ok_or_else(|| RealtimeError::connection("Not connected"))?;
