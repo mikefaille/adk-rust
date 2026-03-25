@@ -3,7 +3,7 @@
 //! This module provides the bridge between realtime audio sessions and
 //! the ADK agent framework, handling tool execution and event routing.
 
-use crate::config::{RealtimeConfig, ToolDefinition};
+use crate::config::{RealtimeConfig, SessionUpdateConfig, ToolDefinition};
 use crate::error::{RealtimeError, Result};
 use crate::events::{ServerEvent, ToolCall, ToolResponse};
 use crate::model::BoxedModel;
@@ -305,6 +305,16 @@ impl RealtimeRunner {
         guard.as_ref().map(|s| s.session_id().to_string())
     }
 
+    /// Update the session configuration.
+    pub async fn update_session(&self, config: SessionUpdateConfig) -> Result<()> {
+        let guard = self.session.read().await;
+        let session = guard.as_ref().ok_or_else(|| RealtimeError::connection("Not connected"))?;
+        let config_value = serde_json::to_value(config).map_err(|e| {
+            RealtimeError::config(format!("Failed to serialize session update config: {}", e))
+        })?;
+        session.send_event(crate::events::ClientEvent::SessionUpdate { session: config_value }).await
+    }
+
     /// Send audio to the session.
     pub async fn send_audio(&self, audio_base64: &str) -> Result<()> {
         let guard = self.session.read().await;
@@ -338,6 +348,23 @@ impl RealtimeRunner {
         let guard = self.session.read().await;
         let session = guard.as_ref().ok_or_else(|| RealtimeError::connection("Not connected"))?;
         session.interrupt().await
+    }
+
+    /// Get the next raw event from the session.
+    pub async fn next_event(&self) -> Option<Result<ServerEvent>> {
+        let guard = self.session.read().await;
+        if let Some(session) = guard.as_ref() {
+            session.next_event().await
+        } else {
+            Some(Err(RealtimeError::connection("Not connected")))
+        }
+    }
+
+    /// Send a tool response to the session.
+    pub async fn send_tool_response(&self, response: ToolResponse) -> Result<()> {
+        let guard = self.session.read().await;
+        let session = guard.as_ref().ok_or_else(|| RealtimeError::connection("Not connected"))?;
+        session.send_tool_response(response).await
     }
 
     /// Run the event loop, processing events until disconnected.

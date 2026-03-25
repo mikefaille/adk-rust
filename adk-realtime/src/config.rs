@@ -174,6 +174,67 @@ pub struct RealtimeConfig {
     pub extra: Option<Value>,
 }
 
+/// Configuration payload for partially updating an active session.
+///
+/// This is the preferred, type-safe mechanism for dynamic FSM state transitions.
+/// For example, if a user traverses an IVR tree and needs a new system instruction
+/// (a "persona shift") or a new set of active tools, you simply construct a
+/// `SessionUpdateConfig` setting *only* those fields. The provider (like Gemini)
+/// will merge this delta into the active session without dropping the audio connection
+/// or resetting the `temperature` or `voice` back to defaults.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SessionUpdateConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instruction: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub voice: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub modalities: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_audio_format: Option<AudioEncoding>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_audio_format: Option<AudioEncoding>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub turn_detection: Option<VadConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<ToolDefinition>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_choice: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_audio_transcription: Option<TranscriptionConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_response_output_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cached_content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extra: Option<Value>,
+}
+
+impl From<RealtimeConfig> for SessionUpdateConfig {
+    fn from(config: RealtimeConfig) -> Self {
+        Self {
+            model: config.model,
+            instruction: config.instruction,
+            voice: config.voice,
+            modalities: config.modalities,
+            input_audio_format: config.input_audio_format,
+            output_audio_format: config.output_audio_format,
+            turn_detection: config.turn_detection,
+            tools: config.tools,
+            tool_choice: config.tool_choice,
+            input_audio_transcription: config.input_audio_transcription,
+            temperature: config.temperature,
+            max_response_output_tokens: config.max_response_output_tokens,
+            cached_content: config.cached_content,
+            extra: config.extra,
+        }
+    }
+}
+
 /// Transcription configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TranscriptionConfig {
