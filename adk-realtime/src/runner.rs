@@ -226,7 +226,7 @@ impl RealtimeRunnerBuilder {
             model,
             config,
             runner_config: self.runner_config,
-            tools: self.tools,
+            tools: Arc::new(RwLock::new(self.tools)),
             event_handler: self.event_handler.unwrap_or_else(|| Arc::new(NoOpEventHandler)),
             session: Arc::new(RwLock::new(None)),
         })
@@ -274,7 +274,7 @@ pub struct RealtimeRunner {
     model: BoxedModel,
     config: RealtimeConfig,
     runner_config: RunnerConfig,
-    tools: HashMap<String, (ToolDefinition, Arc<dyn ToolHandler>)>,
+    tools: Arc<RwLock<HashMap<String, (ToolDefinition, Arc<dyn ToolHandler>)>>>,
     event_handler: Arc<dyn EventHandler>,
     session: Arc<RwLock<Option<BoxedSession>>>,
 }
@@ -303,6 +303,50 @@ impl RealtimeRunner {
     pub async fn session_id(&self) -> Option<String> {
         let guard = self.session.read().await;
         guard.as_ref().map(|s| s.session_id().to_string())
+    }
+
+    /// Update the session configuration.
+    pub async fn update_session(&self, config: serde_json::Value) -> Result<()> {
+        let guard = self.session.read().await;
+        let session = guard.as_ref().ok_or_else(|| RealtimeError::connection("Not connected"))?;
+        session.send_event(crate::events::ClientEvent::SessionUpdate { session: config }).await
+    }
+
+    /// Get the next raw event from the session.
+    pub async fn next_event(&self) -> Option<Result<ServerEvent>> {
+        let guard = self.session.read().await;
+        if let Some(session) = guard.as_ref() {
+            session.next_event().await
+        } else {
+            Some(Err(RealtimeError::connection("Not connected")))
+        }
+    }
+
+    /// Update the tool registry dynamically.
+    pub async fn update_tools(
+        &self,
+        tools: HashMap<String, (ToolDefinition, Arc<dyn ToolHandler>)>,
+    ) -> Result<()> {
+        // Update local handlers
+        {
+            let mut guard = self.tools.write().await;
+            *guard = tools;
+        }
+
+        // Send session update to model if connected
+        let guard = self.session.read().await;
+        if let Some(session) = guard.as_ref() {
+            let tools_guard = self.tools.read().await;
+            let tool_defs: Vec<ToolDefinition> =
+                tools_guard.values().map(|(def, _)| def.clone()).collect();
+            session
+                .send_event(crate::events::ClientEvent::SessionUpdate {
+                    session: serde_json::json!({ "tools": tool_defs }),
+                })
+                .await?;
+        }
+
+        Ok(())
     }
 
     /// Send audio to the session.
@@ -406,7 +450,10 @@ impl RealtimeRunner {
 
     /// Execute a tool call and optionally send the response.
     async fn execute_tool_call(&self, call_id: &str, name: &str, arguments: &str) -> Result<()> {
-        let handler = self.tools.get(name).map(|(_, h)| h.clone());
+        let handler = {
+            let guard = self.tools.read().await;
+            guard.get(name).map(|(_, h)| h.clone())
+        };
 
         let result = if let Some(handler) = handler {
             let args: serde_json::Value = serde_json::from_str(arguments)
@@ -445,6 +492,130 @@ impl RealtimeRunner {
         if let Some(session) = guard.as_ref() {
             session.close().await?;
         }
+        Ok(())
+    }
+
+    /// Get the names of currently registered tools (for testing).
+    #[cfg(test)]
+    pub async fn tool_names(&self) -> Vec<String> {
+        let guard = self.tools.read().await;
+        guard.keys().cloned().collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::audio::AudioChunk;
+    use crate::events::ClientEvent;
+    use futures::Stream;
+    use std::pin::Pin;
+
+    struct MockSession {
+        events: Arc<RwLock<Vec<ClientEvent>>>,
+    }
+
+    #[async_trait]
+    impl crate::session::RealtimeSession for MockSession {
+        fn session_id(&self) -> &str {
+            "mock-session"
+        }
+        fn is_connected(&self) -> bool {
+            true
+        }
+        async fn send_audio(&self, _audio: &AudioChunk) -> Result<()> {
+            Ok(())
+        }
+        async fn send_audio_base64(&self, _audio_base64: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn send_text(&self, _text: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn send_tool_response(&self, _response: ToolResponse) -> Result<()> {
+            Ok(())
+        }
+        async fn commit_audio(&self) -> Result<()> {
+            Ok(())
+        }
+        async fn clear_audio(&self) -> Result<()> {
+            Ok(())
+        }
+        async fn create_response(&self) -> Result<()> {
+            Ok(())
+        }
+        async fn interrupt(&self) -> Result<()> {
+            Ok(())
+        }
+        async fn send_event(&self, event: ClientEvent) -> Result<()> {
+            self.events.write().await.push(event);
+            Ok(())
+        }
+        async fn next_event(&self) -> Option<Result<ServerEvent>> {
+            None
+        }
+        fn events(&self) -> Pin<Box<dyn Stream<Item = Result<ServerEvent>> + Send + '_>> {
+            Box::pin(futures::stream::empty())
+        }
+        async fn close(&self) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    struct MockModel;
+
+    #[async_trait]
+    impl crate::model::RealtimeModel for MockModel {
+        fn provider(&self) -> &str {
+            "mock"
+        }
+        fn model_id(&self) -> &str {
+            "mock-model"
+        }
+        fn supported_input_formats(&self) -> Vec<crate::audio::AudioFormat> {
+            vec![]
+        }
+        fn supported_output_formats(&self) -> Vec<crate::audio::AudioFormat> {
+            vec![]
+        }
+        fn available_voices(&self) -> Vec<&str> {
+            vec![]
+        }
+        async fn connect(&self, _config: RealtimeConfig) -> Result<BoxedSession> {
+            Ok(Box::new(MockSession { events: Arc::new(RwLock::new(Vec::new())) }))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_runner_tool_swapping() -> Result<()> {
+        let runner = RealtimeRunner::builder()
+            .model(Arc::new(MockModel) as BoxedModel)
+            .tool_fn(ToolDefinition::new("tool1"), |_| Ok(serde_json::json!({"res": "ok"})))
+            .build()?;
+
+        runner.connect().await?;
+
+        // Verify initial tool
+        {
+            let names = runner.tool_names().await;
+            assert!(names.contains(&"tool1".to_string()));
+        }
+
+        // Swap tools
+        let mut new_tools = HashMap::new();
+        let handler: Arc<dyn ToolHandler> =
+            Arc::new(FnToolHandler::new(|_| Ok(serde_json::json!({"res": "new"}))));
+        new_tools.insert("tool2".to_string(), (ToolDefinition::new("tool2"), handler));
+
+        runner.update_tools(new_tools).await?;
+
+        // Verify swapped tool
+        {
+            let names = runner.tool_names().await;
+            assert!(!names.contains(&"tool1".to_string()));
+            assert!(names.contains(&"tool2".to_string()));
+        }
+
         Ok(())
     }
 }
