@@ -174,23 +174,30 @@ pub struct RealtimeConfig {
     pub extra: Option<Value>,
 }
 
-/// Configuration payload for partially updating an active session.
+/// A delta payload for safely updating an active realtime session.
 ///
-/// Under the hood, this is a newtype wrapper around `RealtimeConfig` to prevent
-/// duplicating structs while keeping strong typing. Because `RealtimeConfig`
-/// already sets all fields as `Option<T>` with `#[serde(skip_serializing_if = "Option::is_none")]`,
-/// omitting a field does not reset or override it on the server.
+/// Wraps `RealtimeConfig` to prevent struct duplication. Since all fields are
+/// `Option<T>` and skip serialization if `None`, omitting fields preserves
+/// the server's active state.
 ///
-/// **⚠️ WARNING:** You must construct a *fresh*, empty `RealtimeConfig` containing only
-/// the fields you wish to change. Do not wrap your initial startup config, as sending
-/// immutable fields (like `model`) mid-session will cause the provider API to reject the update.
+/// **⚠️ WARNING:** You must construct a *fresh* configuration containing **only**
+/// the fields to modify. Wrapping your original startup config will resend
+/// immutable fields (like `model`), causing the provider to reject the update.
 ///
-/// This is the preferred, type-safe mechanism for dynamic Finite State Machine (FSM) state transitions.
-/// For example, if a user traverses an IVR tree and needs a new system instruction
-/// (a "persona shift") or a new set of active tools, you simply construct a
-/// `SessionUpdateConfig` setting *only* those fields. The provider (like Gemini)
-/// will merge this delta into the active session without dropping the audio connection
-/// or resetting the `temperature` or `voice` back to defaults.
+/// This is the idiomatic mechanism for dynamic Finite State Machine (FSM) state
+/// transitions, allowing seamless "persona shifts" or tool swaps without
+/// dropping the audio connection.
+///
+/// # Example
+///
+/// ```rust
+/// use adk_realtime::config::{SessionUpdateConfig, RealtimeConfig};
+///
+/// // Update *only* the instruction mid-session.
+/// let delta = SessionUpdateConfig(
+///     RealtimeConfig::default().with_instruction("You are now a travel agent.")
+/// );
+/// ```
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct SessionUpdateConfig(pub RealtimeConfig);
