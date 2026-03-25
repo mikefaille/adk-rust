@@ -3,7 +3,7 @@
 //! This module provides the bridge between realtime audio sessions and
 //! the ADK agent framework, handling tool execution and event routing.
 
-use crate::config::{RealtimeConfig, ToolDefinition};
+use crate::config::{RealtimeConfig, SessionUpdateConfig, ToolDefinition};
 use crate::error::{RealtimeError, Result};
 use crate::events::{ServerEvent, ToolCall, ToolResponse};
 use crate::model::BoxedModel;
@@ -312,10 +312,15 @@ impl RealtimeRunner {
     }
 
     /// Update the session configuration.
-    pub async fn update_session(&self, config: serde_json::Value) -> Result<()> {
+    pub async fn update_session(&self, config: SessionUpdateConfig) -> Result<()> {
         let guard = self.session.read().await;
         let session = guard.as_ref().ok_or_else(|| RealtimeError::connection("Not connected"))?;
-        session.send_event(crate::events::ClientEvent::SessionUpdate { session: config }).await
+
+        let config_value = serde_json::to_value(config).map_err(|e| {
+            RealtimeError::config(format!("Failed to serialize session update config: {}", e))
+        })?;
+
+        session.send_event(crate::events::ClientEvent::SessionUpdate { session: config_value }).await
     }
 
     /// Send audio to the session.
