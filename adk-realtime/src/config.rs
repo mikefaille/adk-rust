@@ -178,6 +178,13 @@ pub struct RealtimeConfig {
 ///
 /// Unlike `RealtimeConfig`, all fields are inherently `Option<T>` to
 /// ensure that omitting a field does not reset or override it on the server.
+///
+/// This is the preferred, type-safe mechanism for dynamic FSM state transitions.
+/// For example, if a user traverses an IVR tree and needs a new system instruction
+/// (a "persona shift") or a new set of active tools, you simply construct a
+/// `SessionUpdateConfig` setting *only* those fields. The provider (like Gemini)
+/// will merge this delta into the active session without dropping the audio connection
+/// or resetting the `temperature` or `voice` back to defaults.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SessionUpdateConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
