@@ -316,9 +316,7 @@ impl RealtimeRunner {
         let guard = self.session.read().await;
         let session = guard.as_ref().ok_or_else(|| RealtimeError::connection("Not connected"))?;
 
-        let config_value = serde_json::to_value(config).map_err(|e| {
-            RealtimeError::config(format!("Failed to serialize session update config: {}", e))
-        })?;
+        let config_value = serde_json::to_value(config.0)?;
 
         session.send_event(crate::events::ClientEvent::SessionUpdate { session: config_value }).await
     }
@@ -364,7 +362,7 @@ impl RealtimeRunner {
         if let Some(session) = guard.as_ref() {
             session.next_event().await
         } else {
-            Some(Err(RealtimeError::connection("Not connected")))
+            None
         }
     }
 
