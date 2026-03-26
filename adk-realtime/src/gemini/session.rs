@@ -158,8 +158,12 @@ struct GeminiFunctionResponse {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct GeminiClientContent {
-    turns: Vec<GeminiTurn>,
-    turn_complete: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    turns: Option<Vec<GeminiTurn>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session_update: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    turn_complete: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -519,11 +523,12 @@ impl RealtimeSession for GeminiRealtimeSession {
             realtime_input: None,
             tool_response: None,
             client_content: Some(GeminiClientContent {
-                turns: vec![GeminiTurn {
+                turns: Some(vec![GeminiTurn {
                     role: "user".to_string(),
                     parts: vec![GeminiPart { text: Some(text.to_string()), inline_data: None }],
-                }],
-                turn_complete: true,
+                }]),
+                session_update: None,
+                turn_complete: Some(true),
             }),
         };
         self.send_raw(&msg).await
@@ -569,8 +574,25 @@ impl RealtimeSession for GeminiRealtimeSession {
         Ok(()) // Gemini handles interruption via VAD
     }
 
-    async fn send_event(&self, _event: ClientEvent) -> Result<()> {
-        Ok(()) // Raw events not directly supported
+    async fn send_event(&self, event: ClientEvent) -> Result<()> {
+        match event {
+            ClientEvent::SessionUpdate { session } => {
+                let msg = GeminiClientMessage {
+                    setup: None,
+                    realtime_input: None,
+                    tool_response: None,
+                    client_content: Some(GeminiClientContent {
+                        turns: None,
+                        session_update: Some(session),
+                        turn_complete: None,
+                    }),
+                };
+                self.send_raw(&msg).await
+            }
+            _ => {
+                Ok(()) // Other raw events not directly supported
+            }
+        }
     }
 
     async fn next_event(&self) -> Option<Result<ServerEvent>> {

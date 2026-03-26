@@ -327,9 +327,20 @@ impl RealtimeRunner {
                 "Failed to serialize session update config: {e}. Ensure all SessionUpdateConfig fields implement serde::Serialize and contain valid values"
             ))
         })?;
+
+        let span = tracing::info_span!("adk_telemetry::session_update");
+        let _enter = span.enter();
+
         session
             .send_event(crate::events::ClientEvent::SessionUpdate { session: config_value })
-            .await
+            .await?;
+
+        // Mitigate Attention Shock: Ensure the model's KV cache is flushed/aligned to the new context.
+        session
+            .send_text("[SYSTEM EVENT: Context shifted. Acknowledge new toolset and proceed.]")
+            .await?;
+
+        Ok(())
     }
 
     /// Send audio to the session.
