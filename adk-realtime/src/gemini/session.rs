@@ -572,13 +572,15 @@ impl RealtimeSession for GeminiRealtimeSession {
     async fn send_event(&self, event: ClientEvent) -> Result<()> {
         match event {
             ClientEvent::Message { role, parts } => {
-                let gemini_parts: Vec<GeminiPart> = parts.into_iter().map(|p| match p {
-                    adk_core::types::Part::Text { text } => GeminiPart {
-                        text: Some(text),
-                        inline_data: None,
-                    },
-                    _ => GeminiPart { text: Some("".to_string()), inline_data: None },
-                }).collect();
+                let gemini_parts: Vec<GeminiPart> = parts
+                    .into_iter()
+                    .map(|p| match p {
+                        adk_core::types::Part::Text { text } => {
+                            GeminiPart { text: Some(text), inline_data: None }
+                        }
+                        _ => GeminiPart { text: Some("".to_string()), inline_data: None },
+                    })
+                    .collect();
 
                 let (gemini_role, mut final_parts) = match role.to_lowercase().as_str() {
                     "system" => {
@@ -589,7 +591,7 @@ impl RealtimeSession for GeminiRealtimeSession {
                             }
                         }
                         ("user".to_string(), modified_parts)
-                    },
+                    }
                     "user" => ("user".to_string(), gemini_parts),
                     "model" | "assistant" => ("model".to_string(), gemini_parts),
                     _ => ("user".to_string(), gemini_parts),
@@ -600,17 +602,14 @@ impl RealtimeSession for GeminiRealtimeSession {
                     realtime_input: None,
                     tool_response: None,
                     client_content: Some(GeminiClientContent {
-                        turns: vec![GeminiTurn {
-                            role: gemini_role,
-                            parts: final_parts,
-                        }],
+                        turns: vec![GeminiTurn { role: gemini_role, parts: final_parts }],
                         turn_complete: true,
                     }),
                 };
 
                 tracing::info!(role = ?role, "Injecting mid-flight context via native adk-rust types");
                 self.send_raw(&msg).await
-            },
+            }
             _ => {
                 tracing::debug!("Event type not explicitly handled by Gemini session adapter");
                 Ok(())
