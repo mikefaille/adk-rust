@@ -45,6 +45,9 @@ base64 = "0.22"
 # UUID for session IDs
 uuid.workspace = true
 
+# Telemetry for context propagation
+adk-telemetry.workspace = true
+
 # OpenAI realtime types (optional)
 async-openai = { version = "0.33", optional = true, features = ["realtime"] }
 

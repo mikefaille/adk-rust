@@ -426,6 +426,7 @@ version = "0.4.0"
 dependencies = [
  "adk-core",
  "adk-gemini",
+ "adk-telemetry",
  "async-openai",
  "async-stream",
  "async-trait",

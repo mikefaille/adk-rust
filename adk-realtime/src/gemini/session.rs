@@ -163,7 +163,7 @@ struct GeminiClientContent {
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     turn_complete: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    session_update: Option<Value>,
+    session_update: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -576,18 +576,23 @@ impl RealtimeSession for GeminiRealtimeSession {
     async fn send_event(&self, event: ClientEvent) -> Result<()> {
         match event {
             ClientEvent::SessionUpdate { session } => {
-                let trace_id = uuid::Uuid::new_v4().to_string();
-                // Extract domains from session payload on a best-effort basis
+                // Extract lineage and domains from session payload to maintain distributed trace context
+                let trace_id = session.get("trace_id").and_then(|v| v.as_str()).unwrap_or("unknown");
+                let span_id = session.get("span_id").and_then(|v| v.as_str()).unwrap_or("unknown");
                 let from_domain = session.get("from_domain").and_then(|v| v.as_str()).unwrap_or("unknown");
                 let to_domain = session.get("to_domain").and_then(|v| v.as_str()).unwrap_or("unknown");
 
                 let span = tracing::info_span!(
                     "domain_transition",
-                    trace_id = %trace_id,
                     from_domain = %from_domain,
                     to_domain = %to_domain,
                     latency_ms = tracing::field::Empty,
                 );
+
+                // Link span to the parent span ID if context is present
+                if trace_id != "unknown" && span_id != "unknown" {
+                    adk_telemetry::extract_context(&span, trace_id, span_id);
+                }
 
                 tracing::info!(parent: &span, "Initiating domain transition payload injection");
 
