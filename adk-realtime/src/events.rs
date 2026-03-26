@@ -85,6 +85,26 @@ pub enum ClientEvent {
     /// Cancel/interrupt the current response.
     #[serde(rename = "response.cancel")]
     ResponseCancel,
+
+    /// Trigger a cognitive handoff (soft reconnect) to a new domain.
+    #[serde(rename = "cognitive_handoff")]
+    CognitiveHandoff {
+        /// New system instruction.
+        new_instruction: String,
+        /// New tool definitions.
+        new_tools: Option<Vec<crate::config::ToolDefinition>>,
+        /// A summary of the previous conversation history.
+        history_summary: String,
+    },
+
+    /// A generalized message representing roles and parts.
+    #[serde(rename = "message")]
+    Message {
+        /// Role of the sender (e.g., User, System).
+        role: String,
+        /// List of content parts.
+        parts: Vec<adk_core::types::Part>,
+    },
 }
 
 /// A conversation item for text or tool responses.

@@ -229,6 +229,7 @@ impl RealtimeRunnerBuilder {
             tools: self.tools,
             event_handler: self.event_handler.unwrap_or_else(|| Arc::new(NoOpEventHandler)),
             session: Arc::new(RwLock::new(None)),
+            state: Arc::new(RwLock::new(RunnerState::Idle)),
         })
     }
 }
@@ -270,6 +271,17 @@ impl RealtimeRunnerBuilder {
 ///     Ok(())
 /// }
 /// ```
+/// Represents the execution state of the realtime runner.
+#[derive(Debug, Clone)]
+pub enum RunnerState {
+    /// Runner is idle.
+    Idle,
+    /// Runner is generating a response.
+    Generating,
+    /// Runner has received an update context request but is waiting to apply it.
+    PendingResumption(crate::config::RealtimeConfig),
+}
+
 pub struct RealtimeRunner {
     model: BoxedModel,
     config: RealtimeConfig,
@@ -277,6 +289,7 @@ pub struct RealtimeRunner {
     tools: HashMap<String, (ToolDefinition, Arc<dyn ToolHandler>)>,
     event_handler: Arc<dyn EventHandler>,
     session: Arc<RwLock<Option<BoxedSession>>>,
+    state: Arc<RwLock<RunnerState>>,
 }
 
 impl RealtimeRunner {
@@ -320,16 +333,59 @@ impl RealtimeRunner {
     /// }
     /// ```
     pub async fn update_session(&self, config: SessionUpdateConfig) -> Result<()> {
-        let guard = self.session.read().await;
-        let session = guard.as_ref().ok_or_else(|| RealtimeError::connection("Not connected"))?;
-        let config_value = serde_json::to_value(&config).map_err(|e| {
-            RealtimeError::config(format!(
-                "Failed to serialize session update config: {e}. Ensure all SessionUpdateConfig fields implement serde::Serialize and contain valid values"
-            ))
-        })?;
-        session
-            .send_event(crate::events::ClientEvent::SessionUpdate { session: config_value })
-            .await
+        let resumption_config = {
+            let guard = self.session.read().await;
+            let session =
+                guard.as_ref().ok_or_else(|| RealtimeError::connection("Not connected"))?;
+
+            match session.mutate_context(config.0.clone()).await? {
+                crate::session::ContextMutationOutcome::Applied => None,
+                crate::session::ContextMutationOutcome::RequiresResumption(new_config) => {
+                    tracing::warn!("Provider requires soft reconnect. Buffering audio...");
+                    Some(new_config)
+                }
+            }
+        };
+
+        if let Some(new_config) = resumption_config {
+            let is_idle = {
+                let guard = self.state.read().await;
+                matches!(*guard, RunnerState::Idle)
+            };
+
+            if is_idle {
+                self.execute_resumption(new_config).await?;
+            } else {
+                let mut guard = self.state.write().await;
+                *guard = RunnerState::PendingResumption(new_config);
+            }
+        } else {
+            let guard = self.session.read().await;
+            let session =
+                guard.as_ref().ok_or_else(|| RealtimeError::connection("Not connected"))?;
+            let config_value = serde_json::to_value(&config).map_err(|e| {
+                RealtimeError::config(format!(
+                    "Failed to serialize session update config: {e}. Ensure all SessionUpdateConfig fields implement serde::Serialize and contain valid values"
+                ))
+            })?;
+            session
+                .send_event(crate::events::ClientEvent::SessionUpdate { session: config_value })
+                .await?;
+        }
+
+        Ok(())
+    }
+
+    /// Internal method to execute the resumption of the connection with a new configuration.
+    async fn execute_resumption(&self, config: RealtimeConfig) -> Result<()> {
+        let mut guard = self.session.write().await;
+        if let Some(session) = guard.as_ref() {
+            let _ = session.close().await;
+        }
+
+        let new_session = self.model.connect(config).await?;
+        *guard = Some(new_session);
+        Ok(())
     }
 
     /// Send audio to the session.
@@ -386,15 +442,30 @@ impl RealtimeRunner {
     /// }
     /// ```
     pub async fn next_event(&self) -> Option<Result<ServerEvent>> {
-        let guard = self.session.read().await;
-        if let Some(session) = guard.as_ref() {
-            // Some sessions might yield inside next_event, but just in case, yield here too
-            tokio::task::yield_now().await;
-            session.next_event().await
-        } else {
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            None
+        let event = {
+            let guard = self.session.read().await;
+            if let Some(session) = guard.as_ref() { session.next_event().await } else { None }
+        };
+
+        if let Some(Ok(ServerEvent::ResponseCreated { .. })) = &event {
+            let mut state = self.state.write().await;
+            if matches!(*state, RunnerState::Idle) {
+                *state = RunnerState::Generating;
+            }
+        } else if let Some(Ok(ServerEvent::ResponseDone { .. })) = &event {
+            let mut state = self.state.write().await;
+            if let RunnerState::PendingResumption(queued_config) = state.clone() {
+                *state = RunnerState::Idle;
+                drop(state);
+                if let Err(e) = self.execute_resumption(queued_config).await {
+                    return Some(Err(e));
+                }
+            } else {
+                *state = RunnerState::Idle;
+            }
         }
+
+        event
     }
 
     /// Send a tool response to the session.
@@ -431,6 +502,8 @@ impl RealtimeRunner {
 
             match event {
                 Some(Ok(event)) => {
+                    // Note: State machine updates for ResponseCreated and ResponseDone
+                    // are now handled inherently by `next_event()` itself.
                     self.handle_event(event).await?;
                 }
                 Some(Err(e)) => {
