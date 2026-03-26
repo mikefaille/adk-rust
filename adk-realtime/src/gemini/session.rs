@@ -617,8 +617,11 @@ impl RealtimeSession for GeminiRealtimeSession {
         }
     }
 
-    async fn update_context(&self, config: crate::config::RealtimeConfig) -> Result<()> {
-        Err(crate::error::RealtimeError::RequiresReconnection(config))
+    async fn mutate_context(
+        &self,
+        config: crate::config::RealtimeConfig,
+    ) -> Result<crate::session::ContextMutationOutcome> {
+        Ok(crate::session::ContextMutationOutcome::RequiresResumption(config))
     }
 
     async fn next_event(&self) -> Option<Result<ServerEvent>> {

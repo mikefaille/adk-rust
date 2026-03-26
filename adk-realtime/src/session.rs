@@ -7,6 +7,16 @@ use async_trait::async_trait;
 use futures::Stream;
 use std::pin::Pin;
 
+/// Result of an attempt to update the session configuration mid-flight.
+#[derive(Debug, Clone)]
+pub enum ContextMutationOutcome {
+    /// The update was applied natively over the active connection.
+    Applied,
+    /// The provider does not support native mid-flight updates for these
+    /// parameters. A reconnect with the provided configuration is required.
+    RequiresResumption(crate::config::RealtimeConfig),
+}
+
 /// A real-time bidirectional streaming session.
 ///
 /// This trait provides a unified interface for real-time voice/audio sessions
@@ -74,7 +84,10 @@ pub trait RealtimeSession: Send + Sync {
     async fn send_event(&self, event: ClientEvent) -> Result<()>;
 
     /// Attempt to update the session parameters mid-flight.
-    async fn update_context(&self, config: crate::config::RealtimeConfig) -> Result<()>;
+    async fn mutate_context(
+        &self,
+        config: crate::config::RealtimeConfig,
+    ) -> Result<ContextMutationOutcome>;
 
     /// Get the next event from the server.
     ///

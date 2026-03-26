@@ -781,7 +781,10 @@ impl RealtimeSession for OpenAIWebRTCSession {
         self.send_data_channel_message(&value).await
     }
 
-    async fn update_context(&self, config: crate::config::RealtimeConfig) -> Result<()> {
+    async fn mutate_context(
+        &self,
+        config: crate::config::RealtimeConfig,
+    ) -> Result<crate::session::ContextMutationOutcome> {
         let mut session_config = serde_json::json!({});
 
         if let Some(instruction) = config.instruction {
@@ -813,7 +816,8 @@ impl RealtimeSession for OpenAIWebRTCSession {
             "session": session_config
         });
 
-        self.send_data_channel_message(&event).await
+        self.send_data_channel_message(&event).await?;
+        Ok(crate::session::ContextMutationOutcome::Applied)
     }
 
     /// Receive the next server event.

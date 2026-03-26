@@ -229,6 +229,7 @@ impl RealtimeRunnerBuilder {
             tools: self.tools,
             event_handler: self.event_handler.unwrap_or_else(|| Arc::new(NoOpEventHandler)),
             session: Arc::new(RwLock::new(None)),
+            state: Arc::new(RwLock::new(RunnerState::Idle)),
         })
     }
 }
@@ -270,6 +271,17 @@ impl RealtimeRunnerBuilder {
 ///     Ok(())
 /// }
 /// ```
+/// Represents the execution state of the realtime runner.
+#[derive(Debug, Clone)]
+pub enum RunnerState {
+    /// Runner is idle.
+    Idle,
+    /// Runner is generating a response.
+    Generating,
+    /// Runner has received an update context request but is waiting to apply it.
+    PendingResumption(crate::config::RealtimeConfig),
+}
+
 pub struct RealtimeRunner {
     model: BoxedModel,
     config: RealtimeConfig,
@@ -277,6 +289,7 @@ pub struct RealtimeRunner {
     tools: HashMap<String, (ToolDefinition, Arc<dyn ToolHandler>)>,
     event_handler: Arc<dyn EventHandler>,
     session: Arc<RwLock<Option<BoxedSession>>>,
+    state: Arc<RwLock<RunnerState>>,
 }
 
 impl RealtimeRunner {
@@ -320,33 +333,32 @@ impl RealtimeRunner {
     /// }
     /// ```
     pub async fn update_session(&self, config: SessionUpdateConfig) -> Result<()> {
-        let requires_reconnect = {
+        let resumption_config = {
             let guard = self.session.read().await;
             let session =
                 guard.as_ref().ok_or_else(|| RealtimeError::connection("Not connected"))?;
 
-            match session.update_context(config.0.clone()).await {
-                Ok(()) => {
-                    tracing::info!("Context updated natively mid-flight.");
-                    false
-                }
-                Err(RealtimeError::RequiresReconnection(_)) => {
+            match session.mutate_context(config.0.clone()).await? {
+                crate::session::ContextMutationOutcome::Applied => None,
+                crate::session::ContextMutationOutcome::RequiresResumption(new_config) => {
                     tracing::warn!("Provider requires soft reconnect. Buffering audio...");
-                    true
+                    Some(new_config)
                 }
-                Err(e) => return Err(e),
             }
         };
 
-        if requires_reconnect {
-            let mut guard = self.session.write().await;
-            if let Some(session) = guard.as_ref() {
-                let _ = session.close().await; // Kill old brain
-            }
+        if let Some(new_config) = resumption_config {
+            let is_idle = {
+                let guard = self.state.read().await;
+                matches!(*guard, RunnerState::Idle)
+            };
 
-            // Re-instantiate the session with the new config.
-            let new_session = self.model.connect(config.0).await?;
-            *guard = Some(new_session);
+            if is_idle {
+                self.execute_resumption(new_config).await?;
+            } else {
+                let mut guard = self.state.write().await;
+                *guard = RunnerState::PendingResumption(new_config);
+            }
         } else {
             let guard = self.session.read().await;
             let session =
@@ -361,6 +373,18 @@ impl RealtimeRunner {
                 .await?;
         }
 
+        Ok(())
+    }
+
+    /// Internal method to execute the resumption of the connection with a new configuration.
+    async fn execute_resumption(&self, config: RealtimeConfig) -> Result<()> {
+        let mut guard = self.session.write().await;
+        if let Some(session) = guard.as_ref() {
+            let _ = session.close().await;
+        }
+
+        let new_session = self.model.connect(config).await?;
+        *guard = Some(new_session);
         Ok(())
     }
 
@@ -418,8 +442,34 @@ impl RealtimeRunner {
     /// }
     /// ```
     pub async fn next_event(&self) -> Option<Result<ServerEvent>> {
-        let guard = self.session.read().await;
-        if let Some(session) = guard.as_ref() { session.next_event().await } else { None }
+        let event = {
+            let guard = self.session.read().await;
+            if let Some(session) = guard.as_ref() {
+                session.next_event().await
+            } else {
+                None
+            }
+        };
+
+        if let Some(Ok(ServerEvent::ResponseCreated { .. })) = &event {
+            let mut state = self.state.write().await;
+            if matches!(*state, RunnerState::Idle) {
+                *state = RunnerState::Generating;
+            }
+        } else if let Some(Ok(ServerEvent::ResponseDone { .. })) = &event {
+            let mut state = self.state.write().await;
+            if let RunnerState::PendingResumption(queued_config) = state.clone() {
+                *state = RunnerState::Idle;
+                drop(state);
+                if let Err(e) = self.execute_resumption(queued_config).await {
+                    return Some(Err(e));
+                }
+            } else {
+                *state = RunnerState::Idle;
+            }
+        }
+
+        event
     }
 
     /// Send a tool response to the session.
@@ -456,6 +506,8 @@ impl RealtimeRunner {
 
             match event {
                 Some(Ok(event)) => {
+                    // Note: State machine updates for ResponseCreated and ResponseDone
+                    // are now handled inherently by `next_event()` itself.
                     self.handle_event(event).await?;
                 }
                 Some(Err(e)) => {
