@@ -582,8 +582,8 @@ impl RealtimeSession for GeminiRealtimeSession {
                     })
                     .collect();
 
-                let (gemini_role, mut final_parts) = match role {
-                    adk_core::types::Role::System => {
+                let (gemini_role, mut final_parts) = match role.to_lowercase().as_str() {
+                    "system" => {
                         let mut modified_parts = gemini_parts;
                         if let Some(first_part) = modified_parts.first_mut() {
                             if let Some(text) = &mut first_part.text {
@@ -592,8 +592,8 @@ impl RealtimeSession for GeminiRealtimeSession {
                         }
                         ("user".to_string(), modified_parts)
                     }
-                    adk_core::types::Role::User => ("user".to_string(), gemini_parts),
-                    adk_core::types::Role::Model => ("model".to_string(), gemini_parts),
+                    "user" => ("user".to_string(), gemini_parts),
+                    "model" | "assistant" => ("model".to_string(), gemini_parts),
                     _ => ("user".to_string(), gemini_parts),
                 };
 

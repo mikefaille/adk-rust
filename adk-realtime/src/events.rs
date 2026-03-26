@@ -101,7 +101,7 @@ pub enum ClientEvent {
     #[serde(rename = "message")]
     Message {
         /// Role of the sender (e.g., User, System).
-        role: adk_core::types::Role,
+        role: String,
         /// List of content parts.
         parts: Vec<adk_core::types::Part>,
     },

@@ -96,7 +96,7 @@ mod tests {
     impl TestContext {
         fn new() -> Self {
             Self {
-                content: Content::new("user").expect("Failed to parse role"),
+                content: Content::new("user"),
                 config: RunConfig::default(),
                 session: MockSession,
             }

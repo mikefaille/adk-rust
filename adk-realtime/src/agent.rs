@@ -624,7 +624,7 @@ impl Agent for RealtimeAgent {
             let mut start_event = Event::new(&invocation_id);
             start_event.author = agent_name.clone();
             start_event.llm_response.content = Some(Content {
-                role: adk_core::types::Role::System,
+                role: "system".to_string(),
                 parts: vec![Part::Text {
                     text: format!("Realtime session started: {}", session.session_id()),
                 }],
@@ -665,7 +665,7 @@ impl Agent for RealtimeAgent {
                                 let mut audio_event = Event::new(&invocation_id);
                                 audio_event.author = agent_name.clone();
                                 audio_event.llm_response.content = Some(Content {
-                                    role: adk_core::types::Role::Model,
+                                    role: "model".to_string(),
                                     parts: vec![Part::InlineData {
                                         mime_type: "audio/pcm".to_string(),
                                         data: delta,
@@ -678,7 +678,7 @@ impl Agent for RealtimeAgent {
                                 let mut text_event = Event::new(&invocation_id);
                                 text_event.author = agent_name.clone();
                                 text_event.llm_response.content = Some(Content {
-                                    role: adk_core::types::Role::Model,
+                                    role: "model".to_string(),
                                     parts: vec![Part::Text { text: delta.clone() }],
                                 });
                                 yield Ok(text_event);
@@ -772,7 +772,7 @@ impl Agent for RealtimeAgent {
                                 tool_event.author = agent_name.clone();
                                 tool_event.actions = actions.clone();
                                 tool_event.llm_response.content = Some(Content {
-                                    role: adk_core::types::Role::Function,
+                                    role: "function".to_string(),
                                     parts: vec![Part::FunctionResponse {
                                         function_response: adk_core::FunctionResponseData {
                                             name: name.clone(),
