@@ -597,8 +597,8 @@ impl RealtimeSession for GeminiRealtimeSession {
                 // 2. Coerce the Role
                 // Gemini Live BIDI strictly rejects "system" in clientContent.
                 // We trap adk-rust's native System role and masquerade it as a user directive.
-                let (gemini_role, mut final_parts) = match role {
-                    adk_core::prelude::Role::System => {
+                let (gemini_role, mut final_parts) = match role.as_str() {
+                    "system" => {
                         let mut modified_parts = gemini_parts;
                         if let Some(first_part) = modified_parts.first_mut() {
                             if let Some(text) = &mut first_part.text {
@@ -607,8 +607,8 @@ impl RealtimeSession for GeminiRealtimeSession {
                         }
                         ("user".to_string(), modified_parts)
                     }
-                    adk_core::prelude::Role::User => ("user".to_string(), gemini_parts),
-                    adk_core::prelude::Role::Model => ("model".to_string(), gemini_parts),
+                    "user" => ("user".to_string(), gemini_parts),
+                    "model" | "assistant" => ("model".to_string(), gemini_parts),
                     _ => ("user".to_string(), gemini_parts), // Fallback
                 };
 
@@ -625,27 +625,6 @@ impl RealtimeSession for GeminiRealtimeSession {
 
                 tracing::info!(role = ?role, "Injecting mid-flight context via native adk-rust types");
                 self.send_raw(&msg).await
-            }
-
-            // Implement UpdateSession interception for Gemini
-            ClientEvent::UpdateSession { instructions, tools } => {
-                let mut setup = json!({});
-
-                if let Some(instruction) = instructions {
-                    setup["systemInstruction"] = json!({
-                        "parts": [{"text": instruction}]
-                    });
-                }
-
-                if let Some(tools_schema) = tools {
-                    setup["tools"] = json!(tools_schema);
-                }
-
-                let payload = json!({
-                    "setup": setup
-                });
-
-                self.send_raw(&payload).await
             }
 
             // Route other native adk-rust events as needed...

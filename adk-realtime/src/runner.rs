@@ -285,7 +285,7 @@ pub enum RunnerState {
     Idle,
     Generating,
     ExecutingTool,
-    PendingResumption(Box<RealtimeConfig>),
+    PendingResumption(Box<RealtimeConfig>, Option<String>),
 }
 
 pub struct RealtimeRunner {
@@ -340,10 +340,49 @@ impl RealtimeRunner {
     /// }
     /// ```
     #[tracing::instrument(skip(self, config), name = "SessionUpdate")]
-    pub async fn update_session(
+    pub async fn update_session(&self, config: SessionUpdateConfig) -> Result<()> {
+        let start = std::time::Instant::now();
+        let guard = self.session.read().await;
+        let session = guard.as_ref().ok_or_else(|| RealtimeError::connection("Not connected"))?;
+
+        match session.mutate_context(config.0).await? {
+            crate::session::ContextMutationOutcome::Applied => {
+                tracing::info!("Context updated natively mid-flight.");
+            }
+            crate::session::ContextMutationOutcome::RequiresResumption(new_config) => {
+                tracing::warn!("Provider requires soft reconnect. Checking resumability state...");
+                let mut state = self.state.write().await;
+                match *state {
+                    RunnerState::Idle => {
+                        drop(state);
+                        drop(guard);
+                        self.execute_resumption(*new_config, None).await?;
+                    }
+                    _ => {
+                        tracing::info!("Runner is busy ({:?}). Queuing resumption.", *state);
+                        *state = RunnerState::PendingResumption(new_config, None);
+                    }
+                }
+            }
+        }
+
+        let duration = start.elapsed();
+        if duration > std::time::Duration::from_millis(100) {
+            tracing::error!(
+                duration_ms = duration.as_millis(),
+                "SessionUpdate cycle exceeded 100ms threshold! State-sync telemetry alert."
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Update session configuration and inject a bridge message into the active conversation memory.
+    #[tracing::instrument(skip(self, config), name = "SessionUpdateWithBridge")]
+    pub async fn update_session_with_bridge(
         &self,
         config: SessionUpdateConfig,
-        bridge_message: Option<String>,
+        bridge_message: String,
     ) -> Result<()> {
         let start = std::time::Instant::now();
         let guard = self.session.read().await;
@@ -353,15 +392,12 @@ impl RealtimeRunner {
             crate::session::ContextMutationOutcome::Applied => {
                 tracing::info!("Context updated natively mid-flight.");
 
-                // Attention Shock Mitigation: Inject a generic bridge message explicitly provided by the caller
-                if let Some(msg) = bridge_message {
-                    let bridge_event = crate::events::ClientEvent::Message {
-                        role: "user".to_string(),
-                        parts: vec![adk_core::types::Part::Text { text: msg }],
-                    };
-                    if let Err(e) = session.send_event(bridge_event).await {
-                        tracing::error!("Failed to inject context bridge message: {}", e);
-                    }
+                let bridge_event = crate::events::ClientEvent::Message {
+                    role: "user".to_string(),
+                    parts: vec![adk_core::Part::Text { text: bridge_message }],
+                };
+                if let Err(e) = session.send_event(bridge_event).await {
+                    tracing::error!("Failed to inject context bridge message: {}", e);
                 }
             }
             crate::session::ContextMutationOutcome::RequiresResumption(new_config) => {
@@ -371,13 +407,11 @@ impl RealtimeRunner {
                     RunnerState::Idle => {
                         drop(state);
                         drop(guard);
-                        self.execute_resumption(*new_config, bridge_message).await?;
+                        self.execute_resumption(*new_config, Some(bridge_message)).await?;
                     }
                     _ => {
                         tracing::info!("Runner is busy ({:?}). Queuing resumption.", *state);
-                        *state = RunnerState::PendingResumption(new_config);
-                        // The bridge_message is currently dropped if queued. For a full implementation,
-                        // we'd queue the message too, but we follow the exact spec for now.
+                        *state = RunnerState::PendingResumption(new_config, Some(bridge_message));
                     }
                 }
             }
@@ -395,30 +429,25 @@ impl RealtimeRunner {
     }
 
     /// Executes the phantom reconnect / soft resumption loop.
+    #[tracing::instrument(skip(self, new_config, bridge_message), name = "cognitive_handoff")]
     async fn execute_resumption(
         &self,
         new_config: RealtimeConfig,
         bridge_message: Option<String>,
     ) -> Result<()> {
-        let _span = tracing::info_span!("cognitive_handoff").entered();
-        let mut guard = self.session.write().await;
-
-        if let Some(session) = guard.as_ref() {
-            session.close().await?;
-        }
-
         let new_session = self.factory.connect(new_config).await?;
 
         if let Some(msg) = bridge_message {
             let bridge_event = crate::events::ClientEvent::Message {
                 role: "user".to_string(),
-                parts: vec![adk_core::types::Part::Text { text: msg }],
+                parts: vec![adk_core::Part::Text { text: msg }],
             };
             if let Err(e) = new_session.send_event(bridge_event).await {
                 tracing::error!("Failed to inject context bridge message after resumption: {}", e);
             }
         }
 
+        let mut guard = self.session.write().await;
         *guard = Some(new_session);
         Ok(())
     }
@@ -550,18 +579,18 @@ impl RealtimeRunner {
             ServerEvent::ResponseDone { .. } => {
                 let queued_resumption = {
                     let mut state = self.state.write().await;
-                    if let RunnerState::PendingResumption(config) = state.clone() {
+                    if let RunnerState::PendingResumption(config, bridge_message) = state.clone() {
                         *state = RunnerState::Idle;
-                        Some(config)
+                        Some((config, bridge_message))
                     } else {
                         *state = RunnerState::Idle;
                         None
                     }
                 };
 
-                if let Some(config) = queued_resumption {
+                if let Some((config, bridge_message)) = queued_resumption {
                     tracing::info!("Executing queued session resumption.");
-                    self.execute_resumption(*config, None).await?;
+                    self.execute_resumption(*config, bridge_message).await?;
                 }
 
                 self.event_handler.on_response_done().await?;
@@ -573,22 +602,8 @@ impl RealtimeRunner {
                     self.execute_tool_call(&call_id, &name, &arguments).await?;
                 }
 
-                // Return to Idle (or process pending resumptions)
-                let queued_resumption = {
-                    let mut state = self.state.write().await;
-                    if let RunnerState::PendingResumption(config) = state.clone() {
-                        *state = RunnerState::Idle;
-                        Some(config)
-                    } else {
-                        *state = RunnerState::Idle;
-                        None
-                    }
-                };
-
-                if let Some(config) = queued_resumption {
-                    tracing::info!("Executing queued session resumption after tool call.");
-                    self.execute_resumption(*config, None).await?;
-                }
+                // After tool execution, the model expects a response. We must not tear down the socket here.
+                // We keep the state as ExecutingTool (or return to Generating) and process resumption on ResponseDone.
             }
             ServerEvent::AudioDelta { delta, item_id, .. } => {
                 self.event_handler.on_audio(&delta, &item_id).await?;
@@ -616,6 +631,7 @@ impl RealtimeRunner {
     /// Execute a tool call and optionally send the response.
     async fn execute_tool_call(&self, call_id: &str, name: &str, arguments: &str) -> Result<()> {
         let mut resolved_name = name;
+        let mut resolved_arguments = arguments.to_string();
 
         // Enforce generic TTL to prevent routing deadlocks
         if let Some((target_tool, max_calls, window_size, fallback_tool)) =
@@ -634,6 +650,7 @@ impl RealtimeRunner {
                         fallback_tool
                     );
                     resolved_name = fallback_tool;
+                    resolved_arguments = "{}".to_string(); // Clear arguments to prevent schema validation panic in fallback tool
                 }
             }
 
@@ -646,7 +663,7 @@ impl RealtimeRunner {
         let handler = self.tools.get(resolved_name).map(|(_, h)| h.clone());
 
         let result = if let Some(handler) = handler {
-            let args: serde_json::Value = serde_json::from_str(arguments)
+            let args: serde_json::Value = serde_json::from_str(&resolved_arguments)
                 .unwrap_or(serde_json::Value::Object(Default::default()));
 
             let call = ToolCall {
