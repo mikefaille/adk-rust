@@ -322,6 +322,7 @@ impl RealtimeRunner {
     pub async fn update_session(&self, config: SessionUpdateConfig) -> Result<()> {
         let guard = self.session.read().await;
         let session = guard.as_ref().ok_or_else(|| RealtimeError::connection("Not connected"))?;
+
         let config_value = serde_json::to_value(&config).map_err(|e| {
             RealtimeError::config(format!(
                 "Failed to serialize session update config: {e}. Ensure all SessionUpdateConfig fields implement serde::Serialize and contain valid values"
@@ -329,7 +330,9 @@ impl RealtimeRunner {
         })?;
         session
             .send_event(crate::events::ClientEvent::SessionUpdate { session: config_value })
-            .await
+            .await?;
+
+        Ok(())
     }
 
     /// Send audio to the session.
@@ -388,11 +391,8 @@ impl RealtimeRunner {
     pub async fn next_event(&self) -> Option<Result<ServerEvent>> {
         let guard = self.session.read().await;
         if let Some(session) = guard.as_ref() {
-            // Some sessions might yield inside next_event, but just in case, yield here too
-            tokio::task::yield_now().await;
             session.next_event().await
         } else {
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             None
         }
     }
