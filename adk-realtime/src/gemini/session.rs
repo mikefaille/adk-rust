@@ -104,6 +104,8 @@ struct GeminiSetup {
     tools: Option<Vec<Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     cached_content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -180,6 +182,8 @@ pub struct GeminiRealtimeSession {
     sender: Arc<Mutex<WsSink>>,
     receiver: Arc<Mutex<WsSource>>,
     audio_buffer: Arc<Mutex<Vec<u8>>>,
+    #[allow(dead_code)]
+    resumption_token: Arc<Mutex<Option<String>>>,
 }
 
 impl GeminiRealtimeSession {
@@ -272,6 +276,7 @@ impl GeminiRealtimeSession {
             sender: Arc::new(Mutex::new(sink)),
             receiver: Arc::new(Mutex::new(source)),
             audio_buffer: Arc::new(Mutex::new(Vec::new())),
+            resumption_token: Arc::new(Mutex::new(None)),
         };
 
         session.send_setup(model, config).await?;
@@ -318,6 +323,14 @@ impl GeminiRealtimeSession {
 
         let tools = convert_tools(config.tools);
 
+        // If we have a resumption token stored in extra config, use it.
+        // The token is a string we map to the session_id field in setup based on Gemini API docs.
+        let resumption_token = if let Some(extra) = &config.extra {
+            extra.get("resumeToken").and_then(|t| t.as_str()).map(|s| s.to_string())
+        } else {
+            None
+        };
+
         let setup = GeminiClientMessage {
             setup: Some(GeminiSetup {
                 model: model.to_string(),
@@ -325,6 +338,7 @@ impl GeminiRealtimeSession {
                 generation_config: Some(generation_config),
                 tools,
                 cached_content: config.cached_content,
+                session_id: resumption_token,
             }),
             realtime_input: None,
             tool_response: None,
@@ -391,10 +405,10 @@ impl GeminiRealtimeSession {
             .map_err(|e| RealtimeError::protocol(format!("Parse error: {}, raw: {}", e, raw)))?;
 
         // Check for setup completion
-        if value.get("setupComplete").is_some() {
+        if let Some(_setup_complete) = value.get("setupComplete") {
             return Ok(ServerEvent::SessionCreated {
                 event_id: uuid::Uuid::new_v4().to_string(),
-                session: value,
+                session: value.clone(),
             });
         }
 
@@ -404,7 +418,7 @@ impl GeminiRealtimeSession {
                 if turn_complete.as_bool().unwrap_or(false) {
                     return Ok(ServerEvent::ResponseDone {
                         event_id: uuid::Uuid::new_v4().to_string(),
-                        response: value,
+                        response: value.clone(),
                     });
                 }
             }
@@ -442,6 +456,14 @@ impl GeminiRealtimeSession {
                     }
                 }
             }
+        }
+
+        // Check for sessionResumption
+        if let Some(_resumption) = value.get("sessionResumption") {
+            return Ok(ServerEvent::SessionUpdated {
+                event_id: uuid::Uuid::new_v4().to_string(),
+                session: value.clone(),
+            });
         }
 
         // Check for tool calls
