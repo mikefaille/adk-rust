@@ -318,6 +318,11 @@ impl RealtimeSession for OpenAIRealtimeSession {
         self.send_raw(&value).await
     }
 
+    async fn update_context(&self, config: crate::config::RealtimeConfig) -> Result<()> {
+        // Re-use configure_session implementation which sends `session.update` natively
+        self.configure_session(config).await
+    }
+
     async fn next_event(&self) -> Option<Result<ServerEvent>> {
         self.receive_raw().await
     }

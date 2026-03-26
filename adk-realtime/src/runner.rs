@@ -320,17 +320,46 @@ impl RealtimeRunner {
     /// }
     /// ```
     pub async fn update_session(&self, config: SessionUpdateConfig) -> Result<()> {
-        let guard = self.session.read().await;
-        let session = guard.as_ref().ok_or_else(|| RealtimeError::connection("Not connected"))?;
+        let requires_reconnect = {
+            let guard = self.session.read().await;
+            let session =
+                guard.as_ref().ok_or_else(|| RealtimeError::connection("Not connected"))?;
 
-        let config_value = serde_json::to_value(&config).map_err(|e| {
-            RealtimeError::config(format!(
-                "Failed to serialize session update config: {e}. Ensure all SessionUpdateConfig fields implement serde::Serialize and contain valid values"
-            ))
-        })?;
-        session
-            .send_event(crate::events::ClientEvent::SessionUpdate { session: config_value })
-            .await?;
+            match session.update_context(config.0.clone()).await {
+                Ok(()) => {
+                    tracing::info!("Context updated natively mid-flight.");
+                    false
+                }
+                Err(RealtimeError::RequiresReconnection(_)) => {
+                    tracing::warn!("Provider requires soft reconnect. Buffering audio...");
+                    true
+                }
+                Err(e) => return Err(e),
+            }
+        };
+
+        if requires_reconnect {
+            let mut guard = self.session.write().await;
+            if let Some(session) = guard.as_ref() {
+                let _ = session.close().await; // Kill old brain
+            }
+
+            // Re-instantiate the session with the new config.
+            let new_session = self.model.connect(config.0).await?;
+            *guard = Some(new_session);
+        } else {
+            let guard = self.session.read().await;
+            let session =
+                guard.as_ref().ok_or_else(|| RealtimeError::connection("Not connected"))?;
+            let config_value = serde_json::to_value(&config).map_err(|e| {
+                RealtimeError::config(format!(
+                    "Failed to serialize session update config: {e}. Ensure all SessionUpdateConfig fields implement serde::Serialize and contain valid values"
+                ))
+            })?;
+            session
+                .send_event(crate::events::ClientEvent::SessionUpdate { session: config_value })
+                .await?;
+        }
 
         Ok(())
     }

@@ -73,6 +73,9 @@ pub trait RealtimeSession: Send + Sync {
     /// Send a raw client event.
     async fn send_event(&self, event: ClientEvent) -> Result<()>;
 
+    /// Attempt to update the session parameters mid-flight.
+    async fn update_context(&self, config: crate::config::RealtimeConfig) -> Result<()>;
+
     /// Get the next event from the server.
     ///
     /// Returns `None` when the session is closed.

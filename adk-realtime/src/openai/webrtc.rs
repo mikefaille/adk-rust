@@ -781,6 +781,41 @@ impl RealtimeSession for OpenAIWebRTCSession {
         self.send_data_channel_message(&value).await
     }
 
+    async fn update_context(&self, config: crate::config::RealtimeConfig) -> Result<()> {
+        let mut session_config = serde_json::json!({});
+
+        if let Some(instruction) = config.instruction {
+            session_config["instructions"] = serde_json::json!(instruction);
+        }
+
+        if let Some(tools) = config.tools {
+            let tool_defs: Vec<serde_json::Value> = tools
+                .iter()
+                .map(|t| {
+                    let mut def = serde_json::json!({
+                        "type": "function",
+                        "name": t.name,
+                    });
+                    if let Some(desc) = &t.description {
+                        def["description"] = serde_json::json!(desc);
+                    }
+                    if let Some(params) = &t.parameters {
+                        def["parameters"] = params.clone();
+                    }
+                    def
+                })
+                .collect();
+            session_config["tools"] = serde_json::json!(tool_defs);
+        }
+
+        let event = serde_json::json!({
+            "type": "session.update",
+            "session": session_config
+        });
+
+        self.send_data_channel_message(&event).await
+    }
+
     /// Receive the next server event.
     ///
     /// Reads from the internal mpsc channel that is fed by the background
