@@ -781,11 +781,63 @@ impl RealtimeSession for OpenAIWebRTCSession {
         self.send_data_channel_message(&value).await
     }
 
-    /// Receive the next server event.
-    ///
-    /// Reads from the internal mpsc channel that is fed by the background
-    /// I/O driving loop. Returns `None` when the session is closed and
-    /// the channel is drained.
+    async fn mutate_context(
+        &self,
+        config: crate::config::RealtimeConfig,
+    ) -> Result<crate::session::ContextMutationOutcome> {
+        if !self.is_connected() {
+            return Err(RealtimeError::NotConnected);
+        }
+
+        let mut session_config = serde_json::json!({});
+
+        if let Some(instruction) = config.instruction {
+            session_config["instructions"] = serde_json::json!(instruction);
+        }
+        if let Some(voice) = config.voice {
+            session_config["voice"] = serde_json::json!(voice);
+        }
+        if let Some(modalities) = config.modalities {
+            session_config["modalities"] = serde_json::json!(modalities);
+        }
+        if let Some(input_format) = config.input_audio_format {
+            session_config["input_audio_format"] = serde_json::json!(input_format.to_string());
+        }
+        if let Some(output_format) = config.output_audio_format {
+            session_config["output_audio_format"] = serde_json::json!(output_format.to_string());
+        }
+        if let Some(tools) = config.tools {
+            let tool_defs: Vec<serde_json::Value> = tools
+                .into_iter()
+                .map(|t| {
+                    let mut def = serde_json::json!({
+                        "type": "function",
+                        "name": t.name,
+                    });
+                    if let Some(desc) = t.description {
+                        def["description"] = serde_json::json!(desc);
+                    }
+                    if let Some(params) = t.parameters {
+                        def["parameters"] = params;
+                    }
+                    def
+                })
+                .collect();
+            session_config["tools"] = serde_json::json!(tool_defs);
+        }
+        if let Some(temp) = config.temperature {
+            session_config["temperature"] = serde_json::json!(temp);
+        }
+
+        let event = serde_json::json!({
+            "type": "session.update",
+            "session": session_config
+        });
+
+        self.send_data_channel_message(&event).await?;
+        Ok(crate::session::ContextMutationOutcome::Applied)
+    }
+
     async fn next_event(&self) -> Option<Result<ServerEvent>> {
         let mut rx = self.event_rx.lock().await;
         rx.recv().await

@@ -41,6 +41,26 @@ pub enum ClientEvent {
         session: Value,
     },
 
+    /// Universal intent for mutating context mid-flight.
+    #[serde(rename = "session.update_context")]
+    UpdateSession {
+        /// New instructions.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        instructions: Option<String>,
+        /// New tools definition.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tools: Option<Vec<crate::config::ToolDefinition>>,
+    },
+
+    /// Generic message event using native adk-rust types.
+    #[serde(rename = "session.message")]
+    Message {
+        /// The role of the message sender.
+        role: String,
+        /// The content parts of the message.
+        parts: Vec<adk_core::types::Part>,
+    },
+
     /// Append audio to the input buffer.
     #[serde(rename = "input_audio_buffer.append")]
     AudioDelta {

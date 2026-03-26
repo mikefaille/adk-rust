@@ -9,7 +9,7 @@ use crate::events::{ServerEvent, ToolCall, ToolResponse};
 use crate::model::BoxedModel;
 use crate::session::BoxedSession;
 use async_trait::async_trait;
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -124,11 +124,19 @@ pub struct RunnerConfig {
     pub auto_respond_tools: bool,
     /// Maximum concurrent tool executions.
     pub max_concurrent_tools: usize,
+    /// Optional transition TTL to prevent routing deadlocks.
+    /// Format: `(target_tool_name, max_calls, max_window_size, fallback_tool_name)`
+    pub tool_ttl: Option<(String, usize, usize, String)>,
 }
 
 impl Default for RunnerConfig {
     fn default() -> Self {
-        Self { auto_execute_tools: true, auto_respond_tools: true, max_concurrent_tools: 4 }
+        Self {
+            auto_execute_tools: true,
+            auto_respond_tools: true,
+            max_concurrent_tools: 4,
+            tool_ttl: None,
+        }
     }
 }
 
@@ -223,13 +231,14 @@ impl RealtimeRunnerBuilder {
         }
 
         Ok(RealtimeRunner {
-            model,
+            factory: model,
             config,
             runner_config: self.runner_config,
             tools: self.tools,
             event_handler: self.event_handler.unwrap_or_else(|| Arc::new(NoOpEventHandler)),
             session: Arc::new(RwLock::new(None)),
-            executed_tools: Arc::new(RwLock::new(VecDeque::new())),
+            executed_tools: Arc::new(RwLock::new(std::collections::VecDeque::new())),
+            state: Arc::new(RwLock::new(RunnerState::Idle)),
         })
     }
 }
@@ -271,14 +280,23 @@ impl RealtimeRunnerBuilder {
 ///     Ok(())
 /// }
 /// ```
+#[derive(Debug, Clone)]
+pub enum RunnerState {
+    Idle,
+    Generating,
+    ExecutingTool,
+    PendingResumption(Box<RealtimeConfig>),
+}
+
 pub struct RealtimeRunner {
-    model: BoxedModel,
+    factory: BoxedModel,
     config: RealtimeConfig,
     runner_config: RunnerConfig,
     tools: HashMap<String, (ToolDefinition, Arc<dyn ToolHandler>)>,
     event_handler: Arc<dyn EventHandler>,
     session: Arc<RwLock<Option<BoxedSession>>>,
-    executed_tools: Arc<RwLock<VecDeque<String>>>,
+    executed_tools: Arc<RwLock<std::collections::VecDeque<String>>>,
+    state: Arc<RwLock<RunnerState>>,
 }
 
 impl RealtimeRunner {
@@ -289,7 +307,7 @@ impl RealtimeRunner {
 
     /// Connect to the realtime provider.
     pub async fn connect(&self) -> Result<()> {
-        let session = self.model.connect(self.config.clone()).await?;
+        let session = self.factory.connect(self.config.clone()).await?;
         let mut guard = self.session.write().await;
         *guard = Some(session);
         Ok(())
@@ -322,18 +340,87 @@ impl RealtimeRunner {
     /// }
     /// ```
     #[tracing::instrument(skip(self, config), name = "SessionUpdate")]
-    pub async fn update_session(&self, config: SessionUpdateConfig) -> Result<()> {
+    pub async fn update_session(
+        &self,
+        config: SessionUpdateConfig,
+        bridge_message: Option<String>,
+    ) -> Result<()> {
+        let start = std::time::Instant::now();
         let guard = self.session.read().await;
         let session = guard.as_ref().ok_or_else(|| RealtimeError::connection("Not connected"))?;
-        let config_value = serde_json::to_value(&config).map_err(|e| {
-            RealtimeError::config(format!(
-                "Failed to serialize session update config: {e}. Ensure all SessionUpdateConfig fields implement serde::Serialize and contain valid values"
-            ))
-        })?;
 
-        session
-            .send_event(crate::events::ClientEvent::SessionUpdate { session: config_value })
-            .await
+        match session.mutate_context(config.0).await? {
+            crate::session::ContextMutationOutcome::Applied => {
+                tracing::info!("Context updated natively mid-flight.");
+
+                // Attention Shock Mitigation: Inject a generic bridge message explicitly provided by the caller
+                if let Some(msg) = bridge_message {
+                    let bridge_event = crate::events::ClientEvent::Message {
+                        role: "user".to_string(),
+                        parts: vec![adk_core::types::Part::Text { text: msg }],
+                    };
+                    if let Err(e) = session.send_event(bridge_event).await {
+                        tracing::error!("Failed to inject context bridge message: {}", e);
+                    }
+                }
+            }
+            crate::session::ContextMutationOutcome::RequiresResumption(new_config) => {
+                tracing::warn!("Provider requires soft reconnect. Checking resumability state...");
+                let mut state = self.state.write().await;
+                match *state {
+                    RunnerState::Idle => {
+                        drop(state);
+                        drop(guard);
+                        self.execute_resumption(*new_config, bridge_message).await?;
+                    }
+                    _ => {
+                        tracing::info!("Runner is busy ({:?}). Queuing resumption.", *state);
+                        *state = RunnerState::PendingResumption(new_config);
+                        // The bridge_message is currently dropped if queued. For a full implementation,
+                        // we'd queue the message too, but we follow the exact spec for now.
+                    }
+                }
+            }
+        }
+
+        let duration = start.elapsed();
+        if duration > std::time::Duration::from_millis(100) {
+            tracing::error!(
+                duration_ms = duration.as_millis(),
+                "SessionUpdate cycle exceeded 100ms threshold! State-sync telemetry alert."
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Executes the phantom reconnect / soft resumption loop.
+    async fn execute_resumption(
+        &self,
+        new_config: RealtimeConfig,
+        bridge_message: Option<String>,
+    ) -> Result<()> {
+        let _span = tracing::info_span!("cognitive_handoff").entered();
+        let mut guard = self.session.write().await;
+
+        if let Some(session) = guard.as_ref() {
+            session.close().await?;
+        }
+
+        let new_session = self.factory.connect(new_config).await?;
+
+        if let Some(msg) = bridge_message {
+            let bridge_event = crate::events::ClientEvent::Message {
+                role: "user".to_string(),
+                parts: vec![adk_core::types::Part::Text { text: msg }],
+            };
+            if let Err(e) = new_session.send_event(bridge_event).await {
+                tracing::error!("Failed to inject context bridge message after resumption: {}", e);
+            }
+        }
+
+        *guard = Some(new_session);
+        Ok(())
     }
 
     /// Send audio to the session.
@@ -348,19 +435,6 @@ impl RealtimeRunner {
         let guard = self.session.read().await;
         let session = guard.as_ref().ok_or_else(|| RealtimeError::connection("Not connected"))?;
         session.send_text(text).await
-    }
-
-    /// Send a system notification into the Data Plane to bridge context (e.g., Attention Shock Mitigation).
-    pub async fn send_system_notification(&self, text: &str) -> Result<()> {
-        let guard = self.session.read().await;
-        let session = guard.as_ref().ok_or_else(|| RealtimeError::connection("Not connected"))?;
-        let item = serde_json::json!({
-            "role": "user",
-            "parts": [{
-                "text": text
-            }]
-        });
-        session.send_event(crate::events::ClientEvent::ConversationItemCreate { item }).await
     }
 
     /// Commit the audio buffer (for manual VAD mode).
@@ -466,6 +540,56 @@ impl RealtimeRunner {
     /// Process a single event.
     async fn handle_event(&self, event: ServerEvent) -> Result<()> {
         match event {
+            ServerEvent::ResponseCreated { .. } | ServerEvent::SpeechStarted { .. } => {
+                *self.state.write().await = RunnerState::Generating;
+
+                if let ServerEvent::SpeechStarted { audio_start_ms, .. } = event {
+                    self.event_handler.on_speech_started(audio_start_ms).await?;
+                }
+            }
+            ServerEvent::ResponseDone { .. } => {
+                let queued_resumption = {
+                    let mut state = self.state.write().await;
+                    if let RunnerState::PendingResumption(config) = state.clone() {
+                        *state = RunnerState::Idle;
+                        Some(config)
+                    } else {
+                        *state = RunnerState::Idle;
+                        None
+                    }
+                };
+
+                if let Some(config) = queued_resumption {
+                    tracing::info!("Executing queued session resumption.");
+                    self.execute_resumption(*config, None).await?;
+                }
+
+                self.event_handler.on_response_done().await?;
+            }
+            ServerEvent::FunctionCallDone { call_id, name, arguments, .. } => {
+                *self.state.write().await = RunnerState::ExecutingTool;
+
+                if self.runner_config.auto_execute_tools {
+                    self.execute_tool_call(&call_id, &name, &arguments).await?;
+                }
+
+                // Return to Idle (or process pending resumptions)
+                let queued_resumption = {
+                    let mut state = self.state.write().await;
+                    if let RunnerState::PendingResumption(config) = state.clone() {
+                        *state = RunnerState::Idle;
+                        Some(config)
+                    } else {
+                        *state = RunnerState::Idle;
+                        None
+                    }
+                };
+
+                if let Some(config) = queued_resumption {
+                    tracing::info!("Executing queued session resumption after tool call.");
+                    self.execute_resumption(*config, None).await?;
+                }
+            }
             ServerEvent::AudioDelta { delta, item_id, .. } => {
                 self.event_handler.on_audio(&delta, &item_id).await?;
             }
@@ -475,19 +599,8 @@ impl RealtimeRunner {
             ServerEvent::TranscriptDelta { delta, item_id, .. } => {
                 self.event_handler.on_transcript(&delta, &item_id).await?;
             }
-            ServerEvent::SpeechStarted { audio_start_ms, .. } => {
-                self.event_handler.on_speech_started(audio_start_ms).await?;
-            }
             ServerEvent::SpeechStopped { audio_end_ms, .. } => {
                 self.event_handler.on_speech_stopped(audio_end_ms).await?;
-            }
-            ServerEvent::ResponseDone { .. } => {
-                self.event_handler.on_response_done().await?;
-            }
-            ServerEvent::FunctionCallDone { call_id, name, arguments, .. } => {
-                if self.runner_config.auto_execute_tools {
-                    self.execute_tool_call(&call_id, &name, &arguments).await?;
-                }
             }
             ServerEvent::Error { error, .. } => {
                 let err = RealtimeError::server(error.code.unwrap_or_default(), error.message);
@@ -502,62 +615,55 @@ impl RealtimeRunner {
 
     /// Execute a tool call and optionally send the response.
     async fn execute_tool_call(&self, call_id: &str, name: &str, arguments: &str) -> Result<()> {
-        // Enforce TTL to prevent routing deadlocks
-        let mut executed_tools = self.executed_tools.write().await;
+        let mut resolved_name = name;
 
-        let call_count = executed_tools.iter().filter(|&t| t == name).count();
-        if call_count >= 2 {
-            tracing::warn!("Tool {} exceeded TTL. Routing deadlock detected.", name);
-            let response = ToolResponse {
-                call_id: call_id.to_string(),
-                output: serde_json::json!({
-                    "error": "Rate limit exceeded: tool called too many times in a short period (deadlock detected)."
-                }),
-            };
-            if self.runner_config.auto_respond_tools {
-                if let Some(session) = self.session.read().await.as_ref() {
-                    session.send_tool_response(response).await?;
+        // Enforce generic TTL to prevent routing deadlocks
+        if let Some((target_tool, max_calls, window_size, fallback_tool)) =
+            &self.runner_config.tool_ttl
+        {
+            let mut executed_tools = self.executed_tools.write().await;
+
+            if name == target_tool {
+                let call_count = executed_tools.iter().filter(|&t| t == target_tool).count();
+                if call_count >= *max_calls {
+                    tracing::warn!(
+                        "Tool {} exceeded TTL ({} calls in {}-turn window). Forcing failover to {}.",
+                        name,
+                        max_calls,
+                        window_size,
+                        fallback_tool
+                    );
+                    resolved_name = fallback_tool;
                 }
             }
-            return Ok(());
+
+            executed_tools.push_back(name.to_string());
+            if executed_tools.len() > *window_size {
+                executed_tools.pop_front();
+            }
         }
 
-        executed_tools.push_back(name.to_string());
-        if executed_tools.len() > 3 {
-            executed_tools.pop_front();
-        }
-        drop(executed_tools);
-
-        let handler = self.tools.get(name).map(|(_, h)| h.clone());
+        let handler = self.tools.get(resolved_name).map(|(_, h)| h.clone());
 
         let result = if let Some(handler) = handler {
             let args: serde_json::Value = serde_json::from_str(arguments)
                 .unwrap_or(serde_json::Value::Object(Default::default()));
 
-            let call =
-                ToolCall { call_id: call_id.to_string(), name: name.to_string(), arguments: args };
+            let call = ToolCall {
+                call_id: call_id.to_string(),
+                name: resolved_name.to_string(),
+                arguments: args,
+            };
 
-            let start = std::time::Instant::now();
-            let execution_result = match handler.execute(&call).await {
+            match handler.execute(&call).await {
                 Ok(value) => value,
                 Err(e) => serde_json::json!({
                     "error": e.to_string()
                 }),
-            };
-            let duration = start.elapsed();
-
-            if duration > std::time::Duration::from_millis(100) {
-                tracing::error!(
-                    duration_ms = duration.as_millis(),
-                    tool_name = name,
-                    "Tool execution exceeded 100ms threshold! State-sync telemetry alert."
-                );
             }
-
-            execution_result
         } else {
             serde_json::json!({
-                "error": format!("Unknown tool: {}", name)
+                "error": format!("Unknown tool: {}", resolved_name)
             })
         };
 
