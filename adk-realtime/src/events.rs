@@ -85,6 +85,15 @@ pub enum ClientEvent {
     /// Cancel/interrupt the current response.
     #[serde(rename = "response.cancel")]
     ResponseCancel,
+
+    /// A standard message using `adk_core`'s native Role and Part types.
+    #[serde(rename = "message")]
+    Message {
+        /// Role of the message.
+        role: String,
+        /// Content parts of the message.
+        parts: Vec<adk_core::types::Part>,
+    },
 }
 
 /// A conversation item for text or tool responses.

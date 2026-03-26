@@ -569,8 +569,62 @@ impl RealtimeSession for GeminiRealtimeSession {
         Ok(()) // Gemini handles interruption via VAD
     }
 
-    async fn send_event(&self, _event: ClientEvent) -> Result<()> {
-        Ok(()) // Raw events not directly supported
+    async fn send_event(&self, event: ClientEvent) -> Result<()> {
+        match event {
+            // Intercept standard messages from the orchestrator
+            ClientEvent::Message { role, parts } => {
+                // 1. Translate adk-rust 'Part' to 'GeminiPart'
+                let gemini_parts: Vec<GeminiPart> = parts.into_iter().map(|p| match p {
+                    adk_core::types::Part::Text { text } => GeminiPart {
+                        text: Some(text),
+                        inline_data: None,
+                    },
+                    // Handle other adk-rust Part variants (images, audio) if necessary
+                    _ => GeminiPart { text: Some("".to_string()), inline_data: None },
+                }).collect();
+
+                // 2. Coerce the Role
+                // Gemini Live BIDI strictly rejects "system" in clientContent.
+                // We trap adk-rust's native System role and masquerade it as a user directive.
+                let (gemini_role, final_parts) = match role.as_str() {
+                    "system" | "developer" => {
+                        let mut modified_parts = gemini_parts;
+                        if let Some(first_part) = modified_parts.first_mut() {
+                            if let Some(text) = &mut first_part.text {
+                                *text = format!("[CRITICAL SYSTEM DIRECTIVE OVERRIDE]\n{}", text);
+                            }
+                        }
+                        ("user".to_string(), modified_parts)
+                    },
+                    "user" => ("user".to_string(), gemini_parts),
+                    "model" | "assistant" => ("model".to_string(), gemini_parts),
+                    _ => ("user".to_string(), gemini_parts), // Fallback
+                };
+
+                // 3. Fire the native Gemini Envelope
+                let msg = GeminiClientMessage {
+                    setup: None,
+                    realtime_input: None,
+                    tool_response: None,
+                    client_content: Some(GeminiClientContent {
+                        turns: vec![GeminiTurn {
+                            role: gemini_role,
+                            parts: final_parts,
+                        }],
+                        turn_complete: true,
+                    }),
+                };
+
+                tracing::info!(role = ?role, "Injecting mid-flight context via native adk-rust types");
+                self.send_raw(&msg).await
+            },
+
+            // Route other native adk-rust events as needed...
+            _ => {
+                tracing::debug!("Event type not explicitly handled by Gemini session adapter");
+                Ok(())
+            }
+        }
     }
 
     async fn next_event(&self) -> Option<Result<ServerEvent>> {

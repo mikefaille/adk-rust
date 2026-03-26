@@ -305,6 +305,13 @@ impl RealtimeRunner {
         guard.as_ref().map(|s| s.session_id().to_string())
     }
 
+    /// Send a client event directly to the session.
+    pub async fn send_client_event(&self, event: crate::events::ClientEvent) -> Result<()> {
+        let guard = self.session.read().await;
+        let session = guard.as_ref().ok_or_else(|| RealtimeError::connection("Not connected"))?;
+        session.send_event(event).await
+    }
+
     /// Update the session configuration.
     ///
     /// # Example

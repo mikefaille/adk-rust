@@ -313,9 +313,46 @@ impl RealtimeSession for OpenAIRealtimeSession {
     }
 
     async fn send_event(&self, event: ClientEvent) -> Result<()> {
-        let value = serde_json::to_value(&event)
-            .map_err(|e| RealtimeError::protocol(format!("Serialize error: {}", e)))?;
-        self.send_raw(&value).await
+        match event {
+            ClientEvent::Message { role, parts } => {
+                // OpenAI Realtime API supports "user", "assistant", and "system" roles.
+                let openai_role = match role.as_str() {
+                    "system" | "developer" => "system",
+                    "user" => "user",
+                    "model" | "assistant" => "assistant",
+                    _ => "user", // Default fallback
+                };
+
+                let content: Vec<Value> = parts.into_iter().map(|p| match p {
+                    adk_core::types::Part::Text { text } => json!({
+                        "type": "input_text",
+                        "text": text
+                    }),
+                    // Handle other parts if needed, falling back to text for now
+                    _ => json!({
+                        "type": "input_text",
+                        "text": ""
+                    }),
+                }).collect();
+
+                let payload = json!({
+                    "type": "conversation.item.create",
+                    "item": {
+                        "type": "message",
+                        "role": openai_role,
+                        "content": content
+                    }
+                });
+
+                tracing::info!(role = ?role, "Injecting mid-flight context via native adk-rust types");
+                self.send_raw(&payload).await
+            }
+            other => {
+                let value = serde_json::to_value(&other)
+                    .map_err(|e| RealtimeError::protocol(format!("Serialize error: {}", e)))?;
+                self.send_raw(&value).await
+            }
+        }
     }
 
     async fn next_event(&self) -> Option<Result<ServerEvent>> {
