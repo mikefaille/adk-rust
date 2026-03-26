@@ -10,9 +10,97 @@ pub struct FunctionResponseData {
     pub response: serde_json::Value,
 }
 
+/// Standardized message roles for LLM interactions.
+///
+/// Implements custom serialization/deserialization to cleanly map standard roles
+/// (user, model, system, tool) while preserving extensibility via the `Other` variant.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum Role {
+    #[default]
+    User,
+    Model,
+    System,
+    Tool,
+    Function,
+    Other(String),
+}
+
+impl std::str::FromStr for Role {
+    type Err = std::convert::Infallible;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "user" => Ok(Role::User),
+            "model" | "assistant" => Ok(Role::Model),
+            "system" | "developer" => Ok(Role::System),
+            "tool" => Ok(Role::Tool),
+            "function" => Ok(Role::Function),
+            _ => Ok(Role::Other(s.to_string())),
+        }
+    }
+}
+
+impl TryFrom<&str> for Role {
+    type Error = crate::error::AdkError;
+
+    fn try_from(s: &str) -> Result<Self, Self::Error> {
+        if s.trim().is_empty() {
+            return Err(crate::error::AdkError::Config(
+                "Role cannot be an empty string".to_string(),
+            ));
+        }
+        Ok(s.parse().unwrap_or(Role::Other(s.to_string())))
+    }
+}
+
+impl TryFrom<String> for Role {
+    type Error = crate::error::AdkError;
+
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        if s.trim().is_empty() {
+            return Err(crate::error::AdkError::Config(
+                "Role cannot be an empty string".to_string(),
+            ));
+        }
+        Ok(s.as_str().parse().unwrap_or(Role::Other(s)))
+    }
+}
+
+impl std::fmt::Display for Role {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Role::User => write!(f, "user"),
+            Role::Model => write!(f, "model"),
+            Role::System => write!(f, "system"),
+            Role::Tool => write!(f, "tool"),
+            Role::Function => write!(f, "function"),
+            Role::Other(s) => write!(f, "{s}"),
+        }
+    }
+}
+
+impl serde::Serialize for Role {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Role {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        Ok(s.parse().unwrap_or(Role::Other(s)))
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Content {
-    pub role: String,
+    pub role: Role,
     pub parts: Vec<Part>,
 }
 
@@ -78,8 +166,8 @@ pub enum Part {
 }
 
 impl Content {
-    pub fn new(role: impl Into<String>) -> Self {
-        Self { role: role.into(), parts: Vec::new() }
+    pub fn new(role: impl TryInto<Role, Error = crate::error::AdkError>) -> Result<Self, crate::error::AdkError> {
+        Ok(Self { role: role.try_into()?, parts: Vec::new() })
     }
 
     pub fn with_text(mut self, text: impl Into<String>) -> Self {
@@ -194,14 +282,14 @@ mod tests {
 
     #[test]
     fn test_content_creation() {
-        let content = Content::new("user").with_text("Hello");
-        assert_eq!(content.role, "user");
+        let content = Content::new("user").expect("Failed to parse role").with_text("Hello");
+        assert_eq!(content.role, Role::User);
         assert_eq!(content.parts.len(), 1);
     }
 
     #[test]
     fn test_content_with_inline_data() {
-        let content = Content::new("user")
+        let content = Content::new("user").expect("Failed to parse role")
             .with_text("Check this image")
             .with_inline_data("image/png", vec![0x89, 0x50, 0x4E, 0x47]);
         assert_eq!(content.parts.len(), 2);
@@ -212,7 +300,7 @@ mod tests {
 
     #[test]
     fn test_content_with_file_uri() {
-        let content = Content::new("user")
+        let content = Content::new("user").expect("Failed to parse role")
             .with_text("Check this image")
             .with_file_uri("image/jpeg", "https://example.com/image.jpg");
         assert_eq!(content.parts.len(), 2);
@@ -310,7 +398,7 @@ mod tests {
     fn test_inline_data_within_limit() {
         // Should succeed: small data
         let data = vec![0u8; 1024];
-        let content = Content::new("user").with_inline_data("image/png", data);
+        let content = Content::new("user").expect("Failed to parse role").with_inline_data("image/png", data);
         assert_eq!(content.parts.len(), 1);
     }
 
@@ -326,7 +414,7 @@ mod tests {
     #[should_panic(expected = "exceeds maximum allowed size")]
     fn test_inline_data_exceeds_limit_content() {
         let data = vec![0u8; MAX_INLINE_DATA_SIZE + 1];
-        let _ = Content::new("user").with_inline_data("image/png", data);
+        let _ = Content::new("user").expect("Failed to parse role").with_inline_data("image/png", data);
     }
 
     #[test]
@@ -360,7 +448,7 @@ mod tests {
 
     #[test]
     fn test_content_with_thinking() {
-        let content = Content::new("model").with_thinking("Let me reason about this");
+        let content = Content::new("model").expect("Failed to parse role").with_thinking("Let me reason about this");
         assert_eq!(content.parts.len(), 1);
         assert!(matches!(
             &content.parts[0],

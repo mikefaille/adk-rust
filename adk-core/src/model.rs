@@ -260,7 +260,7 @@ mod tests {
 
     #[test]
     fn test_llm_response_creation() {
-        let content = Content::new("assistant");
+        let content = Content::new("assistant").expect("Failed to parse role");
         let resp = LlmResponse::new(content);
         assert!(resp.content.is_some());
         assert!(resp.turn_complete);
@@ -288,7 +288,7 @@ mod tests {
     #[test]
     fn test_llm_response_roundtrip_with_citations() {
         let response = LlmResponse {
-            content: Some(Content::new("model").with_text("hello")),
+            content: Some(Content::new("model").expect("Failed to parse role").with_text("hello")),
             usage_metadata: None,
             finish_reason: Some(FinishReason::Stop),
             citation_metadata: Some(CitationMetadata {
