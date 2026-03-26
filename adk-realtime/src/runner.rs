@@ -9,7 +9,7 @@ use crate::events::{ServerEvent, ToolCall, ToolResponse};
 use crate::model::BoxedModel;
 use crate::session::BoxedSession;
 use async_trait::async_trait;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -229,6 +229,7 @@ impl RealtimeRunnerBuilder {
             tools: self.tools,
             event_handler: self.event_handler.unwrap_or_else(|| Arc::new(NoOpEventHandler)),
             session: Arc::new(RwLock::new(None)),
+            executed_tools: Arc::new(RwLock::new(VecDeque::new())),
         })
     }
 }
@@ -277,6 +278,7 @@ pub struct RealtimeRunner {
     tools: HashMap<String, (ToolDefinition, Arc<dyn ToolHandler>)>,
     event_handler: Arc<dyn EventHandler>,
     session: Arc<RwLock<Option<BoxedSession>>>,
+    executed_tools: Arc<RwLock<VecDeque<String>>>,
 }
 
 impl RealtimeRunner {
@@ -319,6 +321,7 @@ impl RealtimeRunner {
     ///     runner.update_session(update).await.unwrap();
     /// }
     /// ```
+    #[tracing::instrument(skip(self, config), name = "SessionUpdate")]
     pub async fn update_session(&self, config: SessionUpdateConfig) -> Result<()> {
         let guard = self.session.read().await;
         let session = guard.as_ref().ok_or_else(|| RealtimeError::connection("Not connected"))?;
@@ -327,6 +330,7 @@ impl RealtimeRunner {
                 "Failed to serialize session update config: {e}. Ensure all SessionUpdateConfig fields implement serde::Serialize and contain valid values"
             ))
         })?;
+
         session
             .send_event(crate::events::ClientEvent::SessionUpdate { session: config_value })
             .await
@@ -344,6 +348,19 @@ impl RealtimeRunner {
         let guard = self.session.read().await;
         let session = guard.as_ref().ok_or_else(|| RealtimeError::connection("Not connected"))?;
         session.send_text(text).await
+    }
+
+    /// Send a system notification into the Data Plane to bridge context (e.g., Attention Shock Mitigation).
+    pub async fn send_system_notification(&self, text: &str) -> Result<()> {
+        let guard = self.session.read().await;
+        let session = guard.as_ref().ok_or_else(|| RealtimeError::connection("Not connected"))?;
+        let item = serde_json::json!({
+            "role": "user",
+            "parts": [{
+                "text": text
+            }]
+        });
+        session.send_event(crate::events::ClientEvent::ConversationItemCreate { item }).await
     }
 
     /// Commit the audio buffer (for manual VAD mode).
@@ -485,6 +502,32 @@ impl RealtimeRunner {
 
     /// Execute a tool call and optionally send the response.
     async fn execute_tool_call(&self, call_id: &str, name: &str, arguments: &str) -> Result<()> {
+        // Enforce TTL to prevent routing deadlocks
+        let mut executed_tools = self.executed_tools.write().await;
+
+        let call_count = executed_tools.iter().filter(|&t| t == name).count();
+        if call_count >= 2 {
+            tracing::warn!("Tool {} exceeded TTL. Routing deadlock detected.", name);
+            let response = ToolResponse {
+                call_id: call_id.to_string(),
+                output: serde_json::json!({
+                    "error": "Rate limit exceeded: tool called too many times in a short period (deadlock detected)."
+                }),
+            };
+            if self.runner_config.auto_respond_tools {
+                if let Some(session) = self.session.read().await.as_ref() {
+                    session.send_tool_response(response).await?;
+                }
+            }
+            return Ok(());
+        }
+
+        executed_tools.push_back(name.to_string());
+        if executed_tools.len() > 3 {
+            executed_tools.pop_front();
+        }
+        drop(executed_tools);
+
         let handler = self.tools.get(name).map(|(_, h)| h.clone());
 
         let result = if let Some(handler) = handler {
@@ -494,12 +537,24 @@ impl RealtimeRunner {
             let call =
                 ToolCall { call_id: call_id.to_string(), name: name.to_string(), arguments: args };
 
-            match handler.execute(&call).await {
+            let start = std::time::Instant::now();
+            let execution_result = match handler.execute(&call).await {
                 Ok(value) => value,
                 Err(e) => serde_json::json!({
                     "error": e.to_string()
                 }),
+            };
+            let duration = start.elapsed();
+
+            if duration > std::time::Duration::from_millis(100) {
+                tracing::error!(
+                    duration_ms = duration.as_millis(),
+                    tool_name = name,
+                    "Tool execution exceeded 100ms threshold! State-sync telemetry alert."
+                );
             }
+
+            execution_result
         } else {
             serde_json::json!({
                 "error": format!("Unknown tool: {}", name)
