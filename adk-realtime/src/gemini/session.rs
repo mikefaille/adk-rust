@@ -158,8 +158,12 @@ struct GeminiFunctionResponse {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct GeminiClientContent {
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     turns: Vec<GeminiTurn>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
     turn_complete: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session_update: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -569,8 +573,65 @@ impl RealtimeSession for GeminiRealtimeSession {
         Ok(()) // Gemini handles interruption via VAD
     }
 
-    async fn send_event(&self, _event: ClientEvent) -> Result<()> {
-        Ok(()) // Raw events not directly supported
+    async fn send_event(&self, event: ClientEvent) -> Result<()> {
+        match event {
+            ClientEvent::SessionUpdate { session } => {
+                // Extract lineage and domains from session payload to maintain distributed trace context
+                let trace_id = session.get("trace_id").and_then(|v| v.as_str()).unwrap_or("unknown");
+                let span_id = session.get("span_id").and_then(|v| v.as_str()).unwrap_or("unknown");
+                let from_domain = session.get("from_domain").and_then(|v| v.as_str()).unwrap_or("unknown");
+                let to_domain = session.get("to_domain").and_then(|v| v.as_str()).unwrap_or("unknown");
+
+                let span = tracing::info_span!(
+                    "domain_transition",
+                    from_domain = %from_domain,
+                    to_domain = %to_domain,
+                    latency_ms = tracing::field::Empty,
+                );
+
+                // Link span to the parent span ID if context is present
+                if trace_id != "unknown" && span_id != "unknown" {
+                    adk_telemetry::extract_context(&span, trace_id, span_id);
+                }
+
+                tracing::info!(parent: &span, "Initiating domain transition payload injection");
+
+                let start = std::time::Instant::now();
+
+                let msg = GeminiClientMessage {
+                    setup: None,
+                    realtime_input: None,
+                    tool_response: None,
+                    client_content: Some(GeminiClientContent {
+                        turns: vec![GeminiTurn {
+                            role: "user".to_string(),
+                            parts: vec![GeminiPart {
+                                text: Some("[SYSTEM EVENT: Domain shifted. Acknowledge and proceed using your new toolset.]".to_string()),
+                                inline_data: None,
+                            }],
+                        }],
+                        turn_complete: true,
+                        session_update: Some(session),
+                    }),
+                };
+
+                let result = self.send_raw(&msg).await;
+
+                let elapsed_ms = start.elapsed().as_millis();
+                span.record("latency_ms", &elapsed_ms);
+
+                if let Err(e) = &result {
+                    tracing::error!(parent: &span, "Domain transition injection failed: {}", e);
+                } else {
+                    tracing::info!(parent: &span, "Domain transition payload injected successfully");
+                }
+                result
+            }
+            _ => {
+                tracing::debug!("Raw event type {:?} not directly supported for Gemini", event);
+                Ok(())
+            }
+        }
     }
 
     async fn next_event(&self) -> Option<Result<ServerEvent>> {

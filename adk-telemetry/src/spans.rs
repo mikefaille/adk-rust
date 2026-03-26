@@ -87,3 +87,29 @@ pub fn add_context_attributes(user_id: &str, session_id: &str) {
     span.record("user.id", user_id);
     span.record("session.id", session_id);
 }
+
+/// Extract and link a remote parent context to the given span
+///
+/// # Arguments
+/// * `span` - The tracing span to link to the parent context
+/// * `trace_id` - The remote trace ID string
+/// * `span_id` - The remote span ID string
+pub fn extract_context(span: &Span, trace_id: &str, span_id: &str) {
+    use opentelemetry::trace::{SpanContext, TraceContextExt, TraceFlags, TraceState};
+    use tracing_opentelemetry::OpenTelemetrySpanExt;
+
+    if let (Ok(tid), Ok(sid)) = (
+        opentelemetry::trace::TraceId::from_hex(trace_id),
+        opentelemetry::trace::SpanId::from_hex(span_id)
+    ) {
+        let span_context = SpanContext::new(
+            tid,
+            sid,
+            TraceFlags::SAMPLED,
+            false,
+            TraceState::default(),
+        );
+        let cx = opentelemetry::Context::new().with_remote_span_context(span_context);
+        span.set_parent(cx);
+    }
+}
