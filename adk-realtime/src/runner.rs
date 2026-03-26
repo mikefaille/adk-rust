@@ -444,11 +444,7 @@ impl RealtimeRunner {
     pub async fn next_event(&self) -> Option<Result<ServerEvent>> {
         let event = {
             let guard = self.session.read().await;
-            if let Some(session) = guard.as_ref() {
-                session.next_event().await
-            } else {
-                None
-            }
+            if let Some(session) = guard.as_ref() { session.next_event().await } else { None }
         };
 
         if let Some(Ok(ServerEvent::ResponseCreated { .. })) = &event {
