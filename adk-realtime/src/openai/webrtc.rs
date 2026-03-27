@@ -838,6 +838,11 @@ impl RealtimeSession for OpenAIWebRTCSession {
         Ok(crate::session::ContextMutationOutcome::Applied)
     }
 
+    /// Receive the next server event.
+    ///
+    /// Reads from the internal mpsc channel that is fed by the background
+    /// I/O driving loop. Returns `None` when the session is closed and
+    /// the channel is drained.
     async fn next_event(&self) -> Option<Result<ServerEvent>> {
         let mut rx = self.event_rx.lock().await;
         rx.recv().await

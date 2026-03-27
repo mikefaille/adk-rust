@@ -42,13 +42,12 @@ pub enum ClientEvent {
     },
 
     /// Universal intent for mutating context mid-flight.
-    #[serde(rename = "session.update_context")]
+    /// This is an internal runner control event and is not serialized directly to providers.
+    #[serde(skip_serializing)]
     UpdateSession {
         /// New instructions.
-        #[serde(skip_serializing_if = "Option::is_none")]
         instructions: Option<String>,
         /// New tools definition.
-        #[serde(skip_serializing_if = "Option::is_none")]
         tools: Option<Vec<crate::config::ToolDefinition>>,
     },
 
