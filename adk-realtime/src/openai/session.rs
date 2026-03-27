@@ -313,9 +313,54 @@ impl RealtimeSession for OpenAIRealtimeSession {
     }
 
     async fn send_event(&self, event: ClientEvent) -> Result<()> {
+        if let ClientEvent::Message { role, parts } = event {
+            let content_parts: Vec<serde_json::Value> = parts
+                .into_iter()
+                .map(|p| match p {
+                    adk_core::types::Part::Text { text } => serde_json::json!({
+                        "type": "input_text",
+                        "text": text
+                    }),
+                    adk_core::types::Part::Thinking { thinking, signature } => {
+                        let mut val = serde_json::json!({
+                            "type": "input_text",
+                            "text": thinking
+                        });
+                        if let Some(sig) = signature {
+                            val["signature"] = serde_json::json!(sig);
+                        }
+                        val
+                    }
+                    _ => serde_json::json!({ "type": "input_text", "text": "" }),
+                })
+                .collect();
+
+            let item = serde_json::json!({
+                "type": "message",
+                "role": role,
+                "content": content_parts
+            });
+
+            let payload = serde_json::json!({
+                "type": "conversation.item.create",
+                "item": item
+            });
+
+            return self.send_raw(&payload).await;
+        }
+
         let value = serde_json::to_value(&event)
             .map_err(|e| RealtimeError::protocol(format!("Serialize error: {}", e)))?;
         self.send_raw(&value).await
+    }
+
+    async fn mutate_context(
+        &self,
+        config: crate::config::RealtimeConfig,
+    ) -> Result<crate::session::ContextMutationOutcome> {
+        // OpenAI natively supports hot-swapping config mid-flight via session.update
+        self.configure_session(config).await?;
+        Ok(crate::session::ContextMutationOutcome::Applied)
     }
 
     async fn next_event(&self) -> Option<Result<ServerEvent>> {

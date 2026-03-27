@@ -73,6 +73,17 @@ pub trait RealtimeSession: Send + Sync {
     /// Send a raw client event.
     async fn send_event(&self, event: ClientEvent) -> Result<()>;
 
+    /// Attempt to update the session parameters mid-flight.
+    ///
+    /// Providers that natively support mid-flight updates (like OpenAI) will apply
+    /// the configuration over the active connection and return `Applied`.
+    /// Providers that require an immutable context (like Gemini) will return
+    /// `RequiresResumption`, signaling the runner to perform a soft reconnect.
+    async fn mutate_context(
+        &self,
+        config: crate::config::RealtimeConfig,
+    ) -> Result<ContextMutationOutcome>;
+
     /// Get the next event from the server.
     ///
     /// Returns `None` when the session is closed.
@@ -146,6 +157,15 @@ pub trait RealtimeSessionExt: RealtimeSession {
 
 // Blanket implementation
 impl<T: RealtimeSession> RealtimeSessionExt for T {}
+
+/// Result of a mid-flight context mutation request.
+#[derive(Debug, Clone)]
+pub enum ContextMutationOutcome {
+    /// Provider successfully updated the active session via sideband (e.g., OpenAI session.update).
+    Applied,
+    /// Provider requires the transport to be rebound with a new configuration.
+    RequiresResumption(Box<crate::config::RealtimeConfig>),
+}
 
 /// A boxed session type for dynamic dispatch.
 pub type BoxedSession = Box<dyn RealtimeSession>;

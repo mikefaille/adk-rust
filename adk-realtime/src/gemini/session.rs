@@ -104,6 +104,16 @@ struct GeminiSetup {
     tools: Option<Vec<Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     cached_content: Option<String>,
+    // Enables session resumption on the server.
+    // See: https://ai.google.dev/gemini-api/docs/live-api/session-management
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session_resumption: Option<SessionResumptionConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SessionResumptionConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    handle: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -318,6 +328,15 @@ impl GeminiRealtimeSession {
 
         let tools = convert_tools(config.tools);
 
+        let handle = config
+            .extra
+            .as_ref()
+            .and_then(|ext| ext.get("resumeToken"))
+            .and_then(|t| t.as_str())
+            .map(|token| token.to_string());
+
+        let session_resumption = Some(SessionResumptionConfig { handle });
+
         let setup = GeminiClientMessage {
             setup: Some(GeminiSetup {
                 model: model.to_string(),
@@ -325,6 +344,7 @@ impl GeminiRealtimeSession {
                 generation_config: Some(generation_config),
                 tools,
                 cached_content: config.cached_content,
+                session_resumption,
             }),
             realtime_input: None,
             tool_response: None,
@@ -396,6 +416,17 @@ impl GeminiRealtimeSession {
                 event_id: uuid::Uuid::new_v4().to_string(),
                 session: value,
             });
+        }
+
+        // Check for session resumption update
+        if let Some(resumption_update) = value.get("sessionResumptionUpdate") {
+            if let Some(token) = resumption_update.get("resumptionToken").and_then(|t| t.as_str()) {
+                tracing::debug!("Received new Gemini 2.5 Native resumption token");
+                return Ok(ServerEvent::SessionUpdated {
+                    event_id: uuid::Uuid::new_v4().to_string(),
+                    session: json!({ "resumeToken": token }),
+                });
+            }
         }
 
         // Check for server content (audio/text)
@@ -569,8 +600,61 @@ impl RealtimeSession for GeminiRealtimeSession {
         Ok(()) // Gemini handles interruption via VAD
     }
 
-    async fn send_event(&self, _event: ClientEvent) -> Result<()> {
-        Ok(()) // Raw events not directly supported
+    async fn send_event(&self, event: ClientEvent) -> Result<()> {
+        if let ClientEvent::Message { role, parts } = event {
+            // Translate into Gemini's clientContent format
+            let gemini_parts: Vec<GeminiPart> = parts
+                .into_iter()
+                .map(|p| match p {
+                    adk_core::types::Part::Text { text } => GeminiPart { text: Some(text), inline_data: None },
+                    adk_core::types::Part::Thinking { thinking, .. } => {
+                        GeminiPart { text: Some(thinking), inline_data: None }
+                    }
+                    _ => GeminiPart { text: Some("".to_string()), inline_data: None },
+                })
+                .collect();
+
+            // Coerce into Gemini's clientContent format, wrapping System as User
+            let (gemini_role, mut final_parts) = match role.as_str() {
+                "system" => {
+                    let mut modified_parts = gemini_parts;
+                    if let Some(first_part) = modified_parts.first_mut() {
+                        if let Some(text) = &mut first_part.text {
+                            *text = format!("[CRITICAL SYSTEM DIRECTIVE OVERRIDE]\n{}", text);
+                        }
+                    }
+                    ("user".to_string(), modified_parts)
+                }
+                "user" => ("user".to_string(), gemini_parts),
+                "model" | "assistant" => ("model".to_string(), gemini_parts),
+                _ => ("user".to_string(), gemini_parts), // Fallback
+            };
+
+            let gemini_msg = GeminiClientMessage {
+                setup: None,
+                realtime_input: None,
+                tool_response: None,
+                client_content: Some(GeminiClientContent {
+                    turns: vec![GeminiTurn {
+                        role: gemini_role,
+                        parts: final_parts,
+                    }],
+                    turn_complete: true,
+                }),
+            };
+            return self.send_raw(&gemini_msg).await;
+        }
+
+        Ok(()) // Other raw events not directly supported
+    }
+
+    async fn mutate_context(
+        &self,
+        config: crate::config::RealtimeConfig,
+    ) -> Result<crate::session::ContextMutationOutcome> {
+        // Gemini Live requires a session resumption/soft-reconnect to
+        // safely update tools and instructions mid-flight.
+        Ok(crate::session::ContextMutationOutcome::RequiresResumption(Box::new(config)))
     }
 
     async fn next_event(&self) -> Option<Result<ServerEvent>> {

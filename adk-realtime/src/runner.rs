@@ -13,6 +13,14 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+#[derive(Debug, Clone)]
+pub enum RunnerState {
+    Idle,
+    Generating,
+    ExecutingTool,
+    PendingResumption { config: Box<RealtimeConfig>, bridge_message: Option<String> },
+}
+
 /// Handler for tool/function calls from the realtime model.
 #[async_trait]
 pub trait ToolHandler: Send + Sync {
@@ -224,11 +232,12 @@ impl RealtimeRunnerBuilder {
 
         Ok(RealtimeRunner {
             model,
-            config,
+            config: Arc::new(RwLock::new(config)),
             runner_config: self.runner_config,
             tools: self.tools,
             event_handler: self.event_handler.unwrap_or_else(|| Arc::new(NoOpEventHandler)),
             session: Arc::new(RwLock::new(None)),
+            state: Arc::new(RwLock::new(RunnerState::Idle)),
         })
     }
 }
@@ -272,11 +281,12 @@ impl RealtimeRunnerBuilder {
 /// ```
 pub struct RealtimeRunner {
     model: BoxedModel,
-    config: RealtimeConfig,
+    config: Arc<RwLock<RealtimeConfig>>,
     runner_config: RunnerConfig,
     tools: HashMap<String, (ToolDefinition, Arc<dyn ToolHandler>)>,
     event_handler: Arc<dyn EventHandler>,
     session: Arc<RwLock<Option<BoxedSession>>>,
+    state: Arc<RwLock<RunnerState>>,
 }
 
 impl RealtimeRunner {
@@ -287,7 +297,8 @@ impl RealtimeRunner {
 
     /// Connect to the realtime provider.
     pub async fn connect(&self) -> Result<()> {
-        let session = self.model.connect(self.config.clone()).await?;
+        let config = self.config.read().await.clone();
+        let session = self.model.connect(config).await?;
         let mut guard = self.session.write().await;
         *guard = Some(session);
         Ok(())
@@ -320,16 +331,122 @@ impl RealtimeRunner {
     /// }
     /// ```
     pub async fn update_session(&self, config: SessionUpdateConfig) -> Result<()> {
+        let merged_config = {
+            let mut stored = self.config.write().await;
+            *stored = crate::config::merge_realtime_config(&stored, config.0);
+            stored.clone()
+        };
+
         let guard = self.session.read().await;
         let session = guard.as_ref().ok_or_else(|| RealtimeError::connection("Not connected"))?;
-        let config_value = serde_json::to_value(&config).map_err(|e| {
-            RealtimeError::config(format!(
-                "Failed to serialize session update config: {e}. Ensure all SessionUpdateConfig fields implement serde::Serialize and contain valid values"
-            ))
-        })?;
-        session
-            .send_event(crate::events::ClientEvent::SessionUpdate { session: config_value })
-            .await
+
+        match session.mutate_context(merged_config).await? {
+            crate::session::ContextMutationOutcome::Applied => {
+                tracing::info!("Context updated natively mid-flight.");
+                Ok(())
+            }
+            crate::session::ContextMutationOutcome::RequiresResumption(new_config) => {
+                tracing::warn!("Provider requires soft reconnect. Checking resumability state...");
+                let mut state = self.state.write().await;
+                match *state {
+                    RunnerState::Idle => {
+                        drop(state);
+                        drop(guard);
+                        self.execute_resumption(*new_config, None).await
+                    }
+                    _ => {
+                        tracing::info!("Runner is busy ({:?}). Queuing resumption.", *state);
+                        *state = RunnerState::PendingResumption {
+                            config: new_config,
+                            bridge_message: None,
+                        };
+                        Ok(())
+                    }
+                }
+            }
+        }
+    }
+
+    /// Update session configuration and inject a bridge message into the active conversation memory.
+    #[tracing::instrument(skip(self, config), name = "SessionUpdateWithBridge")]
+    pub async fn update_session_with_bridge(
+        &self,
+        config: SessionUpdateConfig,
+        bridge_message: String,
+    ) -> Result<()> {
+        let merged_config = {
+            let mut stored = self.config.write().await;
+            *stored = crate::config::merge_realtime_config(&stored, config.0);
+            stored.clone()
+        };
+
+        let guard = self.session.read().await;
+        let session = guard.as_ref().ok_or_else(|| RealtimeError::connection("Not connected"))?;
+
+        match session.mutate_context(merged_config).await? {
+            crate::session::ContextMutationOutcome::Applied => {
+                tracing::info!("Context updated natively mid-flight.");
+
+                let bridge_event = crate::events::ClientEvent::Message {
+                    role: "user".to_string(),
+                    parts: vec![adk_core::types::Part::Text { text: bridge_message }],
+                };
+                if let Err(e) = session.send_event(bridge_event).await {
+                    tracing::error!("Failed to inject context bridge message: {}", e);
+                }
+                Ok(())
+            }
+            crate::session::ContextMutationOutcome::RequiresResumption(new_config) => {
+                tracing::warn!("Provider requires soft reconnect. Checking resumability state...");
+                let mut state = self.state.write().await;
+                match *state {
+                    RunnerState::Idle => {
+                        drop(state);
+                        drop(guard);
+                        self.execute_resumption(*new_config, Some(bridge_message)).await
+                    }
+                    _ => {
+                        tracing::info!("Runner is busy ({:?}). Queuing resumption.", *state);
+                        *state = RunnerState::PendingResumption {
+                            config: new_config,
+                            bridge_message: Some(bridge_message),
+                        };
+                        Ok(())
+                    }
+                }
+            }
+        }
+    }
+
+    /// Executes the phantom reconnect / soft resumption loop.
+    #[tracing::instrument(skip(self, new_config, bridge_message), name = "cognitive_handoff")]
+    async fn execute_resumption(
+        &self,
+        new_config: RealtimeConfig,
+        bridge_message: Option<String>,
+    ) -> Result<()> {
+        let mut guard = self.session.write().await;
+
+        if let Some(session) = guard.as_ref() {
+            session.close().await?;
+        }
+
+        let new_session = self.model.connect(new_config).await?;
+
+        // 3. Swap pointer
+        *guard = Some(new_session);
+
+        // 4. Inject bridge message into the NEW active session
+        if let Some(msg) = bridge_message {
+            let bridge_event = crate::events::ClientEvent::Message {
+                role: "user".to_string(),
+                parts: vec![adk_core::types::Part::Text { text: msg }],
+            };
+            if let Err(e) = guard.as_ref().unwrap().send_event(bridge_event).await {
+                tracing::error!("Failed to inject context bridge message after resumption: {}", e);
+            }
+        }
+        Ok(())
     }
 
     /// Send audio to the session.
@@ -449,6 +566,26 @@ impl RealtimeRunner {
     /// Process a single event.
     async fn handle_event(&self, event: ServerEvent) -> Result<()> {
         match event {
+            ServerEvent::ResponseCreated { .. } => {
+                *self.state.write().await = RunnerState::Generating;
+            }
+            ServerEvent::SpeechStarted { audio_start_ms, .. } => {
+                // Do NOT transition to RunnerState::Generating.
+                // The model is listening, not locking context.
+                *self.state.write().await = RunnerState::Idle;
+                self.event_handler.on_speech_started(audio_start_ms).await?;
+            }
+            ServerEvent::ResponseDone { .. } => {
+                self.check_resumption_queue().await?;
+                self.event_handler.on_response_done().await?;
+            }
+            ServerEvent::FunctionCallDone { call_id, name, arguments, .. } => {
+                *self.state.write().await = RunnerState::ExecutingTool;
+
+                if self.runner_config.auto_execute_tools {
+                    self.execute_tool_call(&call_id, &name, &arguments).await?;
+                }
+            }
             ServerEvent::AudioDelta { delta, item_id, .. } => {
                 self.event_handler.on_audio(&delta, &item_id).await?;
             }
@@ -458,19 +595,8 @@ impl RealtimeRunner {
             ServerEvent::TranscriptDelta { delta, item_id, .. } => {
                 self.event_handler.on_transcript(&delta, &item_id).await?;
             }
-            ServerEvent::SpeechStarted { audio_start_ms, .. } => {
-                self.event_handler.on_speech_started(audio_start_ms).await?;
-            }
             ServerEvent::SpeechStopped { audio_end_ms, .. } => {
                 self.event_handler.on_speech_stopped(audio_end_ms).await?;
-            }
-            ServerEvent::ResponseDone { .. } => {
-                self.event_handler.on_response_done().await?;
-            }
-            ServerEvent::FunctionCallDone { call_id, name, arguments, .. } => {
-                if self.runner_config.auto_execute_tools {
-                    self.execute_tool_call(&call_id, &name, &arguments).await?;
-                }
             }
             ServerEvent::Error { error, .. } => {
                 let err = RealtimeError::server(error.code.unwrap_or_default(), error.message);
@@ -480,6 +606,28 @@ impl RealtimeRunner {
                 // Ignore other events
             }
         }
+        Ok(())
+    }
+
+    /// Checks the resumption queue for pending `SessionUpdate` modifications that
+    /// were stalled because the session was busy generating or executing tools.
+    async fn check_resumption_queue(&self) -> Result<()> {
+        let queued_resumption = {
+            let mut state = self.state.write().await;
+            if let RunnerState::PendingResumption { config, bridge_message } = state.clone() {
+                *state = RunnerState::Idle;
+                Some((config, bridge_message))
+            } else {
+                *state = RunnerState::Idle;
+                None
+            }
+        };
+
+        if let Some((config, bridge_message)) = queued_resumption {
+            tracing::info!("Executing queued session resumption.");
+            self.execute_resumption(*config, bridge_message).await?;
+        }
+
         Ok(())
     }
 

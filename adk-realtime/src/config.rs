@@ -199,6 +199,47 @@ pub struct RealtimeConfig {
 ///     RealtimeConfig::default().with_instruction("You are now a travel agent.")
 /// );
 /// ```
+///
+/// Helper function to merge a delta `RealtimeConfig` into a base `RealtimeConfig`.
+/// It consumes the `update` and updates any `Some` fields in the returned clone.
+pub fn merge_realtime_config(base: &RealtimeConfig, update: RealtimeConfig) -> RealtimeConfig {
+    let mut new_config = base.clone();
+    if let Some(model) = update.model {
+        new_config.model = Some(model);
+    }
+    if let Some(instruction) = update.instruction {
+        new_config.instruction = Some(instruction);
+    }
+    if let Some(voice) = update.voice {
+        new_config.voice = Some(voice);
+    }
+    if let Some(modalities) = update.modalities {
+        new_config.modalities = Some(modalities);
+    }
+    if let Some(input_format) = update.input_audio_format {
+        new_config.input_audio_format = Some(input_format);
+    }
+    if let Some(output_format) = update.output_audio_format {
+        new_config.output_audio_format = Some(output_format);
+    }
+    if let Some(tools) = update.tools {
+        new_config.tools = Some(tools);
+    }
+    if let Some(temp) = update.temperature {
+        new_config.temperature = Some(temp);
+    }
+    if let Some(max_tokens) = update.max_response_output_tokens {
+        new_config.max_response_output_tokens = Some(max_tokens);
+    }
+    if let Some(turn_detection) = update.turn_detection {
+        new_config.turn_detection = Some(turn_detection);
+    }
+    if let Some(cached_content) = update.cached_content {
+        new_config.cached_content = Some(cached_content);
+    }
+    new_config
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct SessionUpdateConfig(pub RealtimeConfig);
