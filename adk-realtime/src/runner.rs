@@ -358,10 +358,6 @@ impl RealtimeRunner {
         }
     }
 
-    /// Update the session configuration.
-    ///
-    /// The RealtimeRunner will attempt to mutate the session natively if the underlying
-    /// API supports it (e.g., OpenAI). If it does not (e.g., Gemini), the Runner will
     /// Internal helper to merge a `SessionUpdateConfig` into a base `RealtimeConfig`.
     ///
     /// Note: This is intentionally narrow and specifically scoped to merge only
@@ -388,6 +384,19 @@ impl RealtimeRunner {
     /// Update the session configuration.
     ///
     /// Delegates to [`update_session_with_bridge`] with no bridge message.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use adk_realtime::config::{SessionUpdateConfig, RealtimeConfig};
+    ///
+    /// async fn example(runner: &adk_realtime::RealtimeRunner) {
+    ///     let update = SessionUpdateConfig(
+    ///         RealtimeConfig::default().with_instruction("You are now a pirate.")
+    ///     );
+    ///     runner.update_session(update).await.unwrap();
+    /// }
+    /// ```
     pub async fn update_session(&self, config: SessionUpdateConfig) -> Result<()> {
         self.update_session_with_bridge(config, None).await
     }
