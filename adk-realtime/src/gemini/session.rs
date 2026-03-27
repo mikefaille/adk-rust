@@ -104,15 +104,16 @@ struct GeminiSetup {
     tools: Option<Vec<Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     cached_content: Option<String>,
+    // Enables session resumption on the server.
+    // See: https://ai.google.dev/gemini-api/docs/live-api/session-management
     #[serde(skip_serializing_if = "Option::is_none")]
-    session_resumption: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    session_resumption_config: Option<SessionResumptionConfig>,
+    session_resumption: Option<SessionResumptionConfig>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct SessionResumptionConfig {
-    handle: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    handle: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -327,14 +328,14 @@ impl GeminiRealtimeSession {
 
         let tools = convert_tools(config.tools);
 
-        let session_resumption_config = config
+        let handle = config
             .extra
             .as_ref()
             .and_then(|ext| ext.get("resumeToken"))
             .and_then(|t| t.as_str())
-            .map(|token| SessionResumptionConfig {
-                handle: token.to_string(),
-            });
+            .map(|token| token.to_string());
+
+        let session_resumption = Some(SessionResumptionConfig { handle });
 
         let setup = GeminiClientMessage {
             setup: Some(GeminiSetup {
@@ -343,8 +344,7 @@ impl GeminiRealtimeSession {
                 generation_config: Some(generation_config),
                 tools,
                 cached_content: config.cached_content,
-                session_resumption: Some(true),
-                session_resumption_config,
+                session_resumption,
             }),
             realtime_input: None,
             tool_response: None,
