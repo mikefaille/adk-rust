@@ -331,45 +331,11 @@ impl RealtimeRunner {
     /// }
     /// ```
     pub async fn update_session(&self, config: SessionUpdateConfig) -> Result<()> {
-        let mut stored_config = self.config.write().await;
-
-        // Merge delta into stored config
-        if let Some(ref model) = config.model {
-            stored_config.model = Some(model.clone());
-        }
-        if let Some(ref instruction) = config.instruction {
-            stored_config.instruction = Some(instruction.clone());
-        }
-        if let Some(ref voice) = config.voice {
-            stored_config.voice = Some(voice.clone());
-        }
-        if let Some(ref modalities) = config.modalities {
-            stored_config.modalities = Some(modalities.clone());
-        }
-        if let Some(ref input_format) = config.input_audio_format {
-            stored_config.input_audio_format = Some(*input_format);
-        }
-        if let Some(ref output_format) = config.output_audio_format {
-            stored_config.output_audio_format = Some(*output_format);
-        }
-        if let Some(ref tools) = config.tools {
-            stored_config.tools = Some(tools.clone());
-        }
-        if let Some(ref temp) = config.temperature {
-            stored_config.temperature = Some(*temp);
-        }
-        if let Some(ref max_tokens) = config.max_response_output_tokens {
-            stored_config.max_response_output_tokens = Some(*max_tokens);
-        }
-        if let Some(ref turn_detection) = config.turn_detection {
-            stored_config.turn_detection = Some(turn_detection.clone());
-        }
-        if let Some(ref cached_content) = config.cached_content {
-            stored_config.cached_content = Some(cached_content.clone());
-        }
-
-        let merged_config = stored_config.clone();
-        drop(stored_config);
+        let merged_config = {
+            let mut stored = self.config.write().await;
+            *stored = crate::config::merge_realtime_config(&stored, config.0);
+            stored.clone()
+        };
 
         let guard = self.session.read().await;
         let session = guard.as_ref().ok_or_else(|| RealtimeError::connection("Not connected"))?;
@@ -408,45 +374,11 @@ impl RealtimeRunner {
         config: SessionUpdateConfig,
         bridge_message: String,
     ) -> Result<()> {
-        let mut stored_config = self.config.write().await;
-
-        // Merge delta into stored config
-        if let Some(ref model) = config.model {
-            stored_config.model = Some(model.clone());
-        }
-        if let Some(ref instruction) = config.instruction {
-            stored_config.instruction = Some(instruction.clone());
-        }
-        if let Some(ref voice) = config.voice {
-            stored_config.voice = Some(voice.clone());
-        }
-        if let Some(ref modalities) = config.modalities {
-            stored_config.modalities = Some(modalities.clone());
-        }
-        if let Some(ref input_format) = config.input_audio_format {
-            stored_config.input_audio_format = Some(*input_format);
-        }
-        if let Some(ref output_format) = config.output_audio_format {
-            stored_config.output_audio_format = Some(*output_format);
-        }
-        if let Some(ref tools) = config.tools {
-            stored_config.tools = Some(tools.clone());
-        }
-        if let Some(ref temp) = config.temperature {
-            stored_config.temperature = Some(*temp);
-        }
-        if let Some(ref max_tokens) = config.max_response_output_tokens {
-            stored_config.max_response_output_tokens = Some(*max_tokens);
-        }
-        if let Some(ref turn_detection) = config.turn_detection {
-            stored_config.turn_detection = Some(turn_detection.clone());
-        }
-        if let Some(ref cached_content) = config.cached_content {
-            stored_config.cached_content = Some(cached_content.clone());
-        }
-
-        let merged_config = stored_config.clone();
-        drop(stored_config);
+        let merged_config = {
+            let mut stored = self.config.write().await;
+            *stored = crate::config::merge_realtime_config(&stored, config.0);
+            stored.clone()
+        };
 
         let guard = self.session.read().await;
         let session = guard.as_ref().ok_or_else(|| RealtimeError::connection("Not connected"))?;
@@ -501,17 +433,19 @@ impl RealtimeRunner {
 
         let new_session = self.model.connect(new_config).await?;
 
+        // 3. Swap pointer
+        *guard = Some(new_session);
+
+        // 4. Inject bridge message into the NEW active session
         if let Some(msg) = bridge_message {
             let bridge_event = crate::events::ClientEvent::Message {
                 role: "user".to_string(),
                 parts: vec![adk_core::types::Part::Text { text: msg }],
             };
-            if let Err(e) = new_session.send_event(bridge_event).await {
+            if let Err(e) = guard.as_ref().unwrap().send_event(bridge_event).await {
                 tracing::error!("Failed to inject context bridge message after resumption: {}", e);
             }
         }
-
-        *guard = Some(new_session);
         Ok(())
     }
 
@@ -632,12 +566,14 @@ impl RealtimeRunner {
     /// Process a single event.
     async fn handle_event(&self, event: ServerEvent) -> Result<()> {
         match event {
-            ServerEvent::ResponseCreated { .. } | ServerEvent::SpeechStarted { .. } => {
+            ServerEvent::ResponseCreated { .. } => {
                 *self.state.write().await = RunnerState::Generating;
-
-                if let ServerEvent::SpeechStarted { audio_start_ms, .. } = event {
-                    self.event_handler.on_speech_started(audio_start_ms).await?;
-                }
+            }
+            ServerEvent::SpeechStarted { audio_start_ms, .. } => {
+                // Do NOT transition to RunnerState::Generating.
+                // The model is listening, not locking context.
+                *self.state.write().await = RunnerState::Idle;
+                self.event_handler.on_speech_started(audio_start_ms).await?;
             }
             ServerEvent::ResponseDone { .. } => {
                 self.check_resumption_queue().await?;

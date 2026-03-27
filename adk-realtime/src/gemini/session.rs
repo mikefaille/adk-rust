@@ -569,8 +569,52 @@ impl RealtimeSession for GeminiRealtimeSession {
         Ok(()) // Gemini handles interruption via VAD
     }
 
-    async fn send_event(&self, _event: ClientEvent) -> Result<()> {
-        Ok(()) // Raw events not directly supported
+    async fn send_event(&self, event: ClientEvent) -> Result<()> {
+        if let ClientEvent::Message { role, parts } = event {
+            // Translate into Gemini's clientContent format
+            let gemini_parts: Vec<GeminiPart> = parts
+                .into_iter()
+                .map(|p| match p {
+                    adk_core::types::Part::Text { text } => GeminiPart { text: Some(text), inline_data: None },
+                    adk_core::types::Part::Thinking { thinking, .. } => {
+                        GeminiPart { text: Some(thinking), inline_data: None }
+                    }
+                    _ => GeminiPart { text: Some("".to_string()), inline_data: None },
+                })
+                .collect();
+
+            // Coerce into Gemini's clientContent format, wrapping System as User
+            let (gemini_role, mut final_parts) = match role.as_str() {
+                "system" => {
+                    let mut modified_parts = gemini_parts;
+                    if let Some(first_part) = modified_parts.first_mut() {
+                        if let Some(text) = &mut first_part.text {
+                            *text = format!("[CRITICAL SYSTEM DIRECTIVE OVERRIDE]\n{}", text);
+                        }
+                    }
+                    ("user".to_string(), modified_parts)
+                }
+                "user" => ("user".to_string(), gemini_parts),
+                "model" | "assistant" => ("model".to_string(), gemini_parts),
+                _ => ("user".to_string(), gemini_parts), // Fallback
+            };
+
+            let gemini_msg = GeminiClientMessage {
+                setup: None,
+                realtime_input: None,
+                tool_response: None,
+                client_content: Some(GeminiClientContent {
+                    turns: vec![GeminiTurn {
+                        role: gemini_role,
+                        parts: final_parts,
+                    }],
+                    turn_complete: true,
+                }),
+            };
+            return self.send_raw(&gemini_msg).await;
+        }
+
+        Ok(()) // Other raw events not directly supported
     }
 
     async fn mutate_context(

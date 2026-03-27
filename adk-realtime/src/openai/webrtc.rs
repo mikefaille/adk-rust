@@ -776,6 +776,42 @@ impl RealtimeSession for OpenAIWebRTCSession {
             return Err(RealtimeError::NotConnected);
         }
 
+        if let ClientEvent::Message { role, parts } = event {
+            let content_parts: Vec<serde_json::Value> = parts
+                .into_iter()
+                .map(|p| match p {
+                    adk_core::types::Part::Text { text } => serde_json::json!({
+                        "type": "input_text",
+                        "text": text
+                    }),
+                    adk_core::types::Part::Thinking { thinking, signature } => {
+                        let mut val = serde_json::json!({
+                            "type": "input_text",
+                            "text": thinking
+                        });
+                        if let Some(sig) = signature {
+                            val["signature"] = serde_json::json!(sig);
+                        }
+                        val
+                    }
+                    _ => serde_json::json!({ "type": "input_text", "text": "" }),
+                })
+                .collect();
+
+            let item = serde_json::json!({
+                "type": "message",
+                "role": role,
+                "content": content_parts
+            });
+
+            let payload = serde_json::json!({
+                "type": "conversation.item.create",
+                "item": item
+            });
+
+            return self.send_data_channel_message(&payload).await;
+        }
+
         let value = serde_json::to_value(&event)
             .map_err(|e| RealtimeError::protocol(format!("Serialize event: {e}")))?;
         self.send_data_channel_message(&value).await
