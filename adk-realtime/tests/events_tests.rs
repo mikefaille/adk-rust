@@ -1,6 +1,7 @@
 //! Tests for the events module.
 
 use adk_realtime::{ClientEvent, ServerEvent, ToolCall, ToolResponse};
+use adk_realtime::config::ToolDefinition;
 
 #[test]
 fn test_tool_call_creation() {
@@ -267,4 +268,187 @@ fn test_server_event_unknown_type() {
 
     let event: ServerEvent = serde_json::from_str(json).unwrap();
     assert!(matches!(event, ServerEvent::Unknown));
+}
+
+// ── New ClientEvent variant tests (added in PR) ───────────────────────────────
+
+#[test]
+fn test_client_event_message_serialization_has_type_tag() {
+    let event = ClientEvent::Message {
+        role: "user".to_string(),
+        parts: vec![adk_core::types::Part::Text { text: "Hello".to_string() }],
+    };
+
+    let json = serde_json::to_string(&event).unwrap();
+    // The variant has rename = "message", so the type tag should be "message".
+    assert!(json.contains("\"type\":\"message\"") || json.contains("\"type\": \"message\""));
+}
+
+#[test]
+fn test_client_event_message_serialization_includes_role() {
+    let event = ClientEvent::Message {
+        role: "assistant".to_string(),
+        parts: vec![adk_core::types::Part::Text { text: "Hi!".to_string() }],
+    };
+
+    let json = serde_json::to_string(&event).unwrap();
+    assert!(json.contains("assistant"));
+}
+
+#[test]
+fn test_client_event_message_serialization_includes_parts() {
+    let event = ClientEvent::Message {
+        role: "user".to_string(),
+        parts: vec![adk_core::types::Part::Text { text: "Test content".to_string() }],
+    };
+
+    let json = serde_json::to_string(&event).unwrap();
+    assert!(json.contains("Test content"));
+}
+
+#[test]
+fn test_client_event_message_construction_fields() {
+    let parts = vec![
+        adk_core::types::Part::Text { text: "Part one".to_string() },
+        adk_core::types::Part::Text { text: "Part two".to_string() },
+    ];
+    let event = ClientEvent::Message {
+        role: "user".to_string(),
+        parts: parts.clone(),
+    };
+
+    match event {
+        ClientEvent::Message { role, parts: p } => {
+            assert_eq!(role, "user");
+            assert_eq!(p.len(), 2);
+        }
+        _ => panic!("Expected Message variant"),
+    }
+}
+
+#[test]
+fn test_client_event_update_session_not_serialized() {
+    // UpdateSession has #[serde(skip_serializing)], so serializing it should
+    // NOT produce a valid JSON representation of its fields on the wire.
+    // The serializer will output `null` (since it skips the variant entirely).
+    let event = ClientEvent::UpdateSession {
+        instructions: Some("New instructions".to_string()),
+        tools: None,
+    };
+
+    // Serializing a skip_serializing variant produces null in serde's tagged enum
+    let result = serde_json::to_string(&event);
+    // Either it produces null or an empty/opaque representation - crucially it
+    // must NOT leak the instructions string to the wire format.
+    match result {
+        Ok(json) => {
+            // The instructions must not appear in the wire format
+            assert!(!json.contains("New instructions"),
+                "UpdateSession should not serialize its fields to the wire: got {}", json);
+        }
+        Err(_) => {
+            // Serialization failure is also an acceptable outcome for a skip_serializing variant
+        }
+    }
+}
+
+#[test]
+fn test_client_event_update_session_construction_with_instructions() {
+    let event = ClientEvent::UpdateSession {
+        instructions: Some("You are now a travel agent.".to_string()),
+        tools: None,
+    };
+
+    match event {
+        ClientEvent::UpdateSession { instructions, tools } => {
+            assert_eq!(instructions.as_deref(), Some("You are now a travel agent."));
+            assert!(tools.is_none());
+        }
+        _ => panic!("Expected UpdateSession variant"),
+    }
+}
+
+#[test]
+fn test_client_event_update_session_construction_with_tools() {
+    let tool = ToolDefinition::new("get_weather").with_description("Fetch weather data");
+    let event = ClientEvent::UpdateSession {
+        instructions: None,
+        tools: Some(vec![tool]),
+    };
+
+    match event {
+        ClientEvent::UpdateSession { instructions, tools } => {
+            assert!(instructions.is_none());
+            let tools = tools.unwrap();
+            assert_eq!(tools.len(), 1);
+            assert_eq!(tools[0].name, "get_weather");
+        }
+        _ => panic!("Expected UpdateSession variant"),
+    }
+}
+
+#[test]
+fn test_client_event_update_session_construction_both_fields() {
+    let tools = vec![
+        ToolDefinition::new("tool_a"),
+        ToolDefinition::new("tool_b"),
+    ];
+    let event = ClientEvent::UpdateSession {
+        instructions: Some("Handle billing queries.".to_string()),
+        tools: Some(tools),
+    };
+
+    match event {
+        ClientEvent::UpdateSession { instructions, tools } => {
+            assert_eq!(instructions.as_deref(), Some("Handle billing queries."));
+            assert_eq!(tools.unwrap().len(), 2);
+        }
+        _ => panic!("Expected UpdateSession variant"),
+    }
+}
+
+#[test]
+fn test_server_event_session_updated_deserialization() {
+    // SessionUpdated is used by the runner to handle Gemini resumption tokens.
+    let json = r#"{
+        "type": "session.updated",
+        "event_id": "evt_upd_001",
+        "session": {
+            "resumeToken": "some-opaque-token-xyz"
+        }
+    }"#;
+
+    let event: ServerEvent = serde_json::from_str(json).unwrap();
+    match event {
+        ServerEvent::SessionUpdated { event_id, session } => {
+            assert_eq!(event_id, "evt_upd_001");
+            assert_eq!(
+                session.get("resumeToken").and_then(|t| t.as_str()),
+                Some("some-opaque-token-xyz")
+            );
+        }
+        _ => panic!("Expected SessionUpdated event"),
+    }
+}
+
+#[test]
+fn test_server_event_session_updated_no_resume_token() {
+    // SessionUpdated without a resumeToken should still deserialize cleanly.
+    let json = r#"{
+        "type": "session.updated",
+        "event_id": "evt_upd_002",
+        "session": {
+            "voice": "alloy",
+            "model": "gpt-4o-realtime"
+        }
+    }"#;
+
+    let event: ServerEvent = serde_json::from_str(json).unwrap();
+    match event {
+        ServerEvent::SessionUpdated { session, .. } => {
+            assert!(session.get("resumeToken").is_none());
+            assert_eq!(session.get("voice").and_then(|v| v.as_str()), Some("alloy"));
+        }
+        _ => panic!("Expected SessionUpdated event"),
+    }
 }

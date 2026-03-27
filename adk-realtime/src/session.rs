@@ -7,6 +7,15 @@ use async_trait::async_trait;
 use futures::Stream;
 use std::pin::Pin;
 
+/// The outcome of an attempt to mutate the session context mid-flight.
+#[derive(Debug, Clone)]
+pub enum ContextMutationOutcome {
+    /// Provider successfully updated the active session via sideband.
+    Applied,
+    /// Provider requires the transport to be rebound with a new configuration.
+    RequiresResumption(crate::config::RealtimeConfig),
+}
+
 /// A real-time bidirectional streaming session.
 ///
 /// This trait provides a unified interface for real-time voice/audio sessions
@@ -83,6 +92,15 @@ pub trait RealtimeSession: Send + Sync {
 
     /// Close the session gracefully.
     async fn close(&self) -> Result<()>;
+
+    /// Attempt to mutate the session parameters mid-flight.
+    ///
+    /// For providers that support native hot-swapping (e.g., OpenAI), this
+    /// mutates the parameters without tearing down the connection and returns `Ok(ContextMutationOutcome::Applied)`.
+    /// For providers that require a static configuration (e.g., Gemini), this
+    /// returns `Ok(ContextMutationOutcome::RequiresResumption(config))` to signal
+    /// the runner to queue a session reconnect or resumption safely.
+    async fn mutate_context(&self, config: crate::config::RealtimeConfig) -> Result<ContextMutationOutcome>;
 }
 
 /// Extension trait for RealtimeSession with convenience methods.
@@ -149,3 +167,99 @@ impl<T: RealtimeSession> RealtimeSessionExt for T {}
 
 /// A boxed session type for dynamic dispatch.
 pub type BoxedSession = Box<dyn RealtimeSession>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::RealtimeConfig;
+
+    #[test]
+    fn test_context_mutation_outcome_applied_debug() {
+        let outcome = ContextMutationOutcome::Applied;
+        let debug_str = format!("{:?}", outcome);
+        assert!(debug_str.contains("Applied"));
+    }
+
+    #[test]
+    fn test_context_mutation_outcome_requires_resumption_debug() {
+        let config = RealtimeConfig::default().with_instruction("Test");
+        let outcome = ContextMutationOutcome::RequiresResumption(config);
+        let debug_str = format!("{:?}", outcome);
+        assert!(debug_str.contains("RequiresResumption"));
+    }
+
+    #[test]
+    fn test_context_mutation_outcome_requires_resumption_carries_config() {
+        let config = RealtimeConfig::default()
+            .with_instruction("Carry me forward")
+            .with_voice("alloy");
+        let outcome = ContextMutationOutcome::RequiresResumption(config.clone());
+
+        match outcome {
+            ContextMutationOutcome::RequiresResumption(c) => {
+                assert_eq!(c.instruction.as_deref(), Some("Carry me forward"));
+                assert_eq!(c.voice.as_deref(), Some("alloy"));
+            }
+            ContextMutationOutcome::Applied => panic!("Expected RequiresResumption"),
+        }
+    }
+
+    #[test]
+    fn test_context_mutation_outcome_clone_applied() {
+        let original = ContextMutationOutcome::Applied;
+        let cloned = original.clone();
+        // Both should be Applied - verify via Debug
+        assert!(format!("{:?}", cloned).contains("Applied"));
+    }
+
+    #[test]
+    fn test_context_mutation_outcome_clone_requires_resumption() {
+        let config = RealtimeConfig::default().with_instruction("Clone test");
+        let original = ContextMutationOutcome::RequiresResumption(config.clone());
+        let cloned = original.clone();
+
+        match cloned {
+            ContextMutationOutcome::RequiresResumption(c) => {
+                assert_eq!(c.instruction.as_deref(), Some("Clone test"));
+            }
+            ContextMutationOutcome::Applied => panic!("Expected RequiresResumption after clone"),
+        }
+    }
+
+    #[test]
+    fn test_context_mutation_outcome_requires_resumption_with_tools() {
+        use crate::config::ToolDefinition;
+
+        let config = RealtimeConfig::default()
+            .with_tool(ToolDefinition::new("tool_a"))
+            .with_tool(ToolDefinition::new("tool_b"));
+        let outcome = ContextMutationOutcome::RequiresResumption(config);
+
+        match outcome {
+            ContextMutationOutcome::RequiresResumption(c) => {
+                let tools = c.tools.unwrap();
+                assert_eq!(tools.len(), 2);
+            }
+            _ => panic!("Expected RequiresResumption"),
+        }
+    }
+
+    #[test]
+    fn test_context_mutation_outcome_requires_resumption_with_extra() {
+        let config = RealtimeConfig {
+            extra: Some(serde_json::json!({"resumeToken": "token-xyz"})),
+            ..Default::default()
+        };
+        let outcome = ContextMutationOutcome::RequiresResumption(config);
+
+        match outcome {
+            ContextMutationOutcome::RequiresResumption(c) => {
+                let token = c.extra.as_ref()
+                    .and_then(|e| e.get("resumeToken"))
+                    .and_then(|t| t.as_str());
+                assert_eq!(token, Some("token-xyz"));
+            }
+            _ => panic!("Expected RequiresResumption"),
+        }
+    }
+}
