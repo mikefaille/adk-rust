@@ -92,6 +92,10 @@ struct GeminiClientMessage {
     client_content: Option<GeminiClientContent>,
 }
 
+/// Configuration for Gemini 2.5 Live session resumption.
+///
+/// See the official documentation for details:
+/// https://ai.google.dev/gemini-api/docs/live-api/session-management
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionResumptionConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -466,6 +470,7 @@ impl GeminiRealtimeSession {
         // Catch the Server Update for sessionResumptionUpdate
         // Note the intentional protocol asymmetry here: the client sends the parameter as handle,
         // but the server transmits the parameter back as resumptionToken.
+        // Reference: https://ai.google.dev/gemini-api/docs/live-api/session-management
         if let Some(resumption_update) = value.get("sessionResumptionUpdate") {
             if let Some(token) = resumption_update.get("resumptionToken").and_then(|t| t.as_str()) {
                 tracing::debug!("Received new Gemini 2.5 Native resumption token");
