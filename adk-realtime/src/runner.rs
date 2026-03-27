@@ -363,6 +363,10 @@ impl RealtimeRunner {
     /// The RealtimeRunner will attempt to mutate the session natively if the underlying
     /// API supports it (e.g., OpenAI). If it does not (e.g., Gemini), the Runner will
     /// Internal helper to merge a `SessionUpdateConfig` into a base `RealtimeConfig`.
+    ///
+    /// Note: This is intentionally narrow and specifically scoped to merge only
+    /// hot-swappable cognitive fields (instruction, tools, voice, temperature, extra).
+    /// Transport-level attributes like sample rates and audio formats are not dynamically swappable.
     fn merge_config(base: &mut RealtimeConfig, update: &SessionUpdateConfig) {
         if let Some(instruction) = &update.0.instruction {
             base.instruction = Some(instruction.clone());
@@ -433,7 +437,16 @@ impl RealtimeRunner {
                 if *state_guard == RunnerState::Idle {
                     drop(state_guard);
                     tracing::info!("Runner is idle. Executing resumption immediately.");
-                    self.execute_resumption(new_config, bridge_message).await?;
+                    if let Err(e) = self.execute_resumption(new_config.clone(), bridge_message.clone()).await {
+                        tracing::error!("Immediate resumption failed: {}. Queueing for retry.", e);
+                        let mut fallback_state = self.state.write().await;
+                        *fallback_state = RunnerState::PendingResumption {
+                            config: new_config,
+                            bridge_message,
+                            attempts: 1,
+                        };
+                        return Err(e);
+                    }
                 } else {
                     if let RunnerState::PendingResumption { .. } = *state_guard {
                         tracing::warn!("Runner already had a pending resumption. Overwriting with last-write-wins policy.");
@@ -462,7 +475,9 @@ impl RealtimeRunner {
 
         let mut write_guard = self.session.write().await;
         if let Some(old_session) = write_guard.as_ref() {
-            let _ = old_session.close().await;
+            if let Err(e) = old_session.close().await {
+                tracing::warn!("Failed to cleanly close old session during resumption: {}", e);
+            }
         }
 
         // Reconnect via the generic model interface.
@@ -703,7 +718,10 @@ impl RealtimeRunner {
                     tracing::info!("Restoring pending queue state for retry.");
                     *fallback_state = RunnerState::PendingResumption { config, bridge_message, attempts: attempts + 1 };
                 }
-                return Err(e);
+
+                // Do not return Err(e) here, as that would kill the `run()` loop.
+                // Instead, report it to the event handler and allow the next turn to retry.
+                let _ = self.event_handler.on_error(&e).await;
             }
         } else {
             *state = RunnerState::Idle;
