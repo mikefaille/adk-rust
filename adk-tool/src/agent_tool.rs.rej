@@ -1,5 +1,5 @@
---- adk-tool/src/agent_tool.rs
-+++ adk-tool/src/agent_tool.rs
+--- agent_tool.rs
++++ agent_tool.rs
 @@ -252,6 +252,10 @@
          &self.identity
      }
