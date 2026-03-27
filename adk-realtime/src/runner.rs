@@ -474,19 +474,27 @@ impl RealtimeRunner {
 
         // Inject bridge message into the new session if provided
         if let Some(msg) = bridge_message {
-            tracing::info!("Injecting bridge message post-resumption.");
-            let event = crate::events::ClientEvent::Message {
-                role: "user".to_string(),
-                parts: vec![adk_core::types::Part::Text { text: msg }],
-            };
-            // Send directly to avoid async recursion through send_client_event -> update_session
-            let guard = self.session.read().await;
-            let session = guard.as_ref().ok_or_else(|| RealtimeError::connection("Not connected"))?;
-            session.send_event(event).await?;
+            self.inject_bridge_message(msg).await?;
         }
 
         tracing::info!("Resumption complete. New transport established.");
         Ok(())
+    }
+
+    /// Internal helper to safely inject a bridge message directly into the active session.
+    ///
+    /// This intentionally bypasses the `send_client_event` router to avoid `E0733`
+    /// (un-Boxed async recursion) where `send_client_event` -> `update_session` ->
+    /// `execute_resumption` -> `send_client_event` creates an infinite compiler loop.
+    async fn inject_bridge_message(&self, msg: String) -> Result<()> {
+        tracing::info!("Injecting bridge message post-resumption.");
+        let event = crate::events::ClientEvent::Message {
+            role: "user".to_string(),
+            parts: vec![adk_core::types::Part::Text { text: msg }],
+        };
+        let guard = self.session.read().await;
+        let session = guard.as_ref().ok_or_else(|| RealtimeError::connection("Not connected"))?;
+        session.send_event(event).await
     }
 
     /// Send audio to the session.
