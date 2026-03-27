@@ -92,6 +92,12 @@ struct GeminiClientMessage {
     client_content: Option<GeminiClientContent>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionResumptionConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub handle: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct GeminiSetup {
@@ -105,14 +111,7 @@ struct GeminiSetup {
     #[serde(skip_serializing_if = "Option::is_none")]
     cached_content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    system_resumption: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    session_resumption_config: Option<SessionResumptionConfig>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct SessionResumptionConfig {
-    handle: String,
+    session_resumption: Option<SessionResumptionConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -327,13 +326,15 @@ impl GeminiRealtimeSession {
 
         let tools = convert_tools(config.tools);
 
-        // If we have a resumption token stored in extra config, use it to hydrate the handle.
-        let session_resumption_config = config.extra.as_ref()
+        // Functionally extract the token if it exists in the prior state map
+        let handle = config.extra.as_ref()
             .and_then(|ext| ext.get("resumeToken"))
-            .and_then(|t| t.as_str())
-            .map(|token| SessionResumptionConfig {
-                handle: token.to_string(),
-            });
+            .and_then(|val| val.as_str())
+            .map(|s| s.to_string());
+
+        // Always attach the config object to explicitly enable the feature,
+        // even if the handle is currently None.
+        let session_resumption = Some(SessionResumptionConfig { handle });
 
         let setup = GeminiClientMessage {
             setup: Some(GeminiSetup {
@@ -342,8 +343,7 @@ impl GeminiRealtimeSession {
                 generation_config: Some(generation_config),
                 tools,
                 cached_content: config.cached_content,
-                system_resumption: Some(true),
-                session_resumption_config,
+                session_resumption,
             }),
             realtime_input: None,
             tool_response: None,
@@ -464,8 +464,10 @@ impl GeminiRealtimeSession {
         }
 
         // Catch the Server Update for sessionResumptionUpdate
+        // Note the intentional protocol asymmetry here: the client sends the parameter as handle,
+        // but the server transmits the parameter back as resumptionToken.
         if let Some(resumption_update) = value.get("sessionResumptionUpdate") {
-            if let Some(token) = resumption_update.get("resumeToken").and_then(|t| t.as_str()) {
+            if let Some(token) = resumption_update.get("resumptionToken").and_then(|t| t.as_str()) {
                 tracing::debug!("Received new Gemini 2.5 Native resumption token");
                 return Ok(ServerEvent::SessionUpdated {
                     event_id: uuid::Uuid::new_v4().to_string(),
