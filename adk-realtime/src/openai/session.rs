@@ -4,7 +4,7 @@ use crate::audio::AudioChunk;
 use crate::config::RealtimeConfig;
 use crate::error::{RealtimeError, Result};
 use crate::events::{ClientEvent, ServerEvent, ToolResponse};
-use crate::session::RealtimeSession;
+use crate::session::{ContextMutationOutcome, RealtimeSession};
 use async_trait::async_trait;
 use futures::stream::Stream;
 use futures::{SinkExt, StreamExt};
@@ -313,9 +313,18 @@ impl RealtimeSession for OpenAIRealtimeSession {
     }
 
     async fn send_event(&self, event: ClientEvent) -> Result<()> {
-        let value = serde_json::to_value(&event)
-            .map_err(|e| RealtimeError::protocol(format!("Serialize error: {}", e)))?;
-        self.send_raw(&value).await
+        match event {
+            ClientEvent::Message { role, parts } => {
+                let payload = translate_client_message(&role, parts);
+                tracing::info!(role = ?role, "Injecting mid-flight context via native adk-rust types");
+                self.send_raw(&payload).await
+            }
+            other => {
+                let value = serde_json::to_value(&other)
+                    .map_err(|e| RealtimeError::protocol(format!("Serialize error: {}", e)))?;
+                self.send_raw(&value).await
+            }
+        }
     }
 
     async fn next_event(&self) -> Option<Result<ServerEvent>> {
@@ -340,6 +349,69 @@ impl RealtimeSession for OpenAIRealtimeSession {
 
         Ok(())
     }
+
+    async fn mutate_context(&self, config: crate::config::RealtimeConfig) -> Result<ContextMutationOutcome> {
+        tracing::info!("Updating OpenAI Realtime session context natively");
+        self.configure_session(config).await?;
+        Ok(ContextMutationOutcome::Applied)
+    }
+}
+
+/// Pure translation function for converting a standard `adk_core` message into
+/// OpenAI Realtime API's native `conversation.item.create` payload.
+pub(crate) fn translate_client_message(role: &str, parts: Vec<adk_core::types::Part>) -> Value {
+    let openai_role = match role {
+        "system" | "developer" => "system",
+        "user" => "user",
+        "model" | "assistant" => "assistant",
+        _ => "user", // Default fallback
+    };
+
+    let mut content: Vec<Value> = Vec::new();
+    for p in parts {
+        match p {
+            adk_core::types::Part::Text { text } => {
+                content.push(json!({
+                    "type": "input_text",
+                    "text": text
+                }));
+            }
+            adk_core::types::Part::InlineData { mime_type, data } => {
+                // OpenAI Realtime API accepts "input_audio" natively for base64 audio.
+                if mime_type.starts_with("audio/") {
+                    use base64::Engine;
+                    let encoded = base64::engine::general_purpose::STANDARD.encode(&data);
+                    content.push(json!({
+                        "type": "input_audio",
+                        "audio": encoded
+                    }));
+                } else {
+                    tracing::warn!("Dropping unsupported InlineData (non-audio) part in OpenAI session: {}", mime_type);
+                }
+            }
+            adk_core::types::Part::FileData { file_uri, .. } => {
+                tracing::warn!("Dropping unsupported FileData part in OpenAI session: {}", file_uri);
+            }
+            adk_core::types::Part::Thinking { .. } => {
+                tracing::warn!("Dropping unsupported Thinking part in OpenAI session");
+            }
+            adk_core::types::Part::FunctionCall { name, .. } => {
+                tracing::warn!("Dropping unsupported FunctionCall part in OpenAI session: {}", name);
+            }
+            adk_core::types::Part::FunctionResponse { .. } => {
+                tracing::warn!("Dropping unsupported FunctionResponse part in OpenAI session");
+            }
+        }
+    }
+
+    json!({
+        "type": "conversation.item.create",
+        "item": {
+            "type": "message",
+            "role": openai_role,
+            "content": content
+        }
+    })
 }
 
 /// Generate a random WebSocket key.
@@ -348,6 +420,225 @@ fn generate_ws_key() -> String {
     let mut key = [0u8; 16];
     getrandom::fill(&mut key).unwrap_or_default();
     base64::engine::general_purpose::STANDARD.encode(key)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use adk_core::types::Part;
+
+    #[test]
+    fn test_openai_translate_text_only() {
+        let parts = vec![Part::Text { text: "Hello".to_string() }];
+        let value = translate_client_message("user", parts);
+
+        let item = &value["item"];
+        assert_eq!(item["role"], "user");
+
+        let content = item["content"].as_array().unwrap();
+        assert_eq!(content.len(), 1);
+        assert_eq!(content[0]["type"], "input_text");
+        assert_eq!(content[0]["text"], "Hello");
+    }
+
+    #[test]
+    fn test_openai_translate_text_and_audio() {
+        let parts = vec![
+            Part::Text { text: "Listen:".to_string() },
+            Part::InlineData { mime_type: "audio/wav".to_string(), data: vec![0x1, 0x2, 0x3] },
+        ];
+        let value = translate_client_message("user", parts);
+
+        let content = value["item"]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 2);
+
+        assert_eq!(content[0]["type"], "input_text");
+        assert_eq!(content[0]["text"], "Listen:");
+
+        assert_eq!(content[1]["type"], "input_audio");
+        assert_eq!(content[1]["audio"], "AQID"); // base64 encoded [1,2,3]
+    }
+
+    #[test]
+    fn test_openai_skips_unsupported_parts() {
+        let parts = vec![
+            Part::Text { text: "First".to_string() },
+            Part::InlineData { mime_type: "image/png".to_string(), data: vec![0x1] }, // Should be skipped because it's not audio
+            Part::Thinking { thinking: "Hmm".to_string(), signature: None }, // Should be skipped
+            Part::Text { text: "Last".to_string() },
+        ];
+        let value = translate_client_message("user", parts);
+
+        let content = value["item"]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 2);
+
+        assert_eq!(content[0]["text"], "First");
+        assert_eq!(content[1]["text"], "Last");
+    }
+
+    #[test]
+    fn test_openai_system_role_maps_to_system() {
+        let parts = vec![Part::Text { text: "System message".to_string() }];
+        let value = translate_client_message("system", parts);
+
+        assert_eq!(value["item"]["role"], "system");
+    }
+
+    #[test]
+    fn test_openai_developer_role_maps_to_system() {
+        let parts = vec![Part::Text { text: "Developer override".to_string() }];
+        let value = translate_client_message("developer", parts);
+
+        assert_eq!(value["item"]["role"], "system");
+    }
+
+    #[test]
+    fn test_openai_model_role_maps_to_assistant() {
+        let parts = vec![Part::Text { text: "Model turn".to_string() }];
+        let value = translate_client_message("model", parts);
+
+        assert_eq!(value["item"]["role"], "assistant");
+    }
+
+    #[test]
+    fn test_openai_assistant_role_maps_to_assistant() {
+        let parts = vec![Part::Text { text: "Assistant turn".to_string() }];
+        let value = translate_client_message("assistant", parts);
+
+        assert_eq!(value["item"]["role"], "assistant");
+    }
+
+    #[test]
+    fn test_openai_unknown_role_falls_back_to_user() {
+        let parts = vec![Part::Text { text: "Unknown role".to_string() }];
+        let value = translate_client_message("some_unknown_role", parts);
+
+        assert_eq!(value["item"]["role"], "user");
+    }
+
+    #[test]
+    fn test_openai_empty_parts_produces_empty_content() {
+        let value = translate_client_message("user", vec![]);
+
+        let item = &value["item"];
+        assert_eq!(item["role"], "user");
+        let content = item["content"].as_array().unwrap();
+        assert_eq!(content.len(), 0);
+    }
+
+    #[test]
+    fn test_openai_message_type_is_conversation_item_create() {
+        let parts = vec![Part::Text { text: "Hello".to_string() }];
+        let value = translate_client_message("user", parts);
+
+        assert_eq!(value["type"], "conversation.item.create");
+    }
+
+    #[test]
+    fn test_openai_item_type_is_message() {
+        let parts = vec![Part::Text { text: "Hello".to_string() }];
+        let value = translate_client_message("user", parts);
+
+        assert_eq!(value["item"]["type"], "message");
+    }
+
+    #[test]
+    fn test_openai_function_call_part_is_dropped() {
+        let parts = vec![
+            Part::Text { text: "Before".to_string() },
+            Part::FunctionCall {
+                name: "get_data".to_string(),
+                args: serde_json::json!({"key": "value"}),
+                id: None,
+                thought_signature: None,
+            },
+            Part::Text { text: "After".to_string() },
+        ];
+        let value = translate_client_message("user", parts);
+
+        let content = value["item"]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 2, "FunctionCall part should be dropped");
+        assert_eq!(content[0]["text"], "Before");
+        assert_eq!(content[1]["text"], "After");
+    }
+
+    #[test]
+    fn test_openai_function_response_part_is_dropped() {
+        use adk_core::types::FunctionResponseData;
+        let parts = vec![
+            Part::Text { text: "Before".to_string() },
+            Part::FunctionResponse {
+                function_response: FunctionResponseData {
+                    name: "get_data".to_string(),
+                    response: serde_json::json!({"result": "ok"}),
+                },
+                id: None,
+            },
+            Part::Text { text: "After".to_string() },
+        ];
+        let value = translate_client_message("user", parts);
+
+        let content = value["item"]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 2, "FunctionResponse part should be dropped");
+        assert_eq!(content[0]["text"], "Before");
+        assert_eq!(content[1]["text"], "After");
+    }
+
+    #[test]
+    fn test_openai_file_data_part_is_dropped() {
+        let parts = vec![
+            Part::Text { text: "Context".to_string() },
+            Part::FileData {
+                mime_type: "application/pdf".to_string(),
+                file_uri: "gs://bucket/file.pdf".to_string(),
+            },
+        ];
+        let value = translate_client_message("user", parts);
+
+        let content = value["item"]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 1, "FileData part should be dropped");
+        assert_eq!(content[0]["text"], "Context");
+    }
+
+    #[test]
+    fn test_openai_audio_only_message() {
+        let parts = vec![
+            Part::InlineData { mime_type: "audio/pcm".to_string(), data: vec![0xAB, 0xCD] },
+        ];
+        let value = translate_client_message("user", parts);
+
+        let content = value["item"]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 1);
+        assert_eq!(content[0]["type"], "input_audio");
+        // base64([0xAB, 0xCD]) = "q80=" in standard base64
+        assert!(content[0]["audio"].as_str().is_some());
+    }
+
+    #[test]
+    fn test_openai_non_audio_inline_data_is_dropped() {
+        // Only audio/* MIME types are accepted for InlineData; images must be dropped
+        let parts = vec![
+            Part::InlineData { mime_type: "image/jpeg".to_string(), data: vec![0x1, 0x2] },
+        ];
+        let value = translate_client_message("user", parts);
+
+        let content = value["item"]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 0, "Non-audio InlineData should be dropped");
+    }
+
+    #[test]
+    fn test_openai_multiple_audio_parts() {
+        let parts = vec![
+            Part::InlineData { mime_type: "audio/wav".to_string(), data: vec![0x1] },
+            Part::InlineData { mime_type: "audio/ogg".to_string(), data: vec![0x2] },
+        ];
+        let value = translate_client_message("user", parts);
+
+        let content = value["item"]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 2);
+        assert_eq!(content[0]["type"], "input_audio");
+        assert_eq!(content[1]["type"], "input_audio");
+    }
 }
 
 impl std::fmt::Debug for OpenAIRealtimeSession {

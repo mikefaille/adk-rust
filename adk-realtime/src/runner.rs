@@ -7,11 +7,42 @@ use crate::config::{RealtimeConfig, SessionUpdateConfig, ToolDefinition};
 use crate::error::{RealtimeError, Result};
 use crate::events::{ServerEvent, ToolCall, ToolResponse};
 use crate::model::BoxedModel;
-use crate::session::BoxedSession;
+use crate::session::{BoxedSession, ContextMutationOutcome};
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+
+/// Internal state machine tracking the resumability status of the RealtimeRunner.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RunnerState {
+    /// Runner is ready to accept transport resumption immediately.
+    Idle,
+    /// Model is currently generating a response; tearing down the connection would corrupt context.
+    Generating,
+    /// A tool is currently executing; teardown would cause tool loss.
+    ExecutingTool,
+    /// A context mutation was queued while the runner was busy, and must be executed once Idle.
+    ///
+    /// The runner keeps only one pending resumption. If a new session update arrives while
+    /// a resumption is already pending, the previous pending resumption is replaced. This is
+    /// intentional: pending session updates represent desired end state, not an ordered command queue.
+    /// The policy is last write wins.
+    PendingResumption {
+        /// The new configuration to apply on reconnection.
+        config: crate::config::RealtimeConfig,
+        /// An optional message to inject immediately after resumption.
+        bridge_message: Option<String>,
+        /// Number of failed reconnection attempts for this mutation.
+        attempts: u8,
+    },
+}
+
+impl Default for RunnerState {
+    fn default() -> Self {
+        Self::Idle
+    }
+}
 
 /// Handler for tool/function calls from the realtime model.
 #[async_trait]
@@ -224,11 +255,12 @@ impl RealtimeRunnerBuilder {
 
         Ok(RealtimeRunner {
             model,
-            config,
+            config: Arc::new(RwLock::new(config)),
             runner_config: self.runner_config,
             tools: self.tools,
             event_handler: self.event_handler.unwrap_or_else(|| Arc::new(NoOpEventHandler)),
             session: Arc::new(RwLock::new(None)),
+            state: Arc::new(RwLock::new(RunnerState::Idle)),
         })
     }
 }
@@ -272,11 +304,12 @@ impl RealtimeRunnerBuilder {
 /// ```
 pub struct RealtimeRunner {
     model: BoxedModel,
-    config: RealtimeConfig,
+    config: Arc<RwLock<RealtimeConfig>>,
     runner_config: RunnerConfig,
     tools: HashMap<String, (ToolDefinition, Arc<dyn ToolHandler>)>,
     event_handler: Arc<dyn EventHandler>,
     session: Arc<RwLock<Option<BoxedSession>>>,
+    state: Arc<RwLock<RunnerState>>,
 }
 
 impl RealtimeRunner {
@@ -287,7 +320,8 @@ impl RealtimeRunner {
 
     /// Connect to the realtime provider.
     pub async fn connect(&self) -> Result<()> {
-        let session = self.model.connect(self.config.clone()).await?;
+        let config = self.config.read().await.clone();
+        let session = self.model.connect(config).await?;
         let mut guard = self.session.write().await;
         *guard = Some(session);
         Ok(())
@@ -305,7 +339,51 @@ impl RealtimeRunner {
         guard.as_ref().map(|s| s.session_id().to_string())
     }
 
+    /// Send a client event directly to the session.
+    pub async fn send_client_event(&self, event: crate::events::ClientEvent) -> Result<()> {
+        match event {
+            crate::events::ClientEvent::UpdateSession { instructions, tools } => {
+                let update_config = SessionUpdateConfig(crate::config::RealtimeConfig {
+                    instruction: instructions,
+                    tools,
+                    ..Default::default()
+                });
+                self.update_session(update_config).await
+            }
+            other => {
+                let guard = self.session.read().await;
+                let session = guard.as_ref().ok_or_else(|| RealtimeError::connection("Not connected"))?;
+                session.send_event(other).await
+            }
+        }
+    }
+
+    /// Internal helper to merge a `SessionUpdateConfig` into a base `RealtimeConfig`.
+    ///
+    /// Note: This is intentionally narrow and specifically scoped to merge only
+    /// hot-swappable cognitive fields (instruction, tools, voice, temperature, extra).
+    /// Transport-level attributes like sample rates and audio formats are not dynamically swappable.
+    fn merge_config(base: &mut RealtimeConfig, update: &SessionUpdateConfig) {
+        if let Some(instruction) = &update.0.instruction {
+            base.instruction = Some(instruction.clone());
+        }
+        if let Some(tools) = &update.0.tools {
+            base.tools = Some(tools.clone());
+        }
+        if let Some(voice) = &update.0.voice {
+            base.voice = Some(voice.clone());
+        }
+        if let Some(temp) = update.0.temperature {
+            base.temperature = Some(temp);
+        }
+        if let Some(extra) = &update.0.extra {
+            base.extra = Some(extra.clone());
+        }
+    }
+
     /// Update the session configuration.
+    ///
+    /// Delegates to [`update_session_with_bridge`] with no bridge message.
     ///
     /// # Example
     ///
@@ -320,16 +398,127 @@ impl RealtimeRunner {
     /// }
     /// ```
     pub async fn update_session(&self, config: SessionUpdateConfig) -> Result<()> {
+        self.update_session_with_bridge(config, None).await
+    }
+
+    /// Update the session configuration, optionally injecting a bridge message if
+    /// a transport resumption (Phantom Reconnect) occurs.
+    ///
+    /// The RealtimeRunner will attempt to mutate the session natively if the underlying
+    /// API supports it (e.g., OpenAI). If it does not (e.g., Gemini), the Runner will
+    /// queue a transport resumption, executing it only when the session
+    /// is in a resumable state (Idle) to prevent data corruption.
+    ///
+    /// The runner keeps only one pending resumption. If a new session update arrives while
+    /// a resumption is already pending, the previous pending resumption is replaced. This is
+    /// intentional: pending session updates represent desired end state, not an ordered command queue.
+    /// The policy is last write wins.
+    pub async fn update_session_with_bridge(
+        &self,
+        config: SessionUpdateConfig,
+        bridge_message: Option<String>,
+    ) -> Result<()> {
+        let mut full_config = self.config.write().await;
+        Self::merge_config(&mut full_config, &config);
+
+        let cloned_config = full_config.clone();
+        drop(full_config);
+
         let guard = self.session.read().await;
         let session = guard.as_ref().ok_or_else(|| RealtimeError::connection("Not connected"))?;
-        let config_value = serde_json::to_value(&config).map_err(|e| {
-            RealtimeError::config(format!(
-                "Failed to serialize session update config: {e}. Ensure all SessionUpdateConfig fields implement serde::Serialize and contain valid values"
-            ))
-        })?;
-        session
-            .send_event(crate::events::ClientEvent::SessionUpdate { session: config_value })
-            .await
+
+        match session.mutate_context(cloned_config).await? {
+            ContextMutationOutcome::Applied => {
+                tracing::info!("Context mutated natively mid-flight.");
+                // If applied natively, we can just inject the bridge message directly as a standard message.
+                if let Some(msg) = bridge_message {
+                    let event = crate::events::ClientEvent::Message {
+                        role: "user".to_string(),
+                        parts: vec![adk_core::types::Part::Text { text: msg }],
+                    };
+                    session.send_event(event).await?;
+                }
+                Ok(())
+            }
+            ContextMutationOutcome::RequiresResumption(new_config) => {
+                drop(guard); // release the read lock before potential async ops
+                let mut state_guard = self.state.write().await;
+                if *state_guard == RunnerState::Idle {
+                    drop(state_guard);
+                    tracing::info!("Runner is idle. Executing resumption immediately.");
+                    if let Err(e) = self.execute_resumption(new_config.clone(), bridge_message.clone()).await {
+                        tracing::error!("Immediate resumption failed: {}. Queueing for retry.", e);
+                        let mut fallback_state = self.state.write().await;
+                        *fallback_state = RunnerState::PendingResumption {
+                            config: new_config,
+                            bridge_message,
+                            attempts: 1,
+                        };
+                        return Err(e);
+                    }
+                } else {
+                    if let RunnerState::PendingResumption { .. } = *state_guard {
+                        tracing::warn!("Runner already had a pending resumption. Overwriting with last-write-wins policy.");
+                    } else {
+                        tracing::info!("Runner is busy ({:?}). Queueing resumption.", *state_guard);
+                    }
+
+                    *state_guard = RunnerState::PendingResumption {
+                        config: new_config,
+                        bridge_message,
+                        attempts: 0,
+                    };
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// Internal helper to execute a transport resumption (teardown and rebuild).
+    async fn execute_resumption(
+        &self,
+        new_config: crate::config::RealtimeConfig,
+        bridge_message: Option<String>,
+    ) -> Result<()> {
+        tracing::warn!("Executing transport resumption with new configuration.");
+
+        let mut write_guard = self.session.write().await;
+        if let Some(old_session) = write_guard.as_ref() {
+            if let Err(e) = old_session.close().await {
+                tracing::warn!("Failed to cleanly close old session during resumption: {}", e);
+            }
+        }
+
+        // Reconnect via the generic model interface.
+        let new_session = self.model.connect(new_config).await?;
+
+        // Swap pointer before injecting events so that it is the active runner session.
+        *write_guard = Some(new_session);
+        drop(write_guard); // Free the lock explicitly
+
+        // Inject bridge message into the new session if provided
+        if let Some(msg) = bridge_message {
+            self.inject_bridge_message(msg).await?;
+        }
+
+        tracing::info!("Resumption complete. New transport established.");
+        Ok(())
+    }
+
+    /// Internal helper to safely inject a bridge message directly into the active session.
+    ///
+    /// This intentionally bypasses the `send_client_event` router to avoid `E0733`
+    /// (un-Boxed async recursion) where `send_client_event` -> `update_session` ->
+    /// `execute_resumption` -> `send_client_event` creates an infinite compiler loop.
+    async fn inject_bridge_message(&self, msg: String) -> Result<()> {
+        tracing::info!("Injecting bridge message post-resumption.");
+        let event = crate::events::ClientEvent::Message {
+            role: "user".to_string(),
+            parts: vec![adk_core::types::Part::Text { text: msg }],
+        };
+        let guard = self.session.read().await;
+        let session = guard.as_ref().ok_or_else(|| RealtimeError::connection("Not connected"))?;
+        session.send_event(event).await
     }
 
     /// Send audio to the session.
@@ -448,6 +637,23 @@ impl RealtimeRunner {
 
     /// Process a single event.
     async fn handle_event(&self, event: ServerEvent) -> Result<()> {
+        // Track state transitions before forwarding the event
+        match &event {
+            ServerEvent::ResponseCreated { .. } => {
+                let mut state = self.state.write().await;
+                if let RunnerState::Idle = *state {
+                    *state = RunnerState::Generating;
+                }
+            }
+            ServerEvent::FunctionCallDone { .. } => {
+                let mut state = self.state.write().await;
+                if let RunnerState::Generating | RunnerState::Idle = *state {
+                    *state = RunnerState::ExecutingTool;
+                }
+            }
+            _ => {}
+        }
+
         match event {
             ServerEvent::AudioDelta { delta, item_id, .. } => {
                 self.event_handler.on_audio(&delta, &item_id).await?;
@@ -466,10 +672,21 @@ impl RealtimeRunner {
             }
             ServerEvent::ResponseDone { .. } => {
                 self.event_handler.on_response_done().await?;
+                self.check_resumption_queue().await?;
             }
             ServerEvent::FunctionCallDone { call_id, name, arguments, .. } => {
                 if self.runner_config.auto_execute_tools {
                     self.execute_tool_call(&call_id, &name, &arguments).await?;
+                }
+            }
+            ServerEvent::SessionUpdated { session, .. } => {
+                // Check if the generic session update contains a resumption token
+                if let Some(token) = session.get("resumeToken").and_then(|t| t.as_str()) {
+                    tracing::info!("Received Gemini sessionResumption token, saving for future reconnects.");
+                    let mut config = self.config.write().await;
+                    let mut extra = config.extra.clone().unwrap_or_else(|| serde_json::json!({}));
+                    extra["resumeToken"] = serde_json::Value::String(token.to_string());
+                    config.extra = Some(extra);
                 }
             }
             ServerEvent::Error { error, .. } => {
@@ -479,6 +696,44 @@ impl RealtimeRunner {
             _ => {
                 // Ignore other events
             }
+        }
+        Ok(())
+    }
+
+    /// Safely transitions the runner back to Idle and executes any queued resumptions.
+    async fn check_resumption_queue(&self) -> Result<()> {
+        let mut state = self.state.write().await;
+
+        let pending = if let RunnerState::PendingResumption { config, bridge_message, attempts } = &*state {
+            Some((config.clone(), bridge_message.clone(), *attempts))
+        } else {
+            None
+        };
+
+        if let Some((config, bridge_message, attempts)) = pending {
+            tracing::info!("Executing queued resumption after turn completion. (Attempt {})", attempts + 1);
+            *state = RunnerState::Idle;
+            drop(state); // Free lock before async execution
+
+            // If the reconnection fails, we must restore the intent safely without hot-looping.
+            if let Err(e) = self.execute_resumption(config.clone(), bridge_message.clone()).await {
+                tracing::error!("Resumption failed: {}.", e);
+
+                let mut fallback_state = self.state.write().await;
+                if attempts + 1 >= 3 {
+                    tracing::error!("Maximum resumption attempts reached (3). Dropping queued mutation to prevent infinite loop.");
+                    *fallback_state = RunnerState::Idle;
+                } else {
+                    tracing::info!("Restoring pending queue state for retry.");
+                    *fallback_state = RunnerState::PendingResumption { config, bridge_message, attempts: attempts + 1 };
+                }
+
+                // Do not return Err(e) here, as that would kill the `run()` loop.
+                // Instead, report it to the event handler and allow the next turn to retry.
+                let _ = self.event_handler.on_error(&e).await;
+            }
+        } else {
+            *state = RunnerState::Idle;
         }
         Ok(())
     }
@@ -525,5 +780,234 @@ impl RealtimeRunner {
             session.close().await?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── RunnerState tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_runner_state_default_is_idle() {
+        assert_eq!(RunnerState::default(), RunnerState::Idle);
+    }
+
+    #[test]
+    fn test_runner_state_partial_eq_idle() {
+        assert_eq!(RunnerState::Idle, RunnerState::Idle);
+    }
+
+    #[test]
+    fn test_runner_state_partial_eq_generating() {
+        assert_eq!(RunnerState::Generating, RunnerState::Generating);
+    }
+
+    #[test]
+    fn test_runner_state_partial_eq_executing_tool() {
+        assert_eq!(RunnerState::ExecutingTool, RunnerState::ExecutingTool);
+    }
+
+    #[test]
+    fn test_runner_state_partial_eq_pending_resumption() {
+        let config = RealtimeConfig::default().with_instruction("test");
+        let a = RunnerState::PendingResumption {
+            config: config.clone(),
+            bridge_message: Some("bridge".to_string()),
+            attempts: 0,
+        };
+        let b = RunnerState::PendingResumption {
+            config,
+            bridge_message: Some("bridge".to_string()),
+            attempts: 0,
+        };
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn test_runner_state_partial_eq_pending_resumption_different_attempts() {
+        let config = RealtimeConfig::default();
+        let a = RunnerState::PendingResumption {
+            config: config.clone(),
+            bridge_message: None,
+            attempts: 0,
+        };
+        let b = RunnerState::PendingResumption {
+            config,
+            bridge_message: None,
+            attempts: 2,
+        };
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn test_runner_state_partial_eq_different_variants() {
+        assert_ne!(RunnerState::Idle, RunnerState::Generating);
+        assert_ne!(RunnerState::Generating, RunnerState::ExecutingTool);
+        assert_ne!(RunnerState::Idle, RunnerState::ExecutingTool);
+    }
+
+    #[test]
+    fn test_runner_state_idle_ne_pending_resumption() {
+        let pending = RunnerState::PendingResumption {
+            config: RealtimeConfig::default(),
+            bridge_message: None,
+            attempts: 0,
+        };
+        assert_ne!(RunnerState::Idle, pending);
+    }
+
+    #[test]
+    fn test_runner_state_clone() {
+        let config = RealtimeConfig::default().with_instruction("clone test");
+        let original = RunnerState::PendingResumption {
+            config,
+            bridge_message: Some("msg".to_string()),
+            attempts: 1,
+        };
+        let cloned = original.clone();
+        assert_eq!(original, cloned);
+    }
+
+    // ── merge_config tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_merge_config_instruction_overwrites() {
+        let mut base = RealtimeConfig::default().with_instruction("Old instruction");
+        let update = SessionUpdateConfig(RealtimeConfig::default().with_instruction("New instruction"));
+
+        RealtimeRunner::merge_config(&mut base, &update);
+
+        assert_eq!(base.instruction, Some("New instruction".to_string()));
+    }
+
+    #[test]
+    fn test_merge_config_tools_overwrites() {
+        use crate::config::ToolDefinition;
+        let old_tool = ToolDefinition::new("old_tool");
+        let new_tool = ToolDefinition::new("new_tool");
+
+        let mut base = RealtimeConfig::default().with_tool(old_tool);
+        let update = SessionUpdateConfig(RealtimeConfig::default().with_tool(new_tool.clone()));
+
+        RealtimeRunner::merge_config(&mut base, &update);
+
+        let tools = base.tools.unwrap();
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].name, "new_tool");
+    }
+
+    #[test]
+    fn test_merge_config_voice_overwrites() {
+        let mut base = RealtimeConfig::default().with_voice("alloy");
+        let update = SessionUpdateConfig(RealtimeConfig::default().with_voice("echo"));
+
+        RealtimeRunner::merge_config(&mut base, &update);
+
+        assert_eq!(base.voice, Some("echo".to_string()));
+    }
+
+    #[test]
+    fn test_merge_config_temperature_overwrites() {
+        let mut base = RealtimeConfig::default().with_temperature(0.5);
+        let update = SessionUpdateConfig(RealtimeConfig { temperature: Some(0.9), ..Default::default() });
+
+        RealtimeRunner::merge_config(&mut base, &update);
+
+        assert_eq!(base.temperature, Some(0.9));
+    }
+
+    #[test]
+    fn test_merge_config_extra_overwrites() {
+        let mut base = RealtimeConfig {
+            extra: Some(serde_json::json!({"key": "old"})),
+            ..Default::default()
+        };
+        let update = SessionUpdateConfig(RealtimeConfig {
+            extra: Some(serde_json::json!({"key": "new", "other": true})),
+            ..Default::default()
+        });
+
+        RealtimeRunner::merge_config(&mut base, &update);
+
+        let extra = base.extra.unwrap();
+        assert_eq!(extra["key"], serde_json::json!("new"));
+        assert_eq!(extra["other"], serde_json::json!(true));
+    }
+
+    #[test]
+    fn test_merge_config_none_fields_do_not_overwrite() {
+        // When the update config has None for a field, the base should keep its value
+        let mut base = RealtimeConfig::default()
+            .with_instruction("Keep this")
+            .with_voice("alloy");
+        // Update has None for instruction and voice
+        let update = SessionUpdateConfig(RealtimeConfig::default());
+
+        RealtimeRunner::merge_config(&mut base, &update);
+
+        // Base values should be preserved
+        assert_eq!(base.instruction, Some("Keep this".to_string()));
+        assert_eq!(base.voice, Some("alloy".to_string()));
+    }
+
+    #[test]
+    fn test_merge_config_multiple_fields_simultaneously() {
+        use crate::config::ToolDefinition;
+        let mut base = RealtimeConfig::default();
+        let tool = ToolDefinition::new("weather");
+        let update = SessionUpdateConfig(RealtimeConfig {
+            instruction: Some("New system prompt".to_string()),
+            voice: Some("shimmer".to_string()),
+            temperature: Some(0.7),
+            tools: Some(vec![tool]),
+            ..Default::default()
+        });
+
+        RealtimeRunner::merge_config(&mut base, &update);
+
+        assert_eq!(base.instruction, Some("New system prompt".to_string()));
+        assert_eq!(base.voice, Some("shimmer".to_string()));
+        assert_eq!(base.temperature, Some(0.7));
+        assert_eq!(base.tools.as_ref().unwrap().len(), 1);
+        assert_eq!(base.tools.as_ref().unwrap()[0].name, "weather");
+    }
+
+    #[test]
+    fn test_merge_config_does_not_touch_transport_fields() {
+        // Transport-level fields (model, modalities, audio formats) should not be
+        // set via merge to avoid corrupting the session. Merge only touches
+        // cognitive fields as documented.
+        let mut base = RealtimeConfig {
+            model: Some("gpt-4o-realtime".to_string()),
+            ..Default::default()
+        };
+        let update = SessionUpdateConfig(RealtimeConfig {
+            instruction: Some("New instruction".to_string()),
+            ..Default::default()
+        });
+
+        RealtimeRunner::merge_config(&mut base, &update);
+
+        // Model should be unchanged (merge doesn't touch it)
+        assert_eq!(base.model, Some("gpt-4o-realtime".to_string()));
+        // Instruction should be updated
+        assert_eq!(base.instruction, Some("New instruction".to_string()));
+    }
+
+    #[test]
+    fn test_merge_config_empty_update_is_noop() {
+        let mut base = RealtimeConfig::default()
+            .with_instruction("Preserved")
+            .with_voice("alloy")
+            .with_temperature(0.5);
+
+        let original_base = base.clone();
+        let update = SessionUpdateConfig(RealtimeConfig::default());
+
+        RealtimeRunner::merge_config(&mut base, &update);
+
+        assert_eq!(base, original_base);
     }
 }
