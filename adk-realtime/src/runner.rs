@@ -23,11 +23,18 @@ pub enum RunnerState {
     /// A tool is currently executing; teardown would cause tool loss.
     ExecutingTool,
     /// A context mutation was queued while the runner was busy, and must be executed once Idle.
+    ///
+    /// The runner keeps only one pending resumption. If a new session update arrives while
+    /// a resumption is already pending, the previous pending resumption is replaced. This is
+    /// intentional: pending session updates represent desired end state, not an ordered command queue.
+    /// The policy is last write wins.
     PendingResumption {
         /// The new configuration to apply on reconnection.
         config: crate::config::RealtimeConfig,
         /// An optional message to inject immediately after resumption.
         bridge_message: Option<String>,
+        /// Number of failed reconnection attempts for this mutation.
+        attempts: u8,
     },
 }
 
@@ -334,9 +341,21 @@ impl RealtimeRunner {
 
     /// Send a client event directly to the session.
     pub async fn send_client_event(&self, event: crate::events::ClientEvent) -> Result<()> {
-        let guard = self.session.read().await;
-        let session = guard.as_ref().ok_or_else(|| RealtimeError::connection("Not connected"))?;
-        session.send_event(event).await
+        match event {
+            crate::events::ClientEvent::UpdateSession { instructions, tools } => {
+                let update_config = SessionUpdateConfig(crate::config::RealtimeConfig {
+                    instruction: instructions,
+                    tools,
+                    ..Default::default()
+                });
+                self.update_session(update_config).await
+            }
+            other => {
+                let guard = self.session.read().await;
+                let session = guard.as_ref().ok_or_else(|| RealtimeError::connection("Not connected"))?;
+                session.send_event(other).await
+            }
+        }
     }
 
     /// Update the session configuration.
@@ -376,6 +395,11 @@ impl RealtimeRunner {
     /// API supports it (e.g., OpenAI). If it does not (e.g., Gemini), the Runner will
     /// queue a transport resumption, executing it only when the session
     /// is in a resumable state (Idle) to prevent data corruption.
+    ///
+    /// The runner keeps only one pending resumption. If a new session update arrives while
+    /// a resumption is already pending, the previous pending resumption is replaced. This is
+    /// intentional: pending session updates represent desired end state, not an ordered command queue.
+    /// The policy is last write wins.
     pub async fn update_session_with_bridge(
         &self,
         config: SessionUpdateConfig,
@@ -411,10 +435,16 @@ impl RealtimeRunner {
                     tracing::info!("Runner is idle. Executing resumption immediately.");
                     self.execute_resumption(new_config, bridge_message).await?;
                 } else {
-                    tracing::info!("Runner is busy ({:?}). Queueing resumption.", *state_guard);
+                    if let RunnerState::PendingResumption { .. } = *state_guard {
+                        tracing::warn!("Runner already had a pending resumption. Overwriting with last-write-wins policy.");
+                    } else {
+                        tracing::info!("Runner is busy ({:?}). Queueing resumption.", *state_guard);
+                    }
+
                     *state_guard = RunnerState::PendingResumption {
                         config: new_config,
                         bridge_message,
+                        attempts: 0,
                     };
                 }
                 Ok(())
@@ -449,7 +479,10 @@ impl RealtimeRunner {
                 role: "user".to_string(),
                 parts: vec![adk_core::types::Part::Text { text: msg }],
             };
-            self.send_client_event(event).await?;
+            // Send directly to avoid async recursion through send_client_event -> update_session
+            let guard = self.session.read().await;
+            let session = guard.as_ref().ok_or_else(|| RealtimeError::connection("Not connected"))?;
+            session.send_event(event).await?;
         }
 
         tracing::info!("Resumption complete. New transport established.");
@@ -639,17 +672,31 @@ impl RealtimeRunner {
     async fn check_resumption_queue(&self) -> Result<()> {
         let mut state = self.state.write().await;
 
-        let pending = if let RunnerState::PendingResumption { config, bridge_message } = &*state {
-            Some((config.clone(), bridge_message.clone()))
+        let pending = if let RunnerState::PendingResumption { config, bridge_message, attempts } = &*state {
+            Some((config.clone(), bridge_message.clone(), *attempts))
         } else {
             None
         };
 
-        if let Some((config, bridge_message)) = pending {
-            tracing::info!("Executing queued resumption after turn completion.");
+        if let Some((config, bridge_message, attempts)) = pending {
+            tracing::info!("Executing queued resumption after turn completion. (Attempt {})", attempts + 1);
             *state = RunnerState::Idle;
             drop(state); // Free lock before async execution
-            self.execute_resumption(config, bridge_message).await?;
+
+            // If the reconnection fails, we must restore the intent safely without hot-looping.
+            if let Err(e) = self.execute_resumption(config.clone(), bridge_message.clone()).await {
+                tracing::error!("Resumption failed: {}.", e);
+
+                let mut fallback_state = self.state.write().await;
+                if attempts + 1 >= 3 {
+                    tracing::error!("Maximum resumption attempts reached (3). Dropping queued mutation to prevent infinite loop.");
+                    *fallback_state = RunnerState::Idle;
+                } else {
+                    tracing::info!("Restoring pending queue state for retry.");
+                    *fallback_state = RunnerState::PendingResumption { config, bridge_message, attempts: attempts + 1 };
+                }
+                return Err(e);
+            }
         } else {
             *state = RunnerState::Idle;
         }

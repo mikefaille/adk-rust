@@ -98,8 +98,10 @@ pub enum ClientEvent {
     /// Universal intent to update session configuration mid-flight.
     ///
     /// This is treated as a runner/control-plane internal intent and should not
-    /// be sent directly to providers without interception.
-    #[serde(rename = "update_session")]
+    /// be sent directly to providers without interception. By construction, it
+    /// is explicitly untagged from serialization to guarantee it cannot
+    /// leak onto the WebSocket wire.
+    #[serde(skip_serializing)]
     UpdateSession {
         /// New system instructions.
         #[serde(skip_serializing_if = "Option::is_none")]
