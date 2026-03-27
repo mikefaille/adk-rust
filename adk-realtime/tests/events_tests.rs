@@ -268,3 +268,132 @@ fn test_server_event_unknown_type() {
     let event: ServerEvent = serde_json::from_str(json).unwrap();
     assert!(matches!(event, ServerEvent::Unknown));
 }
+
+// ── Tests for new ClientEvent variants added in this PR ──────────────────────
+
+#[test]
+fn test_client_event_message_serialization_has_type_tag() {
+    let event = ClientEvent::Message {
+        role: "user".to_string(),
+        parts: vec![],
+    };
+
+    let json = serde_json::to_string(&event).unwrap();
+    // The "message" tag must appear on the wire so sessions can route it
+    assert!(json.contains("\"type\":\"message\"") || json.contains("\"type\": \"message\""),
+        "Serialized Message event missing 'type: message' tag. Got: {}", json);
+}
+
+#[test]
+fn test_client_event_message_serialization_contains_role() {
+    let event = ClientEvent::Message {
+        role: "assistant".to_string(),
+        parts: vec![],
+    };
+
+    let json = serde_json::to_string(&event).unwrap();
+    assert!(json.contains("assistant"), "Serialized Message event missing role. Got: {}", json);
+}
+
+#[test]
+fn test_client_event_update_session_does_not_deserialize_from_wire() {
+    // UpdateSession is a control-plane-only variant. It should never be created
+    // from parsing a wire message — any JSON with type "session.update" must
+    // deserialize as SessionUpdate (the OpenAI wire variant), not UpdateSession.
+    let json = r#"{"type": "session.update", "session": {}}"#;
+    let event: ClientEvent = serde_json::from_str(json).unwrap();
+    // Must be the wire-compatible SessionUpdate, NOT the internal UpdateSession
+    assert!(
+        matches!(event, ClientEvent::SessionUpdate { .. }),
+        "Expected SessionUpdate from wire format, got a different variant"
+    );
+}
+
+#[test]
+fn test_client_event_update_session_instructions_only() {
+    let event = ClientEvent::UpdateSession {
+        instructions: Some("Be a pirate".to_string()),
+        tools: None,
+    };
+
+    // Verify it can be constructed and pattern-matched correctly
+    match event {
+        ClientEvent::UpdateSession { instructions, tools } => {
+            assert_eq!(instructions, Some("Be a pirate".to_string()));
+            assert!(tools.is_none());
+        }
+        _ => panic!("Expected UpdateSession variant"),
+    }
+}
+
+#[test]
+fn test_client_event_update_session_with_tools() {
+    use adk_realtime::config::ToolDefinition;
+
+    let tool = ToolDefinition::new("get_weather").with_description("Get the weather");
+    let event = ClientEvent::UpdateSession {
+        instructions: None,
+        tools: Some(vec![tool]),
+    };
+
+    match event {
+        ClientEvent::UpdateSession { instructions, tools } => {
+            assert!(instructions.is_none());
+            let tools = tools.unwrap();
+            assert_eq!(tools.len(), 1);
+            assert_eq!(tools[0].name, "get_weather");
+        }
+        _ => panic!("Expected UpdateSession variant"),
+    }
+}
+
+#[test]
+fn test_client_event_message_with_text_part_roundtrip() {
+    use adk_core::types::Part;
+
+    let event = ClientEvent::Message {
+        role: "user".to_string(),
+        parts: vec![Part::Text { text: "Hello world".to_string() }],
+    };
+
+    let json = serde_json::to_string(&event).unwrap();
+
+    // Deserialization should reconstruct the variant
+    let deserialized: ClientEvent = serde_json::from_str(&json).unwrap();
+
+    match deserialized {
+        ClientEvent::Message { role, parts } => {
+            assert_eq!(role, "user");
+            assert_eq!(parts.len(), 1);
+            match &parts[0] {
+                Part::Text { text } => assert_eq!(text, "Hello world"),
+                _ => panic!("Expected Text part"),
+            }
+        }
+        _ => panic!("Expected Message variant"),
+    }
+}
+
+#[test]
+fn test_server_event_session_updated_deserialization() {
+    // Verify the SessionUpdated event (used for Gemini resumption tokens) deserializes correctly
+    let json = r#"{
+        "type": "session.updated",
+        "event_id": "evt_upd_001",
+        "session": {
+            "resumeToken": "tok-abc123"
+        }
+    }"#;
+
+    let event: ServerEvent = serde_json::from_str(json).unwrap();
+    match event {
+        ServerEvent::SessionUpdated { event_id, session } => {
+            assert_eq!(event_id, "evt_upd_001");
+            assert_eq!(
+                session.get("resumeToken").and_then(|v| v.as_str()),
+                Some("tok-abc123")
+            );
+        }
+        _ => panic!("Expected SessionUpdated event"),
+    }
+}
