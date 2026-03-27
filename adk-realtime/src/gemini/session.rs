@@ -104,6 +104,15 @@ struct GeminiSetup {
     tools: Option<Vec<Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     cached_content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session_resumption: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session_resumption_config: Option<SessionResumptionConfig>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct SessionResumptionConfig {
+    handle: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -318,6 +327,15 @@ impl GeminiRealtimeSession {
 
         let tools = convert_tools(config.tools);
 
+        let session_resumption_config = config
+            .extra
+            .as_ref()
+            .and_then(|ext| ext.get("resumeToken"))
+            .and_then(|t| t.as_str())
+            .map(|token| SessionResumptionConfig {
+                handle: token.to_string(),
+            });
+
         let setup = GeminiClientMessage {
             setup: Some(GeminiSetup {
                 model: model.to_string(),
@@ -325,6 +343,8 @@ impl GeminiRealtimeSession {
                 generation_config: Some(generation_config),
                 tools,
                 cached_content: config.cached_content,
+                session_resumption: Some(true),
+                session_resumption_config,
             }),
             realtime_input: None,
             tool_response: None,
@@ -396,6 +416,17 @@ impl GeminiRealtimeSession {
                 event_id: uuid::Uuid::new_v4().to_string(),
                 session: value,
             });
+        }
+
+        // Check for session resumption update
+        if let Some(resumption_update) = value.get("sessionResumptionUpdate") {
+            if let Some(token) = resumption_update.get("resumptionToken").and_then(|t| t.as_str()) {
+                tracing::debug!("Received new Gemini 2.5 Native resumption token");
+                return Ok(ServerEvent::SessionUpdated {
+                    event_id: uuid::Uuid::new_v4().to_string(),
+                    session: json!({ "resumeToken": token }),
+                });
+            }
         }
 
         // Check for server content (audio/text)
