@@ -23,7 +23,12 @@ pub enum RunnerState {
     /// A tool is currently executing; teardown would cause tool loss.
     ExecutingTool,
     /// A context mutation was queued while the runner was busy, and must be executed once Idle.
-    PendingResumption(crate::config::RealtimeConfig),
+    PendingResumption {
+        /// The new configuration to apply on reconnection.
+        config: crate::config::RealtimeConfig,
+        /// An optional message to inject immediately after resumption.
+        bridge_message: Option<String>,
+    },
 }
 
 impl Default for RunnerState {
@@ -338,9 +343,25 @@ impl RealtimeRunner {
     ///
     /// The RealtimeRunner will attempt to mutate the session natively if the underlying
     /// API supports it (e.g., OpenAI). If it does not (e.g., Gemini), the Runner will
-    /// queue a transport resumption (Phantom Reconnect), executing it only when the session
-    /// is in a resumable state (Idle) to prevent data corruption.
+    /// Update the session configuration.
+    ///
+    /// Delegates to [`update_session_with_bridge`] with no bridge message.
     pub async fn update_session(&self, config: SessionUpdateConfig) -> Result<()> {
+        self.update_session_with_bridge(config, None).await
+    }
+
+    /// Update the session configuration, optionally injecting a bridge message if
+    /// a transport resumption (Phantom Reconnect) occurs.
+    ///
+    /// The RealtimeRunner will attempt to mutate the session natively if the underlying
+    /// API supports it (e.g., OpenAI). If it does not (e.g., Gemini), the Runner will
+    /// queue a transport resumption, executing it only when the session
+    /// is in a resumable state (Idle) to prevent data corruption.
+    pub async fn update_session_with_bridge(
+        &self,
+        config: SessionUpdateConfig,
+        bridge_message: Option<String>,
+    ) -> Result<()> {
         let mut full_config = self.config.write().await;
 
         // Merge the updates from `SessionUpdateConfig` into `full_config`
@@ -369,6 +390,14 @@ impl RealtimeRunner {
         match session.mutate_context(cloned_config).await? {
             ContextMutationOutcome::Applied => {
                 tracing::info!("Context mutated natively mid-flight.");
+                // If applied natively, we can just inject the bridge message directly as a standard message.
+                if let Some(msg) = bridge_message {
+                    let event = crate::events::ClientEvent::Message {
+                        role: "user".to_string(),
+                        parts: vec![adk_core::types::Part::Text { text: msg }],
+                    };
+                    session.send_event(event).await?;
+                }
                 Ok(())
             }
             ContextMutationOutcome::RequiresResumption(new_config) => {
@@ -377,10 +406,13 @@ impl RealtimeRunner {
                 if *state_guard == RunnerState::Idle {
                     drop(state_guard);
                     tracing::info!("Runner is idle. Executing resumption immediately.");
-                    self.execute_resumption(new_config).await?;
+                    self.execute_resumption(new_config, bridge_message).await?;
                 } else {
                     tracing::info!("Runner is busy ({:?}). Queueing resumption.", *state_guard);
-                    *state_guard = RunnerState::PendingResumption(new_config);
+                    *state_guard = RunnerState::PendingResumption {
+                        config: new_config,
+                        bridge_message,
+                    };
                 }
                 Ok(())
             }
@@ -388,16 +420,31 @@ impl RealtimeRunner {
     }
 
     /// Internal helper to execute a transport resumption (teardown and rebuild).
-    async fn execute_resumption(&self, new_config: crate::config::RealtimeConfig) -> Result<()> {
+    async fn execute_resumption(
+        &self,
+        new_config: crate::config::RealtimeConfig,
+        bridge_message: Option<String>,
+    ) -> Result<()> {
         tracing::warn!("Executing transport resumption with new configuration.");
+
         let mut write_guard = self.session.write().await;
         if let Some(old_session) = write_guard.as_ref() {
             let _ = old_session.close().await;
         }
 
         // Reconnect via the generic model interface.
-        // Note: The `RealtimeModel` or the adapter could manage an official resumption handle internally if available.
         let new_session = self.model.connect(new_config).await?;
+
+        // Inject bridge message into the new session if provided
+        if let Some(msg) = bridge_message {
+            tracing::info!("Injecting bridge message post-resumption.");
+            let event = crate::events::ClientEvent::Message {
+                role: "user".to_string(),
+                parts: vec![adk_core::types::Part::Text { text: msg }],
+            };
+            new_session.send_event(event).await?;
+        }
+
         *write_guard = Some(new_session);
 
         tracing::info!("Resumption complete. New transport established.");
@@ -589,17 +636,17 @@ impl RealtimeRunner {
     async fn check_resumption_queue(&self) -> Result<()> {
         let mut state = self.state.write().await;
 
-        let pending = if let RunnerState::PendingResumption(config) = &*state {
-            Some(config.clone())
+        let pending = if let RunnerState::PendingResumption { config, bridge_message } = &*state {
+            Some((config.clone(), bridge_message.clone()))
         } else {
             None
         };
 
-        if let Some(config) = pending {
+        if let Some((config, bridge_message)) = pending {
             tracing::info!("Executing queued resumption after turn completion.");
             *state = RunnerState::Idle;
             drop(state); // Free lock before async execution
-            self.execute_resumption(config).await?;
+            self.execute_resumption(config, bridge_message).await?;
         } else {
             *state = RunnerState::Idle;
         }

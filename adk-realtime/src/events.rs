@@ -94,6 +94,20 @@ pub enum ClientEvent {
         /// Content parts of the message.
         parts: Vec<adk_core::types::Part>,
     },
+
+    /// Universal intent to update session configuration mid-flight.
+    ///
+    /// This is treated as a runner/control-plane internal intent and should not
+    /// be sent directly to providers without interception.
+    #[serde(rename = "update_session")]
+    UpdateSession {
+        /// New system instructions.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        instructions: Option<String>,
+        /// New tools definition.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tools: Option<Vec<crate::config::ToolDefinition>>,
+    },
 }
 
 /// A conversation item for text or tool responses.
