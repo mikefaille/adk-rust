@@ -48,31 +48,15 @@ impl<H: EventHandler> EventHandler for LiveKitEventHandler<H> {
         self.inner.on_audio(audio, item_id).await?;
 
         // Convert PCM bytes to i16 samples and push to LiveKit
-        // Optimize with zero-copy cast on little-endian targets, since audio is little-endian PCM16
-        #[cfg(target_endian = "little")]
-        let samples_cow = match bytemuck::try_cast_slice::<u8, i16>(audio) {
-            Ok(aligned_slice) => Cow::Borrowed(aligned_slice),
-            Err(_) => {
-                let mut fallback = Vec::with_capacity(audio.len() / 2);
-                for chunk in audio.chunks_exact(2) {
-                    fallback.push(i16::from_le_bytes([chunk[0], chunk[1]]));
-                }
-                Cow::Owned(fallback)
-            }
-        };
+        // Using manual loop for safety instead of bytemuck::cast_slice which requires alignment
+        let mut samples = Vec::with_capacity(audio.len() / 2);
+        for chunk in audio.chunks_exact(2) {
+            samples.push(i16::from_le_bytes([chunk[0], chunk[1]]));
+        }
 
-        #[cfg(not(target_endian = "little"))]
-        let samples_cow = {
-            let mut fallback = Vec::with_capacity(audio.len() / 2);
-            for chunk in audio.chunks_exact(2) {
-                fallback.push(i16::from_le_bytes([chunk[0], chunk[1]]));
-            }
-            Cow::Owned(fallback)
-        };
-
-        let samples_per_channel = samples_cow.len() as u32 / self.num_channels;
+        let samples_per_channel = samples.len() as u32 / self.num_channels;
         let frame = AudioFrame {
-            data: samples_cow,
+            data: Cow::Owned(samples),
             sample_rate: self.sample_rate,
             num_channels: self.num_channels,
             samples_per_channel,
