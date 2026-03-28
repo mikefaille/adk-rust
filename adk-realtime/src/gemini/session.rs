@@ -569,8 +569,66 @@ impl RealtimeSession for GeminiRealtimeSession {
         Ok(()) // Gemini handles interruption via VAD
     }
 
-    async fn send_event(&self, _event: ClientEvent) -> Result<()> {
-        Ok(()) // Raw events not directly supported
+    async fn send_event(&self, event: ClientEvent) -> Result<()> {
+        match event {
+            ClientEvent::SessionUpdate { session } => {
+                let config: RealtimeConfig = serde_json::from_value(session).map_err(|e| {
+                    RealtimeError::protocol(format!("Invalid session config: {}", e))
+                })?;
+
+                let mut generation_config = json!({});
+
+                if let Some(modalities) = config.modalities {
+                    generation_config["responseModalities"] = json!(modalities);
+                }
+
+                if let Some(voice) = &config.voice {
+                    generation_config["speechConfig"] = json!({
+                        "voiceConfig": {
+                            "prebuiltVoiceConfig": {
+                                "voiceName": voice
+                            }
+                        }
+                    });
+                }
+
+                if let Some(temp) = config.temperature {
+                    generation_config["temperature"] = json!(temp);
+                }
+
+                let generation_config = if generation_config
+                    .as_object()
+                    .map_or(true, |o| o.is_empty())
+                {
+                    None
+                } else {
+                    Some(generation_config)
+                };
+
+                let system_instruction = config.instruction.map(|text| GeminiContent {
+                    parts: vec![GeminiPart { text: Some(text), inline_data: None }],
+                });
+
+                let tools = convert_tools(config.tools);
+
+                let setup = GeminiClientMessage {
+                    setup: Some(GeminiSetup {
+                        model: config.model.unwrap_or_default(),
+                        system_instruction,
+                        generation_config,
+                        tools,
+                        cached_content: config.cached_content,
+                    }),
+                    realtime_input: None,
+                    tool_response: None,
+                    client_content: None,
+                };
+
+                tracing::info!("Sending Gemini Live session update via setup message");
+                self.send_raw(&setup).await
+            }
+            _ => Ok(()), // Raw events not directly supported
+        }
     }
 
     async fn next_event(&self) -> Option<Result<ServerEvent>> {
