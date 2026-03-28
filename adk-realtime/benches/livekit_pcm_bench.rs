@@ -1,6 +1,6 @@
+use std::borrow::Cow;
 use std::hint::black_box;
 use std::time::{Duration, Instant};
-use std::borrow::Cow;
 
 fn main() {
     let bytes: Vec<u8> = vec![0; 10_000_000];
@@ -74,10 +74,14 @@ fn print_stats(name: &str, durations: &mut [Duration]) {
     };
 
     let mean_f64 = mean.as_secs_f64();
-    let variance = durations.iter().map(|d| {
-        let diff = d.as_secs_f64() - mean_f64;
-        diff * diff
-    }).sum::<f64>() / count as f64;
+    let variance = durations
+        .iter()
+        .map(|d| {
+            let diff = d.as_secs_f64() - mean_f64;
+            diff * diff
+        })
+        .sum::<f64>()
+        / count as f64;
     let stddev = Duration::from_secs_f64(variance.sqrt());
 
     println!("=== {} ===", name);
