@@ -55,6 +55,8 @@ impl<H: EventHandler> EventHandler for LiveKitEventHandler<H> {
             Ok(aligned_slice) => Cow::Borrowed(aligned_slice),
             Err(_) => {
                 // Fallback: `try_cast_slice` fails on memory-unaligned network byte streams.
+                // This can happen if upstream buffers fragment asynchronously (e.g. WebSocket
+                // odd-byte chunking) or due to custom protocol TLS padding offsets.
                 // We safely map using an LLVM-vectorized iterator (3x faster than manual Vec::push).
                 let fallback: Vec<i16> = audio
                     .chunks_exact(2)
