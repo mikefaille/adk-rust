@@ -51,10 +51,10 @@ impl<H: EventHandler> EventHandler for LiveKitEventHandler<H> {
         //
         // PERFORMANCE DECISION:
         // We use functional iterator mapping for LLVM auto-vectorization which provides a
-        // ~8x speedup over a manual `for` loop dynamically pushing to `Vec` (~11ms vs ~87ms
-        // per 10MB of data).
+        // ~3x speedup over a manual `for` loop dynamically pushing to a `Vec` (~2.3ms vs ~7.1ms
+        // per 10MB of data based on aggregate benchmarks).
         //
-        // While zero-copy casting frameworks like `bytemuck` are blisteringly fast (~80ns),
+        // While zero-copy casting frameworks like `bytemuck` are blisteringly fast (~70ns),
         // they require strict memory alignment of the underlying byte slice. Bytemuck casts
         // can panic if the network layer produces unaligned chunks, causing unpredictable mid-call
         // failures. This functional pipeline provides a perfectly safe "middle ground" that
