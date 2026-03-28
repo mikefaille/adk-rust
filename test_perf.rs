@@ -1,82 +1,90 @@
-use std::time::{Duration, Instant};
 use std::hint::black_box;
+use std::time::{Duration, Instant};
 use std::borrow::Cow;
 
 fn main() {
-    let bytes: Vec<u8> = (0..10_000_000).map(|i| (i % 256) as u8).collect();
-    let num_iterations = 50;
-    let num_warmup = 10;
+    let bytes: Vec<u8> = vec![0; 10_000_000];
+    let iterations = 1000;
+    let warmup = 100;
 
-    let mut manual_durations = Vec::new();
+    let mut manual_durations = Vec::with_capacity(iterations);
     let mut iter_durations = Vec::new();
     let mut bytemuck_durations = Vec::new();
 
-    // Warm-up and benchmark iterations
-    for iteration in 0..(num_warmup + num_iterations) {
-        let is_warmup = iteration < num_warmup;
+    let mut samples1 = Vec::new();
+    let mut samples2 = Vec::new();
 
-        // Method 1: Manual loop
-        let start = Instant::now();
-        let mut samples1 = Vec::with_capacity(bytes.len() / 2);
+    // Warm-up
+    for _ in 0..warmup {
+        let mut s = Vec::with_capacity(bytes.len() / 2);
         for chunk in bytes.chunks_exact(2) {
-            samples1.push(i16::from_le_bytes([chunk[0], chunk[1]]));
+            s.push(i16::from_le_bytes([chunk[0], chunk[1]]));
         }
-        black_box(samples1);
-        let dur1 = start.elapsed();
-        if !is_warmup {
-            manual_durations.push(dur1);
-        }
+        black_box(s);
 
-        // Method 2: Iterator
-        let start = Instant::now();
-        let samples2: Vec<i16> = bytes
-            .chunks_exact(2)
-            .map(|c| i16::from_le_bytes([c[0], c[1]]))
-            .collect();
-        black_box(samples2);
-        let dur2 = start.elapsed();
-        if !is_warmup {
-            iter_durations.push(dur2);
-        }
+        let s: Vec<i16> = bytes.chunks_exact(2).map(|c| i16::from_le_bytes([c[0], c[1]])).collect();
+        black_box(s);
 
-        // Method 3: Bytemuck (if little endian)
-        let start = Instant::now();
-        let samples3: Cow<[i16]> = unsafe {
-            let ptr = bytes.as_ptr() as *const i16;
-            let len = bytes.len() / 2;
-            Cow::Borrowed(std::slice::from_raw_parts(ptr, len))
+        let s: Cow<[i16]> = unsafe {
+            Cow::Borrowed(std::slice::from_raw_parts(bytes.as_ptr() as *const i16, bytes.len() / 2))
         };
-        black_box(samples3);
-        let dur3 = start.elapsed();
-        if !is_warmup {
-            bytemuck_durations.push(dur3);
-        }
+        black_box(s);
     }
 
-    // Calculate statistics
-    let calc_stats = |durations: &Vec<Duration>| {
-        let mut sum = 0.0;
-        let mut sum_sq = 0.0;
-        let n = durations.len() as f64;
-
-        for d in durations {
-            let val = d.as_secs_f64() * 1000.0; // in milliseconds
-            sum += val;
-            sum_sq += val * val;
+    // Benchmark
+    for _ in 0..iterations {
+        let start = Instant::now();
+        let mut s = Vec::with_capacity(bytes.len() / 2);
+        for chunk in bytes.chunks_exact(2) {
+            s.push(i16::from_le_bytes([chunk[0], chunk[1]]));
         }
+        manual_durations.push(start.elapsed());
+        samples1 = s;
 
-        let mean = sum / n;
-        let variance = (sum_sq / n) - (mean * mean);
-        let stddev = variance.sqrt();
-        (mean, stddev)
+        let start = Instant::now();
+        let s: Vec<i16> = bytes.chunks_exact(2).map(|c| i16::from_le_bytes([c[0], c[1]])).collect();
+        iter_durations.push(start.elapsed());
+        samples2 = s;
+
+        let start = Instant::now();
+        let s: Cow<[i16]> = unsafe {
+            Cow::Borrowed(std::slice::from_raw_parts(bytes.as_ptr() as *const i16, bytes.len() / 2))
+        };
+        black_box(s);
+        bytemuck_durations.push(start.elapsed());
+    }
+
+    assert_eq!(samples1, samples2, "Fatal: pcm16 outputs differ!");
+
+    print_stats("Manual Loop", &mut manual_durations);
+    print_stats("Iterator / Collect", &mut iter_durations);
+    print_stats("Absolute Zero-Copy (bytemuck simulated)", &mut bytemuck_durations);
+}
+
+fn print_stats(name: &str, durations: &mut [Duration]) {
+    durations.sort_unstable();
+    let count = durations.len();
+    let sum: Duration = durations.iter().sum();
+    let mean = sum / count as u32;
+
+    let median = if count % 2 == 0 {
+        (durations[count / 2 - 1] + durations[count / 2]) / 2
+    } else {
+        durations[count / 2]
     };
 
-    let (manual_mean, manual_stddev) = calc_stats(&manual_durations);
-    let (iter_mean, iter_stddev) = calc_stats(&iter_durations);
-    let (bytemuck_mean, bytemuck_stddev) = calc_stats(&bytemuck_durations);
+    let mean_f64 = mean.as_secs_f64();
+    let variance = durations.iter().map(|d| {
+        let diff = d.as_secs_f64() - mean_f64;
+        diff * diff
+    }).sum::<f64>() / count as f64;
+    let stddev = Duration::from_secs_f64(variance.sqrt());
 
-    println!("Results over {} iterations (after {} warm-up):", num_iterations, num_warmup);
-    println!("Manual loop:      {:.3} ms +/- {:.3} ms", manual_mean, manual_stddev);
-    println!("Iterator:         {:.3} ms +/- {:.3} ms", iter_mean, iter_stddev);
-    println!("Zero-copy cast:   {:.6} ms +/- {:.6} ms", bytemuck_mean, bytemuck_stddev);
+    println!("=== {} ===", name);
+    println!("Mean:   {:?}", mean);
+    println!("Median: {:?}", median);
+    println!("StdDev: {:?}", stddev);
+    println!("Min:    {:?}", durations[0]);
+    println!("Max:    {:?}", durations[count - 1]);
+    println!();
 }
