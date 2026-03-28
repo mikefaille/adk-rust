@@ -47,15 +47,9 @@ impl<H: EventHandler> EventHandler for LiveKitEventHandler<H> {
         // Forward to inner handler first
         self.inner.on_audio(audio, item_id).await?;
 
-        // Absolute Zero-Copy (O(0) Allocation) WebRTC Hand-off
-        //
-        // Convert PCM bytes to i16 samples and push to LiveKit.
-        // We utilize `bytemuck` to safely verify memory alignment and generate an ephemeral
-        // slice that points directly to the underlying byte buffer without any iterations
-        // or memory shifting.
-        //
-        // CRITICAL: We pass `Cow::Borrowed` so the frame simply holds a reference to the
-        // buffer until the WebRTC C++ engine consumes it across the FFI boundary.
+        // Zero-Copy Architecture:
+        // Local Edge: O(0) allocation via `bytemuck` pointer casts directly to C++ WebRTC FFI.
+        // Global Core: `Cow::Borrowed` prevents `'a` lifetime infection of the async graph state.
         #[cfg(target_endian = "little")]
         let samples_cow = match bytemuck::try_cast_slice::<u8, i16>(audio) {
             Ok(aligned_slice) => Cow::Borrowed(aligned_slice),
