@@ -24,10 +24,15 @@ pub enum RunnerState {
     ExecutingTool,
     /// A context mutation was queued while the runner was busy, and must be executed once Idle.
     ///
-    /// The runner keeps only one pending resumption. If a new session update arrives while
-    /// a resumption is already pending, the previous pending resumption is replaced. This is
-    /// intentional: pending session updates represent desired end state, not an ordered command queue.
-    /// The policy is last write wins.
+    /// **Provider Context:** This state is only utilized by providers that do *not* support
+    /// native mid-flight mutability (e.g., Gemini Live), requiring a physical transport teardown
+    /// and rebuild (Phantom Reconnect). Providers like OpenAI natively apply `session.update`
+    /// frames instantly and will never enter this queued state.
+    ///
+    /// **Queue Policy:** The runner keeps only one pending resumption. If a new session update
+    /// arrives while a resumption is already pending, the previous pending resumption is replaced.
+    /// This is intentional: pending session updates represent desired end state, not an ordered
+    /// command queue. The policy is last write wins.
     PendingResumption {
         /// The new configuration to apply on reconnection.
         config: crate::config::RealtimeConfig,
@@ -340,6 +345,12 @@ impl RealtimeRunner {
     }
 
     /// Send a client event directly to the session.
+    ///
+    /// This method intercepts internal control-plane events (like `UpdateSession`) to route
+    /// them through the provider-agnostic orchestration layer instead of forwarding raw JSON
+    /// to the underlying WebSocket transport. This guarantees that `adk-realtime` never leaks
+    /// invalid event payloads to providers (e.g., OpenAI or Gemini) and universally bridges
+    /// the Cognitive Handoff mechanics transparently.
     pub async fn send_client_event(&self, event: crate::events::ClientEvent) -> Result<()> {
         match event {
             crate::events::ClientEvent::UpdateSession { instructions, tools } => {
@@ -358,7 +369,14 @@ impl RealtimeRunner {
         }
     }
 
-    /// Internal helper to merge a `SessionUpdateConfig` into a base `RealtimeConfig`.
+    /// Internal helper to merge a `SessionUpdateConfig` delta into the canonical `RealtimeConfig` state.
+    ///
+    /// **Why this exists**: The `RealtimeRunner` must maintain an absolute, single source of truth
+    /// for its configuration (`self.config`). Orchestrators fire `SessionUpdateConfig`s as sparse
+    /// partial deltas (intents to hot-swap instructions or tools mid-flight). By accumulating
+    /// these sparse updates into the single `base` config, any subsequent "Phantom Reconnect"
+    /// (e.g., due to a Gemini domain shift or an unexpected network drop) natively inherits all
+    /// prior hot-swaps alongside the immutable transport parameters (like sample rates) defined at startup.
     ///
     /// Note: This is intentionally narrow and specifically scoped to merge only
     /// hot-swappable cognitive fields (instruction, tools, voice, temperature, extra).
@@ -418,19 +436,29 @@ impl RealtimeRunner {
         config: SessionUpdateConfig,
         bridge_message: Option<String>,
     ) -> Result<()> {
+        // 1. Merge the incoming delta into the runner's canonical, persisted configuration.
+        // This ensures that any future reconnects (e.g., due to network drops) naturally
+        // inherit this latest state.
         let mut full_config = self.config.write().await;
         Self::merge_config(&mut full_config, &config);
 
         let cloned_config = full_config.clone();
-        drop(full_config);
+        drop(full_config); // Free the write lock early to avoid deadlocks.
 
+        // 2. Obtain a read lock on the active session transport to attempt the mutation.
         let guard = self.session.read().await;
         let session = guard.as_ref().ok_or_else(|| RealtimeError::connection("Not connected"))?;
 
+        // 3. Delegate the mutation attempt to the provider-specific adapter.
         match session.mutate_context(cloned_config).await? {
+
+            // PATH A: Native Mutability (e.g., OpenAI)
+            // The provider natively updated the context over the active WebSocket.
             ContextMutationOutcome::Applied => {
                 tracing::info!("Context mutated natively mid-flight.");
-                // If applied natively, we can just inject the bridge message directly as a standard message.
+
+                // Since the transport wasn't dropped, we can inject the bridge message
+                // immediately as a standard user message to update the model's short-term memory.
                 if let Some(msg) = bridge_message {
                     let event = crate::events::ClientEvent::Message {
                         role: "user".to_string(),
@@ -440,14 +468,24 @@ impl RealtimeRunner {
                 }
                 Ok(())
             }
+
+            // PATH B: Rigid Initialization (e.g., Gemini)
+            // The provider requires us to tear down the WebSocket and establish a new one (Phantom Reconnect).
             ContextMutationOutcome::RequiresResumption(new_config) => {
-                drop(guard); // release the read lock before potential async ops
+                drop(guard); // CRITICAL: Release the read lock on the session before we attempt to mutate it or acquire state locks.
+
+                // 4. Check the Runner's internal state machine to ensure it is safe to tear down the socket.
                 let mut state_guard = self.state.write().await;
+
                 if *state_guard == RunnerState::Idle {
-                    drop(state_guard);
+                    // Safe to reconnect: The model is neither generating audio nor executing a tool.
+                    drop(state_guard); // Free state lock before the heavy async network operation.
                     tracing::info!("Runner is idle. Executing resumption immediately.");
+
                     if let Err(e) = self.execute_resumption(new_config.clone(), bridge_message.clone()).await {
                         tracing::error!("Immediate resumption failed: {}. Queueing for retry.", e);
+                        // If the reconnect fails (e.g., transient network issue), we must not lose the mutation intent.
+                        // We push it back into the queue for the background loop to retry.
                         let mut fallback_state = self.state.write().await;
                         *fallback_state = RunnerState::PendingResumption {
                             config: new_config,
@@ -457,12 +495,15 @@ impl RealtimeRunner {
                         return Err(e);
                     }
                 } else {
+                    // Unsafe to reconnect: Tearing down the socket now would corrupt the in-flight context.
+                    // We must queue the mutation. The event loop will execute it once it returns to Idle.
                     if let RunnerState::PendingResumption { .. } = *state_guard {
                         tracing::warn!("Runner already had a pending resumption. Overwriting with last-write-wins policy.");
                     } else {
                         tracing::info!("Runner is busy ({:?}). Queueing resumption.", *state_guard);
                     }
 
+                    // Queue the intent using a last-write-wins policy.
                     *state_guard = RunnerState::PendingResumption {
                         config: new_config,
                         bridge_message,
@@ -482,21 +523,29 @@ impl RealtimeRunner {
     ) -> Result<()> {
         tracing::warn!("Executing transport resumption with new configuration.");
 
+        // 1. Acquire exclusive write access to the session pointer.
         let mut write_guard = self.session.write().await;
+
+        // 2. Explicitly tear down the old WebSocket connection to release upstream resources.
         if let Some(old_session) = write_guard.as_ref() {
             if let Err(e) = old_session.close().await {
                 tracing::warn!("Failed to cleanly close old session during resumption: {}", e);
             }
         }
 
-        // Reconnect via the generic model interface.
+        // 3. Establish a brand new connection using the provider-agnostic factory interface.
+        // If the provider supports resumption natively (like Gemini), the `new_config`
+        // payload already contains the cached `resumeToken`.
         let new_session = self.model.connect(new_config).await?;
 
-        // Swap pointer before injecting events so that it is the active runner session.
+        // 4. Overwrite the active session pointer with the newly connected transport.
         *write_guard = Some(new_session);
-        drop(write_guard); // Free the lock explicitly
 
-        // Inject bridge message into the new session if provided
+        // 5. Release the write lock immediately before attempting to inject any new messages.
+        drop(write_guard);
+
+        // 6. If the orchestrator provided a bridge message (e.g. to explain the domain shift),
+        // safely inject it into the new connection's context window.
         if let Some(msg) = bridge_message {
             self.inject_bridge_message(msg).await?;
         }
@@ -702,8 +751,10 @@ impl RealtimeRunner {
 
     /// Safely transitions the runner back to Idle and executes any queued resumptions.
     async fn check_resumption_queue(&self) -> Result<()> {
+        // 1. Acquire the state lock to inspect the queue.
         let mut state = self.state.write().await;
 
+        // 2. Extract the pending configuration and attempt count if one exists.
         let pending = if let RunnerState::PendingResumption { config, bridge_message, attempts } = &*state {
             Some((config.clone(), bridge_message.clone(), *attempts))
         } else {
@@ -712,14 +763,22 @@ impl RealtimeRunner {
 
         if let Some((config, bridge_message, attempts)) = pending {
             tracing::info!("Executing queued resumption after turn completion. (Attempt {})", attempts + 1);
-            *state = RunnerState::Idle;
-            drop(state); // Free lock before async execution
 
-            // If the reconnection fails, we must restore the intent safely without hot-looping.
+            // 3. Mark the state as Idle so the background loop is unblocked.
+            *state = RunnerState::Idle;
+
+            // 4. Release the state lock *before* performing the heavy async socket connection.
+            drop(state);
+
+            // 5. Attempt the actual transport teardown/rebuild.
             if let Err(e) = self.execute_resumption(config.clone(), bridge_message.clone()).await {
                 tracing::error!("Resumption failed: {}.", e);
 
+                // 6. If the reconnect fails (e.g., transient network error), re-acquire the lock
+                // to safely handle the retry logic without crashing the event loop.
                 let mut fallback_state = self.state.write().await;
+
+                // 7. Enforce a maximum retry budget to prevent infinite "hot-looping"
                 if attempts + 1 >= 3 {
                     tracing::error!("Maximum resumption attempts reached (3). Dropping queued mutation to prevent infinite loop.");
                     *fallback_state = RunnerState::Idle;
@@ -728,11 +787,12 @@ impl RealtimeRunner {
                     *fallback_state = RunnerState::PendingResumption { config, bridge_message, attempts: attempts + 1 };
                 }
 
-                // Do not return Err(e) here, as that would kill the `run()` loop.
-                // Instead, report it to the event handler and allow the next turn to retry.
+                // 8. Do not return Err(e) here, as that would permanently kill the `run()` loop.
+                // Instead, report the error to the downstream handler and allow the event loop to continue spinning.
                 let _ = self.event_handler.on_error(&e).await;
             }
         } else {
+            // No resumptions were queued; simply mark as Idle.
             *state = RunnerState::Idle;
         }
         Ok(())

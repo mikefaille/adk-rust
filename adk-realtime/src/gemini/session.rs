@@ -615,10 +615,40 @@ impl RealtimeSession for GeminiRealtimeSession {
                 self.send_raw(&msg).await
             },
 
-            // Route other native adk-rust events as needed...
-            _ => {
-                tracing::debug!("Event type not explicitly handled by Gemini session adapter");
+            // Explicitly handle all other unified ClientEvent variants.
+            // Returning Ok(()) silently for unsupported features is an anti-pattern.
+            // We log a clear warning that Gemini does not natively support this specific control event.
+            ClientEvent::AudioDelta { .. } => {
+                tracing::warn!("AudioDelta is explicitly handled via `send_audio`, not `send_event`. Dropping event.");
                 Ok(())
+            }
+            ClientEvent::InputAudioBufferCommit => {
+                tracing::warn!("Gemini Live API does not support manual audio buffer commits. Dropping event.");
+                Ok(())
+            }
+            ClientEvent::InputAudioBufferClear => {
+                tracing::warn!("Gemini Live API does not support manual audio buffer clears via wire events. Dropping event.");
+                Ok(())
+            }
+            ClientEvent::ConversationItemCreate { .. } => {
+                tracing::warn!("Raw ConversationItemCreate is an OpenAI construct. Use ClientEvent::Message instead for Gemini. Dropping event.");
+                Ok(())
+            }
+            ClientEvent::ResponseCreate { .. } => {
+                tracing::warn!("Gemini Live API automatically generates responses based on VAD/turns. Manual ResponseCreate is unsupported. Dropping event.");
+                Ok(())
+            }
+            ClientEvent::ResponseCancel => {
+                tracing::warn!("Gemini Live API natively handles interruption via VAD. Manual ResponseCancel is unsupported. Dropping event.");
+                Ok(())
+            }
+            ClientEvent::SessionUpdate { .. } => {
+                tracing::warn!("Raw SessionUpdate is an OpenAI construct. Use RealtimeRunner's `update_session` for provider-agnostic Context Mutation. Dropping event.");
+                Ok(())
+            }
+            ClientEvent::UpdateSession { .. } => {
+                tracing::error!("Internal UpdateSession intent leaked to the Gemini transport socket. This should have been intercepted by the RealtimeRunner.");
+                Err(RealtimeError::ProviderError("Internal intent leaked to transport".to_string()))
             }
         }
     }
@@ -682,7 +712,7 @@ pub fn build_vertex_live_url(region: &str, project_id: &str) -> Result<String> {
 /// Pure translation function for converting a standard `adk_core` message into
 /// Gemini Live API's native `clientContent` payload.
 pub(crate) fn translate_client_message(role: &str, parts: Vec<adk_core::types::Part>) -> GeminiClientMessage {
-    // 1. Translate adk-rust 'Part' to 'GeminiPart'
+    // 1. Translate the polymorphic `adk_core::types::Part` elements into strictly-typed `GeminiPart` structures.
     let mut gemini_parts: Vec<GeminiPart> = Vec::new();
     for p in parts {
         match p {
@@ -693,6 +723,7 @@ pub(crate) fn translate_client_message(role: &str, parts: Vec<adk_core::types::P
                 });
             }
             adk_core::types::Part::InlineData { mime_type, data } => {
+                // Gemini natively encodes binary artifacts (images/audio) via a base64 payload envelope.
                 let encoded = base64::engine::general_purpose::STANDARD.encode(&data);
                 gemini_parts.push(GeminiPart {
                     text: None,
@@ -702,6 +733,9 @@ pub(crate) fn translate_client_message(role: &str, parts: Vec<adk_core::types::P
                     }),
                 });
             }
+
+            // 2. Gracefully skip semantic elements that Google's Live API `clientContent` turn does not support
+            // using `tracing::warn!`, avoiding "silent data loss" or injecting empty string placeholders.
             adk_core::types::Part::FileData { file_uri, .. } => {
                 tracing::warn!("Dropping unsupported FileData part in Gemini session: {}", file_uri);
             }
@@ -717,14 +751,17 @@ pub(crate) fn translate_client_message(role: &str, parts: Vec<adk_core::types::P
         }
     }
 
-    // 2. Coerce the Role
-    // Gemini Live BIDI strictly rejects "system" in clientContent.
-    // We trap adk-rust's native System role and masquerade it as a user directive.
+    // 3. Coerce the `Role`.
+    // Gemini Live's bidirectional socket strongly rejects `system` or `developer` roles
+    // inside mid-flight `clientContent` turns. To support Cognitive Handoffs, we intercept
+    // the system instruction and safely masquerade it as a high-priority "user" turn.
     let (gemini_role, final_parts) = match role {
         "system" | "developer" => {
             let mut modified_parts = gemini_parts;
             let mut text_injected = false;
 
+            // Iterate to find the first actual text element in the user's prompt (avoiding images/audio arrays)
+            // to safely inject the system prefix.
             for part in modified_parts.iter_mut() {
                 if let Some(ref mut text) = part.text {
                     *text = format!("[CRITICAL SYSTEM DIRECTIVE OVERRIDE]\n{}", text);
@@ -733,6 +770,8 @@ pub(crate) fn translate_client_message(role: &str, parts: Vec<adk_core::types::P
                 }
             }
 
+            // If the orchestrator sent a `system` role containing exclusively non-text data (e.g., just an image),
+            // construct a synthetic text part to carry the directive.
             if !text_injected {
                 modified_parts.insert(0, GeminiPart {
                     text: Some("[CRITICAL SYSTEM DIRECTIVE OVERRIDE]".to_string()),
@@ -744,10 +783,10 @@ pub(crate) fn translate_client_message(role: &str, parts: Vec<adk_core::types::P
         },
         "user" => ("user".to_string(), gemini_parts),
         "model" | "assistant" => ("model".to_string(), gemini_parts),
-        _ => ("user".to_string(), gemini_parts), // Fallback
+        _ => ("user".to_string(), gemini_parts), // Default fallback for custom orchestrator roles
     };
 
-    // 3. Fire the native Gemini Envelope
+    // 4. Construct the native `GeminiClientContent` wire envelope.
     GeminiClientMessage {
         setup: None,
         realtime_input: None,
