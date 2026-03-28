@@ -695,11 +695,8 @@ impl RealtimeSession for GeminiRealtimeSession {
                     .and_then(|val| val.as_str())
                     .map(|s| s.to_string());
 
-                let session_resumption = if handle.is_some() {
-                    Some(SessionResumptionConfig { handle })
-                } else {
-                    None
-                };
+                let session_resumption =
+                    if handle.is_some() { Some(SessionResumptionConfig { handle }) } else { None };
 
                 let setup = GeminiClientMessage {
                     setup: Some(GeminiSetup {
