@@ -50,31 +50,37 @@ impl<H: EventHandler> EventHandler for LiveKitEventHandler<H> {
         // Zero-Copy Architecture:
         // Local Edge: O(0) allocation via `bytemuck` pointer casts directly to C++ WebRTC FFI.
         // Global Core: `Cow::Borrowed` prevents `'a` lifetime infection of the async graph state.
-        #[cfg(target_endian = "little")]
-        let samples_cow = match bytemuck::try_cast_slice::<u8, i16>(audio) {
-            Ok(aligned_slice) => Cow::Borrowed(aligned_slice),
-            Err(_) => {
-                // Fallback: `try_cast_slice` fails on memory-unaligned network byte streams.
-                // This can happen if upstream buffers fragment asynchronously (e.g. WebSocket
-                // odd-byte chunking) or due to custom protocol TLS padding offsets.
-                // We safely map using an LLVM-vectorized iterator (3x faster than manual Vec::push).
-                let fallback: Vec<i16> = audio
-                    .chunks_exact(2)
-                    .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
-                    .collect();
-                Cow::Owned(fallback)
+        let samples_cow = 'cow: {
+            #[cfg(target_endian = "little")]
+            if let Ok(aligned_slice) = bytemuck::try_cast_slice::<u8, i16>(audio) {
+                break 'cow Cow::Borrowed(aligned_slice);
             }
-        };
 
-        #[cfg(not(target_endian = "little"))]
-        let samples_cow = {
-            // Big-Endian Fallback: Explicit parsing via LLVM-vectorized iterator.
+            // Fallback: `try_cast_slice` fails on memory-unaligned network byte streams.
+            // This can happen if upstream buffers fragment asynchronously (e.g. WebSocket
+            // odd-byte chunking) or due to custom protocol TLS padding offsets.
+            // We safely map using an LLVM-vectorized iterator (3x faster than manual Vec::push).
             let fallback: Vec<i16> = audio
                 .chunks_exact(2)
                 .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
                 .collect();
             Cow::Owned(fallback)
         };
+
+        if self.num_channels == 0 {
+            return Err(RealtimeError::provider(
+                "Cannot push audio to LiveKit NativeAudioSource: num_channels is 0",
+            ));
+        }
+
+        if samples_cow.len() % (self.num_channels as usize) != 0 {
+            tracing::warn!(
+                samples_len = samples_cow.len(),
+                num_channels = self.num_channels,
+                "Skipping invalid audio frame: sample count is not an exact multiple of channels"
+            );
+            return Ok(());
+        }
 
         let samples_per_channel = samples_cow.len() as u32 / self.num_channels;
         let frame = AudioFrame {
