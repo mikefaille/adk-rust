@@ -65,6 +65,6 @@ impl RealtimeModel for GeminiRealtimeModel {
     async fn connect(&self, config: RealtimeConfig) -> Result<BoxedSession> {
         let session =
             GeminiRealtimeSession::connect(self.backend.clone(), &self.model_id, config).await?;
-        Ok(Box::new(session))
+        Ok(std::sync::Arc::new(session))
     }
 }
