@@ -596,14 +596,12 @@ impl RealtimeSession for GeminiRealtimeSession {
                     generation_config["temperature"] = json!(temp);
                 }
 
-                let generation_config = if generation_config
-                    .as_object()
-                    .map_or(true, |o| o.is_empty())
-                {
-                    None
-                } else {
-                    Some(generation_config)
-                };
+                let generation_config =
+                    if generation_config.as_object().map_or(true, |o| o.is_empty()) {
+                        None
+                    } else {
+                        Some(generation_config)
+                    };
 
                 let system_instruction = config.instruction.map(|text| GeminiContent {
                     parts: vec![GeminiPart { text: Some(text), inline_data: None }],
