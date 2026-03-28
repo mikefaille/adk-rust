@@ -48,11 +48,10 @@ impl<H: EventHandler> EventHandler for LiveKitEventHandler<H> {
         self.inner.on_audio(audio, item_id).await?;
 
         // Convert PCM bytes to i16 samples and push to LiveKit
-        // Using manual loop for safety instead of bytemuck::cast_slice which requires alignment
-        let mut samples = Vec::with_capacity(audio.len() / 2);
-        for chunk in audio.chunks_exact(2) {
-            samples.push(i16::from_le_bytes([chunk[0], chunk[1]]));
-        }
+        // Using iterator mapping for LLVM auto-vectorization performance while
+        // maintaining 100% safety compared to zero-copy casts (e.g., bytemuck).
+        let samples: Vec<i16> =
+            audio.chunks_exact(2).map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]])).collect();
 
         let samples_per_channel = samples.len() as u32 / self.num_channels;
         let frame = AudioFrame {
