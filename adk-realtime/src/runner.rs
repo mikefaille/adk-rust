@@ -14,9 +14,10 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 /// Internal state machine tracking the resumability status of the RealtimeRunner.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub enum RunnerState {
     /// Runner is ready to accept transport resumption immediately.
+    #[default]
     Idle,
     /// Model is currently generating a response; tearing down the connection would corrupt context.
     Generating,
@@ -35,18 +36,12 @@ pub enum RunnerState {
     /// command queue. The policy is last write wins.
     PendingResumption {
         /// The new configuration to apply on reconnection.
-        config: crate::config::RealtimeConfig,
+        config: Box<crate::config::RealtimeConfig>,
         /// An optional message to inject immediately after resumption.
         bridge_message: Option<String>,
         /// Number of failed reconnection attempts for this mutation.
         attempts: u8,
     },
-}
-
-impl Default for RunnerState {
-    fn default() -> Self {
-        Self::Idle
-    }
 }
 
 /// Handler for tool/function calls from the realtime model.
@@ -363,7 +358,8 @@ impl RealtimeRunner {
             }
             other => {
                 let guard = self.session.read().await;
-                let session = guard.as_ref().ok_or_else(|| RealtimeError::connection("Not connected"))?;
+                let session =
+                    guard.as_ref().ok_or_else(|| RealtimeError::connection("Not connected"))?;
                 session.send_event(other).await
             }
         }
@@ -451,7 +447,6 @@ impl RealtimeRunner {
 
         // 3. Delegate the mutation attempt to the provider-specific adapter.
         match session.mutate_context(cloned_config).await? {
-
             // PATH A: Native Mutability (e.g., OpenAI)
             // The provider natively updated the context over the active WebSocket.
             ContextMutationOutcome::Applied => {
@@ -472,6 +467,7 @@ impl RealtimeRunner {
             // PATH B: Rigid Initialization (e.g., Gemini)
             // The provider requires us to tear down the WebSocket and establish a new one (Phantom Reconnect).
             ContextMutationOutcome::RequiresResumption(new_config) => {
+                let new_config = *new_config;
                 drop(guard); // CRITICAL: Release the read lock on the session before we attempt to mutate it or acquire state locks.
 
                 // 4. Check the Runner's internal state machine to ensure it is safe to tear down the socket.
@@ -482,13 +478,15 @@ impl RealtimeRunner {
                     drop(state_guard); // Free state lock before the heavy async network operation.
                     tracing::info!("Runner is idle. Executing resumption immediately.");
 
-                    if let Err(e) = self.execute_resumption(new_config.clone(), bridge_message.clone()).await {
+                    if let Err(e) =
+                        self.execute_resumption(new_config.clone(), bridge_message.clone()).await
+                    {
                         tracing::error!("Immediate resumption failed: {}. Queueing for retry.", e);
                         // If the reconnect fails (e.g., transient network issue), we must not lose the mutation intent.
                         // We push it back into the queue for the background loop to retry.
                         let mut fallback_state = self.state.write().await;
                         *fallback_state = RunnerState::PendingResumption {
-                            config: new_config,
+                            config: Box::new(new_config),
                             bridge_message,
                             attempts: 1,
                         };
@@ -498,14 +496,16 @@ impl RealtimeRunner {
                     // Unsafe to reconnect: Tearing down the socket now would corrupt the in-flight context.
                     // We must queue the mutation. The event loop will execute it once it returns to Idle.
                     if let RunnerState::PendingResumption { .. } = *state_guard {
-                        tracing::warn!("Runner already had a pending resumption. Overwriting with last-write-wins policy.");
+                        tracing::warn!(
+                            "Runner already had a pending resumption. Overwriting with last-write-wins policy."
+                        );
                     } else {
                         tracing::info!("Runner is busy ({:?}). Queueing resumption.", *state_guard);
                     }
 
                     // Queue the intent using a last-write-wins policy.
                     *state_guard = RunnerState::PendingResumption {
-                        config: new_config,
+                        config: Box::new(new_config),
                         bridge_message,
                         attempts: 0,
                     };
@@ -624,8 +624,12 @@ impl RealtimeRunner {
     /// }
     /// ```
     pub async fn next_event(&self) -> Option<Result<ServerEvent>> {
-        let guard = self.session.read().await;
-        if let Some(session) = guard.as_ref() {
+        let session = {
+            let guard = self.session.read().await;
+            guard.clone()
+        };
+
+        if let Some(session) = session {
             // Some sessions might yield inside next_event, but just in case, yield here too
             tokio::task::yield_now().await;
             session.next_event().await
@@ -731,7 +735,9 @@ impl RealtimeRunner {
             ServerEvent::SessionUpdated { session, .. } => {
                 // Check if the generic session update contains a resumption token
                 if let Some(token) = session.get("resumeToken").and_then(|t| t.as_str()) {
-                    tracing::info!("Received Gemini sessionResumption token, saving for future reconnects.");
+                    tracing::info!(
+                        "Received Gemini sessionResumption token, saving for future reconnects."
+                    );
                     let mut config = self.config.write().await;
                     let mut extra = config.extra.clone().unwrap_or_else(|| serde_json::json!({}));
                     extra["resumeToken"] = serde_json::Value::String(token.to_string());
@@ -755,14 +761,18 @@ impl RealtimeRunner {
         let mut state = self.state.write().await;
 
         // 2. Extract the pending configuration and attempt count if one exists.
-        let pending = if let RunnerState::PendingResumption { config, bridge_message, attempts } = &*state {
-            Some((config.clone(), bridge_message.clone(), *attempts))
-        } else {
-            None
-        };
+        let pending =
+            if let RunnerState::PendingResumption { config, bridge_message, attempts } = &*state {
+                Some((config.clone(), bridge_message.clone(), *attempts))
+            } else {
+                None
+            };
 
         if let Some((config, bridge_message, attempts)) = pending {
-            tracing::info!("Executing queued resumption after turn completion. (Attempt {})", attempts + 1);
+            tracing::info!(
+                "Executing queued resumption after turn completion. (Attempt {})",
+                attempts + 1
+            );
 
             // 3. Mark the state as Idle so the background loop is unblocked.
             *state = RunnerState::Idle;
@@ -771,7 +781,7 @@ impl RealtimeRunner {
             drop(state);
 
             // 5. Attempt the actual transport teardown/rebuild.
-            if let Err(e) = self.execute_resumption(config.clone(), bridge_message.clone()).await {
+            if let Err(e) = self.execute_resumption(*config.clone(), bridge_message.clone()).await {
                 tracing::error!("Resumption failed: {}.", e);
 
                 // 6. If the reconnect fails (e.g., transient network error), re-acquire the lock
@@ -780,11 +790,17 @@ impl RealtimeRunner {
 
                 // 7. Enforce a maximum retry budget to prevent infinite "hot-looping"
                 if attempts + 1 >= 3 {
-                    tracing::error!("Maximum resumption attempts reached (3). Dropping queued mutation to prevent infinite loop.");
+                    tracing::error!(
+                        "Maximum resumption attempts reached (3). Dropping queued mutation to prevent infinite loop."
+                    );
                     *fallback_state = RunnerState::Idle;
                 } else {
                     tracing::info!("Restoring pending queue state for retry.");
-                    *fallback_state = RunnerState::PendingResumption { config, bridge_message, attempts: attempts + 1 };
+                    *fallback_state = RunnerState::PendingResumption {
+                        config,
+                        bridge_message,
+                        attempts: attempts + 1,
+                    };
                 }
 
                 // 8. Do not return Err(e) here, as that would permanently kill the `run()` loop.

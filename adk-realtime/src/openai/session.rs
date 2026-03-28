@@ -320,7 +320,9 @@ impl RealtimeSession for OpenAIRealtimeSession {
                 self.send_raw(&payload).await
             }
             ClientEvent::UpdateSession { .. } => {
-                tracing::error!("Internal UpdateSession intent leaked to the OpenAI transport socket. This should have been intercepted by the RealtimeRunner.");
+                tracing::error!(
+                    "Internal UpdateSession intent leaked to the OpenAI transport socket. This should have been intercepted by the RealtimeRunner."
+                );
                 Err(RealtimeError::ProviderError("Internal intent leaked to transport".to_string()))
             }
             other => {
@@ -356,7 +358,10 @@ impl RealtimeSession for OpenAIRealtimeSession {
         Ok(())
     }
 
-    async fn mutate_context(&self, config: crate::config::RealtimeConfig) -> Result<ContextMutationOutcome> {
+    async fn mutate_context(
+        &self,
+        config: crate::config::RealtimeConfig,
+    ) -> Result<ContextMutationOutcome> {
         tracing::info!("Updating OpenAI Realtime session context natively");
         self.configure_session(config).await?;
         Ok(ContextMutationOutcome::Applied)
@@ -396,20 +401,29 @@ pub(crate) fn translate_client_message(role: &str, parts: Vec<adk_core::types::P
                         "audio": encoded
                     }));
                 } else {
-                    tracing::warn!("Dropping unsupported InlineData (non-audio) part in OpenAI session: {}", mime_type);
+                    tracing::warn!(
+                        "Dropping unsupported InlineData (non-audio) part in OpenAI session: {}",
+                        mime_type
+                    );
                 }
             }
 
             // 3. Gracefully skip unsupported semantic features using explicit warnings
             // rather than silently emitting empty `input_text` elements, which pollutes context.
             adk_core::types::Part::FileData { file_uri, .. } => {
-                tracing::warn!("Dropping unsupported FileData part in OpenAI session: {}", file_uri);
+                tracing::warn!(
+                    "Dropping unsupported FileData part in OpenAI session: {}",
+                    file_uri
+                );
             }
             adk_core::types::Part::Thinking { .. } => {
                 tracing::warn!("Dropping unsupported Thinking part in OpenAI session");
             }
             adk_core::types::Part::FunctionCall { name, .. } => {
-                tracing::warn!("Dropping unsupported FunctionCall part in OpenAI session: {}", name);
+                tracing::warn!(
+                    "Dropping unsupported FunctionCall part in OpenAI session: {}",
+                    name
+                );
             }
             adk_core::types::Part::FunctionResponse { .. } => {
                 tracing::warn!("Dropping unsupported FunctionResponse part in OpenAI session");

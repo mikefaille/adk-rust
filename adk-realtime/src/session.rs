@@ -13,7 +13,7 @@ pub enum ContextMutationOutcome {
     /// Provider successfully updated the active session via sideband.
     Applied,
     /// Provider requires the transport to be rebound with a new configuration.
-    RequiresResumption(crate::config::RealtimeConfig),
+    RequiresResumption(Box<crate::config::RealtimeConfig>),
 }
 
 /// A real-time bidirectional streaming session.
@@ -100,7 +100,10 @@ pub trait RealtimeSession: Send + Sync {
     /// For providers that require a static configuration (e.g., Gemini), this
     /// returns `Ok(ContextMutationOutcome::RequiresResumption(config))` to signal
     /// the runner to queue a session reconnect or resumption safely.
-    async fn mutate_context(&self, config: crate::config::RealtimeConfig) -> Result<ContextMutationOutcome>;
+    async fn mutate_context(
+        &self,
+        config: crate::config::RealtimeConfig,
+    ) -> Result<ContextMutationOutcome>;
 }
 
 /// Extension trait for RealtimeSession with convenience methods.
@@ -165,5 +168,5 @@ pub trait RealtimeSessionExt: RealtimeSession {
 // Blanket implementation
 impl<T: RealtimeSession> RealtimeSessionExt for T {}
 
-/// A boxed session type for dynamic dispatch.
-pub type BoxedSession = Box<dyn RealtimeSession>;
+/// A shared session type for thread-safe dynamic dispatch.
+pub type BoxedSession = std::sync::Arc<dyn RealtimeSession>;
