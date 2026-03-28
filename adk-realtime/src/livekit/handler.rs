@@ -82,6 +82,7 @@ impl<H: EventHandler> EventHandler for LiveKitEventHandler<H> {
             return Ok(());
         }
 
+        // Guaranteed exact division (modulo == 0) and non-zero denominator by safety guards above.
         let samples_per_channel = samples_cow.len() as u32 / self.num_channels;
         let frame = AudioFrame {
             data: samples_cow,
