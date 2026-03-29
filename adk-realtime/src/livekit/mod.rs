@@ -50,12 +50,14 @@
 //! ```
 
 mod bridge;
+pub mod builder;
 pub mod config;
 mod handler;
 
 // ── Our bridge utilities ────────────────────────────────────────────────
 
 pub use bridge::{bridge_gemini_input, bridge_input};
+pub use builder::LiveKitRoomBuilder;
 pub use config::LiveKitConfig;
 pub use handler::LiveKitEventHandler;
 

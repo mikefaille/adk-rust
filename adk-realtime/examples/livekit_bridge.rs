@@ -58,7 +58,7 @@
 use std::sync::Arc;
 
 use adk_realtime::RealtimeConfig;
-use adk_realtime::livekit::{LiveKitConfig, LiveKitEventHandler, bridge_input};
+use adk_realtime::livekit::{LiveKitConfig, LiveKitEventHandler, LiveKitRoomBuilder, bridge_input};
 use adk_realtime::openai::OpenAIRealtimeModel;
 use adk_realtime::runner::{EventHandler, RealtimeRunner};
 use livekit::prelude::*;
@@ -90,15 +90,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let api_key = std::env::var("OPENAI_API_KEY").expect("OPENAI_API_KEY env var is required");
     let model = OpenAIRealtimeModel::new(api_key, "gpt-4o-realtime-preview-2024-12-17");
 
-    // --- 2. Automatically Connect to LiveKit via Config ---
+    // --- 2. Automatically Connect to LiveKit via Builder ---
     println!("Connecting to LiveKit...");
 
     // Automatically load credentials from environment
     let lk_config = LiveKitConfig::from_env()?;
 
-    // Developer retains full control of the `Room` and events, but tedious WebRTC setup is handled.
-    let (_room, mut room_events, audio_source) =
-        lk_config.connect("my-room", "agent-01", 24000, 1).await?;
+    // The Builder separates the Config (data) from the connection action
+    let (_room, mut room_events, audio_source) = LiveKitRoomBuilder::new(lk_config)
+        .identity("agent-01")
+        .sample_rate(24000)
+        .connect("my-room")
+        .await?;
 
     // --- 3. Wrap event handler with LiveKit audio output ---
     // The LiveKitEventHandler intercepts on_audio to push model audio to the NativeAudioSource
