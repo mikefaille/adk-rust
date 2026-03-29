@@ -330,6 +330,12 @@ impl RealtimeConfig {
         self.cached_content = Some(content.into());
         self
     }
+
+    /// Set extra provider-specific options.
+    pub fn with_extra(mut self, extra: Value) -> Self {
+        self.extra = Some(extra);
+        self
+    }
 }
 
 /// Builder for RealtimeConfig.
