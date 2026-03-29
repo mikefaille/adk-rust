@@ -58,13 +58,10 @@
 use std::sync::Arc;
 
 use adk_realtime::RealtimeConfig;
-use adk_realtime::livekit::{LiveKitBridge, LiveKitConfig, LiveKitEventHandler};
+use adk_realtime::livekit::{LiveKitConfig, LiveKitEventHandler, bridge_input};
 use adk_realtime::openai::OpenAIRealtimeModel;
 use adk_realtime::runner::{EventHandler, RealtimeRunner};
 use livekit::prelude::*;
-use livekit::webrtc::audio_source::AudioSourceOptions;
-use livekit::webrtc::audio_source::native::NativeAudioSource;
-use livekit_api::access_token::{AccessToken, VideoGrants};
 
 /// A simple event handler that prints text and transcript events.
 struct PrintingEventHandler;
@@ -93,12 +90,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let api_key = std::env::var("OPENAI_API_KEY").expect("OPENAI_API_KEY env var is required");
     let model = OpenAIRealtimeModel::new(api_key, "gpt-4o-realtime-preview-2024-12-17");
 
-    // --- 2. Build the Event Handler & Audio Source ---
-    let audio_source = NativeAudioSource::new(AudioSourceOptions::default(), 24000, 1, 100);
-    let inner_handler = PrintingEventHandler;
-    let lk_handler = LiveKitEventHandler::new(inner_handler, audio_source.clone(), 24000, 1);
+    // --- 2. Automatically Connect to LiveKit via Config ---
+    println!("Connecting to LiveKit...");
 
-    // --- 3. Build the RealtimeRunner ---
+    // Automatically load credentials from environment
+    let lk_config = LiveKitConfig::from_env()?;
+
+    // Developer retains full control of the `Room` and events, but tedious WebRTC setup is handled.
+    let (_room, mut room_events, audio_source) =
+        lk_config.connect("my-room", "agent-01", 24000, 1).await?;
+
+    // --- 3. Wrap event handler with LiveKit audio output ---
+    // The LiveKitEventHandler intercepts on_audio to push model audio to the NativeAudioSource
+    let inner_handler = PrintingEventHandler;
+    let lk_handler = LiveKitEventHandler::new(inner_handler, audio_source, 24000, 1);
+
+    // --- 4. Build the RealtimeRunner ---
     let config = RealtimeConfig::default()
         .with_instruction("You are a helpful voice assistant in a LiveKit room.")
         .with_voice("alloy");
@@ -111,32 +118,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .build()?,
     );
 
-    // --- 4. Connect the runner to the AI model ---
+    // --- 5. Connect the runner to the AI model ---
     runner.connect().await?;
     println!("Connected to OpenAI Realtime API.");
 
-    // --- 5. Establish the LiveKit connection manually ---
-    println!("Connecting to LiveKit...\n");
-
-    let lk_config = LiveKitConfig::from_env()?;
-
-    // Developer retains control: generate tokens & handle room manually.
-    let token = AccessToken::with_api_key(&lk_config.api_key, &lk_config.api_secret)
-        .with_identity("agent-01")
-        .with_grants(VideoGrants {
-            room_join: true,
-            room: "my-room".to_string(),
-            ..Default::default()
-        })
-        .to_jwt()?;
-
-    let (room, room_events) = Room::connect(&lk_config.url, &token, RoomOptions::default()).await?;
-
-    // --- 6. Attach the Bridge ---
-    // The bridge strips the tedious WebRTC setup but respects the `Room` context.
-    let bridge = LiveKitBridge::new(runner.clone(), audio_source);
-
-    let _bridge_handle = bridge.attach(&room, room_events).await?;
+    // --- 6. Bridge incoming participant audio to the model ---
+    let bridge_runner = Arc::clone(&runner);
+    let bridge_handle = tokio::spawn(async move {
+        println!("Waiting for remote participants to publish audio tracks...");
+        while let Some(event) = room_events.recv().await {
+            if let RoomEvent::TrackSubscribed { track: RemoteTrack::Audio(audio_track), .. } = event
+            {
+                println!("Bridging remote audio track to AI model.");
+                if let Err(e) = bridge_input(audio_track, &bridge_runner).await {
+                    eprintln!("Audio input bridge failed: {e}");
+                }
+                break;
+            }
+        }
+    });
 
     // --- 7. Run the event loop ---
     println!("Running event loop — speak into the LiveKit room...\n");
@@ -144,6 +144,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("Runner error: {e}");
     }
 
+    bridge_handle.abort();
+    runner.close().await?;
     println!("Session closed.");
     Ok(())
 }
