@@ -58,11 +58,13 @@
 use std::sync::Arc;
 
 use adk_realtime::RealtimeConfig;
-use adk_realtime::livekit::{LiveKitConfig, LiveKitEventHandler, run_agent_in_room};
+use adk_realtime::livekit::{LiveKitBridge, LiveKitConfig, LiveKitEventHandler};
 use adk_realtime::openai::OpenAIRealtimeModel;
 use adk_realtime::runner::{EventHandler, RealtimeRunner};
+use livekit::prelude::*;
 use livekit::webrtc::audio_source::AudioSourceOptions;
 use livekit::webrtc::audio_source::native::NativeAudioSource;
+use livekit_api::access_token::{AccessToken, VideoGrants};
 
 /// A simple event handler that prints text and transcript events.
 struct PrintingEventHandler;
@@ -113,14 +115,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     runner.connect().await?;
     println!("Connected to OpenAI Realtime API.");
 
-    // --- 5. Automatically Connect & Bridge to LiveKit ---
-    println!("Connecting to LiveKit and bridging audio...\n");
+    // --- 5. Establish the LiveKit connection manually ---
+    println!("Connecting to LiveKit...\n");
 
-    // Automatically load credentials from environment
     let lk_config = LiveKitConfig::from_env()?;
 
-    if let Err(e) = run_agent_in_room(lk_config, "my-room", "agent-01", runner, audio_source).await
-    {
+    // Developer retains control: generate tokens & handle room manually.
+    let token = AccessToken::with_api_key(&lk_config.api_key, &lk_config.api_secret)
+        .with_identity("agent-01")
+        .with_grants(VideoGrants {
+            room_join: true,
+            room: "my-room".to_string(),
+            ..Default::default()
+        })
+        .to_jwt()?;
+
+    let (room, room_events) = Room::connect(&lk_config.url, &token, RoomOptions::default()).await?;
+
+    // --- 6. Attach the Bridge ---
+    // The bridge strips the tedious WebRTC setup but respects the `Room` context.
+    let bridge = LiveKitBridge::new(runner.clone(), audio_source);
+
+    let _bridge_handle = bridge.attach(&room, room_events).await?;
+
+    // --- 7. Run the event loop ---
+    println!("Running event loop — speak into the LiveKit room...\n");
+    if let Err(e) = runner.run().await {
         eprintln!("Runner error: {e}");
     }
 

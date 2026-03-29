@@ -50,16 +50,16 @@
 //! ```
 
 mod bridge;
+pub mod bridge_app;
 pub mod config;
 mod handler;
-pub mod worker;
 
 // ── Our bridge utilities ────────────────────────────────────────────────
 
 pub use bridge::{bridge_gemini_input, bridge_input};
+pub use bridge_app::LiveKitBridge;
 pub use config::LiveKitConfig;
 pub use handler::LiveKitEventHandler;
-pub use worker::run_agent_in_room;
 
 // ── Room and connection ─────────────────────────────────────────────────
 //
