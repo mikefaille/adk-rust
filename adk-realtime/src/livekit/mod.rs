@@ -50,11 +50,13 @@
 //! ```
 
 mod bridge;
+pub mod config;
 mod handler;
 
 // ── Our bridge utilities ────────────────────────────────────────────────
 
 pub use bridge::{bridge_gemini_input, bridge_input};
+pub use config::LiveKitConfig;
 pub use handler::LiveKitEventHandler;
 
 // ── Room and connection ─────────────────────────────────────────────────
@@ -125,6 +127,7 @@ pub mod prelude {
         ConnectionState,
         DataPacket,
         DataPacketKind,
+        LiveKitConfig,
         // Bridge utilities
         LiveKitEventHandler,
         // Tracks
