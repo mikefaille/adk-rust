@@ -129,9 +129,6 @@ pub mod prelude {
         ConnectionState,
         DataPacket,
         DataPacketKind,
-        LiveKitConfig,
-        // Bridge utilities
-        LiveKitEventHandler,
         // Tracks
         LocalAudioTrack,
         // Participants
@@ -154,7 +151,5 @@ pub mod prelude {
         TrackPublishOptions,
         TrackSource,
         VideoGrants,
-        bridge_gemini_input,
-        bridge_input,
     };
 }
