@@ -50,8 +50,6 @@ pub enum Model {
     // ── Gemini 3.1 (newest generation) ────────────────────────────
     #[serde(rename = "models/gemini-3.1-pro-preview")]
     Gemini31ProPreview,
-    #[serde(rename = "models/gemini-3.1-flash-live-preview")]
-    Gemini31FlashLivePreview,
     #[serde(rename = "models/gemini-3.1-flash-lite-preview")]
     Gemini31FlashLitePreview,
     #[serde(rename = "models/gemini-3.1-flash-image")]
@@ -81,6 +79,9 @@ pub enum Model {
     #[deprecated(note = "Use Model::Gemini25FlashImage instead")]
     #[serde(rename = "models/gemini-2.5-flash-image-preview")]
     Gemini25FlashImagePreview,
+    // ── Audio/Live Models ───────────────────────────────────────────
+    #[serde(rename = "models/gemini-3.1-flash-live-preview")]
+    Gemini31FlashLivePreview,
     #[serde(rename = "models/gemini-2.5-flash-native-audio-preview-12-2025")]
     Gemini25FlashLive122025,
     #[serde(rename = "models/gemini-2.5-flash-native-audio-preview-09-2025")]
@@ -128,7 +129,6 @@ impl Model {
         #[allow(deprecated)]
         match self {
             Model::Gemini31ProPreview => "models/gemini-3.1-pro-preview",
-            Model::Gemini31FlashLivePreview => "models/gemini-3.1-flash-live-preview",
             Model::Gemini31FlashLitePreview => "models/gemini-3.1-flash-lite-preview",
             Model::Gemini31FlashImage => "models/gemini-3.1-flash-image",
             Model::Gemini3ProPreview => "models/gemini-3-pro-preview",
@@ -140,6 +140,7 @@ impl Model {
             Model::Gemini25FlashPreview092025 => "models/gemini-2.5-flash-preview-09-2025",
             Model::Gemini25FlashImage => "models/gemini-2.5-flash-image",
             Model::Gemini25FlashImagePreview => "models/gemini-2.5-flash-image-preview",
+            Model::Gemini31FlashLivePreview => "models/gemini-3.1-flash-live-preview",
             Model::Gemini25FlashLive122025 => {
                 "models/gemini-2.5-flash-native-audio-preview-12-2025"
             }
@@ -164,7 +165,6 @@ impl Model {
         #[allow(deprecated)]
         let model_id = match self {
             Model::Gemini31ProPreview => "gemini-3.1-pro-preview",
-            Model::Gemini31FlashLivePreview => "gemini-3.1-flash-live-preview",
             Model::Gemini31FlashLitePreview => "gemini-3.1-flash-lite-preview",
             Model::Gemini31FlashImage => "gemini-3.1-flash-image",
             Model::Gemini3ProPreview => "gemini-3-pro-preview",
@@ -176,6 +176,7 @@ impl Model {
             Model::Gemini25FlashPreview092025 => "gemini-2.5-flash-preview-09-2025",
             Model::Gemini25FlashImage => "gemini-2.5-flash-image",
             Model::Gemini25FlashImagePreview => "gemini-2.5-flash-image-preview",
+            Model::Gemini31FlashLivePreview => "gemini-3.1-flash-live-preview",
             Model::Gemini25FlashLive122025 => "gemini-2.5-flash-native-audio-preview-12-2025",
             Model::Gemini25FlashLive092025 => "gemini-2.5-flash-native-audio-preview-09-2025",
             Model::Gemini25FlashPreviewTts => "gemini-2.5-flash-preview-tts",
@@ -210,7 +211,6 @@ impl From<String> for Model {
         match bare {
             // Gemini 3.1 models (newest generation)
             "gemini-3.1-pro-preview" => Self::Gemini31ProPreview,
-            "gemini-3.1-flash-live-preview" => Self::Gemini31FlashLivePreview,
             "gemini-3.1-flash-lite-preview" => Self::Gemini31FlashLitePreview,
             "gemini-3.1-flash-image" => Self::Gemini31FlashImage,
             // Gemini 3 models
@@ -224,6 +224,7 @@ impl From<String> for Model {
             "gemini-2.5-flash-preview-09-2025" => Self::Gemini25FlashPreview092025,
             "gemini-2.5-flash-image" => Self::Gemini25FlashImage,
             "gemini-2.5-flash-image-preview" => Self::Gemini25FlashImagePreview,
+            "gemini-3.1-flash-live-preview" => Self::Gemini31FlashLivePreview,
             "gemini-2.5-flash-native-audio-preview-12-2025" => Self::Gemini25FlashLive122025,
             "gemini-2.5-flash-native-audio-preview-09-2025" => Self::Gemini25FlashLive092025,
             "gemini-2.5-flash-preview-tts" => Self::Gemini25FlashPreviewTts,
