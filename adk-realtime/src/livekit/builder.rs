@@ -10,6 +10,11 @@ use tokio::sync::mpsc::UnboundedReceiver;
 
 use super::config::LiveKitConfig;
 
+const DEFAULT_IDENTITY: &str = "ai-agent";
+const DEFAULT_SAMPLE_RATE: u32 = 24000;
+const DEFAULT_NUM_CHANNELS: u32 = 1;
+const DEFAULT_QUEUE_SIZE_MS: u32 = 100;
+
 /// A builder for establishing an active connection to a LiveKit room and preparing
 /// the required WebRTC audio interfaces.
 ///
@@ -42,10 +47,10 @@ impl LiveKitRoomBuilder {
     pub fn new(config: LiveKitConfig) -> Self {
         Self {
             config,
-            identity: "ai-agent".to_string(),
-            sample_rate: 24000,
-            num_channels: 1,
-            queue_size_ms: 100,
+            identity: DEFAULT_IDENTITY.to_string(),
+            sample_rate: DEFAULT_SAMPLE_RATE,
+            num_channels: DEFAULT_NUM_CHANNELS,
+            queue_size_ms: DEFAULT_QUEUE_SIZE_MS,
         }
     }
 
@@ -115,7 +120,8 @@ impl LiveKitRoomBuilder {
         );
 
         let rtc_source = RtcAudioSource::Native(audio_source.clone());
-        let local_track = LocalAudioTrack::create_audio_track("ai-agent-audio", rtc_source);
+        let local_track =
+            LocalAudioTrack::create_audio_track(&format!("{}-audio", self.identity), rtc_source);
         let publish_options = TrackPublishOptions::default();
 
         room.local_participant()

@@ -64,23 +64,22 @@ impl LiveKitConfig {
     ///
     /// Returns a `RealtimeError::ConfigError` if any of the required environment variables are missing.
     pub fn from_env() -> Result<Self> {
-        let url = env::var("LIVEKIT_URL").map_err(|_| {
-            RealtimeError::config(
-                "Missing LIVEKIT_URL environment variable. Please set it to the LiveKit server WebSocket URL (e.g. `ws://localhost:7880`).",
-            )
-        })?;
+        let var_to_err = |name, help| env::var(name).map_err(|_| RealtimeError::config(help));
 
-        let api_key = env::var("LIVEKIT_API_KEY").map_err(|_| {
-            RealtimeError::config(
-                "Missing LIVEKIT_API_KEY environment variable. Please set it to your LiveKit API key.",
-            )
-        })?;
+        let url = var_to_err(
+            "LIVEKIT_URL",
+            "Missing LIVEKIT_URL environment variable. Please set it to the LiveKit server WebSocket URL (e.g. `ws://localhost:7880`).",
+        )?;
 
-        let api_secret = env::var("LIVEKIT_API_SECRET").map_err(|_| {
-            RealtimeError::config(
-                "Missing LIVEKIT_API_SECRET environment variable. Please set it to your LiveKit API secret.",
-            )
-        })?;
+        let api_key = var_to_err(
+            "LIVEKIT_API_KEY",
+            "Missing LIVEKIT_API_KEY environment variable. Please set it to your LiveKit API key.",
+        )?;
+
+        let api_secret = var_to_err(
+            "LIVEKIT_API_SECRET",
+            "Missing LIVEKIT_API_SECRET environment variable. Please set it to your LiveKit API secret.",
+        )?;
 
         Ok(Self { url, api_key, api_secret })
     }
