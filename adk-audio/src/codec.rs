@@ -61,6 +61,9 @@ pub fn decode<'a>(data: &'a [u8], format: AudioFormat) -> AudioResult<AudioFrame
     match format {
         AudioFormat::Pcm16 => {
             // Raw PCM16 — assume 16kHz mono (caller should know the format)
+            if data.len() % 2 != 0 {
+                return Err(AudioError::Codec(format!("invalid PCM16 byte length: {}", data.len())));
+            }
             Ok(AudioFrame::new(std::borrow::Cow::Borrowed(bytemuck::cast_slice(data)), 16000, 1))
         }
         AudioFormat::Wav => decode_wav(data),
@@ -142,7 +145,10 @@ fn decode_wav<'a>(data: &'a [u8]) -> AudioResult<AudioFrame<'a>> {
         ]) as usize;
         if chunk_id == b"data" {
             let start = offset + 8;
-            let end = (start + chunk_size).min(data.len());
+            if chunk_size % 2 != 0 || start + chunk_size > data.len() {
+                return Err(AudioError::Codec("malformed WAV data chunk".into()));
+            }
+            let end = start + chunk_size;
             let pcm = std::borrow::Cow::Borrowed(bytemuck::cast_slice(&data[start..end]));
             return Ok(AudioFrame::new(pcm, sample_rate, channels as u8));
         }

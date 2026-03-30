@@ -61,22 +61,24 @@ pub(crate) async fn voice_agent_loop(
                                 let merged = merge_frames(&speech_buffer);
                                 speech_buffer.clear();
 
-                                let stt_start = std::time::Instant::now();
-                                let transcript = stt.transcribe(&merged, &SttOptions::default()).await;
-                                let stt_elapsed = stt_start.elapsed().as_millis() as f64;
+                                if let Ok(merged_frame) = merged {
+                                    let stt_start = std::time::Instant::now();
+                                    let transcript = stt.transcribe(&merged_frame, &SttOptions::default()).await;
+                                    let stt_elapsed = stt_start.elapsed().as_millis() as f64;
 
-                                if let Ok(transcript) = transcript {
-                                    {
-                                        let mut m = metrics.write().await;
-                                        m.stt_latency_ms = stt_elapsed;
-                                        if total_frames > 0 {
-                                            m.vad_speech_ratio = speech_frames as f32 / total_frames as f32;
+                                    if let Ok(transcript) = transcript {
+                                        {
+                                            let mut m = metrics.write().await;
+                                            m.stt_latency_ms = stt_elapsed;
+                                            if total_frames > 0 {
+                                                m.vad_speech_ratio = speech_frames as f32 / total_frames as f32;
+                                            }
                                         }
-                                    }
-                                    let _ = output_tx.send(PipelineOutput::Transcript(transcript.clone())).await;
+                                        let _ = output_tx.send(PipelineOutput::Transcript(transcript.clone())).await;
 
-                                    // 4. Sentence-chunked TTS (simplified — full agent integration in later task)
-                                    process_text_to_speech(&tts, &output_tx, &metrics, &transcript.text).await;
+                                        // 4. Sentence-chunked TTS (simplified — full agent integration in later task)
+                                        process_text_to_speech(&tts, &output_tx, &metrics, &transcript.text).await;
+                                    }
                                 }
                             }
                         }

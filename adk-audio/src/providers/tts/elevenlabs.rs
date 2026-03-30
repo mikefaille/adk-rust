@@ -123,7 +123,16 @@ impl TtsProvider for ElevenLabsTts {
             message: e.to_string(),
         })?;
 
-        let data = bytemuck::cast_slice::<u8, i16>(&pcm).to_vec();
+        if pcm.len() % 2 != 0 {
+            return Err(AudioError::Tts {
+                provider: "elevenlabs".into(),
+                message: "received odd-length PCM data from API".into(),
+            });
+        }
+        let data: Vec<i16> = pcm
+            .chunks_exact(2)
+            .map(|c| i16::from_le_bytes([c[0], c[1]]))
+            .collect();
         Ok(AudioFrame::new(std::borrow::Cow::Owned(data), 24000, 1))
     }
 
@@ -171,18 +180,38 @@ impl TtsProvider for ElevenLabsTts {
         let stream = async_stream::stream! {
             use futures::StreamExt;
             let mut byte_stream = resp.bytes_stream();
+            let mut pending = Vec::new();
+
             while let Some(chunk) = byte_stream.next().await {
                 match chunk {
-                    Ok(data) => {
-                        if data.len() >= 2 {
-                            let data_vec = bytemuck::cast_slice::<u8, i16>(&data).to_vec();
-                            yield Ok(AudioFrame::new(std::borrow::Cow::Owned(data_vec), 24000, 1));
+                    Ok(mut data) => {
+                        if !pending.is_empty() {
+                            let mut combined = std::mem::take(&mut pending);
+                            combined.extend_from_slice(&data);
+                            data = combined.into();
+                        }
+
+                        let chunks = data.chunks_exact(2);
+                        let remainder = chunks.remainder();
+                        if !remainder.is_empty() {
+                            pending.extend_from_slice(remainder);
+                        }
+
+                        let pcm: Vec<i16> = chunks.map(|c| i16::from_le_bytes([c[0], c[1]])).collect();
+                        if !pcm.is_empty() {
+                            yield Ok(AudioFrame::new(std::borrow::Cow::Owned(pcm), 24000, 1));
                         }
                     }
                     Err(e) => {
                         yield Err(AudioError::Tts { provider: "elevenlabs".into(), message: e.to_string() });
                     }
                 }
+            }
+            if !pending.is_empty() {
+                yield Err(AudioError::Tts {
+                    provider: "elevenlabs".into(),
+                    message: "truncated PCM stream with odd number of bytes".into(),
+                });
             }
         };
 

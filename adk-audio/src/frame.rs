@@ -1,6 +1,7 @@
 //! Canonical audio buffer type used throughout the crate.
 
 use std::borrow::Cow;
+use crate::error::AudioError;
 
 /// The canonical audio buffer — raw PCM-16 LE samples with metadata.
 ///
@@ -36,8 +37,28 @@ impl<'a> AudioFrame<'a> {
     ///
     /// Duration is computed automatically from the data length, sample rate,
     /// and channel count.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `channels > 0` and the data length is not evenly divisible by the
+    /// number of channels.
     pub fn new(data: impl Into<Cow<'a, [i16]>>, sample_rate: u32, channels: u8) -> Self {
+        Self::try_new(data, sample_rate, channels).expect("AudioFrame data length must be divisible by channel count")
+    }
+
+    /// Fallible constructor for `AudioFrame`.
+    ///
+    /// Validates that the provided sample slice length is an exact multiple of the
+    /// channel count.
+    pub fn try_new(data: impl Into<Cow<'a, [i16]>>, sample_rate: u32, channels: u8) -> Result<Self, AudioError> {
         let data = data.into();
+        if channels > 0 && data.len() % (channels as usize) != 0 {
+            return Err(AudioError::Codec(format!(
+                "Data length {} is not divisible by channels {}",
+                data.len(),
+                channels
+            )));
+        }
         let samples_per_channel =
             if channels > 0 && sample_rate > 0 { data.len() as u32 / channels as u32 } else { 0 };
         let duration_ms = if sample_rate > 0 {
@@ -45,7 +66,7 @@ impl<'a> AudioFrame<'a> {
         } else {
             0
         };
-        Self { data, sample_rate, channels, duration_ms, samples_per_channel }
+        Ok(Self { data, sample_rate, channels, duration_ms, samples_per_channel })
     }
 
     /// View the raw data as a slice of i16 samples.
@@ -70,16 +91,23 @@ impl<'a> AudioFrame<'a> {
 ///
 /// All frames must share the same sample rate and channel count.
 /// Returns an empty frame if the input is empty.
-pub fn merge_frames<'a>(frames: &[AudioFrame<'a>]) -> AudioFrame<'static> {
+pub fn merge_frames<'a>(frames: &[AudioFrame<'a>]) -> Result<AudioFrame<'static>, AudioError> {
     if frames.is_empty() {
-        return AudioFrame::new(Cow::Owned(vec![]), 16000, 1);
+        return Ok(AudioFrame::new(Cow::Owned(vec![]), 16000, 1));
     }
     let sample_rate = frames[0].sample_rate;
     let channels = frames[0].channels;
+
+    for f in frames {
+        if f.sample_rate != sample_rate || f.channels != channels {
+            return Err(AudioError::Codec("merge_frames: inconsistent sample_rate or channels across frames".into()));
+        }
+    }
+
     let total_len: usize = frames.iter().map(|f| f.data.len()).sum();
     let mut buf = Vec::with_capacity(total_len);
     for f in frames {
         buf.extend_from_slice(&f.data);
     }
-    AudioFrame::new(Cow::Owned(buf), sample_rate, channels)
+    Ok(AudioFrame::new(Cow::Owned(buf), sample_rate, channels))
 }

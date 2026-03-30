@@ -107,7 +107,16 @@ impl TtsProvider for OpenAiTts {
             .await
             .map_err(|e| AudioError::Tts { provider: "openai".into(), message: e.to_string() })?;
 
-        let data = bytemuck::cast_slice::<u8, i16>(&pcm).to_vec();
+        if pcm.len() % 2 != 0 {
+            return Err(AudioError::Tts {
+                provider: "openai".into(),
+                message: "received odd-length PCM data from API".into(),
+            });
+        }
+        let data: Vec<i16> = pcm
+            .chunks_exact(2)
+            .map(|c| i16::from_le_bytes([c[0], c[1]]))
+            .collect();
         Ok(AudioFrame::new(std::borrow::Cow::Owned(data), 24000, 1))
     }
 

@@ -114,7 +114,7 @@ jobs:
       run: CI=true devenv shell ws-test-ci | tee test.log
 
     - name: Run tests (no livekit-real)
-      run: CI=true devenv shell cargo test --all-targets --exclude-features livekit-real | tee test-no-livekit.log
+      run: CI=true devenv shell cargo test -p adk-realtime --no-default-features --features openai,gemini,vertex-live | tee test-no-livekit.log
 
     - name: Test summary
       if: always()

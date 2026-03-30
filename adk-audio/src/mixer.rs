@@ -3,7 +3,6 @@
 use std::collections::HashMap;
 
 use async_trait::async_trait;
-use bytes::Bytes;
 
 use crate::error::{AudioError, AudioResult};
 use crate::frame::AudioFrame;
@@ -68,6 +67,18 @@ impl Mixer {
     pub fn mix(&mut self) -> AudioResult<AudioFrame<'static>> {
         if self.tracks.is_empty() {
             return Err(AudioError::Fx("mixer has no tracks".into()));
+        }
+
+        // Validate formats
+        for (name, track) in &self.tracks {
+            if let Some(ref frame) = track.buffer {
+                if frame.sample_rate != self.output_sample_rate {
+                    return Err(AudioError::Fx(format!("Track '{}' sample rate {} does not match mixer output rate {}", name, frame.sample_rate, self.output_sample_rate)));
+                }
+                if frame.channels != 1 {
+                    return Err(AudioError::Fx(format!("Track '{}' is not mono. Mixer currently only supports mono tracks.", name)));
+                }
+            }
         }
 
         // Find the maximum sample count across all buffered tracks

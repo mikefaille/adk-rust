@@ -13,13 +13,19 @@
 //! | [`bridge_input`] | Reads audio from a [`RemoteAudioTrack`] and feeds 24 kHz PCM16 to a [`RealtimeRunner`](crate::RealtimeRunner). |
 //! | [`bridge_gemini_input`] | Same as [`bridge_input`] but resamples to 16 kHz mono for Gemini Live. |
 //!
-//! # Feature flag
+//! # Feature flags
 //!
-//! This module requires the **`livekit`** Cargo feature:
+//! This module exposes actual LiveKit functionality when the **`livekit`** feature is enabled.
+//! It optionally exposes test helpers for downstream stubs when the **`test-utils`** feature is enabled.
 //!
 //! ```toml
 //! [dependencies]
-//! adk-realtime = { version = "0.3", features = ["livekit"] }
+//! adk-realtime = { version = "0.3", features = ["livekit", "test-utils"] }
+//! ```
+//!
+//! To access test utilities (if `test-utils` is enabled):
+//! ```rust,ignore
+//! use adk_realtime::livekit::test_utils::AudioFrame;
 //! ```
 //!
 //! # Example

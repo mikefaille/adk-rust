@@ -9,6 +9,26 @@ use crate::frame::AudioFrame;
 ///
 /// Implementors include normalizers, resamplers, noise suppressors,
 /// compressors, and the `FxChain` itself (enabling nested chains).
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use adk_audio::traits::AudioProcessor;
+/// use adk_audio::frame::AudioFrame;
+/// use adk_audio::error::AudioResult;
+/// use async_trait::async_trait;
+/// use std::borrow::Cow;
+///
+/// struct MyProcessor;
+/// #[async_trait]
+/// impl AudioProcessor for MyProcessor {
+///     async fn process<'a>(&'a self, frame: &AudioFrame<'a>) -> AudioResult<AudioFrame<'static>> {
+///         // Operate on borrowed data from the input `frame`
+///         let pcm = frame.samples().to_vec(); // own the data
+///         Ok(AudioFrame::new(Cow::Owned(pcm), frame.sample_rate, frame.channels))
+///     }
+/// }
+/// ```
 #[async_trait]
 pub trait AudioProcessor: Send + Sync {
     /// Process a single audio frame, returning the transformed result.
@@ -64,16 +84,17 @@ impl Default for FxChain {
 #[async_trait]
 impl AudioProcessor for FxChain {
     async fn process<'a>(&'a self, frame: &AudioFrame<'a>) -> AudioResult<AudioFrame<'static>> {
-        let mut current = AudioFrame {
+        let mut produced: Option<AudioFrame<'static>> = None;
+        for stage in &self.stages {
+            let output = stage.process(if let Some(ref owned) = produced { owned } else { frame }).await?;
+            produced = Some(output);
+        }
+        Ok(produced.unwrap_or_else(|| AudioFrame {
             data: std::borrow::Cow::Owned(frame.data.to_vec()),
             sample_rate: frame.sample_rate,
             channels: frame.channels,
             duration_ms: frame.duration_ms,
             samples_per_channel: frame.samples_per_channel,
-        };
-        for stage in &self.stages {
-            current = stage.process(&current).await?;
-        }
-        Ok(current)
+        }))
     }
 }

@@ -128,7 +128,16 @@ impl SttProvider for AssemblyAiStt {
 
         // Step 3: Poll for completion
         let poll_url = format!("{}/v2/transcript/{transcript_id}", self.base_url);
+        let mut poll_count = 0;
+        let max_polls = 120; // 2 minutes max
         loop {
+            if poll_count >= max_polls {
+                return Err(AudioError::Stt {
+                    provider: "assemblyai".into(),
+                    message: "Polling timed out after 120 seconds".into(),
+                });
+            }
+            poll_count += 1;
             tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
             let poll_resp = self
