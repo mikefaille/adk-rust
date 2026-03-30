@@ -5,7 +5,7 @@ use livekit::options::TrackPublishOptions;
 use livekit::prelude::*;
 use livekit::webrtc::audio_source::native::NativeAudioSource;
 use livekit::webrtc::audio_source::{AudioSourceOptions, RtcAudioSource};
-use livekit_api::access_token::{AccessToken, VideoGrants};
+use livekit_api::access_token::VideoGrants;
 use tokio::sync::mpsc::UnboundedReceiver;
 
 use super::config::LiveKitConfig;
@@ -40,6 +40,7 @@ pub struct LiveKitRoomBuilder {
     sample_rate: u32,
     num_channels: u32,
     queue_size_ms: u32,
+    grants: Option<VideoGrants>,
 }
 
 impl LiveKitRoomBuilder {
@@ -51,6 +52,7 @@ impl LiveKitRoomBuilder {
             sample_rate: DEFAULT_SAMPLE_RATE,
             num_channels: DEFAULT_NUM_CHANNELS,
             queue_size_ms: DEFAULT_QUEUE_SIZE_MS,
+            grants: None,
         }
     }
 
@@ -75,6 +77,13 @@ impl LiveKitRoomBuilder {
         self
     }
 
+    /// Sets custom permissions (VideoGrants) to be encoded into the agent's JWT.
+    /// If not provided, it defaults to basic `room_join` permissions.
+    pub fn grants(mut self, grants: VideoGrants) -> Self {
+        self.grants = Some(grants);
+        self
+    }
+
     /// Connects to the LiveKit room, sets up a local audio track for the agent, and publishes it.
     ///
     /// This method eliminates the boilerplate of token generation, `Room::connect`, and WebRTC
@@ -90,15 +99,7 @@ impl LiveKitRoomBuilder {
         room_name: &str,
     ) -> Result<(Room, UnboundedReceiver<RoomEvent>, NativeAudioSource)> {
         // 1. Generate an access token
-        let token = AccessToken::with_api_key(&self.config.api_key, &self.config.api_secret)
-            .with_identity(&self.identity)
-            .with_grants(VideoGrants {
-                room_join: true,
-                room: room_name.to_string(),
-                ..Default::default()
-            })
-            .to_jwt()
-            .map_err(|e| RealtimeError::livekit(format!("Token generation failed: {e}")))?;
+        let token = self.config.generate_token(room_name, &self.identity, self.grants)?;
 
         // 2. Connect to the Room
         tracing::info!("Connecting to LiveKit room '{}'...", room_name);

@@ -1,6 +1,7 @@
 //! Configuration structures for LiveKit integration.
 
 use crate::error::{RealtimeError, Result};
+use livekit_api::access_token::{AccessToken, VideoGrants};
 use std::env;
 
 /// Configuration for connecting to a LiveKit server.
@@ -82,5 +83,39 @@ impl LiveKitConfig {
         )?;
 
         Ok(Self { url, api_key, api_secret })
+    }
+
+    /// Generates a JWT access token for joining a specific LiveKit room.
+    ///
+    /// This is useful for manual connection management when you do not want
+    /// to use the `LiveKitRoomBuilder`.
+    ///
+    /// # Arguments
+    ///
+    /// * `room_name` - The name of the room to join.
+    /// * `participant_identity` - The identity to use for the participant.
+    /// * `grants` - Optional custom permissions. If `None` is provided, defaults to
+    ///              basic room join permissions for the specified `room_name`.
+    ///
+    /// # Returns
+    ///
+    /// Returns the generated JWT string on success.
+    pub fn generate_token(
+        &self,
+        room_name: &str,
+        participant_identity: &str,
+        grants: Option<VideoGrants>,
+    ) -> Result<String> {
+        let grants = grants.unwrap_or_else(|| VideoGrants {
+            room_join: true,
+            room: room_name.to_string(),
+            ..Default::default()
+        });
+
+        AccessToken::with_api_key(&self.api_key, &self.api_secret)
+            .with_identity(participant_identity)
+            .with_grants(grants)
+            .to_jwt()
+            .map_err(|e| RealtimeError::livekit(format!("Token generation failed: {e}")))
     }
 }
