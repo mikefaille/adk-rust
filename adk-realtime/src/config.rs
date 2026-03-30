@@ -402,6 +402,12 @@ impl RealtimeConfigBuilder {
         self
     }
 
+    /// Set extra provider-specific options.
+    pub fn extra(mut self, extra: Value) -> Self {
+        self.config.extra = Some(extra);
+        self
+    }
+
     /// Build the configuration.
     pub fn build(self) -> RealtimeConfig {
         self.config
