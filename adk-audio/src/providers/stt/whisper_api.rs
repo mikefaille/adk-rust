@@ -39,7 +39,11 @@ impl WhisperApiStt {
 
 #[async_trait]
 impl SttProvider for WhisperApiStt {
-    async fn transcribe(&self, audio: &AudioFrame<'_>, opts: &SttOptions) -> AudioResult<Transcript> {
+    async fn transcribe(
+        &self,
+        audio: &AudioFrame<'_>,
+        opts: &SttOptions,
+    ) -> AudioResult<Transcript> {
         let wav_bytes = frame_to_wav_bytes(audio)?;
         let url = format!("{}/v1/audio/transcriptions", self.base_url);
 

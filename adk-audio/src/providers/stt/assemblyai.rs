@@ -47,7 +47,11 @@ impl AssemblyAiStt {
 
 #[async_trait]
 impl SttProvider for AssemblyAiStt {
-    async fn transcribe(&self, audio: &AudioFrame<'_>, opts: &SttOptions) -> AudioResult<Transcript> {
+    async fn transcribe(
+        &self,
+        audio: &AudioFrame<'_>,
+        opts: &SttOptions,
+    ) -> AudioResult<Transcript> {
         let wav_bytes = frame_to_wav_bytes(audio)?;
 
         // Step 1: Upload audio (base_url is always HTTPS — enforced at construction)
@@ -215,9 +219,7 @@ mod tests {
         };
 
         let opts = SttOptions::default();
-        let result = provider
-            .transcribe_stream(Box::pin(futures::stream::empty()), &opts)
-            .await;
+        let result = provider.transcribe_stream(Box::pin(futures::stream::empty()), &opts).await;
 
         match result {
             Err(AudioError::Stt { provider, message }) => {

@@ -69,7 +69,11 @@ pub struct Speaker {
 #[async_trait]
 pub trait SttProvider: Send + Sync {
     /// Transcribe a single audio frame (batch mode).
-    async fn transcribe(&self, audio: &AudioFrame<'_>, opts: &SttOptions) -> AudioResult<Transcript>;
+    async fn transcribe(
+        &self,
+        audio: &AudioFrame<'_>,
+        opts: &SttOptions,
+    ) -> AudioResult<Transcript>;
 
     /// Transcribe a stream of audio frames (streaming mode).
     async fn transcribe_stream<'a>(

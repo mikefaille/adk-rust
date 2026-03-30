@@ -130,7 +130,8 @@ impl TtsProvider for ElevenLabsTts {
     async fn synthesize_stream<'a>(
         &'a self,
         request: &'a TtsRequest,
-    ) -> AudioResult<Pin<Box<dyn Stream<Item = AudioResult<AudioFrame<'static>>> + Send + 'a>>> {
+    ) -> AudioResult<Pin<Box<dyn Stream<Item = AudioResult<AudioFrame<'static>>> + Send + 'a>>>
+    {
         let voice_id = if request.voice.is_empty() {
             self.voices[0].id.clone()
         } else {

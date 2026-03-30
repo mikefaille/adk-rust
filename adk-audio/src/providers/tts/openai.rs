@@ -114,7 +114,8 @@ impl TtsProvider for OpenAiTts {
     async fn synthesize_stream<'a>(
         &'a self,
         request: &'a TtsRequest,
-    ) -> AudioResult<Pin<Box<dyn Stream<Item = AudioResult<AudioFrame<'static>>> + Send + 'a>>> {
+    ) -> AudioResult<Pin<Box<dyn Stream<Item = AudioResult<AudioFrame<'static>>> + Send + 'a>>>
+    {
         // OpenAI TTS doesn't have a native streaming endpoint for PCM,
         // so we fetch the full response and yield it as a single frame.
         let frame = self.synthesize(request).await?;

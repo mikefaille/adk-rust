@@ -21,9 +21,7 @@ impl AudioProcessor for OffsetProcessor {
         let samples = frame.samples();
         let pcm: Vec<i16> = samples
             .iter()
-            .map(|&s| {
-                (s as i32 + self.offset as i32).clamp(-32768, 32767) as i16
-            })
+            .map(|&s| (s as i32 + self.offset as i32).clamp(-32768, 32767) as i16)
             .collect();
         Ok(AudioFrame::new(std::borrow::Cow::Owned(pcm), frame.sample_rate, frame.channels))
     }

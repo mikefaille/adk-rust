@@ -74,7 +74,9 @@ pub fn decode<'a>(data: &'a [u8], format: AudioFormat) -> AudioResult<AudioFrame
 /// `AudioError::Codec`.
 pub fn encode(frame: &AudioFrame, format: AudioFormat) -> AudioResult<Bytes> {
     match format {
-        AudioFormat::Pcm16 => Ok(Bytes::from(bytemuck::cast_slice::<i16, u8>(&frame.data).to_vec())),
+        AudioFormat::Pcm16 => {
+            Ok(Bytes::from(bytemuck::cast_slice::<i16, u8>(&frame.data).to_vec()))
+        }
         AudioFormat::Wav => encode_wav(frame),
         _ => Err(AudioError::Codec(format!("encoding {format:?} is not yet supported"))),
     }

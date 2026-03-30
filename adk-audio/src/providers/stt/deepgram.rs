@@ -47,7 +47,11 @@ impl DeepgramStt {
 
 #[async_trait]
 impl SttProvider for DeepgramStt {
-    async fn transcribe(&self, audio: &AudioFrame<'_>, opts: &SttOptions) -> AudioResult<Transcript> {
+    async fn transcribe(
+        &self,
+        audio: &AudioFrame<'_>,
+        opts: &SttOptions,
+    ) -> AudioResult<Transcript> {
         assert!(self.base_url.starts_with("https://"), "Deepgram requires HTTPS");
         let wav_bytes = frame_to_wav_bytes(audio)?;
 
@@ -146,9 +150,7 @@ mod tests {
         };
 
         let opts = SttOptions::default();
-        let result = provider
-            .transcribe_stream(Box::pin(futures::stream::empty()), &opts)
-            .await;
+        let result = provider.transcribe_stream(Box::pin(futures::stream::empty()), &opts).await;
 
         match result {
             Err(AudioError::Stt { provider, message }) => {

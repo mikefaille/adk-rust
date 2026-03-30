@@ -26,7 +26,8 @@ impl TtsProvider for StubTts {
     async fn synthesize_stream<'a>(
         &'a self,
         _: &'a TtsRequest,
-    ) -> AudioResult<Pin<Box<dyn Stream<Item = AudioResult<AudioFrame<'static>>> + Send + 'a>>> {
+    ) -> AudioResult<Pin<Box<dyn Stream<Item = AudioResult<AudioFrame<'static>>> + Send + 'a>>>
+    {
         Ok(Box::pin(futures::stream::empty()))
     }
     fn voice_catalog(&self) -> &[Voice] {

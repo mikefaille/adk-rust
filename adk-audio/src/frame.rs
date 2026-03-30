@@ -56,7 +56,13 @@ impl<'a> AudioFrame<'a> {
     /// Create a silent `AudioFrame` of the given duration.
     pub fn silence(sample_rate: u32, channels: u8, duration_ms: u32) -> Self {
         let n_samples = (sample_rate as usize * channels as usize * duration_ms as usize) / 1000;
-        Self { data: Cow::Owned(vec![0i16; n_samples]), sample_rate, channels, duration_ms, samples_per_channel: if channels > 0 { n_samples as u32 / channels as u32 } else { 0 } }
+        Self {
+            data: Cow::Owned(vec![0i16; n_samples]),
+            sample_rate,
+            channels,
+            duration_ms,
+            samples_per_channel: if channels > 0 { n_samples as u32 / channels as u32 } else { 0 },
+        }
     }
 }
 

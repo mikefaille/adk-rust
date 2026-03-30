@@ -35,13 +35,12 @@ use livekit::prelude::*;
 use livekit::webrtc::audio_source::native::NativeAudioSource;
 use livekit::webrtc::audio_source::{AudioSourceOptions, RtcAudioSource};
 
-async fn connect_to_livekit() -> Result<
-    (Room, NativeAudioSource, livekit::track::RemoteAudioTrack),
-    Box<dyn std::error::Error>,
-> {
+async fn connect_to_livekit()
+-> Result<(Room, NativeAudioSource, livekit::track::RemoteAudioTrack), Box<dyn std::error::Error>> {
     let url = std::env::var("LIVEKIT_URL").expect("LIVEKIT_URL env var is required");
     let api_key = std::env::var("LIVEKIT_API_KEY").expect("LIVEKIT_API_KEY env var is required");
-    let api_secret = std::env::var("LIVEKIT_API_SECRET").expect("LIVEKIT_API_SECRET env var is required");
+    let api_secret =
+        std::env::var("LIVEKIT_API_SECRET").expect("LIVEKIT_API_SECRET env var is required");
 
     // Generate a token for the agent
     let token = livekit_api::access_token::AccessToken::with_api_key(&api_key, &api_secret)

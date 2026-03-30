@@ -28,7 +28,8 @@ impl TtsProvider for MockTts {
     async fn synthesize_stream<'a>(
         &'a self,
         _req: &'a TtsRequest,
-    ) -> AudioResult<Pin<Box<dyn Stream<Item = AudioResult<AudioFrame<'static>>> + Send + 'a>>> {
+    ) -> AudioResult<Pin<Box<dyn Stream<Item = AudioResult<AudioFrame<'static>>> + Send + 'a>>>
+    {
         Ok(Box::pin(futures::stream::empty()))
     }
     fn voice_catalog(&self) -> &[Voice] {
@@ -39,7 +40,11 @@ impl TtsProvider for MockTts {
 struct MockStt;
 #[async_trait]
 impl SttProvider for MockStt {
-    async fn transcribe(&self, _audio: &AudioFrame<'_>, _opts: &SttOptions) -> AudioResult<Transcript> {
+    async fn transcribe(
+        &self,
+        _audio: &AudioFrame<'_>,
+        _opts: &SttOptions,
+    ) -> AudioResult<Transcript> {
         Ok(Transcript::default())
     }
     async fn transcribe_stream<'a>(

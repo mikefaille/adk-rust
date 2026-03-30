@@ -98,10 +98,7 @@ impl Mixer {
         }
 
         // Clamp to i16 range
-        let pcm: Vec<i16> = mixed
-            .iter()
-            .map(|&s| s.clamp(-32768, 32767) as i16)
-            .collect();
+        let pcm: Vec<i16> = mixed.iter().map(|&s| s.clamp(-32768, 32767) as i16).collect();
 
         // Clear buffers
         for track in self.tracks.values_mut() {

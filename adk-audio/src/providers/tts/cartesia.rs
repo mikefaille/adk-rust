@@ -106,7 +106,8 @@ impl TtsProvider for CartesiaTts {
     async fn synthesize_stream<'a>(
         &'a self,
         request: &'a TtsRequest,
-    ) -> AudioResult<Pin<Box<dyn Stream<Item = AudioResult<AudioFrame<'static>>> + Send + 'a>>> {
+    ) -> AudioResult<Pin<Box<dyn Stream<Item = AudioResult<AudioFrame<'static>>> + Send + 'a>>>
+    {
         // Cartesia supports WebSocket streaming, but for now use batch
         let frame = self.synthesize(request).await?;
         Ok(Box::pin(futures::stream::once(async { Ok(frame) })))
