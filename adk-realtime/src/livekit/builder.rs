@@ -84,6 +84,24 @@ impl LiveKitRoomBuilder {
     /// channels, connecting as a hidden participant, etc.).
     ///
     /// If not provided, it defaults to basic `room_join` permissions for the specified room.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use adk_realtime::livekit::LiveKitRoomBuilder;
+    /// use livekit_api::access_token::VideoGrants;
+    ///
+    /// // Give the agent permission to join the room and publish data messages
+    /// let grants = VideoGrants {
+    ///     room_join: true,
+    ///     room: "my-room".to_string(),
+    ///     can_publish_data: true,
+    ///     ..Default::default()
+    /// };
+    ///
+    /// let builder = LiveKitRoomBuilder::new(config)
+    ///     .grants(grants);
+    /// ```
     pub fn grants(mut self, grants: VideoGrants) -> Self {
         self.grants = Some(grants);
         self
