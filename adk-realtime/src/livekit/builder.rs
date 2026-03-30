@@ -77,8 +77,13 @@ impl LiveKitRoomBuilder {
         self
     }
 
-    /// Sets custom permissions (VideoGrants) to be encoded into the agent's JWT.
-    /// If not provided, it defaults to basic `room_join` permissions.
+    /// Sets custom permissions (`VideoGrants`) to be encoded into the agent's JWT.
+    ///
+    /// Despite the name `VideoGrants` in the official LiveKit API, this structure configures
+    /// **all** capabilities for the participant (e.g., audio publishing, subscribing to data
+    /// channels, connecting as a hidden participant, etc.).
+    ///
+    /// If not provided, it defaults to basic `room_join` permissions for the specified room.
     pub fn grants(mut self, grants: VideoGrants) -> Self {
         self.grants = Some(grants);
         self
@@ -98,6 +103,22 @@ impl LiveKitRoomBuilder {
         self,
         room_name: &str,
     ) -> Result<(Room, UnboundedReceiver<RoomEvent>, NativeAudioSource)> {
+        if room_name.trim().is_empty() {
+            return Err(RealtimeError::config("room_name cannot be empty"));
+        }
+        if self.identity.trim().is_empty() {
+            return Err(RealtimeError::config("identity cannot be empty"));
+        }
+        if self.sample_rate == 0 {
+            return Err(RealtimeError::config("sample_rate must be greater than 0"));
+        }
+        if self.num_channels == 0 {
+            return Err(RealtimeError::config("num_channels must be greater than 0"));
+        }
+        if self.queue_size_ms == 0 {
+            return Err(RealtimeError::config("queue_size_ms must be greater than 0"));
+        }
+
         // 1. Generate an access token
         let token = self.config.generate_token(room_name, &self.identity, self.grants)?;
 
@@ -135,5 +156,110 @@ impl LiveKitRoomBuilder {
         tracing::info!("Published AI agent audio track to room.");
 
         Ok((room, room_events, audio_source))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use livekit_api::access_token::VideoGrants;
+
+    fn get_dummy_config() -> LiveKitConfig {
+        LiveKitConfig::new(
+            "ws://localhost:7880".to_string(),
+            "dummy_key".to_string(),
+            "dummy_secret".to_string(),
+        )
+    }
+
+    #[test]
+    fn test_builder_defaults() {
+        let config = get_dummy_config();
+        let builder = LiveKitRoomBuilder::new(config);
+
+        assert_eq!(builder.identity, DEFAULT_IDENTITY);
+        assert_eq!(builder.sample_rate, DEFAULT_SAMPLE_RATE);
+        assert_eq!(builder.num_channels, DEFAULT_NUM_CHANNELS);
+        assert_eq!(builder.queue_size_ms, DEFAULT_QUEUE_SIZE_MS);
+        assert!(builder.grants.is_none());
+    }
+
+    #[test]
+    fn test_builder_setters() {
+        let config = get_dummy_config();
+        let grants =
+            VideoGrants { room_join: true, room: "test-room".to_string(), ..Default::default() };
+
+        let builder = LiveKitRoomBuilder::new(config)
+            .identity("custom-agent")
+            .sample_rate(16000)
+            .num_channels(2)
+            .grants(grants.clone());
+
+        assert_eq!(builder.identity, "custom-agent");
+        assert_eq!(builder.sample_rate, 16000);
+        assert_eq!(builder.num_channels, 2);
+        assert!(builder.grants.is_some());
+        assert_eq!(builder.grants.unwrap().room, "test-room");
+    }
+
+    #[tokio::test]
+    async fn test_builder_validation_empty_room() {
+        let config = get_dummy_config();
+        let builder = LiveKitRoomBuilder::new(config);
+
+        let result = builder.connect("").await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("room_name cannot be empty"));
+    }
+
+    #[tokio::test]
+    async fn test_builder_validation_empty_identity() {
+        let config = get_dummy_config();
+        let builder = LiveKitRoomBuilder::new(config).identity("   ");
+
+        let result = builder.connect("test-room").await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("identity cannot be empty"));
+    }
+
+    #[tokio::test]
+    async fn test_builder_validation_zero_sample_rate() {
+        let config = get_dummy_config();
+        let builder = LiveKitRoomBuilder::new(config).sample_rate(0);
+
+        let result = builder.connect("test-room").await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("sample_rate must be greater than 0"));
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_builder_connect_integration() {
+        // This test requires a running LiveKit server and valid credentials in the environment.
+        // It's ignored by default so it doesn't break CI.
+        let url = std::env::var("LIVEKIT_URL").unwrap_or_default();
+        let key = std::env::var("LIVEKIT_API_KEY").unwrap_or_default();
+        let secret = std::env::var("LIVEKIT_API_SECRET").unwrap_or_default();
+
+        if url.is_empty() || key.is_empty() || secret.is_empty() {
+            println!("Skipping integration test: missing LiveKit credentials in environment.");
+            return;
+        }
+
+        let config = LiveKitConfig::new(url, key, secret);
+
+        let builder = LiveKitRoomBuilder::new(config)
+            .identity("test-agent")
+            .sample_rate(24000)
+            .num_channels(1);
+
+        let result = builder.connect("integration-test-room").await;
+        assert!(result.is_ok(), "Failed to connect to LiveKit: {:?}", result.err());
+
+        let (room, _events, _audio) = result.unwrap();
+        assert_eq!(room.name(), "integration-test-room");
+
+        let _ = room.close().await;
     }
 }

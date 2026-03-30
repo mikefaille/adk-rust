@@ -20,7 +20,8 @@
 //! |-------------------|----------|--------------------------------------------------|
 //! | `OPENAI_API_KEY`  | **Yes**  | OpenAI API key with realtime model access        |
 //! | `LIVEKIT_URL`     | **Yes**  | LiveKit server WebSocket URL (e.g. `ws://localhost:7880`) |
-//! | `LIVEKIT_TOKEN`   | **Yes**  | LiveKit access token for the room                |
+//! | `LIVEKIT_API_KEY` | **Yes**  | LiveKit server API Key                           |
+//! | `LIVEKIT_API_SECRET`| **Yes**| LiveKit server API Secret                        |
 //!
 //! ## Running
 //!
@@ -51,9 +52,9 @@
 //!
 //! ## Note
 //!
-//! This example requires a real LiveKit server and room. The `connect_to_livekit()`
-//! function below shows the setup pattern — you'll need to adapt it to your
-//! LiveKit deployment. See <https://docs.livekit.io/> for setup instructions.
+//! This example requires a real LiveKit server and room. It demonstrates loading
+//! connection details from the environment via `LiveKitConfig::new` and using
+//! the `LiveKitRoomBuilder` to seamlessly connect and wire the bridge elements.
 
 use std::sync::Arc;
 
@@ -93,8 +94,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // --- 2. Automatically Connect to LiveKit via Builder ---
     println!("Connecting to LiveKit...");
 
-    // Automatically load credentials from environment
-    let lk_config = LiveKitConfig::from_env()?;
+    // Manually load credentials from environment in the consumer app
+    let lk_url = std::env::var("LIVEKIT_URL").expect("LIVEKIT_URL is required");
+    let lk_api_key = std::env::var("LIVEKIT_API_KEY").expect("LIVEKIT_API_KEY is required");
+    let lk_api_secret =
+        std::env::var("LIVEKIT_API_SECRET").expect("LIVEKIT_API_SECRET is required");
+
+    let lk_config = LiveKitConfig::new(lk_url, lk_api_key, lk_api_secret);
 
     // The Builder separates the Config (data) from the connection action
     let (_room, mut room_events, audio_source) = LiveKitRoomBuilder::new(lk_config)
@@ -129,14 +135,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bridge_runner = Arc::clone(&runner);
     let bridge_handle = tokio::spawn(async move {
         println!("Waiting for remote participants to publish audio tracks...");
+        let mut target_track = None;
+
         while let Some(event) = room_events.recv().await {
             if let RoomEvent::TrackSubscribed { track: RemoteTrack::Audio(audio_track), .. } = event
             {
-                println!("Bridging remote audio track to AI model.");
-                if let Err(e) = bridge_input(audio_track, &bridge_runner).await {
-                    eprintln!("Audio input bridge failed: {e}");
-                }
+                println!("Found remote audio track.");
+                target_track = Some(audio_track);
                 break;
+            }
+        }
+
+        // Explicitly drop the event receiver to prevent the unbounded channel
+        // from leaking memory while we block on the audio bridge.
+        drop(room_events);
+
+        if let Some(audio_track) = target_track {
+            println!("Bridging remote audio track to AI model.");
+            if let Err(e) = bridge_input(audio_track, &bridge_runner).await {
+                eprintln!("Audio input bridge failed: {e}");
             }
         }
     });

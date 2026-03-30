@@ -2,18 +2,13 @@
 
 use crate::error::{RealtimeError, Result};
 use livekit_api::access_token::{AccessToken, VideoGrants};
-use std::env;
 
 /// Configuration for connecting to a LiveKit server.
 ///
 /// **Design Note:**
-/// This library provides two ways to instantiate configuration to satisfy different use cases:
-/// 1. `LiveKitConfig::new(...)`: Explicit dependency injection. This avoids hardcoding
-///    environment variable parsing into the core library, which is ideal for production deployments
-///    using secret managers or custom configuration systems.
-/// 2. `LiveKitConfig::from_env()`: Convenience loader. This automatically reads `LIVEKIT_URL`,
-///    `LIVEKIT_API_KEY`, and `LIVEKIT_API_SECRET`, matching the standard conventions of the Go and
-///    Python LiveKit SDK ecosystems for rapid development.
+/// This struct strictly relies on explicit dependency injection via `LiveKitConfig::new(...)`.
+/// This avoids hardcoding environment variable parsing into the core library, which is ideal for
+/// production deployments using secret managers or custom configuration systems.
 #[derive(Debug, Clone)]
 pub struct LiveKitConfig {
     /// The WebSocket URL of the LiveKit server.
@@ -51,40 +46,6 @@ impl LiveKitConfig {
         Self { url, api_key, api_secret }
     }
 
-    /// Creates a new `LiveKitConfig` from environment variables.
-    ///
-    /// This aligns with the conventions used in the LiveKit Go and Python SDKs, where clients
-    /// will automatically pick up connection details from the environment if not explicitly provided.
-    ///
-    /// Requires the following environment variables to be set:
-    /// - `LIVEKIT_URL`
-    /// - `LIVEKIT_API_KEY`
-    /// - `LIVEKIT_API_SECRET`
-    ///
-    /// # Errors
-    ///
-    /// Returns a `RealtimeError::ConfigError` if any of the required environment variables are missing.
-    pub fn from_env() -> Result<Self> {
-        let var_to_err = |name, help| env::var(name).map_err(|_| RealtimeError::config(help));
-
-        let url = var_to_err(
-            "LIVEKIT_URL",
-            "Missing LIVEKIT_URL environment variable. Please set it to the LiveKit server WebSocket URL (e.g. `ws://localhost:7880`).",
-        )?;
-
-        let api_key = var_to_err(
-            "LIVEKIT_API_KEY",
-            "Missing LIVEKIT_API_KEY environment variable. Please set it to your LiveKit API key.",
-        )?;
-
-        let api_secret = var_to_err(
-            "LIVEKIT_API_SECRET",
-            "Missing LIVEKIT_API_SECRET environment variable. Please set it to your LiveKit API secret.",
-        )?;
-
-        Ok(Self { url, api_key, api_secret })
-    }
-
     /// Generates a JWT access token for joining a specific LiveKit room.
     ///
     /// This is useful for manual connection management when you do not want
@@ -94,8 +55,10 @@ impl LiveKitConfig {
     ///
     /// * `room_name` - The name of the room to join.
     /// * `participant_identity` - The identity to use for the participant.
-    /// * `grants` - Optional custom permissions. If `None` is provided, defaults to
-    ///              basic room join permissions for the specified `room_name`.
+    /// * `grants` - Optional custom permissions. Despite the name `VideoGrants` in the official
+    ///              LiveKit API, this struct configures **all** participant capabilities,
+    ///              including audio publishing, data channel usage, hidden presence, etc.
+    ///              If `None` is provided, it defaults to basic room join permissions.
     ///
     /// # Returns
     ///
