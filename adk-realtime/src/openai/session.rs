@@ -171,6 +171,16 @@ impl OpenAIRealtimeSession {
             });
         }
 
+        if let Some(extra) = &config.extra {
+            if let Some(obj) = extra.as_object() {
+                if let Some(session_obj) = session_config.as_object_mut() {
+                    for (k, v) in obj {
+                        session_obj.insert(k.clone(), v.clone());
+                    }
+                }
+            }
+        }
+
         // Send session.update event
         let event = json!({
             "type": "session.update",

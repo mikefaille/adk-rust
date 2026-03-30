@@ -330,6 +330,12 @@ impl RealtimeConfig {
         self.cached_content = Some(content.into());
         self
     }
+
+    /// Set extra provider-specific options.
+    pub fn with_extra(mut self, extra: Value) -> Self {
+        self.extra = Some(extra);
+        self
+    }
 }
 
 /// Builder for RealtimeConfig.
@@ -393,6 +399,12 @@ impl RealtimeConfigBuilder {
     /// Set cached content resource.
     pub fn cached_content(mut self, content: impl Into<String>) -> Self {
         self.config.cached_content = Some(content.into());
+        self
+    }
+
+    /// Set extra provider-specific options.
+    pub fn extra(mut self, extra: Value) -> Self {
+        self.config.extra = Some(extra);
         self
     }
 

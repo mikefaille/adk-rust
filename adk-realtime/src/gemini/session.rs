@@ -63,7 +63,7 @@ impl GeminiLiveBackend {
     ///
     /// ```rust,ignore
     /// let backend = GeminiLiveBackend::vertex_adc("my-project", "us-central1")?;
-    /// let model = GeminiRealtimeModel::new(backend, "models/gemini-live-2.5-flash-native-audio");
+    /// let model = GeminiRealtimeModel::new(backend, "models/gemini-3.1-flash-live-preview");
     /// ```
     #[cfg(feature = "vertex-live")]
     pub fn vertex_adc(project_id: impl Into<String>, region: impl Into<String>) -> Result<Self> {
@@ -322,6 +322,17 @@ impl GeminiRealtimeSession {
 
         if let Some(temp) = config.temperature {
             generation_config["temperature"] = json!(temp);
+        }
+
+        if let Some(extra) = &config.extra {
+            if let Some(thinking_level) = extra.get("thinking_level") {
+                if let Some(obj) = generation_config.as_object_mut() {
+                    obj.insert(
+                        "thinkingConfig".to_string(),
+                        json!({ "thinkingLevel": thinking_level }),
+                    );
+                }
+            }
         }
 
         let system_instruction = config.instruction.map(|text| GeminiContent {
