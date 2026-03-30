@@ -107,15 +107,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // --- 3. Automatically Connect to LiveKit via Builder ---
     // The Builder separates the Config (data) from the connection action.
-    // It generates the JWT token, connects to the room, and publishes the agent's
-    // audio track automatically, returning exactly what we need to build the bridge.
+    // It synchronously validates your inputs, then generates the JWT token,
+    // connects to the room, and publishes the agent's audio track automatically.
     println!("Connecting to LiveKit...");
-    let (_room, room_events, audio_source) = LiveKitRoomBuilder::new(lk_config)
-        .identity("agent-01")
-        .sample_rate(SAMPLE_RATE)
-        .num_channels(NUM_CHANNELS)
-        .connect("my-room")
-        .await?;
+    let builder = LiveKitRoomBuilder::new(lk_config)
+        .identity("agent-01")?
+        .sample_rate(SAMPLE_RATE)?
+        .num_channels(NUM_CHANNELS)?;
+
+    let connection = builder.build("my-room")?;
+    let (_room, room_events, audio_source) = connection.connect().await?;
 
     // --- 4. Wrap event handler with LiveKit audio output ---
     // The LiveKitEventHandler intercepts `on_audio` events emitted by the

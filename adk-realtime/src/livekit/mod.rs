@@ -52,6 +52,7 @@
 mod bridge;
 pub mod builder;
 pub mod config;
+pub mod error;
 mod handler;
 
 // ── Our bridge utilities ────────────────────────────────────────────────

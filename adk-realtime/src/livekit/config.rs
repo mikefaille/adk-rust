@@ -1,6 +1,6 @@
 //! Configuration structures for LiveKit integration.
 
-use crate::error::{RealtimeError, Result};
+use crate::livekit::error::Result;
 use livekit_api::access_token::{AccessToken, VideoGrants};
 use secrecy::{ExposeSecret, SecretString};
 
@@ -103,13 +103,14 @@ impl LiveKitConfig {
     ///     ..Default::default()
     /// };
     ///
-    /// let token = config.generate_token("my-room", "agent-01", Some(grants)).unwrap();
+    /// let token = config.generate_token("my-room", "agent-01", Some(grants), None).unwrap();
     /// ```
     pub fn generate_token(
         &self,
         room_name: &str,
         participant_identity: &str,
         grants: Option<VideoGrants>,
+        metadata: Option<String>,
     ) -> Result<String> {
         let grants = grants.unwrap_or_else(|| VideoGrants {
             room_join: true,
@@ -117,10 +118,17 @@ impl LiveKitConfig {
             ..Default::default()
         });
 
-        AccessToken::with_api_key(self.api_key.expose_secret(), self.api_secret.expose_secret())
-            .with_identity(participant_identity)
-            .with_grants(grants)
-            .to_jwt()
-            .map_err(|e| RealtimeError::livekit(format!("Token generation failed: {e}")))
+        let mut token = AccessToken::with_api_key(
+            self.api_key.expose_secret(),
+            self.api_secret.expose_secret(),
+        )
+        .with_identity(participant_identity)
+        .with_grants(grants);
+
+        if let Some(md) = metadata {
+            token = token.with_metadata(&md);
+        }
+
+        Ok(token.to_jwt()?)
     }
 }
