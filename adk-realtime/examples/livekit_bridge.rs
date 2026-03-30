@@ -88,14 +88,16 @@ impl EventHandler for PrintingEventHandler {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    const SAMPLE_RATE: u32 = 24000;
+    const NUM_CHANNELS: u32 = 1;
+
     // --- 1. Create the OpenAI realtime model ---
     let api_key = std::env::var("OPENAI_API_KEY").expect("OPENAI_API_KEY env var is required");
     let model = OpenAIRealtimeModel::new(api_key, "gpt-4o-realtime-preview-2024-12-17");
 
-    // --- 2. Automatically Connect to LiveKit via Builder ---
-    println!("Connecting to LiveKit...");
-
-    // Manually load credentials from environment in the consumer app
+    // --- 2. Build the LiveKit Config ---
+    // Manually load credentials from environment in the consumer app.
+    // The `LiveKitConfig` stores the URL and securely wraps the key/secret.
     let lk_url = std::env::var("LIVEKIT_URL").expect("LIVEKIT_URL is required");
     let lk_api_key = std::env::var("LIVEKIT_API_KEY").expect("LIVEKIT_API_KEY is required");
     let lk_api_secret =
@@ -103,19 +105,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let lk_config = LiveKitConfig::new(lk_url, lk_api_key, lk_api_secret);
 
-    // The Builder separates the Config (data) from the connection action
+    // --- 3. Automatically Connect to LiveKit via Builder ---
+    // The Builder separates the Config (data) from the connection action.
+    // It generates the JWT token, connects to the room, and publishes the agent's
+    // audio track automatically, returning exactly what we need to build the bridge.
+    println!("Connecting to LiveKit...");
     let (_room, room_events, audio_source) = LiveKitRoomBuilder::new(lk_config)
         .identity("agent-01")
-        .sample_rate(24000)
+        .sample_rate(SAMPLE_RATE)
+        .num_channels(NUM_CHANNELS)
         .connect("my-room")
         .await?;
 
-    // --- 3. Wrap event handler with LiveKit audio output ---
-    // The LiveKitEventHandler intercepts on_audio to push model audio to the NativeAudioSource
+    // --- 4. Wrap event handler with LiveKit audio output ---
+    // The LiveKitEventHandler intercepts `on_audio` events emitted by the
+    // RealtimeRunner and pushes those PCM bytes to the NativeAudioSource.
     let inner_handler = PrintingEventHandler;
-    let lk_handler = LiveKitEventHandler::new(inner_handler, audio_source, 24000, 1);
+    let lk_handler =
+        LiveKitEventHandler::new(inner_handler, audio_source, SAMPLE_RATE, NUM_CHANNELS);
 
-    // --- 4. Build the RealtimeRunner ---
+    // --- 5. Build the RealtimeRunner ---
+    // The RealtimeRunner acts as the core AI orchestrator in this example. It manages
+    // the underlying connection to the OpenAI Realtime model and continuously routes
+    // the generated PCM audio events back to our LiveKitEventHandler so the room can hear it.
     let config = RealtimeConfig::default()
         .with_instruction("You are a helpful voice assistant in a LiveKit room.")
         .with_voice("alloy");
@@ -128,11 +140,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .build()?,
     );
 
-    // --- 5. Connect the runner to the AI model ---
+    // --- 6. Connect the runner to the AI model ---
     runner.connect().await?;
     println!("Connected to OpenAI Realtime API.");
 
-    // --- 6. Bridge incoming participant audio to the model ---
+    // --- 7. Bridge incoming participant audio to the model ---
+    // We spawn a background task that listens for a remote participant to speak.
+    // When an audio track appears, `wait_and_bridge_audio` automatically binds it
+    // to the `RealtimeRunner` so the AI can hear them.
     let bridge_runner = Arc::clone(&runner);
     let bridge_handle = tokio::spawn(async move {
         if let Err(e) = wait_and_bridge_audio(room_events, &bridge_runner).await {
@@ -140,7 +155,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    // --- 7. Run the event loop ---
+    // --- 8. Run the event loop ---
+    // This processes model responses and routes them through the
+    // LiveKitEventHandler (which publishes audio back to the room).
     println!("Running event loop — speak into the LiveKit room...\n");
     if let Err(e) = runner.run().await {
         eprintln!("Runner error: {e}");
