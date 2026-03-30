@@ -59,10 +59,11 @@
 use std::sync::Arc;
 
 use adk_realtime::RealtimeConfig;
-use adk_realtime::livekit::{LiveKitConfig, LiveKitEventHandler, LiveKitRoomBuilder, bridge_input};
+use adk_realtime::livekit::{
+    LiveKitConfig, LiveKitEventHandler, LiveKitRoomBuilder, wait_and_bridge_audio,
+};
 use adk_realtime::openai::OpenAIRealtimeModel;
 use adk_realtime::runner::{EventHandler, RealtimeRunner};
-use livekit::prelude::*;
 
 /// A simple event handler that prints text and transcript events.
 struct PrintingEventHandler;
@@ -103,7 +104,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let lk_config = LiveKitConfig::new(lk_url, lk_api_key, lk_api_secret);
 
     // The Builder separates the Config (data) from the connection action
-    let (_room, mut room_events, audio_source) = LiveKitRoomBuilder::new(lk_config)
+    let (_room, room_events, audio_source) = LiveKitRoomBuilder::new(lk_config)
         .identity("agent-01")
         .sample_rate(24000)
         .connect("my-room")
@@ -134,27 +135,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // --- 6. Bridge incoming participant audio to the model ---
     let bridge_runner = Arc::clone(&runner);
     let bridge_handle = tokio::spawn(async move {
-        println!("Waiting for remote participants to publish audio tracks...");
-        let mut target_track = None;
-
-        while let Some(event) = room_events.recv().await {
-            if let RoomEvent::TrackSubscribed { track: RemoteTrack::Audio(audio_track), .. } = event
-            {
-                println!("Found remote audio track.");
-                target_track = Some(audio_track);
-                break;
-            }
-        }
-
-        // Explicitly drop the event receiver to prevent the unbounded channel
-        // from leaking memory while we block on the audio bridge.
-        drop(room_events);
-
-        if let Some(audio_track) = target_track {
-            println!("Bridging remote audio track to AI model.");
-            if let Err(e) = bridge_input(audio_track, &bridge_runner).await {
-                eprintln!("Audio input bridge failed: {e}");
-            }
+        if let Err(e) = wait_and_bridge_audio(room_events, &bridge_runner).await {
+            eprintln!("Audio input bridge failed: {e}");
         }
     });
 

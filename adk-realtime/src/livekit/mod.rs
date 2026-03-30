@@ -56,7 +56,7 @@ mod handler;
 
 // ── Our bridge utilities ────────────────────────────────────────────────
 
-pub use bridge::{bridge_gemini_input, bridge_input};
+pub use bridge::{bridge_gemini_input, bridge_input, wait_and_bridge_audio};
 pub use builder::LiveKitRoomBuilder;
 pub use config::LiveKitConfig;
 pub use handler::LiveKitEventHandler;

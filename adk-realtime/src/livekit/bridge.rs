@@ -1,8 +1,11 @@
 //! Bridge functions for connecting LiveKit audio tracks to a [`RealtimeRunner`].
 
 use futures::StreamExt;
+use livekit::prelude::{RemoteTrack, RoomEvent};
 use livekit::track::RemoteAudioTrack;
 use livekit::webrtc::audio_stream::native::NativeAudioStream;
+use std::sync::Arc;
+use tokio::sync::mpsc::UnboundedReceiver;
 
 use crate::audio::{AudioChunk, AudioFormat, SmartAudioBuffer};
 use crate::error::Result;
@@ -46,6 +49,74 @@ pub async fn bridge_input(track: RemoteAudioTrack, runner: &RealtimeRunner) -> R
         let chunk = AudioChunk::from_i16_samples(&samples, AudioFormat::pcm16_24khz());
         runner.send_audio(&chunk.to_base64()).await?;
     }
+
+    Ok(())
+}
+
+/// A high-level helper that waits for the first remote participant to publish an audio track,
+/// and automatically bridges it to the `RealtimeRunner`.
+///
+/// This avoids a common pitfall where users block the main async task on `bridge_input`
+/// while continuing to hold the unbounded `RoomEvent` receiver, resulting in an unhandled
+/// event memory leak over the life of the room connection.
+///
+/// # Arguments
+///
+/// * `room_events` - The LiveKit room event receiver. This function consumes and drops it.
+/// * `runner` - The target `RealtimeRunner`.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use adk_realtime::livekit::{LiveKitRoomBuilder, wait_and_bridge_audio};
+///
+/// let (_room, room_events, _) = LiveKitRoomBuilder::new(config).connect("my-room").await?;
+///
+/// tokio::spawn(async move {
+///     wait_and_bridge_audio(room_events, &runner).await.unwrap();
+/// });
+/// ```
+pub async fn wait_and_bridge_audio(
+    mut room_events: UnboundedReceiver<RoomEvent>,
+    runner: &Arc<RealtimeRunner>,
+) -> Result<()> {
+    tracing::info!("Listening for remote participant audio tracks...");
+
+    // Continuously poll the unbounded receiver to prevent LiveKit room events
+    // from leaking memory over the lifespan of the connection.
+    while let Some(event) = room_events.recv().await {
+        if let RoomEvent::TrackSubscribed {
+            track: RemoteTrack::Audio(audio_track),
+            participant,
+            ..
+        } = event
+        {
+            tracing::info!(
+                "Subscribed to audio track from participant: {}",
+                participant.identity()
+            );
+
+            // Spawn the blocking bridge stream into its own task so we do not block
+            // the main event loop. This allows us to keep draining `room_events`.
+            let bridge_runner = Arc::clone(runner);
+            tokio::spawn(async move {
+                if let Err(e) = bridge_input(audio_track, &bridge_runner).await {
+                    tracing::error!(
+                        "Audio input bridge failed for participant {}: {}",
+                        participant.identity(),
+                        e
+                    );
+                }
+            });
+
+            // For a basic bridge, we only bind to the first active audio track we see.
+            // A more complex production architecture would mix multiple participant tracks.
+            break;
+        }
+    }
+
+    // By the time we break out of the loop and reach here, `room_events` drops naturally,
+    // which cleanly closes the unbounded channel without any hacky explicit `drop()` logic.
 
     Ok(())
 }
