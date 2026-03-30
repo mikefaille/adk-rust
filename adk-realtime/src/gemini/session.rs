@@ -63,7 +63,7 @@ impl GeminiLiveBackend {
     ///
     /// ```rust,ignore
     /// let backend = GeminiLiveBackend::vertex_adc("my-project", "us-central1")?;
-    /// let model = GeminiRealtimeModel::new(backend, "models/gemini-live-2.5-flash-native-audio");
+    /// let model = GeminiRealtimeModel::new(backend, "models/gemini-3.1-flash-live-preview");
     /// ```
     #[cfg(feature = "vertex-live")]
     pub fn vertex_adc(project_id: impl Into<String>, region: impl Into<String>) -> Result<Self> {
