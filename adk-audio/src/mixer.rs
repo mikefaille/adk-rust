@@ -3,7 +3,6 @@
 use std::collections::HashMap;
 
 use async_trait::async_trait;
-use bytes::Bytes;
 
 use crate::error::{AudioError, AudioResult};
 use crate::frame::AudioFrame;
@@ -12,7 +11,7 @@ use crate::traits::AudioProcessor;
 /// A track in the mixer with volume and buffered audio.
 struct MixerTrack {
     volume: f32,
-    buffer: Option<AudioFrame>,
+    buffer: Option<AudioFrame<'static>>,
 }
 
 /// Multi-track audio mixer.
@@ -55,7 +54,7 @@ impl Mixer {
     }
 
     /// Push an audio frame to a named track.
-    pub fn push_frame(&mut self, track: &str, frame: AudioFrame) {
+    pub fn push_frame(&mut self, track: &str, frame: AudioFrame<'static>) {
         if let Some(t) = self.tracks.get_mut(track) {
             t.buffer = Some(frame);
         }
@@ -65,9 +64,27 @@ impl Mixer {
     ///
     /// Tracks without buffered audio are treated as silence.
     /// All tracks are mixed at the output sample rate.
-    pub fn mix(&mut self) -> AudioResult<AudioFrame> {
+    pub fn mix(&mut self) -> AudioResult<AudioFrame<'static>> {
         if self.tracks.is_empty() {
             return Err(AudioError::Fx("mixer has no tracks".into()));
+        }
+
+        // Validate formats
+        for (name, track) in &self.tracks {
+            if let Some(ref frame) = track.buffer {
+                if frame.sample_rate != self.output_sample_rate {
+                    return Err(AudioError::Fx(format!(
+                        "Track '{}' sample rate {} does not match mixer output rate {}",
+                        name, frame.sample_rate, self.output_sample_rate
+                    )));
+                }
+                if frame.channels != 1 {
+                    return Err(AudioError::Fx(format!(
+                        "Track '{}' is not mono. Mixer currently only supports mono tracks.",
+                        name
+                    )));
+                }
+            }
         }
 
         // Find the maximum sample count across all buffered tracks
@@ -75,7 +92,7 @@ impl Mixer {
             .tracks
             .values()
             .filter_map(|t| t.buffer.as_ref())
-            .map(|f| f.data.len() / 2)
+            .map(|f| f.data.len())
             .max()
             .unwrap_or(0);
 
@@ -98,39 +115,32 @@ impl Mixer {
         }
 
         // Clamp to i16 range
-        let pcm: Vec<u8> = mixed
-            .iter()
-            .flat_map(|&s| {
-                let clamped = s.clamp(-32768, 32767) as i16;
-                clamped.to_le_bytes()
-            })
-            .collect();
+        let pcm: Vec<i16> = mixed.iter().map(|&s| s.clamp(-32768, 32767) as i16).collect();
 
         // Clear buffers
         for track in self.tracks.values_mut() {
             track.buffer = None;
         }
 
-        Ok(AudioFrame::new(Bytes::from(pcm), self.output_sample_rate, 1))
+        Ok(AudioFrame::new(std::borrow::Cow::Owned(pcm), self.output_sample_rate, 1))
     }
 }
 
 #[async_trait]
 impl AudioProcessor for Mixer {
-    async fn process(&self, frame: &AudioFrame) -> AudioResult<AudioFrame> {
+    async fn process<'a>(&'a self, frame: &AudioFrame<'a>) -> AudioResult<AudioFrame<'static>> {
         // Single-track passthrough: apply first track's volume
         let volume = self.tracks.values().next().map(|t| t.volume).unwrap_or(1.0);
 
         let samples = frame.samples();
-        let pcm: Vec<u8> = samples
+        let pcm: Vec<i16> = samples
             .iter()
-            .flat_map(|&s| {
+            .map(|&s| {
                 let scaled = (s as f32 * volume) as i32;
-                let clamped = scaled.clamp(-32768, 32767) as i16;
-                clamped.to_le_bytes()
+                scaled.clamp(-32768, 32767) as i16
             })
             .collect();
 
-        Ok(AudioFrame::new(Bytes::from(pcm), frame.sample_rate, frame.channels))
+        Ok(AudioFrame::new(std::borrow::Cow::Owned(pcm), frame.sample_rate, frame.channels))
     }
 }

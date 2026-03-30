@@ -20,10 +20,10 @@ use proptest::prelude::*;
 // --- Mock that always says "no speech" ---
 struct AlwaysSilentVad;
 impl VadProcessor for AlwaysSilentVad {
-    fn is_speech(&self, _frame: &AudioFrame) -> bool {
+    fn is_speech(&self, _frame: &AudioFrame<'_>) -> bool {
         false
     }
-    fn segment(&self, _frame: &AudioFrame) -> Vec<SpeechSegment> {
+    fn segment(&self, _frame: &AudioFrame<'_>) -> Vec<SpeechSegment> {
         vec![]
     }
 }
@@ -32,10 +32,10 @@ impl VadProcessor for AlwaysSilentVad {
 #[allow(dead_code)]
 struct AlwaysSpeechVad;
 impl VadProcessor for AlwaysSpeechVad {
-    fn is_speech(&self, _frame: &AudioFrame) -> bool {
+    fn is_speech(&self, _frame: &AudioFrame<'_>) -> bool {
         true
     }
-    fn segment(&self, _frame: &AudioFrame) -> Vec<SpeechSegment> {
+    fn segment(&self, _frame: &AudioFrame<'_>) -> Vec<SpeechSegment> {
         vec![SpeechSegment { start_ms: 0, end_ms: 100 }]
     }
 }
@@ -47,15 +47,19 @@ struct CountingStt {
 
 #[async_trait]
 impl SttProvider for CountingStt {
-    async fn transcribe(&self, _audio: &AudioFrame, _opts: &SttOptions) -> AudioResult<Transcript> {
+    async fn transcribe(
+        &self,
+        _audio: &AudioFrame<'_>,
+        _opts: &SttOptions,
+    ) -> AudioResult<Transcript> {
         self.call_count.fetch_add(1, Ordering::SeqCst);
         Ok(Transcript { text: "hello".into(), ..Default::default() })
     }
-    async fn transcribe_stream(
-        &self,
-        _audio: Pin<Box<dyn Stream<Item = AudioFrame> + Send>>,
-        _opts: &SttOptions,
-    ) -> AudioResult<Pin<Box<dyn Stream<Item = AudioResult<Transcript>> + Send>>> {
+    async fn transcribe_stream<'a>(
+        &'a self,
+        _audio: Pin<Box<dyn Stream<Item = AudioFrame<'a>> + Send + 'a>>,
+        _opts: &'a SttOptions,
+    ) -> AudioResult<Pin<Box<dyn Stream<Item = AudioResult<Transcript>> + Send + 'a>>> {
         Ok(Box::pin(futures::stream::empty()))
     }
 }
@@ -63,13 +67,14 @@ impl SttProvider for CountingStt {
 struct StubTts;
 #[async_trait]
 impl TtsProvider for StubTts {
-    async fn synthesize(&self, _: &TtsRequest) -> AudioResult<AudioFrame> {
+    async fn synthesize(&self, _: &TtsRequest) -> AudioResult<AudioFrame<'static>> {
         Ok(AudioFrame::silence(16000, 1, 100))
     }
-    async fn synthesize_stream(
-        &self,
-        _: &TtsRequest,
-    ) -> AudioResult<Pin<Box<dyn Stream<Item = AudioResult<AudioFrame>> + Send>>> {
+    async fn synthesize_stream<'a>(
+        &'a self,
+        _: &'a TtsRequest,
+    ) -> AudioResult<Pin<Box<dyn Stream<Item = AudioResult<AudioFrame<'static>>> + Send + 'a>>>
+    {
         Ok(Box::pin(futures::stream::empty()))
     }
     fn voice_catalog(&self) -> &[Voice] {

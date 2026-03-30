@@ -15,21 +15,21 @@ pub fn ivr_pipeline(
     stt: Arc<dyn SttProvider>,
     vad: Arc<dyn VadProcessor>,
     agent: Arc<dyn adk_core::Agent>,
-) -> AudioResult<PipelineHandle> {
+) -> AudioResult<PipelineHandle<'static>> {
     AudioPipelineBuilder::new().tts(tts).stt(stt).vad(vad).agent(agent).build_voice_agent()
 }
 
 /// Podcast production pipeline: TTS with broadcast-quality processing.
-pub fn podcast_pipeline(tts: Arc<dyn TtsProvider>) -> AudioResult<PipelineHandle> {
+pub fn podcast_pipeline(tts: Arc<dyn TtsProvider>) -> AudioResult<PipelineHandle<'static>> {
     AudioPipelineBuilder::new().tts(tts).build_tts()
 }
 
 /// Meeting transcription pipeline: STT with low-aggressiveness VAD.
-pub fn transcription_pipeline(stt: Arc<dyn SttProvider>) -> AudioResult<PipelineHandle> {
+pub fn transcription_pipeline(stt: Arc<dyn SttProvider>) -> AudioResult<PipelineHandle<'static>> {
     AudioPipelineBuilder::new().stt(stt).build_stt()
 }
 
 /// Audio enhancement pipeline: noise suppression, resampling, normalization.
-pub fn enhance_pipeline() -> AudioResult<PipelineHandle> {
+pub fn enhance_pipeline() -> AudioResult<PipelineHandle<'static>> {
     AudioPipelineBuilder::new().build_transform()
 }

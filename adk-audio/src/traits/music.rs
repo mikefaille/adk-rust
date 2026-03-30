@@ -7,7 +7,7 @@ use crate::frame::AudioFrame;
 
 /// Request parameters for music generation.
 #[derive(Debug, Clone, Default)]
-pub struct MusicRequest {
+pub struct MusicRequest<'a> {
     /// Text prompt describing the desired music.
     pub prompt: String,
     /// Desired duration in seconds.
@@ -19,7 +19,7 @@ pub struct MusicRequest {
     /// Optional musical key (e.g. "C major").
     pub key: Option<String>,
     /// Optional audio to continue from.
-    pub continuation_audio: Option<AudioFrame>,
+    pub continuation_audio: Option<AudioFrame<'a>>,
     /// Whether to generate instrumental-only (no vocals).
     pub instrumental: bool,
 }
@@ -28,7 +28,7 @@ pub struct MusicRequest {
 #[async_trait]
 pub trait MusicProvider: Send + Sync {
     /// Generate music from a text prompt.
-    async fn generate(&self, request: &MusicRequest) -> AudioResult<AudioFrame>;
+    async fn generate(&self, request: &MusicRequest<'_>) -> AudioResult<AudioFrame<'static>>;
 
     /// List supported genre strings.
     fn supported_genres(&self) -> &[String];

@@ -93,7 +93,7 @@ pub mod openai;
 #[cfg(feature = "gemini")]
 pub mod gemini;
 
-#[cfg(feature = "livekit")]
+#[cfg(any(feature = "livekit", feature = "test-utils"))]
 pub mod livekit;
 
 // Re-exports

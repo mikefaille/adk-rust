@@ -74,8 +74,9 @@ pub enum RealtimeError {
     WebRTCError(String),
 
     /// LiveKit bridge error.
-    #[error("LiveKit error: {0}")]
-    LiveKitError(String),
+    #[cfg(feature = "livekit")]
+    #[error(transparent)]
+    LiveKitError(#[from] crate::livekit::error::LiveKitError),
 }
 
 impl RealtimeError {
@@ -117,10 +118,5 @@ impl RealtimeError {
     /// Create a new WebRTC error.
     pub fn webrtc(msg: impl Into<String>) -> Self {
         Self::WebRTCError(msg.into())
-    }
-
-    /// Create a new LiveKit error.
-    pub fn livekit(msg: impl Into<String>) -> Self {
-        Self::LiveKitError(msg.into())
     }
 }

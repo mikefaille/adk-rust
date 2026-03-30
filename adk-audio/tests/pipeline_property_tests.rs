@@ -22,13 +22,14 @@ use proptest::prelude::*;
 struct MockTts;
 #[async_trait]
 impl TtsProvider for MockTts {
-    async fn synthesize(&self, _req: &TtsRequest) -> AudioResult<AudioFrame> {
+    async fn synthesize(&self, _req: &TtsRequest) -> AudioResult<AudioFrame<'static>> {
         Ok(AudioFrame::silence(16000, 1, 100))
     }
-    async fn synthesize_stream(
-        &self,
-        _req: &TtsRequest,
-    ) -> AudioResult<Pin<Box<dyn Stream<Item = AudioResult<AudioFrame>> + Send>>> {
+    async fn synthesize_stream<'a>(
+        &'a self,
+        _req: &'a TtsRequest,
+    ) -> AudioResult<Pin<Box<dyn Stream<Item = AudioResult<AudioFrame<'static>>> + Send + 'a>>>
+    {
         Ok(Box::pin(futures::stream::empty()))
     }
     fn voice_catalog(&self) -> &[Voice] {
@@ -39,24 +40,28 @@ impl TtsProvider for MockTts {
 struct MockStt;
 #[async_trait]
 impl SttProvider for MockStt {
-    async fn transcribe(&self, _audio: &AudioFrame, _opts: &SttOptions) -> AudioResult<Transcript> {
+    async fn transcribe(
+        &self,
+        _audio: &AudioFrame<'_>,
+        _opts: &SttOptions,
+    ) -> AudioResult<Transcript> {
         Ok(Transcript::default())
     }
-    async fn transcribe_stream(
-        &self,
-        _audio: Pin<Box<dyn Stream<Item = AudioFrame> + Send>>,
-        _opts: &SttOptions,
-    ) -> AudioResult<Pin<Box<dyn Stream<Item = AudioResult<Transcript>> + Send>>> {
+    async fn transcribe_stream<'a>(
+        &'a self,
+        _audio: Pin<Box<dyn Stream<Item = AudioFrame<'a>> + Send + 'a>>,
+        _opts: &'a SttOptions,
+    ) -> AudioResult<Pin<Box<dyn Stream<Item = AudioResult<Transcript>> + Send + 'a>>> {
         Ok(Box::pin(futures::stream::empty()))
     }
 }
 
 struct MockVad;
 impl VadProcessor for MockVad {
-    fn is_speech(&self, _frame: &AudioFrame) -> bool {
+    fn is_speech(&self, _frame: &AudioFrame<'_>) -> bool {
         false
     }
-    fn segment(&self, _frame: &AudioFrame) -> Vec<SpeechSegment> {
+    fn segment(&self, _frame: &AudioFrame<'_>) -> Vec<SpeechSegment> {
         vec![]
     }
 }

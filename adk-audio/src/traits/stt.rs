@@ -69,12 +69,16 @@ pub struct Speaker {
 #[async_trait]
 pub trait SttProvider: Send + Sync {
     /// Transcribe a single audio frame (batch mode).
-    async fn transcribe(&self, audio: &AudioFrame, opts: &SttOptions) -> AudioResult<Transcript>;
+    async fn transcribe(
+        &self,
+        audio: &AudioFrame<'_>,
+        opts: &SttOptions,
+    ) -> AudioResult<Transcript>;
 
     /// Transcribe a stream of audio frames (streaming mode).
-    async fn transcribe_stream(
-        &self,
-        audio: Pin<Box<dyn Stream<Item = AudioFrame> + Send>>,
-        opts: &SttOptions,
-    ) -> AudioResult<Pin<Box<dyn Stream<Item = AudioResult<Transcript>> + Send>>>;
+    async fn transcribe_stream<'a>(
+        &'a self,
+        audio: Pin<Box<dyn Stream<Item = AudioFrame<'a>> + Send + 'a>>,
+        opts: &'a SttOptions,
+    ) -> AudioResult<Pin<Box<dyn Stream<Item = AudioResult<Transcript>> + Send + 'a>>>;
 }

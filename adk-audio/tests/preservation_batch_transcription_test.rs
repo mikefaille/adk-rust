@@ -20,18 +20,17 @@
 use adk_audio::error::AudioError;
 use adk_audio::frame::AudioFrame;
 use adk_audio::traits::{SttOptions, SttProvider};
-use bytes::Bytes;
 use proptest::prelude::*;
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn make_audio_frame(sample_count: usize) -> AudioFrame {
-    // AudioFrame::new expects raw PCM-16 LE bytes, not i16 samples directly.
+fn make_audio_frame(sample_count: usize) -> AudioFrame<'static> {
     let samples: Vec<i16> = (0..sample_count).map(|i| (i % 256) as i16).collect();
-    let byte_data: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
-    AudioFrame::new(Bytes::from(byte_data), 16000, 1)
+    let bytes: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
+    let pcm = bytemuck::cast_slice::<u8, i16>(&bytes).to_vec();
+    AudioFrame::new(std::borrow::Cow::Owned(pcm), 16000, 1)
 }
 
 // ---------------------------------------------------------------------------
@@ -55,8 +54,9 @@ proptest! {
         sample_count in 1usize..4800,
     ) {
         let original_samples: Vec<i16> = (0..sample_count).map(|i| (i % 256) as i16).collect();
-        let byte_data: Vec<u8> = original_samples.iter().flat_map(|s| s.to_le_bytes()).collect();
-        let frame = AudioFrame::new(Bytes::from(byte_data), 16000, 1);
+        let bytes: Vec<u8> = original_samples.iter().flat_map(|s| s.to_le_bytes()).collect();
+        let pcm = bytemuck::cast_slice::<u8, i16>(&bytes).to_vec();
+        let frame = AudioFrame::new(std::borrow::Cow::Owned(pcm), 16000, 1);
 
         // samples() should return the same data
         let recovered = frame.samples();

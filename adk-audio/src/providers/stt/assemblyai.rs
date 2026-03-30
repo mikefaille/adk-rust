@@ -47,7 +47,11 @@ impl AssemblyAiStt {
 
 #[async_trait]
 impl SttProvider for AssemblyAiStt {
-    async fn transcribe(&self, audio: &AudioFrame, opts: &SttOptions) -> AudioResult<Transcript> {
+    async fn transcribe(
+        &self,
+        audio: &AudioFrame<'_>,
+        opts: &SttOptions,
+    ) -> AudioResult<Transcript> {
         let wav_bytes = frame_to_wav_bytes(audio)?;
 
         // Step 1: Upload audio (base_url is always HTTPS — enforced at construction)
@@ -124,7 +128,16 @@ impl SttProvider for AssemblyAiStt {
 
         // Step 3: Poll for completion
         let poll_url = format!("{}/v2/transcript/{transcript_id}", self.base_url);
+        let mut poll_count = 0;
+        let max_polls = 120; // 2 minutes max
         loop {
+            if poll_count >= max_polls {
+                return Err(AudioError::Stt {
+                    provider: "assemblyai".into(),
+                    message: "Polling timed out after 120 seconds".into(),
+                });
+            }
+            poll_count += 1;
             tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
             let poll_resp = self
@@ -159,11 +172,11 @@ impl SttProvider for AssemblyAiStt {
         }
     }
 
-    async fn transcribe_stream(
-        &self,
-        _audio: Pin<Box<dyn Stream<Item = AudioFrame> + Send>>,
-        _opts: &SttOptions,
-    ) -> AudioResult<Pin<Box<dyn Stream<Item = AudioResult<Transcript>> + Send>>> {
+    async fn transcribe_stream<'a>(
+        &'a self,
+        _audio: Pin<Box<dyn Stream<Item = AudioFrame<'a>> + Send + 'a>>,
+        _opts: &'a SttOptions,
+    ) -> AudioResult<Pin<Box<dyn Stream<Item = AudioResult<Transcript>> + Send + 'a>>> {
         Err(AudioError::Stt {
             provider: "assemblyai".into(),
             message: "streaming transcription not yet implemented".into(),
@@ -214,9 +227,8 @@ mod tests {
             base_url: "https://api.assemblyai.com".to_string(),
         };
 
-        let result = provider
-            .transcribe_stream(Box::pin(futures::stream::empty()), &SttOptions::default())
-            .await;
+        let opts = SttOptions::default();
+        let result = provider.transcribe_stream(Box::pin(futures::stream::empty()), &opts).await;
 
         match result {
             Err(AudioError::Stt { provider, message }) => {

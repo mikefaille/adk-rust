@@ -17,7 +17,7 @@ fn arb_channels() -> impl Strategy<Value = u8> {
 }
 
 fn arb_pcm_data(max_samples: usize) -> impl Strategy<Value = Vec<u8>> {
-    (1..max_samples).prop_flat_map(|n| proptest::collection::vec(any::<u8>(), n * 2..=n * 2))
+    (1..max_samples).prop_flat_map(|n| proptest::collection::vec(any::<u8>(), n * 4..=n * 4)) // align to max channel bytes
 }
 
 proptest! {
@@ -30,11 +30,13 @@ proptest! {
         sr in arb_sample_rate(),
         ch in arb_channels(),
     ) {
-        let original = AudioFrame::new(data, sr, ch);
+        let valid_len = (data.len() / (2 * ch as usize)) * (2 * ch as usize);
+        let pcm = bytemuck::cast_slice::<u8, i16>(&data[..valid_len]).to_vec();
+        let original = AudioFrame::new(std::borrow::Cow::Owned(pcm), sr, ch);
         let encoded = encode(&original, AudioFormat::Wav).unwrap();
         let decoded = decode(&encoded, AudioFormat::Wav).unwrap();
 
-        prop_assert_eq!(&decoded.data, &original.data);
+        prop_assert_eq!(&decoded.data[..], &original.data[..]);
         prop_assert_eq!(decoded.sample_rate, original.sample_rate);
         prop_assert_eq!(decoded.channels, original.channels);
     }
@@ -46,7 +48,9 @@ proptest! {
         sr in arb_sample_rate(),
         ch in arb_channels(),
     ) {
-        let frame = AudioFrame::new(data, sr, ch);
+        let valid_len = (data.len() / (2 * ch as usize)) * (2 * ch as usize);
+        let pcm = bytemuck::cast_slice::<u8, i16>(&data[..valid_len]).to_vec();
+        let frame = AudioFrame::new(std::borrow::Cow::Owned(pcm), sr, ch);
         let encoded = encode(&frame, AudioFormat::Wav).unwrap();
         let bytes = encoded.as_ref();
 

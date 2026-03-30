@@ -20,13 +20,14 @@ use futures::Stream;
 struct StubTts;
 #[async_trait]
 impl TtsProvider for StubTts {
-    async fn synthesize(&self, _: &TtsRequest) -> AudioResult<AudioFrame> {
+    async fn synthesize(&self, _: &TtsRequest) -> AudioResult<AudioFrame<'static>> {
         Ok(AudioFrame::silence(16000, 1, 100))
     }
-    async fn synthesize_stream(
-        &self,
-        _: &TtsRequest,
-    ) -> AudioResult<Pin<Box<dyn Stream<Item = AudioResult<AudioFrame>> + Send>>> {
+    async fn synthesize_stream<'a>(
+        &'a self,
+        _: &'a TtsRequest,
+    ) -> AudioResult<Pin<Box<dyn Stream<Item = AudioResult<AudioFrame<'static>>> + Send + 'a>>>
+    {
         Ok(Box::pin(futures::stream::empty()))
     }
     fn voice_catalog(&self) -> &[Voice] {
@@ -37,14 +38,14 @@ impl TtsProvider for StubTts {
 struct StubStt;
 #[async_trait]
 impl SttProvider for StubStt {
-    async fn transcribe(&self, _: &AudioFrame, _: &SttOptions) -> AudioResult<Transcript> {
+    async fn transcribe(&self, _: &AudioFrame<'_>, _: &SttOptions) -> AudioResult<Transcript> {
         Ok(Transcript::default())
     }
-    async fn transcribe_stream(
-        &self,
-        _: Pin<Box<dyn Stream<Item = AudioFrame> + Send>>,
-        _: &SttOptions,
-    ) -> AudioResult<Pin<Box<dyn Stream<Item = AudioResult<Transcript>> + Send>>> {
+    async fn transcribe_stream<'a>(
+        &'a self,
+        _: Pin<Box<dyn Stream<Item = AudioFrame<'a>> + Send + 'a>>,
+        _: &'a SttOptions,
+    ) -> AudioResult<Pin<Box<dyn Stream<Item = AudioResult<Transcript>> + Send + 'a>>> {
         Ok(Box::pin(futures::stream::empty()))
     }
 }
@@ -52,7 +53,7 @@ impl SttProvider for StubStt {
 struct StubMusic;
 #[async_trait]
 impl MusicProvider for StubMusic {
-    async fn generate(&self, _: &MusicRequest) -> AudioResult<AudioFrame> {
+    async fn generate(&self, _: &MusicRequest<'_>) -> AudioResult<AudioFrame<'static>> {
         Ok(AudioFrame::silence(16000, 1, 100))
     }
     fn supported_genres(&self) -> &[String] {

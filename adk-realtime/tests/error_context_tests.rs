@@ -50,12 +50,13 @@ proptest! {
     }
 
     /// **Feature: realtime-audio-transport, Property 5: Error Message Context Preservation**
-    /// *For any* non-empty context string, constructing `RealtimeError::LiveKitError`
-    /// via the convenience constructor SHALL produce a Display output containing the original string.
+    /// *For any* non-empty context string, constructing `LiveKitError::General`
+    /// SHALL produce a Display output containing the original string.
     /// **Validates: Requirements 14.4**
+    #[cfg(feature = "livekit")]
     #[test]
     fn prop_livekit_error_preserves_context(ctx in arb_non_empty_string()) {
-        let error = RealtimeError::livekit(&ctx);
+        let error: RealtimeError = adk_realtime::livekit::error::LiveKitError::General(ctx.clone()).into();
         let display = format!("{}", error);
         prop_assert!(
             display.contains(&ctx),
@@ -73,11 +74,11 @@ proptest! {
     fn prop_direct_variant_construction_preserves_context(ctx in arb_non_empty_string()) {
         let opus = RealtimeError::OpusCodecError(ctx.clone());
         let webrtc = RealtimeError::WebRTCError(ctx.clone());
-        let livekit = RealtimeError::LiveKitError(ctx.clone());
+        #[cfg(feature = "livekit")]
+        let livekit: RealtimeError = adk_realtime::livekit::error::LiveKitError::General(ctx.clone()).into();
 
         let opus_display = format!("{}", opus);
         let webrtc_display = format!("{}", webrtc);
-        let livekit_display = format!("{}", livekit);
 
         prop_assert!(
             opus_display.contains(&ctx),
@@ -91,11 +92,16 @@ proptest! {
             webrtc_display,
             ctx
         );
-        prop_assert!(
-            livekit_display.contains(&ctx),
-            "Direct LiveKitError display '{}' does not contain context '{}'",
-            livekit_display,
-            ctx
-        );
+
+        #[cfg(feature = "livekit")]
+        {
+            let livekit_display = format!("{}", livekit);
+            prop_assert!(
+                livekit_display.contains(&ctx),
+                "Direct LiveKitError display '{}' does not contain context '{}'",
+                livekit_display,
+                ctx
+            );
+        }
     }
 }

@@ -57,11 +57,17 @@ impl AudioFormat {
 ///
 /// Currently supports WAV and raw PCM16. Other formats return
 /// `AudioError::Codec`.
-pub fn decode(data: &[u8], format: AudioFormat) -> AudioResult<AudioFrame> {
+pub fn decode<'a>(data: &'a [u8], format: AudioFormat) -> AudioResult<AudioFrame<'a>> {
     match format {
         AudioFormat::Pcm16 => {
             // Raw PCM16 — assume 16kHz mono (caller should know the format)
-            Ok(AudioFrame::new(Bytes::copy_from_slice(data), 16000, 1))
+            if data.len() % 2 != 0 {
+                return Err(AudioError::Codec(format!(
+                    "invalid PCM16 byte length: {}",
+                    data.len()
+                )));
+            }
+            Ok(AudioFrame::new(std::borrow::Cow::Borrowed(bytemuck::cast_slice(data)), 16000, 1))
         }
         AudioFormat::Wav => decode_wav(data),
         _ => Err(AudioError::Codec(format!("decoding {format:?} is not yet supported"))),
@@ -74,7 +80,9 @@ pub fn decode(data: &[u8], format: AudioFormat) -> AudioResult<AudioFrame> {
 /// `AudioError::Codec`.
 pub fn encode(frame: &AudioFrame, format: AudioFormat) -> AudioResult<Bytes> {
     match format {
-        AudioFormat::Pcm16 => Ok(frame.data.clone()),
+        AudioFormat::Pcm16 => {
+            Ok(Bytes::from(bytemuck::cast_slice::<i16, u8>(&frame.data).to_vec()))
+        }
         AudioFormat::Wav => encode_wav(frame),
         _ => Err(AudioError::Codec(format!("encoding {format:?} is not yet supported"))),
     }
@@ -82,7 +90,7 @@ pub fn encode(frame: &AudioFrame, format: AudioFormat) -> AudioResult<Bytes> {
 
 /// Encode an `AudioFrame` as a RIFF WAV file.
 fn encode_wav(frame: &AudioFrame) -> AudioResult<Bytes> {
-    let data_len = frame.data.len() as u32;
+    let data_len = (frame.data.len() * 2) as u32;
     let channels = frame.channels as u16;
     let sample_rate = frame.sample_rate;
     let bits_per_sample: u16 = 16;
@@ -90,7 +98,7 @@ fn encode_wav(frame: &AudioFrame) -> AudioResult<Bytes> {
     let block_align = channels * bits_per_sample / 8;
     let file_size = 36 + data_len;
 
-    let mut buf = Vec::with_capacity(44 + frame.data.len());
+    let mut buf = Vec::with_capacity(44 + frame.data.len() * 2);
     // RIFF header
     buf.extend_from_slice(b"RIFF");
     buf.extend_from_slice(&file_size.to_le_bytes());
@@ -107,13 +115,13 @@ fn encode_wav(frame: &AudioFrame) -> AudioResult<Bytes> {
     // data sub-chunk
     buf.extend_from_slice(b"data");
     buf.extend_from_slice(&data_len.to_le_bytes());
-    buf.extend_from_slice(&frame.data);
+    buf.extend_from_slice(bytemuck::cast_slice(&frame.data));
 
     Ok(Bytes::from(buf))
 }
 
 /// Decode a RIFF WAV file into an `AudioFrame`.
-fn decode_wav(data: &[u8]) -> AudioResult<AudioFrame> {
+fn decode_wav<'a>(data: &'a [u8]) -> AudioResult<AudioFrame<'a>> {
     if data.len() < 44 {
         return Err(AudioError::Codec("WAV data too short for header".into()));
     }
@@ -140,8 +148,11 @@ fn decode_wav(data: &[u8]) -> AudioResult<AudioFrame> {
         ]) as usize;
         if chunk_id == b"data" {
             let start = offset + 8;
-            let end = (start + chunk_size).min(data.len());
-            let pcm = Bytes::copy_from_slice(&data[start..end]);
+            if chunk_size % 2 != 0 || start + chunk_size > data.len() {
+                return Err(AudioError::Codec("malformed WAV data chunk".into()));
+            }
+            let end = start + chunk_size;
+            let pcm = std::borrow::Cow::Borrowed(bytemuck::cast_slice(&data[start..end]));
             return Ok(AudioFrame::new(pcm, sample_rate, channels as u8));
         }
         offset += 8 + chunk_size;

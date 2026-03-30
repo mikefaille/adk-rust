@@ -74,7 +74,7 @@ impl OpenAiTts {
 
 #[async_trait]
 impl TtsProvider for OpenAiTts {
-    async fn synthesize(&self, request: &TtsRequest) -> AudioResult<AudioFrame> {
+    async fn synthesize(&self, request: &TtsRequest) -> AudioResult<AudioFrame<'static>> {
         let voice = if request.voice.is_empty() { "alloy" } else { &request.voice };
         let url = format!("{}/v1/audio/speech", self.base_url());
 
@@ -107,13 +107,22 @@ impl TtsProvider for OpenAiTts {
             .await
             .map_err(|e| AudioError::Tts { provider: "openai".into(), message: e.to_string() })?;
 
-        Ok(AudioFrame::new(pcm, 24000, 1))
+        if pcm.len() % 2 != 0 {
+            return Err(AudioError::Tts {
+                provider: "openai".into(),
+                message: "received odd-length PCM data from API".into(),
+            });
+        }
+        let data: Vec<i16> =
+            pcm.chunks_exact(2).map(|c| i16::from_le_bytes([c[0], c[1]])).collect();
+        Ok(AudioFrame::new(std::borrow::Cow::Owned(data), 24000, 1))
     }
 
-    async fn synthesize_stream(
-        &self,
-        request: &TtsRequest,
-    ) -> AudioResult<Pin<Box<dyn Stream<Item = AudioResult<AudioFrame>> + Send>>> {
+    async fn synthesize_stream<'a>(
+        &'a self,
+        request: &'a TtsRequest,
+    ) -> AudioResult<Pin<Box<dyn Stream<Item = AudioResult<AudioFrame<'static>>> + Send + 'a>>>
+    {
         // OpenAI TTS doesn't have a native streaming endpoint for PCM,
         // so we fetch the full response and yield it as a single frame.
         let frame = self.synthesize(request).await?;

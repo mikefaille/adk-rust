@@ -10,22 +10,22 @@ use crate::pipeline::types::{PipelineInput, PipelineMetrics, PipelineOutput};
 ///
 /// Provides channels for sending input, receiving output, reading metrics,
 /// and shutting down the pipeline.
-pub struct PipelineHandle {
+pub struct PipelineHandle<'a> {
     /// Send audio, text, or control messages into the pipeline.
-    pub input_tx: mpsc::Sender<PipelineInput>,
+    pub input_tx: mpsc::Sender<PipelineInput<'a>>,
     /// Receive audio, transcript, or metrics output from the pipeline.
-    pub output_rx: mpsc::Receiver<PipelineOutput>,
+    pub output_rx: mpsc::Receiver<PipelineOutput<'static>>,
     /// Real-time pipeline metrics (updated after each stage).
     pub metrics: Arc<RwLock<PipelineMetrics>>,
     /// One-shot channel to signal graceful shutdown.
     shutdown_tx: Option<oneshot::Sender<()>>,
 }
 
-impl PipelineHandle {
+impl<'a> PipelineHandle<'a> {
     /// Create a new `PipelineHandle`.
     pub(crate) fn new(
-        input_tx: mpsc::Sender<PipelineInput>,
-        output_rx: mpsc::Receiver<PipelineOutput>,
+        input_tx: mpsc::Sender<PipelineInput<'a>>,
+        output_rx: mpsc::Receiver<PipelineOutput<'static>>,
         metrics: Arc<RwLock<PipelineMetrics>>,
         shutdown_tx: oneshot::Sender<()>,
     ) -> Self {

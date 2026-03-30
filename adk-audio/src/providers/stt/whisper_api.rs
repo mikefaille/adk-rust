@@ -39,7 +39,11 @@ impl WhisperApiStt {
 
 #[async_trait]
 impl SttProvider for WhisperApiStt {
-    async fn transcribe(&self, audio: &AudioFrame, opts: &SttOptions) -> AudioResult<Transcript> {
+    async fn transcribe(
+        &self,
+        audio: &AudioFrame<'_>,
+        opts: &SttOptions,
+    ) -> AudioResult<Transcript> {
         let wav_bytes = frame_to_wav_bytes(audio)?;
         let url = format!("{}/v1/audio/transcriptions", self.base_url);
 
@@ -105,11 +109,11 @@ impl SttProvider for WhisperApiStt {
         Ok(Transcript { text, words, speakers: vec![], confidence: 1.0, language_detected })
     }
 
-    async fn transcribe_stream(
-        &self,
-        _audio: Pin<Box<dyn Stream<Item = AudioFrame> + Send>>,
-        _opts: &SttOptions,
-    ) -> AudioResult<Pin<Box<dyn Stream<Item = AudioResult<Transcript>> + Send>>> {
+    async fn transcribe_stream<'a>(
+        &'a self,
+        _audio: Pin<Box<dyn Stream<Item = AudioFrame<'a>> + Send + 'a>>,
+        _opts: &'a SttOptions,
+    ) -> AudioResult<Pin<Box<dyn Stream<Item = AudioResult<Transcript>> + Send + 'a>>> {
         // Whisper API doesn't support native streaming; use windowed fallback
         Ok(Box::pin(futures::stream::empty()))
     }
