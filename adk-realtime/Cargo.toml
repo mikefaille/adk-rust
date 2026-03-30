@@ -98,10 +98,6 @@ name = "livekit_bridge"
 required-features = ["livekit", "openai"]
 
 [[example]]
-name = "gemini_livekit_bridge"
-required-features = ["livekit", "gemini"]
-
-[[example]]
 name = "openai_webrtc"
 required-features = ["openai-webrtc"]
 
