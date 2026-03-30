@@ -62,7 +62,10 @@ pub fn decode<'a>(data: &'a [u8], format: AudioFormat) -> AudioResult<AudioFrame
         AudioFormat::Pcm16 => {
             // Raw PCM16 — assume 16kHz mono (caller should know the format)
             if data.len() % 2 != 0 {
-                return Err(AudioError::Codec(format!("invalid PCM16 byte length: {}", data.len())));
+                return Err(AudioError::Codec(format!(
+                    "invalid PCM16 byte length: {}",
+                    data.len()
+                )));
             }
             Ok(AudioFrame::new(std::borrow::Cow::Borrowed(bytemuck::cast_slice(data)), 16000, 1))
         }

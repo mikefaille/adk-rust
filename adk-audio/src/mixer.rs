@@ -73,10 +73,16 @@ impl Mixer {
         for (name, track) in &self.tracks {
             if let Some(ref frame) = track.buffer {
                 if frame.sample_rate != self.output_sample_rate {
-                    return Err(AudioError::Fx(format!("Track '{}' sample rate {} does not match mixer output rate {}", name, frame.sample_rate, self.output_sample_rate)));
+                    return Err(AudioError::Fx(format!(
+                        "Track '{}' sample rate {} does not match mixer output rate {}",
+                        name, frame.sample_rate, self.output_sample_rate
+                    )));
                 }
                 if frame.channels != 1 {
-                    return Err(AudioError::Fx(format!("Track '{}' is not mono. Mixer currently only supports mono tracks.", name)));
+                    return Err(AudioError::Fx(format!(
+                        "Track '{}' is not mono. Mixer currently only supports mono tracks.",
+                        name
+                    )));
                 }
             }
         }

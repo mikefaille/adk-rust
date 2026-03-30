@@ -129,10 +129,8 @@ impl TtsProvider for ElevenLabsTts {
                 message: "received odd-length PCM data from API".into(),
             });
         }
-        let data: Vec<i16> = pcm
-            .chunks_exact(2)
-            .map(|c| i16::from_le_bytes([c[0], c[1]]))
-            .collect();
+        let data: Vec<i16> =
+            pcm.chunks_exact(2).map(|c| i16::from_le_bytes([c[0], c[1]])).collect();
         Ok(AudioFrame::new(std::borrow::Cow::Owned(data), 24000, 1))
     }
 

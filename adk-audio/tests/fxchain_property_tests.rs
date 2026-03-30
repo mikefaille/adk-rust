@@ -7,7 +7,6 @@
 
 use adk_audio::{AudioFrame, AudioProcessor, AudioResult, FxChain};
 use async_trait::async_trait;
-use bytes::Bytes;
 use proptest::prelude::*;
 
 /// A processor that adds a fixed offset to all samples (for testing order).

@@ -86,7 +86,8 @@ impl AudioProcessor for FxChain {
     async fn process<'a>(&'a self, frame: &AudioFrame<'a>) -> AudioResult<AudioFrame<'static>> {
         let mut produced: Option<AudioFrame<'static>> = None;
         for stage in &self.stages {
-            let output = stage.process(if let Some(ref owned) = produced { owned } else { frame }).await?;
+            let output =
+                stage.process(if let Some(ref owned) = produced { owned } else { frame }).await?;
             produced = Some(output);
         }
         Ok(produced.unwrap_or_else(|| AudioFrame {

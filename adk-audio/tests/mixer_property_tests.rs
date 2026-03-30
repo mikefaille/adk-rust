@@ -7,7 +7,6 @@
 //! **Validates: Requirement 22**
 
 use adk_audio::{AudioFrame, Mixer};
-use bytes::Bytes;
 use proptest::prelude::*;
 
 fn arb_volume() -> impl Strategy<Value = f32> {
