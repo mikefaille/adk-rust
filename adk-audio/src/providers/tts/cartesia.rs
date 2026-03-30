@@ -61,7 +61,7 @@ impl CartesiaTts {
 
 #[async_trait]
 impl TtsProvider for CartesiaTts {
-    async fn synthesize(&self, request: &TtsRequest) -> AudioResult<AudioFrame> {
+    async fn synthesize(&self, request: &TtsRequest) -> AudioResult<AudioFrame<'static>> {
         let voice_id = if request.voice.is_empty() { &self.voices[0].id } else { &request.voice };
         let url = format!("{}/tts/bytes", self.base_url());
 
@@ -99,13 +99,14 @@ impl TtsProvider for CartesiaTts {
             .await
             .map_err(|e| AudioError::Tts { provider: "cartesia".into(), message: e.to_string() })?;
 
-        Ok(AudioFrame::new(pcm, 24000, 1))
+        let data = bytemuck::cast_slice::<u8, i16>(&pcm).to_vec();
+        Ok(AudioFrame::new(std::borrow::Cow::Owned(data), 24000, 1))
     }
 
-    async fn synthesize_stream(
-        &self,
-        request: &TtsRequest,
-    ) -> AudioResult<Pin<Box<dyn Stream<Item = AudioResult<AudioFrame>> + Send>>> {
+    async fn synthesize_stream<'a>(
+        &'a self,
+        request: &'a TtsRequest,
+    ) -> AudioResult<Pin<Box<dyn Stream<Item = AudioResult<AudioFrame<'static>>> + Send + 'a>>> {
         // Cartesia supports WebSocket streaming, but for now use batch
         let frame = self.synthesize(request).await?;
         Ok(Box::pin(futures::stream::once(async { Ok(frame) })))

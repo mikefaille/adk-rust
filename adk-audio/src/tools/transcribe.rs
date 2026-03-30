@@ -53,10 +53,10 @@ impl adk_core::Tool for TranscribeTool {
         let language = args["language"].as_str().map(String::from);
 
         // Decode base64 audio
-        use bytes::Bytes;
         let data = base64_decode(audio_b64)
             .map_err(|e| adk_core::AdkError::tool(format!("transcribe: invalid base64: {e}")))?;
-        let frame = crate::frame::AudioFrame::new(Bytes::from(data), sample_rate, 1);
+        let pcm = bytemuck::cast_slice::<u8, i16>(&data).to_vec();
+        let frame = crate::frame::AudioFrame::new(std::borrow::Cow::Owned(pcm), sample_rate, 1);
 
         let opts = SttOptions { language, ..Default::default() };
         let transcript = self

@@ -12,7 +12,7 @@ use crate::frame::AudioFrame;
 #[async_trait]
 pub trait AudioProcessor: Send + Sync {
     /// Process a single audio frame, returning the transformed result.
-    async fn process(&self, frame: &AudioFrame) -> AudioResult<AudioFrame>;
+    async fn process<'a>(&'a self, frame: &AudioFrame<'a>) -> AudioResult<AudioFrame<'static>>;
 }
 
 /// An ordered chain of `AudioProcessor` stages applied in series.
@@ -63,8 +63,14 @@ impl Default for FxChain {
 
 #[async_trait]
 impl AudioProcessor for FxChain {
-    async fn process(&self, frame: &AudioFrame) -> AudioResult<AudioFrame> {
-        let mut current = frame.clone();
+    async fn process<'a>(&'a self, frame: &AudioFrame<'a>) -> AudioResult<AudioFrame<'static>> {
+        let mut current = AudioFrame {
+            data: std::borrow::Cow::Owned(frame.data.to_vec()),
+            sample_rate: frame.sample_rate,
+            channels: frame.channels,
+            duration_ms: frame.duration_ms,
+            samples_per_channel: frame.samples_per_channel,
+        };
         for stage in &self.stages {
             current = stage.process(&current).await?;
         }

@@ -87,7 +87,7 @@ impl ElevenLabsTts {
 
 #[async_trait]
 impl TtsProvider for ElevenLabsTts {
-    async fn synthesize(&self, request: &TtsRequest) -> AudioResult<AudioFrame> {
+    async fn synthesize(&self, request: &TtsRequest) -> AudioResult<AudioFrame<'static>> {
         let voice_id = if request.voice.is_empty() { &self.voices[0].id } else { &request.voice };
         let url =
             format!("{}/v1/text-to-speech/{voice_id}?output_format=pcm_24000", self.base_url());
@@ -123,13 +123,14 @@ impl TtsProvider for ElevenLabsTts {
             message: e.to_string(),
         })?;
 
-        Ok(AudioFrame::new(pcm, 24000, 1))
+        let data = bytemuck::cast_slice::<u8, i16>(&pcm).to_vec();
+        Ok(AudioFrame::new(std::borrow::Cow::Owned(data), 24000, 1))
     }
 
-    async fn synthesize_stream(
-        &self,
-        request: &TtsRequest,
-    ) -> AudioResult<Pin<Box<dyn Stream<Item = AudioResult<AudioFrame>> + Send>>> {
+    async fn synthesize_stream<'a>(
+        &'a self,
+        request: &'a TtsRequest,
+    ) -> AudioResult<Pin<Box<dyn Stream<Item = AudioResult<AudioFrame<'static>>> + Send + 'a>>> {
         let voice_id = if request.voice.is_empty() {
             self.voices[0].id.clone()
         } else {
@@ -173,7 +174,8 @@ impl TtsProvider for ElevenLabsTts {
                 match chunk {
                     Ok(data) => {
                         if data.len() >= 2 {
-                            yield Ok(AudioFrame::new(data, 24000, 1));
+                            let data_vec = bytemuck::cast_slice::<u8, i16>(&data).to_vec();
+                            yield Ok(AudioFrame::new(std::borrow::Cow::Owned(data_vec), 24000, 1));
                         }
                     }
                     Err(e) => {

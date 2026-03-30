@@ -16,8 +16,8 @@ use crate::traits::{FxChain, SttOptions, SttProvider, TtsProvider, TtsRequest, V
 /// reasoning, sentence-chunked TTS synthesis, and audio output.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn voice_agent_loop(
-    mut input_rx: mpsc::Receiver<PipelineInput>,
-    output_tx: mpsc::Sender<PipelineOutput>,
+    mut input_rx: mpsc::Receiver<PipelineInput<'static>>,
+    output_tx: mpsc::Sender<PipelineOutput<'static>>,
     stt: Arc<dyn SttProvider>,
     tts: Arc<dyn TtsProvider>,
     vad: Arc<dyn VadProcessor>,
@@ -27,7 +27,7 @@ pub(crate) async fn voice_agent_loop(
     metrics: Arc<RwLock<PipelineMetrics>>,
     mut shutdown_rx: oneshot::Receiver<()>,
 ) {
-    let mut speech_buffer: Vec<AudioFrame> = Vec::new();
+    let mut speech_buffer: Vec<AudioFrame<'static>> = Vec::new();
     let mut silence_count = 0u32;
     let silence_threshold = 5; // consecutive silent frames before flush
     let mut total_frames = 0u64;
@@ -95,7 +95,7 @@ pub(crate) async fn voice_agent_loop(
 /// Synthesize text through sentence-chunked TTS and emit audio output.
 async fn process_text_to_speech(
     tts: &Arc<dyn TtsProvider>,
-    output_tx: &mpsc::Sender<PipelineOutput>,
+    output_tx: &mpsc::Sender<PipelineOutput<'static>>,
     metrics: &Arc<RwLock<PipelineMetrics>>,
     text: &str,
 ) {

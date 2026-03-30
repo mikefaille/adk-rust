@@ -21,9 +21,9 @@ use adk_audio::traits::{SttOptions, SttProvider};
 #[tokio::test]
 async fn bug_condition_assemblyai_transcribe_stream_returns_error() {
     let provider = adk_audio::AssemblyAiStt::with_api_key("test-key".to_string());
-
+    let opts = SttOptions::default();
     let result = provider
-        .transcribe_stream(Box::pin(futures::stream::empty()), &SttOptions::default())
+        .transcribe_stream(Box::pin(futures::stream::empty()), &opts)
         .await;
 
     match result {
@@ -49,9 +49,9 @@ async fn bug_condition_assemblyai_transcribe_stream_returns_error() {
 #[tokio::test]
 async fn bug_condition_deepgram_transcribe_stream_returns_error() {
     let provider = adk_audio::DeepgramStt::with_api_key("test-key".to_string());
-
+    let opts = SttOptions::default();
     let result = provider
-        .transcribe_stream(Box::pin(futures::stream::empty()), &SttOptions::default())
+        .transcribe_stream(Box::pin(futures::stream::empty()), &opts)
         .await;
 
     match result {
@@ -78,9 +78,9 @@ async fn bug_condition_deepgram_transcribe_stream_returns_error() {
 #[tokio::test]
 async fn bug_condition_mlx_transcribe_stream_returns_error() {
     let provider = adk_audio::MlxSttProvider::with_dummy();
-
+    let opts = SttOptions::default();
     let result = provider
-        .transcribe_stream(Box::pin(futures::stream::empty()), &SttOptions::default())
+        .transcribe_stream(Box::pin(futures::stream::empty()), &opts)
         .await;
 
     match result {

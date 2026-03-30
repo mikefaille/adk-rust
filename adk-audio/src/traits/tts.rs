@@ -81,13 +81,13 @@ impl Default for TtsRequest {
 #[async_trait]
 pub trait TtsProvider: Send + Sync {
     /// Synthesize text to a single audio frame (batch mode).
-    async fn synthesize(&self, request: &TtsRequest) -> AudioResult<AudioFrame>;
+    async fn synthesize(&self, request: &TtsRequest) -> AudioResult<AudioFrame<'static>>;
 
     /// Synthesize text as a stream of audio frames (streaming mode).
-    async fn synthesize_stream(
-        &self,
-        request: &TtsRequest,
-    ) -> AudioResult<Pin<Box<dyn Stream<Item = AudioResult<AudioFrame>> + Send>>>;
+    async fn synthesize_stream<'a>(
+        &'a self,
+        request: &'a TtsRequest,
+    ) -> AudioResult<Pin<Box<dyn Stream<Item = AudioResult<AudioFrame<'static>>> + Send + 'a>>>;
 
     /// List available voices for this provider.
     fn voice_catalog(&self) -> &[Voice];

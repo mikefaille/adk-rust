@@ -273,7 +273,7 @@ proptest! {
             let (lk_handler, lk_inner) = create_test_handler();
             let direct = create_direct_handler();
 
-            let error = RealtimeError::livekit(&ctx);
+            let error: RealtimeError = adk_realtime::livekit::error::LiveKitError::General(ctx.clone()).into();
             lk_handler.on_error(&error).await.unwrap();
             direct.on_error(&error).await.unwrap();
 

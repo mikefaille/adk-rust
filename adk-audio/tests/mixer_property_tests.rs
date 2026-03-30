@@ -24,8 +24,7 @@ proptest! {
     /// P6.1: Volume 0.0 produces silence
     #[test]
     fn prop_volume_zero_silence(samples in arb_pcm_samples(200)) {
-        let pcm: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
-        let frame = AudioFrame::new(Bytes::from(pcm), 16000, 1);
+        let frame = AudioFrame::new(std::borrow::Cow::Owned(samples.clone()), 16000, 1);
 
         let mut mixer = Mixer::new(16000);
         mixer.add_track("test", 0.0);
@@ -40,8 +39,7 @@ proptest! {
     /// P6.2: Volume 1.0 preserves original samples
     #[test]
     fn prop_volume_one_identity(samples in arb_pcm_samples(200)) {
-        let pcm: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
-        let frame = AudioFrame::new(Bytes::from(pcm), 16000, 1);
+        let frame = AudioFrame::new(std::borrow::Cow::Owned(samples.clone()), 16000, 1);
 
         let mut mixer = Mixer::new(16000);
         mixer.add_track("test", 1.0);
@@ -62,8 +60,7 @@ proptest! {
     /// P6.3: Volume scaling is correct
     #[test]
     fn prop_volume_scaling(samples in arb_pcm_samples(200), volume in arb_volume()) {
-        let pcm: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
-        let frame = AudioFrame::new(Bytes::from(pcm), 16000, 1);
+        let frame = AudioFrame::new(std::borrow::Cow::Owned(samples.clone()), 16000, 1);
 
         let mut mixer = Mixer::new(16000);
         mixer.add_track("test", volume);

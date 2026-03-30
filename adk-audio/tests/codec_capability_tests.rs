@@ -21,7 +21,7 @@ fn arb_audio_format() -> impl Strategy<Value = AudioFormat> {
 }
 
 /// Create a valid PCM16 AudioFrame suitable for encoding.
-fn valid_pcm16_frame() -> AudioFrame {
+fn valid_pcm16_frame() -> AudioFrame<'static> {
     // 10 samples of silence at 16kHz mono = 20 bytes
     AudioFrame::silence(16000, 1, 10)
 }

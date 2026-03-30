@@ -99,13 +99,13 @@ impl AudioPipelineBuilder {
     }
 
     /// Build a TTS-only pipeline (Text → TTS → Audio).
-    pub fn build_tts(self) -> AudioResult<PipelineHandle> {
+    pub fn build_tts(self) -> AudioResult<PipelineHandle<'static>> {
         let tts = self.tts.ok_or_else(|| {
             AudioError::PipelineClosed("TTS pipeline requires a TtsProvider".into())
         })?;
 
-        let (input_tx, mut input_rx) = mpsc::channel::<PipelineInput>(self.buffer_size);
-        let (output_tx, output_rx) = mpsc::channel::<PipelineOutput>(self.buffer_size);
+        let (input_tx, mut input_rx) = mpsc::channel::<PipelineInput<'static>>(self.buffer_size);
+        let (output_tx, output_rx) = mpsc::channel::<PipelineOutput<'static>>(self.buffer_size);
         let metrics = Arc::new(RwLock::new(PipelineMetrics::default()));
         let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
 
@@ -134,13 +134,13 @@ impl AudioPipelineBuilder {
     }
 
     /// Build an STT-only pipeline (Audio → STT → Transcript).
-    pub fn build_stt(self) -> AudioResult<PipelineHandle> {
+    pub fn build_stt(self) -> AudioResult<PipelineHandle<'static>> {
         let stt = self.stt.ok_or_else(|| {
             AudioError::PipelineClosed("STT pipeline requires an SttProvider".into())
         })?;
 
-        let (input_tx, mut input_rx) = mpsc::channel::<PipelineInput>(self.buffer_size);
-        let (output_tx, output_rx) = mpsc::channel::<PipelineOutput>(self.buffer_size);
+        let (input_tx, mut input_rx) = mpsc::channel::<PipelineInput<'static>>(self.buffer_size);
+        let (output_tx, output_rx) = mpsc::channel::<PipelineOutput<'static>>(self.buffer_size);
         let metrics = Arc::new(RwLock::new(PipelineMetrics::default()));
         let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
 
@@ -171,7 +171,7 @@ impl AudioPipelineBuilder {
     /// Build a voice agent pipeline (Audio → VAD → STT → Agent → TTS → Audio).
     ///
     /// Requires `tts`, `stt`, `vad`, and `agent` to be set.
-    pub fn build_voice_agent(self) -> AudioResult<PipelineHandle> {
+    pub fn build_voice_agent(self) -> AudioResult<PipelineHandle<'static>> {
         validate_voice_agent_config(
             self.tts.is_some(),
             self.stt.is_some(),
@@ -184,8 +184,8 @@ impl AudioPipelineBuilder {
         let vad = self.vad.unwrap();
         let agent = self.agent.unwrap();
 
-        let (input_tx, input_rx) = mpsc::channel::<PipelineInput>(self.buffer_size);
-        let (output_tx, output_rx) = mpsc::channel::<PipelineOutput>(self.buffer_size);
+        let (input_tx, input_rx) = mpsc::channel::<PipelineInput<'static>>(self.buffer_size);
+        let (output_tx, output_rx) = mpsc::channel::<PipelineOutput<'static>>(self.buffer_size);
         let metrics = Arc::new(RwLock::new(PipelineMetrics::default()));
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
 
@@ -207,11 +207,11 @@ impl AudioPipelineBuilder {
     }
 
     /// Build a transform-only pipeline (Audio → FxChain → Audio).
-    pub fn build_transform(self) -> AudioResult<PipelineHandle> {
+    pub fn build_transform(self) -> AudioResult<PipelineHandle<'static>> {
         let pre_fx = self.pre_fx.unwrap_or_default();
 
-        let (input_tx, mut input_rx) = mpsc::channel::<PipelineInput>(self.buffer_size);
-        let (output_tx, output_rx) = mpsc::channel::<PipelineOutput>(self.buffer_size);
+        let (input_tx, mut input_rx) = mpsc::channel::<PipelineInput<'static>>(self.buffer_size);
+        let (output_tx, output_rx) = mpsc::channel::<PipelineOutput<'static>>(self.buffer_size);
         let metrics = Arc::new(RwLock::new(PipelineMetrics::default()));
         let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
 
@@ -239,13 +239,13 @@ impl AudioPipelineBuilder {
     }
 
     /// Build a music generation pipeline (Text → MusicProvider → Audio).
-    pub fn build_music(self) -> AudioResult<PipelineHandle> {
+    pub fn build_music(self) -> AudioResult<PipelineHandle<'static>> {
         let music = self.music.ok_or_else(|| {
             AudioError::PipelineClosed("Music pipeline requires a MusicProvider".into())
         })?;
 
-        let (input_tx, mut input_rx) = mpsc::channel::<PipelineInput>(self.buffer_size);
-        let (output_tx, output_rx) = mpsc::channel::<PipelineOutput>(self.buffer_size);
+        let (input_tx, mut input_rx) = mpsc::channel::<PipelineInput<'static>>(self.buffer_size);
+        let (output_tx, output_rx) = mpsc::channel::<PipelineOutput<'static>>(self.buffer_size);
         let metrics = Arc::new(RwLock::new(PipelineMetrics::default()));
         let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
 

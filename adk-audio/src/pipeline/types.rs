@@ -4,9 +4,9 @@ use crate::frame::AudioFrame;
 use crate::traits::Transcript;
 
 /// Messages that can be sent into a pipeline.
-pub enum PipelineInput {
+pub enum PipelineInput<'a> {
     /// Raw audio data.
-    Audio(AudioFrame),
+    Audio(AudioFrame<'a>),
     /// Text input (bypasses STT).
     Text(String),
     /// Control message.
@@ -24,9 +24,9 @@ pub enum PipelineControl {
 }
 
 /// Messages produced by a pipeline.
-pub enum PipelineOutput {
+pub enum PipelineOutput<'a> {
     /// Synthesized or processed audio.
-    Audio(AudioFrame),
+    Audio(AudioFrame<'a>),
     /// Transcription result.
     Transcript(Transcript),
     /// Agent text response (before TTS).

@@ -49,18 +49,29 @@
 //! let handler = LiveKitEventHandler::new(inner_handler, audio_source.clone());
 //! ```
 
+#[cfg(feature = "test-utils")]
+pub mod test_utils;
+
+#[cfg(feature = "livekit")]
+pub mod error;
+
+#[cfg(feature = "livekit")]
 mod bridge;
+#[cfg(feature = "livekit")]
 mod handler;
 
 // ── Our bridge utilities ────────────────────────────────────────────────
 
+#[cfg(feature = "livekit")]
 pub use bridge::{bridge_gemini_input, bridge_input};
+#[cfg(feature = "livekit")]
 pub use handler::LiveKitEventHandler;
 
 // ── Room and connection ─────────────────────────────────────────────────
 //
 // Core types for connecting to and interacting with a LiveKit room.
 
+#[cfg(feature = "livekit")]
 pub use livekit::prelude::{
     ConnectionState, DataPacket, DataPacketKind, Room, RoomError, RoomEvent, RoomOptions,
     RoomResult,
@@ -68,6 +79,7 @@ pub use livekit::prelude::{
 
 // ── Participants ────────────────────────────────────────────────────────
 
+#[cfg(feature = "livekit")]
 pub use livekit::prelude::{LocalParticipant, Participant, RemoteParticipant};
 
 // ── Tracks ──────────────────────────────────────────────────────────────
@@ -75,12 +87,14 @@ pub use livekit::prelude::{LocalParticipant, Participant, RemoteParticipant};
 // Track types used when subscribing to remote audio or publishing local
 // audio back into the room.
 
+#[cfg(feature = "livekit")]
 pub use livekit::prelude::{
     LocalAudioTrack, LocalTrack, RemoteAudioTrack, RemoteTrack, RemoteVideoTrack, Track, TrackKind,
     TrackSource,
 };
 
 /// Options for publishing a local track (codec preferences, simulcast, etc.).
+#[cfg(feature = "livekit")]
 pub use livekit::options::TrackPublishOptions;
 
 // ── Audio I/O ───────────────────────────────────────────────────────────
@@ -89,10 +103,12 @@ pub use livekit::options::TrackPublishOptions;
 // reading them from a subscribed track.
 
 /// A single audio frame (PCM samples + sample rate + channel count).
+#[cfg(feature = "livekit")]
 pub use livekit::webrtc::audio_frame::AudioFrame;
 
 /// Builder options, source wrapper, and platform-native source for
 /// pushing audio frames into a LiveKit audio track.
+#[cfg(feature = "livekit")]
 pub use livekit::webrtc::audio_source::{
     AudioSourceOptions, RtcAudioSource, native::NativeAudioSource,
 };
@@ -103,9 +119,11 @@ pub use livekit::webrtc::audio_source::{
 // crate so downstream consumers do not need a direct dependency on it.
 
 /// JWT access token for authenticating participants.
+#[cfg(feature = "livekit")]
 pub use livekit_api::access_token::AccessToken;
 
 /// Permission grants embedded in an [`AccessToken`].
+#[cfg(feature = "livekit")]
 pub use livekit_api::access_token::VideoGrants;
 
 /// Convenience prelude that re-exports everything above plus our bridge
@@ -114,6 +132,7 @@ pub use livekit_api::access_token::VideoGrants;
 /// ```rust,ignore
 /// use adk_realtime::livekit::prelude::*;
 /// ```
+#[cfg(feature = "livekit")]
 pub mod prelude {
     pub use super::{
         // Authentication

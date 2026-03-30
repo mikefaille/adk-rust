@@ -47,7 +47,7 @@ impl AssemblyAiStt {
 
 #[async_trait]
 impl SttProvider for AssemblyAiStt {
-    async fn transcribe(&self, audio: &AudioFrame, opts: &SttOptions) -> AudioResult<Transcript> {
+    async fn transcribe(&self, audio: &AudioFrame<'_>, opts: &SttOptions) -> AudioResult<Transcript> {
         let wav_bytes = frame_to_wav_bytes(audio)?;
 
         // Step 1: Upload audio (base_url is always HTTPS — enforced at construction)
@@ -159,11 +159,11 @@ impl SttProvider for AssemblyAiStt {
         }
     }
 
-    async fn transcribe_stream(
-        &self,
-        _audio: Pin<Box<dyn Stream<Item = AudioFrame> + Send>>,
-        _opts: &SttOptions,
-    ) -> AudioResult<Pin<Box<dyn Stream<Item = AudioResult<Transcript>> + Send>>> {
+    async fn transcribe_stream<'a>(
+        &'a self,
+        _audio: Pin<Box<dyn Stream<Item = AudioFrame<'a>> + Send + 'a>>,
+        _opts: &'a SttOptions,
+    ) -> AudioResult<Pin<Box<dyn Stream<Item = AudioResult<Transcript>> + Send + 'a>>> {
         Err(AudioError::Stt {
             provider: "assemblyai".into(),
             message: "streaming transcription not yet implemented".into(),
@@ -214,8 +214,9 @@ mod tests {
             base_url: "https://api.assemblyai.com".to_string(),
         };
 
+        let opts = SttOptions::default();
         let result = provider
-            .transcribe_stream(Box::pin(futures::stream::empty()), &SttOptions::default())
+            .transcribe_stream(Box::pin(futures::stream::empty()), &opts)
             .await;
 
         match result {

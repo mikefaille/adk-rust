@@ -30,11 +30,12 @@ proptest! {
         sr in arb_sample_rate(),
         ch in arb_channels(),
     ) {
-        let original = AudioFrame::new(data, sr, ch);
+        let pcm = bytemuck::cast_slice::<u8, i16>(&data).to_vec();
+        let original = AudioFrame::new(std::borrow::Cow::Owned(pcm), sr, ch);
         let encoded = encode(&original, AudioFormat::Wav).unwrap();
         let decoded = decode(&encoded, AudioFormat::Wav).unwrap();
 
-        prop_assert_eq!(&decoded.data, &original.data);
+        prop_assert_eq!(&decoded.data[..], &original.data[..]);
         prop_assert_eq!(decoded.sample_rate, original.sample_rate);
         prop_assert_eq!(decoded.channels, original.channels);
     }
@@ -46,7 +47,8 @@ proptest! {
         sr in arb_sample_rate(),
         ch in arb_channels(),
     ) {
-        let frame = AudioFrame::new(data, sr, ch);
+        let pcm = bytemuck::cast_slice::<u8, i16>(&data).to_vec();
+        let frame = AudioFrame::new(std::borrow::Cow::Owned(pcm), sr, ch);
         let encoded = encode(&frame, AudioFormat::Wav).unwrap();
         let bytes = encoded.as_ref();
 

@@ -17,16 +17,15 @@ struct OffsetProcessor {
 
 #[async_trait]
 impl AudioProcessor for OffsetProcessor {
-    async fn process(&self, frame: &AudioFrame) -> AudioResult<AudioFrame> {
+    async fn process<'a>(&'a self, frame: &AudioFrame<'a>) -> AudioResult<AudioFrame<'static>> {
         let samples = frame.samples();
-        let pcm: Vec<u8> = samples
+        let pcm: Vec<i16> = samples
             .iter()
-            .flat_map(|&s| {
-                let val = (s as i32 + self.offset as i32).clamp(-32768, 32767) as i16;
-                val.to_le_bytes()
+            .map(|&s| {
+                (s as i32 + self.offset as i32).clamp(-32768, 32767) as i16
             })
             .collect();
-        Ok(AudioFrame::new(Bytes::from(pcm), frame.sample_rate, frame.channels))
+        Ok(AudioFrame::new(std::borrow::Cow::Owned(pcm), frame.sample_rate, frame.channels))
     }
 }
 
@@ -44,10 +43,11 @@ proptest! {
             .unwrap();
 
         rt.block_on(async {
-            let frame = AudioFrame::new(Bytes::from(data.clone()), 16000, 1);
+            let pcm = bytemuck::cast_slice::<u8, i16>(&data).to_vec();
+            let frame = AudioFrame::new(std::borrow::Cow::Owned(pcm.clone()), 16000, 1);
             let chain = FxChain::new();
             let result = chain.process(&frame).await.unwrap();
-            prop_assert_eq!(&result.data[..], &data[..]);
+            prop_assert_eq!(&result.data[..], &pcm[..]);
             Ok(())
         })?;
     }
