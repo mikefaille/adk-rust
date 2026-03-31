@@ -32,7 +32,7 @@ type WsSource = futures::stream::SplitStream<WsStream>;
 #[derive(Debug, Clone)]
 pub enum GeminiLiveBackend {
     /// AI Studio with API key authentication.
-    Studio { api_key: String },
+    Studio { api_key: String, model: String },
 
     /// Vertex AI with OAuth2/ADC authentication.
     #[cfg(feature = "vertex-live")]
@@ -43,13 +43,15 @@ pub enum GeminiLiveBackend {
         region: String,
         /// Google Cloud project ID.
         project_id: String,
+        /// The model identifier (e.g. "gemini-3.1-flash-live-preview").
+        model: String,
     },
 }
 
 impl GeminiLiveBackend {
     /// Create a Studio backend with API key authentication.
-    pub fn studio(api_key: impl Into<String>) -> Self {
-        Self::Studio { api_key: api_key.into() }
+    pub fn studio(api_key: impl Into<String>, model: impl Into<String>) -> Self {
+        Self::Studio { api_key: api_key.into(), model: model.into() }
     }
 
     /// Create a Vertex AI backend using Application Default Credentials (ADC).
@@ -62,18 +64,27 @@ impl GeminiLiveBackend {
     /// # Example
     ///
     /// ```rust,ignore
-    /// let backend = GeminiLiveBackend::vertex_adc("my-project", "us-central1")?;
+    /// let backend = GeminiLiveBackend::vertex_adc("my-project", "us-central1", "gemini-3.1-flash-live-preview")?;
     /// let model = GeminiRealtimeModel::new(backend, "models/gemini-live-2.5-flash-native-audio");
     /// ```
     #[cfg(feature = "vertex-live")]
-    pub fn vertex_adc(project_id: impl Into<String>, region: impl Into<String>) -> Result<Self> {
+    pub fn vertex_adc(
+        project_id: impl Into<String>,
+        region: impl Into<String>,
+        model: impl Into<String>,
+    ) -> Result<Self> {
         let credentials =
             google_cloud_auth::credentials::Builder::default().build().map_err(|e| {
                 RealtimeError::AuthError(format!(
                     "Failed to discover Application Default Credentials: {e}"
                 ))
             })?;
-        Ok(Self::Vertex { credentials, region: region.into(), project_id: project_id.into() })
+        Ok(Self::Vertex {
+            credentials,
+            region: region.into(),
+            project_id: project_id.into(),
+            model: model.into(),
+        })
     }
 }
 
@@ -202,10 +213,10 @@ impl GeminiRealtimeSession {
         config: RealtimeConfig,
     ) -> Result<Self> {
         let ws_stream = match &backend {
-            GeminiLiveBackend::Studio { api_key } => {
+            GeminiLiveBackend::Studio { api_key, model } => {
                 let url = format!(
-                    "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key={}",
-                    api_key
+                    "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key={}&model={}",
+                    api_key, model
                 );
                 let request = url.into_client_request().map_err(|e| {
                     RealtimeError::connection(format!("Failed to create request: {}", e))
@@ -216,8 +227,8 @@ impl GeminiRealtimeSession {
                 ws
             }
             #[cfg(feature = "vertex-live")]
-            GeminiLiveBackend::Vertex { credentials, region, project_id } => {
-                let url = build_vertex_live_url(region, project_id)?;
+            GeminiLiveBackend::Vertex { credentials, region, project_id, model } => {
+                let url = build_vertex_live_url(region, project_id, model)?;
 
                 // Obtain OAuth2 bearer token from ADC credentials
                 let header_map =
@@ -718,17 +729,20 @@ impl std::fmt::Debug for GeminiRealtimeSession {
 ///
 /// Returns `RealtimeError::ConfigError` if region or project_id is empty.
 #[cfg(feature = "vertex-live")]
-pub fn build_vertex_live_url(region: &str, project_id: &str) -> Result<String> {
+pub fn build_vertex_live_url(region: &str, project_id: &str, model: &str) -> Result<String> {
     if region.is_empty() {
         return Err(RealtimeError::config("Vertex AI Live requires a non-empty region"));
     }
     if project_id.is_empty() {
         return Err(RealtimeError::config("Vertex AI Live requires a non-empty project_id"));
     }
+    if model.is_empty() {
+        return Err(RealtimeError::config("Vertex AI Live requires a non-empty model"));
+    }
     Ok(format!(
         "wss://{region}-aiplatform.googleapis.com/ws/\
          google.cloud.aiplatform.v1beta1.LlmBidiService/BidiGenerateContent\
-         ?project_id={project_id}",
+         ?project_id={project_id}&model={model}",
     ))
 }
 

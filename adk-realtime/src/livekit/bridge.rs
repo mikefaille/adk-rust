@@ -1,15 +1,11 @@
 //! Bridge functions for connecting LiveKit audio tracks to a [`RealtimeRunner`].
 
 use futures::StreamExt;
-use livekit::prelude::{RemoteTrack, RoomEvent};
 use livekit::track::RemoteAudioTrack;
 use livekit::webrtc::audio_stream::native::NativeAudioStream;
-use std::sync::Arc;
-use tokio::sync::mpsc::UnboundedReceiver;
-use tracing::Instrument;
 
 use crate::audio::{AudioChunk, AudioFormat, SmartAudioBuffer};
-use crate::livekit::error::Result;
+use crate::error::Result;
 use crate::runner::RealtimeRunner;
 
 /// Default sample rate for OpenAI-compatible audio (24kHz).
@@ -42,96 +38,14 @@ pub async fn bridge_input(track: RemoteAudioTrack, runner: &RealtimeRunner) -> R
         if let Some(samples) = buffer.flush() {
             // Convert i16 samples to little-endian PCM16 bytes
             let chunk = AudioChunk::from_i16_samples(&samples, AudioFormat::pcm16_24khz());
-            runner
-                .send_audio(&chunk.to_base64())
-                .await
-                .map_err(|e| crate::livekit::error::LiveKitError::Bridge(e.to_string()))?;
+            runner.send_audio(&chunk.to_base64()).await?;
         }
     }
 
     if let Some(samples) = buffer.flush_remaining() {
         let chunk = AudioChunk::from_i16_samples(&samples, AudioFormat::pcm16_24khz());
-        runner
-            .send_audio(&chunk.to_base64())
-            .await
-            .map_err(|e| crate::livekit::error::LiveKitError::Bridge(e.to_string()))?;
+        runner.send_audio(&chunk.to_base64()).await?;
     }
-
-    Ok(())
-}
-
-/// A high-level helper that waits for the first remote participant to publish an audio track,
-/// and automatically bridges it to the `RealtimeRunner`.
-///
-/// This avoids a common pitfall where users block the main async task on `bridge_input`
-/// while continuing to hold the unbounded `RoomEvent` receiver, resulting in an unhandled
-/// event memory leak over the life of the room connection.
-///
-/// # Arguments
-///
-/// * `room_events` - The LiveKit room event receiver. This function consumes and drops it.
-/// * `runner` - The target `RealtimeRunner`.
-///
-/// # Latency & Concurrency
-///
-/// This helper is designed for scalable, non-blocking operation. It polls the `RoomEvent` receiver
-/// continuously to avoid memory leaks. When an audio track is detected, the intensive bridging stream
-/// (`bridge_input`) is spawned into a background `tokio::spawn` task automatically. The background
-/// task is explicitly instrumented with the parent's current `tracing::Span` to ensure unbroken trace
-/// continuity across the async boundary, which is critical for end-to-end telemetry and debugging.
-///
-/// # Example
-///
-/// ```rust,ignore
-/// use adk_realtime::livekit::{LiveKitRoomBuilder, wait_and_bridge_audio};
-///
-/// let builder = LiveKitRoomBuilder::new(config).build("my-room")?;
-/// let (_room, room_events, _) = builder.connect().await?;
-///
-/// tokio::spawn(async move {
-///     wait_and_bridge_audio(room_events, &runner).await.unwrap();
-/// });
-/// ```
-pub async fn wait_and_bridge_audio(
-    mut room_events: UnboundedReceiver<RoomEvent>,
-    runner: &Arc<RealtimeRunner>,
-) -> Result<()> {
-    tracing::info!("Listening for remote participant audio tracks...");
-
-    // Continuously poll the unbounded receiver to prevent LiveKit room events
-    // from leaking memory over the lifespan of the connection.
-    while let Some(event) = room_events.recv().await {
-        if let RoomEvent::TrackSubscribed {
-            track: RemoteTrack::Audio(audio_track),
-            participant,
-            ..
-        } = event
-        {
-            tracing::info!(
-                "Subscribed to audio track from participant: {}",
-                participant.identity()
-            );
-
-            // Spawn the blocking bridge stream into its own task so we do not block
-            // the main event loop. This allows us to keep draining `room_events`.
-            let bridge_runner = Arc::clone(runner);
-            let span = tracing::Span::current();
-            tokio::spawn(
-                async move {
-                    if let Err(e) = bridge_input(audio_track, &bridge_runner).await {
-                        tracing::error!(
-                            "Audio input bridge failed for participant {}: {}",
-                            participant.identity(),
-                            e
-                        );
-                    }
-                }
-                .instrument(span),
-            );
-        }
-    }
-
-    tracing::info!("LiveKit room connection closed. Audio bridge loop terminating.");
 
     Ok(())
 }
@@ -157,19 +71,13 @@ pub async fn bridge_gemini_input(track: RemoteAudioTrack, runner: &RealtimeRunne
         buffer.push(&frame.data);
         if let Some(samples) = buffer.flush() {
             let chunk = AudioChunk::from_i16_samples(&samples, AudioFormat::pcm16_16khz());
-            runner
-                .send_audio(&chunk.to_base64())
-                .await
-                .map_err(|e| crate::livekit::error::LiveKitError::Bridge(e.to_string()))?;
+            runner.send_audio(&chunk.to_base64()).await?;
         }
     }
 
     if let Some(samples) = buffer.flush_remaining() {
         let chunk = AudioChunk::from_i16_samples(&samples, AudioFormat::pcm16_16khz());
-        runner
-            .send_audio(&chunk.to_base64())
-            .await
-            .map_err(|e| crate::livekit::error::LiveKitError::Bridge(e.to_string()))?;
+        runner.send_audio(&chunk.to_base64()).await?;
     }
 
     Ok(())

@@ -55,7 +55,7 @@ proptest! {
     /// **Validates: Requirements 14.4**
     #[test]
     fn prop_livekit_error_preserves_context(ctx in arb_non_empty_string()) {
-        let error = RealtimeError::LiveKit(adk_realtime::livekit::error::LiveKitError::Config(ctx.clone()));
+        let error = RealtimeError::livekit(&ctx);
         let display = format!("{}", error);
         prop_assert!(
             display.contains(&ctx),
@@ -73,7 +73,7 @@ proptest! {
     fn prop_direct_variant_construction_preserves_context(ctx in arb_non_empty_string()) {
         let opus = RealtimeError::OpusCodecError(ctx.clone());
         let webrtc = RealtimeError::WebRTCError(ctx.clone());
-        let livekit = RealtimeError::LiveKit(adk_realtime::livekit::error::LiveKitError::Config(ctx.clone()));
+        let livekit = RealtimeError::LiveKitError(ctx.clone());
 
         let opus_display = format!("{}", opus);
         let webrtc_display = format!("{}", webrtc);

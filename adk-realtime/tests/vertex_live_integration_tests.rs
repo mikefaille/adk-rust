@@ -48,7 +48,12 @@ async fn test_vertex_live_text_exchange() {
             .build()
             .expect("Failed to obtain Application Default Credentials");
 
-        let backend = GeminiLiveBackend::Vertex { credentials, region, project_id };
+        let backend = GeminiLiveBackend::Vertex {
+            credentials,
+            region,
+            project_id,
+            model: "gemini-3.1-flash-live-preview".to_string(),
+        };
 
         let model = GeminiRealtimeModel::new(backend, "models/gemini-live-2.5-flash-native-audio");
 
@@ -110,7 +115,12 @@ async fn test_vertex_live_session_id() {
             .build()
             .expect("Failed to obtain Application Default Credentials");
 
-        let backend = GeminiLiveBackend::Vertex { credentials, region, project_id };
+        let backend = GeminiLiveBackend::Vertex {
+            credentials,
+            region,
+            project_id,
+            model: "gemini-3.1-flash-live-preview".to_string(),
+        };
 
         let model = GeminiRealtimeModel::new(backend, "models/gemini-live-2.5-flash-native-audio");
 

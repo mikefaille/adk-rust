@@ -460,6 +460,7 @@ dependencies = [
  "livekit-api",
  "proptest",
  "reqwest 0.12.28",
+ "rustls",
  "secrecy",
  "serde",
  "serde_json",

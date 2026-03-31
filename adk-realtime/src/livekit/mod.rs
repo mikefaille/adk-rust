@@ -50,16 +50,17 @@
 //! ```
 
 mod bridge;
-pub mod builder;
-pub mod config;
-pub mod error;
+mod builder;
+mod config;
+mod error;
 mod handler;
 
 // ── Our bridge utilities ────────────────────────────────────────────────
 
-pub use bridge::{bridge_gemini_input, bridge_input, wait_and_bridge_audio};
+pub use bridge::{bridge_gemini_input, bridge_input};
 pub use builder::LiveKitRoomBuilder;
 pub use config::LiveKitConfig;
+pub use error::LiveKitError;
 pub use handler::LiveKitEventHandler;
 
 // ── Room and connection ─────────────────────────────────────────────────
@@ -130,6 +131,8 @@ pub mod prelude {
         ConnectionState,
         DataPacket,
         DataPacketKind,
+        // Bridge utilities
+        LiveKitEventHandler,
         // Tracks
         LocalAudioTrack,
         // Participants
@@ -152,5 +155,7 @@ pub mod prelude {
         TrackPublishOptions,
         TrackSource,
         VideoGrants,
+        bridge_gemini_input,
+        bridge_input,
     };
 }

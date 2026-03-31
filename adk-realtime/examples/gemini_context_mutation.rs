@@ -30,7 +30,8 @@ async fn main() -> anyhow::Result<()> {
     info!("connecting to Gemini Live with model {model_id}");
 
     // Phase 1: Technical support agent
-    let backend = adk_realtime::gemini::GeminiLiveBackend::studio(&api_key);
+    let backend =
+        adk_realtime::gemini::GeminiLiveBackend::studio(&api_key, "gemini-3.1-flash-live-preview");
     let model = adk_realtime::gemini::GeminiRealtimeModel::new(backend, &model_id);
 
     let lookup_tool = ToolDefinition {
