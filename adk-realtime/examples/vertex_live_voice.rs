@@ -47,7 +47,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // --- 3. Create the model and session configuration ---
-    let model = GeminiRealtimeModel::new(backend, "models/gemini-live-2.5-flash-native-audio");
+    let model = GeminiRealtimeModel::new(backend);
     let config = RealtimeConfig::default()
         .with_instruction("You are a helpful voice assistant. Keep responses concise.");
 

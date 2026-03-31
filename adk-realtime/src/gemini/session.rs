@@ -54,6 +54,15 @@ impl GeminiLiveBackend {
         Self::Studio { api_key: api_key.into(), model: model.into() }
     }
 
+    /// Retrieve the model identifier bound to this backend.
+    pub fn model(&self) -> &str {
+        match self {
+            Self::Studio { model, .. } => model,
+            #[cfg(feature = "vertex-live")]
+            Self::Vertex { model, .. } => model,
+        }
+    }
+
     /// Create a Vertex AI backend using Application Default Credentials (ADC).
     ///
     /// This is the most ergonomic way to connect to Vertex AI Live. It
@@ -207,11 +216,8 @@ pub struct GeminiRealtimeSession {
 
 impl GeminiRealtimeSession {
     /// Connect to Gemini Live API using the specified backend.
-    pub async fn connect(
-        backend: GeminiLiveBackend,
-        model: &str,
-        config: RealtimeConfig,
-    ) -> Result<Self> {
+    pub async fn connect(backend: GeminiLiveBackend, config: RealtimeConfig) -> Result<Self> {
+        let model = backend.model().to_string();
         let ws_stream = match &backend {
             GeminiLiveBackend::Studio { api_key, model } => {
                 let url = format!(
@@ -297,7 +303,7 @@ impl GeminiRealtimeSession {
             audio_buffer: Arc::new(Mutex::new(Vec::new())),
         };
 
-        session.send_setup(model, config).await?;
+        session.send_setup(&model, config).await?;
         Ok(session)
     }
 

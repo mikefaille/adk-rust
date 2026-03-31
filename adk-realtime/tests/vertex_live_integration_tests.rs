@@ -55,7 +55,7 @@ async fn test_vertex_live_text_exchange() {
             model: "gemini-3.1-flash-live-preview".to_string(),
         };
 
-        let model = GeminiRealtimeModel::new(backend, "models/gemini-live-2.5-flash-native-audio");
+        let model = GeminiRealtimeModel::new(backend);
 
         let config = RealtimeConfig::default()
             .with_instruction("You are a helpful assistant. Respond briefly.");
@@ -122,7 +122,7 @@ async fn test_vertex_live_session_id() {
             model: "gemini-3.1-flash-live-preview".to_string(),
         };
 
-        let model = GeminiRealtimeModel::new(backend, "models/gemini-live-2.5-flash-native-audio");
+        let model = GeminiRealtimeModel::new(backend);
 
         let config = RealtimeConfig::default();
 

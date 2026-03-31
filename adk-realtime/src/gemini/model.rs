@@ -18,25 +18,25 @@ use super::{DEFAULT_MODEL, GEMINI_VOICES};
 /// use adk_realtime::gemini::{GeminiRealtimeModel, GeminiLiveBackend};
 /// use adk_realtime::RealtimeModel;
 ///
-/// let backend = GeminiLiveBackend::Studio { api_key: "your-key".into() };
-/// let model = GeminiRealtimeModel::new(backend, "models/gemini-live-2.5-flash-native-audio");
+/// let backend = GeminiLiveBackend::studio("your-key", "models/gemini-live-2.5-flash-native-audio");
+/// let model = GeminiRealtimeModel::new(backend);
 /// let session = model.connect(config).await?;
 /// ```
 #[derive(Debug, Clone)]
 pub struct GeminiRealtimeModel {
     backend: GeminiLiveBackend,
-    model_id: String,
 }
 
 impl GeminiRealtimeModel {
-    /// Create a new Gemini Live model.
-    pub fn new(backend: GeminiLiveBackend, model_id: impl Into<String>) -> Self {
-        Self { backend, model_id: model_id.into() }
+    /// Create a new Gemini Live model from a backend configuration.
+    pub fn new(backend: GeminiLiveBackend) -> Self {
+        Self { backend }
     }
 
     /// Create with the default Live model.
-    pub fn with_default_model(backend: GeminiLiveBackend) -> Self {
-        Self::new(backend, DEFAULT_MODEL)
+    pub fn with_default_model(api_key: impl Into<String>) -> Self {
+        let backend = GeminiLiveBackend::studio(api_key, DEFAULT_MODEL);
+        Self::new(backend)
     }
 }
 
@@ -47,7 +47,7 @@ impl RealtimeModel for GeminiRealtimeModel {
     }
 
     fn model_id(&self) -> &str {
-        &self.model_id
+        self.backend.model()
     }
 
     fn supported_input_formats(&self) -> Vec<AudioFormat> {
@@ -63,8 +63,7 @@ impl RealtimeModel for GeminiRealtimeModel {
     }
 
     async fn connect(&self, config: RealtimeConfig) -> Result<BoxedSession> {
-        let session =
-            GeminiRealtimeSession::connect(self.backend.clone(), &self.model_id, config).await?;
+        let session = GeminiRealtimeSession::connect(self.backend.clone(), config).await?;
         Ok(Box::new(session))
     }
 }
