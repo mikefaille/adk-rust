@@ -69,6 +69,14 @@ impl LiveKitRoomBuilder {
             ));
         }
 
+        if let Some(room) = &self.room_name {
+            if room.is_empty() {
+                return Err(LiveKitError::ConfigError(
+                    "Cannot connect to LiveKit with an empty room_name".to_string(),
+                ));
+            }
+        }
+
         let mut final_grants = self.grants.unwrap_or_default();
         if let Some(room) = &self.room_name {
             final_grants.room_join = true;
@@ -81,7 +89,12 @@ impl LiveKitRoomBuilder {
             Some(final_grants),
         )?;
 
-        let (room, events) = Room::connect(&self.config.url, &token, self.options).await?;
+        tracing::info!(room_name = ?self.room_name, identity = %self.identity, "connecting to livekit.room");
+        let (room, events) = Room::connect(&self.config.url, &token, self.options)
+            .await
+            .map_err(|e| LiveKitError::ConnectionError(e))?;
+
+        tracing::info!(participant = %room.local_participant().identity(), "connected to livekit.room");
         Ok((room, events))
     }
 }
@@ -93,15 +106,38 @@ mod tests {
     #[test]
     fn test_livekit_builder_options() {
         let config = LiveKitConfig::new("wss://test.url", "key", "secret").unwrap();
+        let grants = livekit_api::access_token::VideoGrants {
+            room_join: true,
+            room: "test-room".to_string(),
+            ..Default::default()
+        };
+
         let builder = LiveKitRoomBuilder::new(config, "agent1")
             .name("Agent")
             .room_name("test-room")
-            .auto_subscribe(false);
+            .auto_subscribe(false)
+            .grants(grants.clone());
 
         assert_eq!(builder.identity, "agent1");
         assert_eq!(builder.name.as_deref(), Some("Agent"));
         assert_eq!(builder.room_name.as_deref(), Some("test-room"));
         assert_eq!(builder.options.auto_subscribe, false);
+        assert_eq!(builder.grants.unwrap().room, "test-room");
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_livekit_builder_connect_integration() {
+        let url = std::env::var("LIVEKIT_URL").unwrap_or_else(|_| "ws://localhost:7880".into());
+        let key = std::env::var("LIVEKIT_API_KEY").unwrap_or_else(|_| "devkey".into());
+        let secret = std::env::var("LIVEKIT_API_SECRET").unwrap_or_else(|_| "secret".into());
+
+        let config = LiveKitConfig::new(url, key, secret).unwrap();
+        let builder = LiveKitRoomBuilder::new(config, "test-agent")
+            .room_name("test-room");
+
+        // Should fail gracefully if credentials are bad, or succeed if a local server is running.
+        let _ = builder.connect().await;
     }
 
     #[tokio::test]

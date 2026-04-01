@@ -1,11 +1,21 @@
 use secrecy::{ExposeSecret, SecretString};
 
 /// Configuration for connecting to a LiveKit server.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct LiveKitConfig {
     pub url: String,
     pub api_key: SecretString,
     pub api_secret: SecretString,
+}
+
+impl std::fmt::Debug for LiveKitConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LiveKitConfig")
+            .field("url", &self.url)
+            .field("api_key", &"<redacted>")
+            .field("api_secret", &"<redacted>")
+            .finish()
+    }
 }
 
 impl LiveKitConfig {
