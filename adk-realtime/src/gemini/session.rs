@@ -341,12 +341,14 @@ impl GeminiRealtimeSession {
             generation_config["temperature"] = json!(temp);
         }
 
-        if let Some(thinking_level) = config.extra.as_ref().and_then(|extra| extra.get("thinking_level")) {
-            if let Some(obj) = generation_config.as_object_mut() {
-                obj.insert(
-                    "thinkingConfig".to_string(),
-                    json!({ "thinkingLevel": thinking_level }),
-                );
+        if let Some(extra) = &config.extra {
+            if let Some(thinking_level) = extra.get("thinking_level") {
+                if let Some(obj) = generation_config.as_object_mut() {
+                    obj.insert(
+                        "thinkingConfig".to_string(),
+                        json!({ "thinkingLevel": thinking_level }),
+                    );
+                }
             }
         }
 
