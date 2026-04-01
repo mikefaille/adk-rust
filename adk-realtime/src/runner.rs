@@ -395,8 +395,8 @@ impl RealtimeRunner {
         if let Some(temp) = update.0.temperature {
             base.temperature = Some(temp);
         }
-        if let Some(extra) = &update.0.extra {
-            base.extra = Some(extra.clone());
+        if !update.0.extra.is_empty() {
+            base.extra = update.0.extra.clone();
         }
     }
 
@@ -739,9 +739,7 @@ impl RealtimeRunner {
                         "Received Gemini sessionResumption token, saving for future reconnects."
                     );
                     let mut config = self.config.write().await;
-                    let mut extra = config.extra.clone().unwrap_or_else(|| serde_json::json!({}));
-                    extra["resumeToken"] = serde_json::Value::String(token.to_string());
-                    config.extra = Some(extra);
+                    config.extra.insert("resumeToken".to_string(), serde_json::Value::String(token.to_string()));
                 }
             }
             ServerEvent::Error { error, .. } => {

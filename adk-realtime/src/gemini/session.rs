@@ -341,15 +341,14 @@ impl GeminiRealtimeSession {
             generation_config["temperature"] = json!(temp);
         }
 
-        if let Some(extra) = &config.extra {
-            if let Some(thinking_level) = extra.get("thinking_level") {
-                if let Some(obj) = generation_config.as_object_mut() {
-                    obj.insert(
-                        "thinkingConfig".to_string(),
-                        json!({ "thinkingLevel": thinking_level }),
-                    );
-                }
-            }
+        let thinking_config = config.extra.get("thinking_level")
+            .and_then(|val| val.as_str())
+            .map(|level| json!({ "thinkingLevel": level.to_string() }));
+
+        if let Some(tc) = thinking_config {
+             if let Some(obj) = generation_config.as_object_mut() {
+                 obj.insert("thinkingConfig".to_string(), tc);
+             }
         }
 
         let system_instruction = config.instruction.map(|text| GeminiContent {
@@ -361,8 +360,7 @@ impl GeminiRealtimeSession {
         // Functionally extract the token if it exists in the prior state map
         let handle = config
             .extra
-            .as_ref()
-            .and_then(|ext| ext.get("resumeToken"))
+            .get("resumeToken")
             .and_then(|val| val.as_str())
             .map(|s| s.to_string());
 

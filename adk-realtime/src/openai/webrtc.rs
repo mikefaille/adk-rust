@@ -814,4 +814,14 @@ impl RealtimeSession for OpenAIWebRTCSession {
         rtc.disconnect();
         Ok(())
     }
+
+    async fn mutate_context(
+        &self,
+        config: crate::config::RealtimeConfig,
+    ) -> Result<crate::session::ContextMutationOutcome> {
+        tracing::info!(
+            "WebRTC API does not support native mid-flight context swaps; signalling resumption needed."
+        );
+        Ok(crate::session::ContextMutationOutcome::RequiresResumption(config))
+    }
 }
