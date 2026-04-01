@@ -396,7 +396,7 @@ impl RealtimeRunner {
             base.temperature = Some(temp);
         }
         if !update.0.extra.is_empty() {
-            base.extra = update.0.extra.clone();
+            base.extra.extend(update.0.extra.clone());
         }
     }
 
