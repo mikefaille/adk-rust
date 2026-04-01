@@ -821,10 +821,10 @@ impl RealtimeSession for OpenAIWebRTCSession {
     ) -> Result<crate::session::ContextMutationOutcome> {
         tracing::info!("Applying native mid-flight context swap via OpenAI WebRTC SessionUpdate.");
 
+        let session_config = super::session::translate_config_to_session_update(&config);
+
         let event = ClientEvent::SessionUpdate {
-            session: serde_json::to_value(&config).map_err(|e| {
-                RealtimeError::protocol(format!("Serialize config for SessionUpdate: {e}"))
-            })?,
+            session: session_config,
         };
         self.send_event(event).await?;
 
