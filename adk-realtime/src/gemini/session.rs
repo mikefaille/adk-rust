@@ -343,7 +343,7 @@ impl GeminiRealtimeSession {
 
         let thinking_config = config.extra.get("thinking_level")
             .and_then(|val| val.as_str())
-            .map(|level| json!({ "thinkingLevel": level.to_string() }));
+            .map(|level| json!({ "thinkingLevel": level }));
 
         if let (Some(tc), Some(obj)) = (thinking_config, generation_config.as_object_mut()) {
             obj.insert("thinkingConfig".to_string(), tc);

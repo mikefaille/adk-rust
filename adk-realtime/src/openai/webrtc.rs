@@ -819,9 +819,15 @@ impl RealtimeSession for OpenAIWebRTCSession {
         &self,
         config: crate::config::RealtimeConfig,
     ) -> Result<crate::session::ContextMutationOutcome> {
-        tracing::info!(
-            "WebRTC API does not support native mid-flight context swaps; signalling resumption needed."
-        );
-        Ok(crate::session::ContextMutationOutcome::RequiresResumption(config))
+        tracing::info!("Applying native mid-flight context swap via OpenAI WebRTC SessionUpdate.");
+
+        let event = ClientEvent::SessionUpdate {
+            session: serde_json::to_value(&config).map_err(|e| {
+                RealtimeError::protocol(format!("Serialize config for SessionUpdate: {e}"))
+            })?,
+        };
+        self.send_event(event).await?;
+
+        Ok(crate::session::ContextMutationOutcome::Applied)
     }
 }

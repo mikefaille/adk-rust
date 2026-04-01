@@ -739,7 +739,7 @@ impl RealtimeRunner {
                         "Received Gemini sessionResumption token, saving for future reconnects."
                     );
                     let mut config = self.config.write().await;
-                    config.extra.insert("resumeToken".to_string(), serde_json::Value::String(token.to_string()));
+                    config.extra.insert("resumeToken".to_string(), token.into());
                 }
             }
             ServerEvent::Error { error, .. } => {
