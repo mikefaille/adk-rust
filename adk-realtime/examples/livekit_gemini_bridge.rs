@@ -88,27 +88,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let lk_config = LiveKitConfig::new(lk_url, lk_api_key, lk_api_secret)?;
 
-    let (room, mut room_events) = LiveKitRoomBuilder::new(lk_config, "gemini-agent-01")
+    let bundle = LiveKitRoomBuilder::new(lk_config)
+        .identity("gemini-agent-01")
         .name("Gemini Agent")
         .room_name("my-room")
         .auto_subscribe(true)
+        .with_audio(GEMINI_SAMPLE_RATE, NUM_CHANNELS)
         .connect()
         .await?;
-    tracing::info!("Connected to LiveKit room '{}'", room.name());
 
-    let audio_source = NativeAudioSource::new(
-        AudioSourceOptions::default(),
-        GEMINI_SAMPLE_RATE,
-        NUM_CHANNELS,
-        GEMINI_SAMPLE_RATE / 100,
-    );
-    let rtc_audio_source = RtcAudioSource::Native(audio_source.clone());
-    let track = LocalAudioTrack::create_audio_track("gemini-agent-01-audio", rtc_audio_source);
+    let room = bundle.room;
+    let mut room_events = bundle.events;
+    let audio_source = bundle.audio_source.expect("Audio source was not created by builder");
+    let _audio_track = bundle.audio_track.expect("Audio track was not created by builder");
 
-    room.local_participant()
-        .publish_track(LocalTrack::Audio(track), TrackPublishOptions::default())
-        .await?;
-    tracing::info!("Published AI agent audio track to room.");
+    tracing::info!("Connected to LiveKit room '{}' and published audio track.", room.name());
 
     // --- 4. Wrap event handler with LiveKit audio output ---
     // The LiveKitEventHandler intercepts `on_audio` events emitted by the
