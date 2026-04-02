@@ -266,7 +266,6 @@ impl RealtimeRunnerBuilder {
             event_handler: self.event_handler.unwrap_or_else(|| Arc::new(NoOpEventHandler)),
             session: Arc::new(RwLock::new(None)),
             state: Arc::new(RwLock::new(RunnerState::Idle)),
-            resume_token: Arc::new(RwLock::new(None)),
         })
     }
 }
@@ -316,7 +315,6 @@ pub struct RealtimeRunner {
     event_handler: Arc<dyn EventHandler>,
     session: Arc<RwLock<Option<BoxedSession>>>,
     state: Arc<RwLock<RunnerState>>,
-    resume_token: Arc<RwLock<Option<String>>>,
 }
 
 impl RealtimeRunner {
@@ -325,19 +323,9 @@ impl RealtimeRunner {
         RealtimeRunnerBuilder::new()
     }
 
-    /// Internal helper to inject runtime state into a temporary config for the provider session.
-    async fn inject_runtime_state(&self, mut config: crate::config::RealtimeConfig) -> crate::config::RealtimeConfig {
-        if let Some(token) = self.resume_token.read().await.as_ref() {
-            config.extra.insert("resumeToken".to_string(), token.to_string().into());
-        }
-        config
-    }
-
     /// Connect to the realtime provider.
     pub async fn connect(&self) -> Result<()> {
         let config = self.config.read().await.clone();
-        let config = self.inject_runtime_state(config).await;
-
         let session = self.model.connect(config).await?;
         let mut guard = self.session.write().await;
         *guard = Some(session);
@@ -538,8 +526,6 @@ impl RealtimeRunner {
         bridge_message: Option<String>,
     ) -> Result<()> {
         tracing::warn!("Executing transport resumption with new configuration.");
-
-        let new_config = self.inject_runtime_state(new_config).await;
 
         // 1. Acquire exclusive write access to the session pointer.
         let mut write_guard = self.session.write().await;
@@ -744,15 +730,8 @@ impl RealtimeRunner {
                     self.execute_tool_call(&call_id, &name, &arguments).await?;
                 }
             }
-            ServerEvent::SessionUpdated { session, .. } => {
-                // Check if the generic session update contains a resumption token
-                if let Some(token) = session.get("resumeToken").and_then(|t| t.as_str()) {
-                    tracing::info!(
-                        "Received Gemini sessionResumption token, saving for future reconnects."
-                    );
-                    let mut r_token = self.resume_token.write().await;
-                    *r_token = Some(token.to_string());
-                }
+            ServerEvent::SessionUpdated { .. } => {
+                // Generic session updates (e.g. from OpenAI) can be handled here.
             }
             ServerEvent::Error { error, .. } => {
                 let err = RealtimeError::server(error.code.unwrap_or_default(), error.message);
