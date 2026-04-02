@@ -48,14 +48,9 @@ async fn test_vertex_live_text_exchange() {
             .build()
             .expect("Failed to obtain Application Default Credentials");
 
-        let backend = GeminiLiveBackend::Vertex {
-            credentials,
-            region,
-            project_id,
-            model: "gemini-3.1-flash-live-preview".to_string(),
-        };
+        let backend = GeminiLiveBackend::Vertex { credentials, region, project_id };
 
-        let model = GeminiRealtimeModel::new(backend);
+        let model = GeminiRealtimeModel::new(backend, "gemini-3.1-flash-live-preview");
 
         let config = RealtimeConfig::default()
             .with_instruction("You are a helpful assistant. Respond briefly.");
@@ -115,14 +110,9 @@ async fn test_vertex_live_session_id() {
             .build()
             .expect("Failed to obtain Application Default Credentials");
 
-        let backend = GeminiLiveBackend::Vertex {
-            credentials,
-            region,
-            project_id,
-            model: "gemini-3.1-flash-live-preview".to_string(),
-        };
+        let backend = GeminiLiveBackend::Vertex { credentials, region, project_id };
 
-        let model = GeminiRealtimeModel::new(backend);
+        let model = GeminiRealtimeModel::new(backend, "gemini-3.1-flash-live-preview");
 
         let config = RealtimeConfig::default();
 

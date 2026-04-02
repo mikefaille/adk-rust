@@ -77,8 +77,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Explicitly use the 3.1-flash-live-preview model which is tuned for real-time streaming.
     // The backend now accepts the model name to construct the correct BIDI endpoint URL.
     let model_name = "models/gemini-3.1-flash-live-preview";
-    let backend = GeminiLiveBackend::studio(api_key, model_name);
-    let model = GeminiRealtimeModel::new(backend);
+    let backend = GeminiLiveBackend::studio(api_key);
+    let model = GeminiRealtimeModel::new(backend, model_name);
 
     // --- 2. Build the LiveKit Config ---
     let lk_url = std::env::var("LIVEKIT_URL").expect("LIVEKIT_URL is required");

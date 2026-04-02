@@ -16,7 +16,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::RwLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::Mutex;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -33,7 +32,7 @@ type WsSource = futures::stream::SplitStream<WsStream>;
 #[derive(Debug, Clone)]
 pub enum GeminiLiveBackend {
     /// AI Studio with API key authentication.
-    Studio { api_key: String, model: String },
+    Studio { api_key: String },
 
     /// Vertex AI with OAuth2/ADC authentication.
     #[cfg(feature = "vertex-live")]
@@ -44,24 +43,13 @@ pub enum GeminiLiveBackend {
         region: String,
         /// Google Cloud project ID.
         project_id: String,
-        /// The model identifier (e.g. "gemini-3.1-flash-live-preview").
-        model: String,
     },
 }
 
 impl GeminiLiveBackend {
     /// Create a Studio backend with API key authentication.
-    pub fn studio(api_key: impl Into<String>, model: impl Into<String>) -> Self {
-        Self::Studio { api_key: api_key.into(), model: model.into() }
-    }
-
-    /// Retrieve the model identifier bound to this backend.
-    pub fn model(&self) -> &str {
-        match self {
-            Self::Studio { model, .. } => model,
-            #[cfg(feature = "vertex-live")]
-            Self::Vertex { model, .. } => model,
-        }
+    pub fn studio(api_key: impl Into<String>) -> Self {
+        Self::Studio { api_key: api_key.into() }
     }
 
     /// Create a Vertex AI backend using Application Default Credentials (ADC).
@@ -74,27 +62,18 @@ impl GeminiLiveBackend {
     /// # Example
     ///
     /// ```rust,ignore
-    /// let backend = GeminiLiveBackend::vertex_adc("my-project", "us-central1", "gemini-3.1-flash-live-preview")?;
-    /// let model = GeminiRealtimeModel::new(backend, "models/gemini-live-2.5-flash-native-audio");
+    /// let backend = GeminiLiveBackend::vertex_adc("my-project", "us-central1")?;
+    /// let model = GeminiRealtimeModel::new(backend, "models/gemini-3.1-flash-live-preview");
     /// ```
     #[cfg(feature = "vertex-live")]
-    pub fn vertex_adc(
-        project_id: impl Into<String>,
-        region: impl Into<String>,
-        model: impl Into<String>,
-    ) -> Result<Self> {
+    pub fn vertex_adc(project_id: impl Into<String>, region: impl Into<String>) -> Result<Self> {
         let credentials =
             google_cloud_auth::credentials::Builder::default().build().map_err(|e| {
                 RealtimeError::AuthError(format!(
                     "Failed to discover Application Default Credentials: {e}"
                 ))
             })?;
-        Ok(Self::Vertex {
-            credentials,
-            region: region.into(),
-            project_id: project_id.into(),
-            model: model.into(),
-        })
+        Ok(Self::Vertex { credentials, region: region.into(), project_id: project_id.into() })
     }
 }
 
@@ -213,15 +192,17 @@ pub struct GeminiRealtimeSession {
     sender: Arc<Mutex<WsSink>>,
     receiver: Arc<Mutex<WsSource>>,
     audio_buffer: Arc<Mutex<Vec<u8>>>,
-    resume_token: Arc<RwLock<Option<String>>>,
 }
 
 impl GeminiRealtimeSession {
     /// Connect to Gemini Live API using the specified backend.
-    pub async fn connect(backend: GeminiLiveBackend, config: RealtimeConfig, resume_token: Arc<RwLock<Option<String>>>) -> Result<Self> {
-        let model = backend.model().to_string();
+    pub async fn connect(
+        backend: GeminiLiveBackend,
+        model: &str,
+        config: RealtimeConfig,
+    ) -> Result<Self> {
         let ws_stream = match &backend {
-            GeminiLiveBackend::Studio { api_key, model } => {
+            GeminiLiveBackend::Studio { api_key } => {
                 let url = format!(
                     "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key={}&model={}",
                     api_key, model
@@ -235,7 +216,7 @@ impl GeminiRealtimeSession {
                 ws
             }
             #[cfg(feature = "vertex-live")]
-            GeminiLiveBackend::Vertex { credentials, region, project_id, model } => {
+            GeminiLiveBackend::Vertex { credentials, region, project_id } => {
                 let url = build_vertex_live_url(region, project_id, model)?;
 
                 // Obtain OAuth2 bearer token from ADC credentials
@@ -303,7 +284,6 @@ impl GeminiRealtimeSession {
             sender: Arc::new(Mutex::new(sink)),
             receiver: Arc::new(Mutex::new(source)),
             audio_buffer: Arc::new(Mutex::new(Vec::new())),
-            resume_token,
         };
 
         session.send_setup(&model, config).await?;
@@ -344,12 +324,15 @@ impl GeminiRealtimeSession {
             generation_config["temperature"] = json!(temp);
         }
 
-        let thinking_config = config.extra.get("thinking_level")
-            .and_then(|val| val.as_str())
-            .map(|level| json!({ "thinkingLevel": level }));
-
-        if let (Some(tc), Some(obj)) = (thinking_config, generation_config.as_object_mut()) {
-            obj.insert("thinkingConfig".to_string(), tc);
+        if let Some(extra) = &config.extra {
+            if let Some(thinking_level) = extra.get("thinking_level") {
+                if let Some(obj) = generation_config.as_object_mut() {
+                    obj.insert(
+                        "thinkingConfig".to_string(),
+                        json!({ "thinkingLevel": thinking_level }),
+                    );
+                }
+            }
         }
 
         let system_instruction = config.instruction.map(|text| GeminiContent {
@@ -358,8 +341,13 @@ impl GeminiRealtimeSession {
 
         let tools = convert_tools(config.tools);
 
-        // Read the cached resumption token from the session's runtime state.
-        let handle = self.resume_token.read().unwrap().clone();
+        // Functionally extract the token if it exists in the prior state map
+        let handle = config
+            .extra
+            .as_ref()
+            .and_then(|ext| ext.get("resumeToken"))
+            .and_then(|val| val.as_str())
+            .map(|s| s.to_string());
 
         // Always attach the config object to explicitly enable the session resumption feature,
         // even if the handle is currently None.
@@ -499,9 +487,6 @@ impl GeminiRealtimeSession {
         if let Some(resumption_update) = value.get("sessionResumptionUpdate") {
             if let Some(token) = resumption_update.get("resumptionToken").and_then(|t| t.as_str()) {
                 tracing::debug!("Received new Gemini 2.5 Native resumption token");
-                if let Ok(mut r_token) = self.resume_token.write() {
-                    *r_token = Some(token.to_string());
-                }
                 return Ok(ServerEvent::SessionUpdated {
                     event_id: uuid::Uuid::new_v4().to_string(),
                     session: json!({ "resumeToken": token }),

@@ -39,15 +39,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let project_id =
         std::env::var("GOOGLE_CLOUD_PROJECT").expect("GOOGLE_CLOUD_PROJECT env var is required");
 
-    let backend = GeminiLiveBackend::Vertex {
-        credentials,
-        region,
-        project_id,
-        model: "gemini-3.1-flash-live-preview".to_string(),
-    };
+    let backend = GeminiLiveBackend::Vertex { credentials, region, project_id };
 
     // --- 3. Create the model and session configuration ---
-    let model = GeminiRealtimeModel::new(backend);
+    let model = GeminiRealtimeModel::new(backend, "gemini-3.1-flash-live-preview");
     let config = RealtimeConfig::default()
         .with_instruction("You are a helpful voice assistant. Keep responses concise.");
 

@@ -814,20 +814,4 @@ impl RealtimeSession for OpenAIWebRTCSession {
         rtc.disconnect();
         Ok(())
     }
-
-    async fn mutate_context(
-        &self,
-        config: crate::config::RealtimeConfig,
-    ) -> Result<crate::session::ContextMutationOutcome> {
-        tracing::info!("Applying native mid-flight context swap via OpenAI WebRTC SessionUpdate.");
-
-        let session_config = super::session::translate_config_to_session_update(&config);
-
-        let event = ClientEvent::SessionUpdate {
-            session: session_config,
-        };
-        self.send_event(event).await?;
-
-        Ok(crate::session::ContextMutationOutcome::Applied)
-    }
 }

@@ -395,8 +395,8 @@ impl RealtimeRunner {
         if let Some(temp) = update.0.temperature {
             base.temperature = Some(temp);
         }
-        if !update.0.extra.is_empty() {
-            base.extra.extend(update.0.extra.clone());
+        if let Some(extra) = &update.0.extra {
+            base.extra = Some(extra.clone());
         }
     }
 
@@ -538,6 +538,8 @@ impl RealtimeRunner {
         }
 
         // 3. Establish a brand new connection using the provider-agnostic factory interface.
+        // If the provider supports resumption natively (like Gemini), the `new_config`
+        // payload already contains the cached `resumeToken`.
         let new_session = self.model.connect(new_config).await?;
 
         // 4. Overwrite the active session pointer with the newly connected transport.
@@ -730,8 +732,17 @@ impl RealtimeRunner {
                     self.execute_tool_call(&call_id, &name, &arguments).await?;
                 }
             }
-            ServerEvent::SessionUpdated { .. } => {
-                // Generic session updates (e.g. from OpenAI) can be handled here.
+            ServerEvent::SessionUpdated { session, .. } => {
+                // Check if the generic session update contains a resumption token
+                if let Some(token) = session.get("resumeToken").and_then(|t| t.as_str()) {
+                    tracing::info!(
+                        "Received Gemini sessionResumption token, saving for future reconnects."
+                    );
+                    let mut config = self.config.write().await;
+                    let mut extra = config.extra.clone().unwrap_or_else(|| serde_json::json!({}));
+                    extra["resumeToken"] = serde_json::Value::String(token.to_string());
+                    config.extra = Some(extra);
+                }
             }
             ServerEvent::Error { error, .. } => {
                 let err = RealtimeError::server(error.code.unwrap_or_default(), error.message);

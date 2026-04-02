@@ -7,9 +7,6 @@ use crate::model::RealtimeModel;
 use crate::session::BoxedSession;
 use async_trait::async_trait;
 
-use std::sync::Arc;
-use std::sync::RwLock;
-
 use super::session::{GeminiLiveBackend, GeminiRealtimeSession};
 use super::{DEFAULT_MODEL, GEMINI_VOICES};
 
@@ -21,26 +18,25 @@ use super::{DEFAULT_MODEL, GEMINI_VOICES};
 /// use adk_realtime::gemini::{GeminiRealtimeModel, GeminiLiveBackend};
 /// use adk_realtime::RealtimeModel;
 ///
-/// let backend = GeminiLiveBackend::studio("your-key", "models/gemini-live-2.5-flash-native-audio");
-/// let model = GeminiRealtimeModel::new(backend);
+/// let backend = GeminiLiveBackend::studio("your-key");
+/// let model = GeminiRealtimeModel::new(backend, "models/gemini-live-2.5-flash-native-audio");
 /// let session = model.connect(config).await?;
 /// ```
 #[derive(Debug, Clone)]
 pub struct GeminiRealtimeModel {
     backend: GeminiLiveBackend,
-    resume_token: Arc<RwLock<Option<String>>>,
+    model_id: String,
 }
 
 impl GeminiRealtimeModel {
-    /// Create a new Gemini Live model from a backend configuration.
-    pub fn new(backend: GeminiLiveBackend) -> Self {
-        Self { backend, resume_token: Arc::new(RwLock::new(None)) }
+    /// Create a new Gemini Live model.
+    pub fn new(backend: GeminiLiveBackend, model_id: impl Into<String>) -> Self {
+        Self { backend, model_id: model_id.into() }
     }
 
     /// Create with the default Live model.
-    pub fn with_default_model(api_key: impl Into<String>) -> Self {
-        let backend = GeminiLiveBackend::studio(api_key, DEFAULT_MODEL);
-        Self::new(backend)
+    pub fn with_default_model(backend: GeminiLiveBackend) -> Self {
+        Self::new(backend, DEFAULT_MODEL)
     }
 }
 
@@ -51,7 +47,7 @@ impl RealtimeModel for GeminiRealtimeModel {
     }
 
     fn model_id(&self) -> &str {
-        self.backend.model()
+        &self.model_id
     }
 
     fn supported_input_formats(&self) -> Vec<AudioFormat> {
@@ -67,7 +63,8 @@ impl RealtimeModel for GeminiRealtimeModel {
     }
 
     async fn connect(&self, config: RealtimeConfig) -> Result<BoxedSession> {
-        let session = GeminiRealtimeSession::connect(self.backend.clone(), config, self.resume_token.clone()).await?;
+        let session =
+            GeminiRealtimeSession::connect(self.backend.clone(), &self.model_id, config).await?;
         Ok(Box::new(session))
     }
 }
