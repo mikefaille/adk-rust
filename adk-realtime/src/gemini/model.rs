@@ -7,6 +7,9 @@ use crate::model::RealtimeModel;
 use crate::session::BoxedSession;
 use async_trait::async_trait;
 
+use std::sync::Arc;
+use std::sync::RwLock;
+
 use super::session::{GeminiLiveBackend, GeminiRealtimeSession};
 use super::{DEFAULT_MODEL, GEMINI_VOICES};
 
@@ -25,12 +28,13 @@ use super::{DEFAULT_MODEL, GEMINI_VOICES};
 #[derive(Debug, Clone)]
 pub struct GeminiRealtimeModel {
     backend: GeminiLiveBackend,
+    resume_token: Arc<RwLock<Option<String>>>,
 }
 
 impl GeminiRealtimeModel {
     /// Create a new Gemini Live model from a backend configuration.
     pub fn new(backend: GeminiLiveBackend) -> Self {
-        Self { backend }
+        Self { backend, resume_token: Arc::new(RwLock::new(None)) }
     }
 
     /// Create with the default Live model.
@@ -63,7 +67,7 @@ impl RealtimeModel for GeminiRealtimeModel {
     }
 
     async fn connect(&self, config: RealtimeConfig) -> Result<BoxedSession> {
-        let session = GeminiRealtimeSession::connect(self.backend.clone(), config).await?;
+        let session = GeminiRealtimeSession::connect(self.backend.clone(), config, self.resume_token.clone()).await?;
         Ok(Box::new(session))
     }
 }

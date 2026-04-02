@@ -171,8 +171,8 @@ pub struct RealtimeConfig {
     pub cached_content: Option<String>,
 
     /// Provider-specific options.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub extra: Option<Value>,
+    #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub extra: serde_json::Map<String, Value>,
 }
 
 /// A delta payload for safely updating an active realtime session.

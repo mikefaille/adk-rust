@@ -82,96 +82,7 @@ impl OpenAIRealtimeSession {
 
     /// Configure the session with initial settings.
     async fn configure_session(&self, config: RealtimeConfig) -> Result<()> {
-        let mut session_config = json!({});
-
-        if let Some(instruction) = &config.instruction {
-            session_config["instructions"] = json!(instruction);
-        }
-
-        if let Some(voice) = &config.voice {
-            session_config["voice"] = json!(voice);
-        }
-
-        if let Some(modalities) = &config.modalities {
-            session_config["modalities"] = json!(modalities);
-        }
-
-        if let Some(input_format) = &config.input_audio_format {
-            session_config["input_audio_format"] = json!(input_format.to_string());
-        }
-
-        if let Some(output_format) = &config.output_audio_format {
-            session_config["output_audio_format"] = json!(output_format.to_string());
-        }
-
-        if let Some(vad) = &config.turn_detection {
-            let vad_config = match vad.mode {
-                crate::config::VadMode::ServerVad => {
-                    let mut cfg = json!({
-                        "type": "server_vad"
-                    });
-                    if let Some(ms) = vad.silence_duration_ms {
-                        cfg["silence_duration_ms"] = json!(ms);
-                    }
-                    if let Some(thresh) = vad.threshold {
-                        cfg["threshold"] = json!(thresh);
-                    }
-                    if let Some(prefix) = vad.prefix_padding_ms {
-                        cfg["prefix_padding_ms"] = json!(prefix);
-                    }
-                    cfg
-                }
-                crate::config::VadMode::SemanticVad => {
-                    let mut cfg = json!({
-                        "type": "semantic_vad"
-                    });
-                    if let Some(eagerness) = &vad.eagerness {
-                        cfg["eagerness"] = json!(eagerness);
-                    }
-                    cfg
-                }
-                crate::config::VadMode::None => {
-                    json!(null)
-                }
-            };
-            session_config["turn_detection"] = vad_config;
-        }
-
-        if let Some(tools) = &config.tools {
-            let tool_defs: Vec<Value> = tools
-                .iter()
-                .map(|t| {
-                    let mut def = json!({
-                        "type": "function",
-                        "name": t.name,
-                    });
-                    if let Some(desc) = &t.description {
-                        def["description"] = json!(desc);
-                    }
-                    if let Some(params) = &t.parameters {
-                        def["parameters"] = params.clone();
-                    }
-                    def
-                })
-                .collect();
-            session_config["tools"] = json!(tool_defs);
-        }
-
-        if let Some(temp) = config.temperature {
-            session_config["temperature"] = json!(temp);
-        }
-
-        if let Some(max_tokens) = config.max_response_output_tokens {
-            session_config["max_response_output_tokens"] = json!(max_tokens);
-        }
-
-        if let Some(transcription) = &config.input_audio_transcription {
-            session_config["input_audio_transcription"] = json!({
-                "model": transcription.model
-            });
-        }
-
-        // Send session.update event
+        let session_config = translate_config_to_session_update(&config);
         let event = json!({
             "type": "session.update",
             "session": session_config
@@ -366,6 +277,105 @@ impl RealtimeSession for OpenAIRealtimeSession {
         self.configure_session(config).await?;
         Ok(ContextMutationOutcome::Applied)
     }
+}
+
+/// Pure translation function mapping `adk_realtime::config::RealtimeConfig` to OpenAI's
+/// native session configuration JSON object payload (omitting structural wrappers).
+pub(crate) fn translate_config_to_session_update(config: &crate::config::RealtimeConfig) -> Value {
+    let mut session_config = json!({});
+
+    if let Some(instruction) = &config.instruction {
+        session_config["instructions"] = json!(instruction);
+    }
+
+    if let Some(voice) = &config.voice {
+        session_config["voice"] = json!(voice);
+    }
+
+    if let Some(modalities) = &config.modalities {
+        session_config["modalities"] = json!(modalities);
+    }
+
+    if let Some(input_format) = &config.input_audio_format {
+        session_config["input_audio_format"] = json!(input_format.to_string());
+    }
+
+    if let Some(output_format) = &config.output_audio_format {
+        session_config["output_audio_format"] = json!(output_format.to_string());
+    }
+
+    if let Some(vad) = &config.turn_detection {
+        let vad_config = match vad.mode {
+            crate::config::VadMode::ServerVad => {
+                let mut cfg = json!({
+                    "type": "server_vad"
+                });
+                if let Some(ms) = vad.silence_duration_ms {
+                    cfg["silence_duration_ms"] = json!(ms);
+                }
+                if let Some(thresh) = vad.threshold {
+                    cfg["threshold"] = json!(thresh);
+                }
+                if let Some(prefix) = vad.prefix_padding_ms {
+                    cfg["prefix_padding_ms"] = json!(prefix);
+                }
+                cfg
+            }
+            crate::config::VadMode::SemanticVad => {
+                let mut cfg = json!({
+                    "type": "semantic_vad"
+                });
+                if let Some(eagerness) = &vad.eagerness {
+                    cfg["eagerness"] = json!(eagerness);
+                }
+                cfg
+            }
+            crate::config::VadMode::None => {
+                json!(null)
+            }
+        };
+        session_config["turn_detection"] = vad_config;
+    }
+
+    if let Some(tools) = &config.tools {
+        let tool_defs: Vec<Value> = tools
+            .iter()
+            .map(|t| {
+                let mut def = json!({
+                    "type": "function",
+                    "name": t.name,
+                });
+                if let Some(desc) = &t.description {
+                    def["description"] = json!(desc);
+                }
+                if let Some(params) = &t.parameters {
+                    def["parameters"] = params.clone();
+                }
+                def
+            })
+            .collect();
+        session_config["tools"] = json!(tool_defs);
+    }
+
+    if let Some(temp) = config.temperature {
+        session_config["temperature"] = json!(temp);
+    }
+
+    if let Some(max_tokens) = config.max_response_output_tokens {
+        session_config["max_response_output_tokens"] = json!(max_tokens);
+    }
+
+    if let Some(transcription) = &config.input_audio_transcription {
+        session_config["input_audio_transcription"] = json!({
+            "model": transcription.model
+        });
+    }
+
+    if let Some(choice) = &config.tool_choice {
+        session_config["tool_choice"] = json!(choice);
+    }
+
+    session_config
 }
 
 /// Pure translation function for converting a standard `adk_core` message into

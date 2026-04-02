@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::RwLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::Mutex;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -212,11 +213,12 @@ pub struct GeminiRealtimeSession {
     sender: Arc<Mutex<WsSink>>,
     receiver: Arc<Mutex<WsSource>>,
     audio_buffer: Arc<Mutex<Vec<u8>>>,
+    resume_token: Arc<RwLock<Option<String>>>,
 }
 
 impl GeminiRealtimeSession {
     /// Connect to Gemini Live API using the specified backend.
-    pub async fn connect(backend: GeminiLiveBackend, config: RealtimeConfig) -> Result<Self> {
+    pub async fn connect(backend: GeminiLiveBackend, config: RealtimeConfig, resume_token: Arc<RwLock<Option<String>>>) -> Result<Self> {
         let model = backend.model().to_string();
         let ws_stream = match &backend {
             GeminiLiveBackend::Studio { api_key, model } => {
@@ -301,6 +303,7 @@ impl GeminiRealtimeSession {
             sender: Arc::new(Mutex::new(sink)),
             receiver: Arc::new(Mutex::new(source)),
             audio_buffer: Arc::new(Mutex::new(Vec::new())),
+            resume_token,
         };
 
         session.send_setup(&model, config).await?;
@@ -341,15 +344,12 @@ impl GeminiRealtimeSession {
             generation_config["temperature"] = json!(temp);
         }
 
-        if let Some(extra) = &config.extra {
-            if let Some(thinking_level) = extra.get("thinking_level") {
-                if let Some(obj) = generation_config.as_object_mut() {
-                    obj.insert(
-                        "thinkingConfig".to_string(),
-                        json!({ "thinkingLevel": thinking_level }),
-                    );
-                }
-            }
+        let thinking_config = config.extra.get("thinking_level")
+            .and_then(|val| val.as_str())
+            .map(|level| json!({ "thinkingLevel": level }));
+
+        if let (Some(tc), Some(obj)) = (thinking_config, generation_config.as_object_mut()) {
+            obj.insert("thinkingConfig".to_string(), tc);
         }
 
         let system_instruction = config.instruction.map(|text| GeminiContent {
@@ -358,13 +358,8 @@ impl GeminiRealtimeSession {
 
         let tools = convert_tools(config.tools);
 
-        // Functionally extract the token if it exists in the prior state map
-        let handle = config
-            .extra
-            .as_ref()
-            .and_then(|ext| ext.get("resumeToken"))
-            .and_then(|val| val.as_str())
-            .map(|s| s.to_string());
+        // Read the cached resumption token from the session's runtime state.
+        let handle = self.resume_token.read().unwrap().clone();
 
         // Always attach the config object to explicitly enable the session resumption feature,
         // even if the handle is currently None.
@@ -504,6 +499,9 @@ impl GeminiRealtimeSession {
         if let Some(resumption_update) = value.get("sessionResumptionUpdate") {
             if let Some(token) = resumption_update.get("resumptionToken").and_then(|t| t.as_str()) {
                 tracing::debug!("Received new Gemini 2.5 Native resumption token");
+                if let Ok(mut r_token) = self.resume_token.write() {
+                    *r_token = Some(token.to_string());
+                }
                 return Ok(ServerEvent::SessionUpdated {
                     event_id: uuid::Uuid::new_v4().to_string(),
                     session: json!({ "resumeToken": token }),
