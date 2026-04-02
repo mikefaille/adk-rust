@@ -266,6 +266,7 @@ impl RealtimeRunnerBuilder {
             event_handler: self.event_handler.unwrap_or_else(|| Arc::new(NoOpEventHandler)),
             session: Arc::new(RwLock::new(None)),
             state: Arc::new(RwLock::new(RunnerState::Idle)),
+            resume_token: Arc::new(RwLock::new(None)),
         })
     }
 }
@@ -315,6 +316,7 @@ pub struct RealtimeRunner {
     event_handler: Arc<dyn EventHandler>,
     session: Arc<RwLock<Option<BoxedSession>>>,
     state: Arc<RwLock<RunnerState>>,
+    resume_token: Arc<RwLock<Option<String>>>,
 }
 
 impl RealtimeRunner {
@@ -323,9 +325,19 @@ impl RealtimeRunner {
         RealtimeRunnerBuilder::new()
     }
 
+    /// Internal helper to inject runtime state into a temporary config for the provider session.
+    async fn inject_runtime_state(&self, mut config: crate::config::RealtimeConfig) -> crate::config::RealtimeConfig {
+        if let Some(token) = self.resume_token.read().await.as_ref() {
+            config.extra.insert("resumeToken".to_string(), token.to_string().into());
+        }
+        config
+    }
+
     /// Connect to the realtime provider.
     pub async fn connect(&self) -> Result<()> {
         let config = self.config.read().await.clone();
+        let config = self.inject_runtime_state(config).await;
+
         let session = self.model.connect(config).await?;
         let mut guard = self.session.write().await;
         *guard = Some(session);
@@ -527,6 +539,8 @@ impl RealtimeRunner {
     ) -> Result<()> {
         tracing::warn!("Executing transport resumption with new configuration.");
 
+        let new_config = self.inject_runtime_state(new_config).await;
+
         // 1. Acquire exclusive write access to the session pointer.
         let mut write_guard = self.session.write().await;
 
@@ -538,8 +552,6 @@ impl RealtimeRunner {
         }
 
         // 3. Establish a brand new connection using the provider-agnostic factory interface.
-        // If the provider supports resumption natively (like Gemini), the `new_config`
-        // payload already contains the cached `resumeToken`.
         let new_session = self.model.connect(new_config).await?;
 
         // 4. Overwrite the active session pointer with the newly connected transport.
@@ -738,8 +750,8 @@ impl RealtimeRunner {
                     tracing::info!(
                         "Received Gemini sessionResumption token, saving for future reconnects."
                     );
-                    let mut config = self.config.write().await;
-                    config.extra.insert("resumeToken".to_string(), token.into());
+                    let mut r_token = self.resume_token.write().await;
+                    *r_token = Some(token.to_string());
                 }
             }
             ServerEvent::Error { error, .. } => {
