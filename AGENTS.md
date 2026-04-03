@@ -152,7 +152,8 @@ Individual features (`agents`, `models`, `tools`, `sessions`, `server`, `graph`,
 - Always use `tracing` for logging. Never `println!` or `eprintln!` in library code.
 - Always use `Arc<T>` for shared ownership across async boundaries.
 - Always use `tokio::sync::RwLock` for async-safe interior mutability.
-- Use builder pattern for complex configuration.
+- Always use builder pattern for complex configuration.
+- Always unify `rustls` crypto providers to `aws-lc-rs` at the workspace level. This is the official `rustls` recommendation for superior performance and completeness. If transitive dependencies pull in multiple providers (e.g., `ring`), ensure tests and examples call `rustls::crypto::aws_lc_rs::default_provider().install_default()` early to avoid runtime panics.
 - When using `format!` and you can inline variables into `{}`, always do that.
 - Always collapse `if` statements per clippy `collapsible_if`.
 - Always inline `format!` args per clippy `uninlined_format_args`.

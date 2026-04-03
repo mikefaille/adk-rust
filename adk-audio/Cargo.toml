@@ -57,6 +57,7 @@ livekit-api = { workspace = true, optional = true }
 
 [dev-dependencies]
 proptest = "1"
+rustls = { workspace = true }
 tokio = { version = "1", features = ["full", "test-util"] }
 
 [features]
