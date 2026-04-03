@@ -13,6 +13,8 @@ Implement tools with strict schema contracts and protocol-aware outputs.
 2. Add MCP toolsets with auth/reconnect configuration.
 3. Add ADK UI render tools with protocol compatibility checks.
 4. Validate tool protocol outputs with existing test matrices.
+5. Use MCP Resource API (list_resources, list_resource_templates, read_resource) for server-provided data.
+6. Use ElicitationHandler for MCP servers that request user input during tool execution.
 
 ## Guardrails
 1. Reject ambiguous argument schemas.

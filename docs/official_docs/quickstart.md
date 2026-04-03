@@ -29,7 +29,7 @@ cargo adk new my_agent --template rag
 # REST API server ready for deployment
 cargo adk new my_agent --template api
 
-# OpenAI GPT-4o-mini agent
+# OpenAI GPT-5-mini agent
 cargo adk new my_agent --template openai
 
 # Use any provider with any template
@@ -42,7 +42,7 @@ cargo adk new my_agent --template tools --provider anthropic
 | `tools` | Agent with `#[tool]` macro custom tools + schemars schema generation |
 | `rag` | RAG pipeline — Gemini embeddings, in-memory vector store, document ingestion |
 | `api` | Axum REST server with health check, ready for `docker build` |
-| `openai` | OpenAI GPT-4o-mini agent with console |
+| `openai` | OpenAI GPT-5-mini agent with console |
 
 ## Step 2: Add Your API Key
 
@@ -69,6 +69,27 @@ Type your message and press Enter. Ctrl+C to exit.
 I'm a helpful AI assistant. I can help you with answering questions,
 explaining concepts, and having a friendly conversation.
 ```
+
+---
+
+## Zero-Config Alternative — `adk::run()`
+
+If you just want to run a quick agent without scaffolding, use the one-liner:
+
+```rust
+use adk_rust::run;
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    dotenvy::dotenv().ok();
+    // Detects ANTHROPIC_API_KEY, OPENAI_API_KEY, or GOOGLE_API_KEY automatically
+    let response = run("You are a helpful assistant.", "Explain Rust in one sentence.").await?;
+    println!("{response}");
+    Ok(())
+}
+```
+
+This handles provider detection, session creation, agent building, and execution in a single call. Great for scripts, prototypes, and quick experiments.
 
 ---
 
@@ -194,14 +215,14 @@ Or scaffold with a provider: `cargo adk new my-agent --provider openai`
 
 ```rust
 let api_key = std::env::var("OPENAI_API_KEY")?;
-let model = OpenAIClient::new(OpenAIConfig::new(api_key, "gpt-4o-mini"))?;
+let model = OpenAIClient::new(OpenAIConfig::new(api_key, "gpt-5-mini"))?;
 ```
 
 ### Anthropic
 
 ```rust
 let api_key = std::env::var("ANTHROPIC_API_KEY")?;
-let model = AnthropicClient::new(AnthropicConfig::new(api_key, "claude-sonnet-4-5-20250929"))?;
+let model = AnthropicClient::new(AnthropicConfig::new(api_key, "claude-sonnet-4-6"))?;
 ```
 
 ### DeepSeek
@@ -231,8 +252,8 @@ let model = OllamaModel::new(OllamaConfig::new("llama3.2"))?;
 | Provider | Model Examples | Feature Flag |
 |----------|---------------|--------------|
 | Gemini | `gemini-2.5-flash`, `gemini-2.5-pro`, `gemini-3-pro-preview` | (default) |
-| OpenAI | `gpt-5`, `gpt-5-mini`, `gpt-4o-mini` | `openai` |
-| Anthropic | `claude-sonnet-4-5-20250929`, `claude-opus-4-5-20251101` | `anthropic` |
+| OpenAI | `gpt-5`, `gpt-5-mini`, `gpt-4.1` | `openai` |
+| Anthropic | `claude-sonnet-4-6`, `claude-opus-4-6`, `claude-haiku-4-5` | `anthropic` |
 | DeepSeek | `deepseek-chat`, `deepseek-reasoner` | `deepseek` |
 | Groq | `meta-llama/llama-4-scout-17b-16e-instruct`, `llama-3.3-70b-versatile` | `groq` |
 | Ollama | `llama3.2:3b`, `qwen2.5:7b`, `mistral:7b` | `ollama` |

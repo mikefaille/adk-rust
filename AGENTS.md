@@ -51,24 +51,34 @@ adk-model/       LLM provider facade: Gemini, OpenAI, Anthropic, DeepSeek, Groq,
                  Fireworks, Together, Mistral, Perplexity, Cerebras, SambaNova, Bedrock, Azure AI
                  (feature-gated)
 adk-gemini/      Dedicated Gemini client with GeminiBackend trait (Studio + Vertex AI)
-adk-tool/        Tool system: FunctionTool, MCP integration (rmcp 0.14), Google Search
+adk-tool/        Tool system: FunctionTool, MCP integration (rmcp 1.2), Google Search, MCP Resource API
 adk-runner/      Agent execution runtime with event streaming
 adk-server/      HTTP server (Axum) and A2A (Agent-to-Agent) protocol
-adk-session/     Session management and state persistence
+adk-session/     Session management and state persistence, encrypted sessions (AES-256-GCM)
 adk-artifact/    Binary artifact storage for agents
 adk-memory/      Semantic memory and RAG search
-adk-graph/       Graph-based workflow orchestration with checkpoints and HITL
+adk-graph/       Graph-based workflow orchestration with checkpoints, durable resume, and HITL
 adk-realtime/    Real-time bidirectional audio/video streaming (OpenAI, Gemini Live, Vertex AI Live,
-                 LiveKit, WebRTC)
+                 LiveKit, WebRTC), mid-session context mutation, interruption detection
 adk-browser/     Browser automation tools via WebDriver
 adk-eval/        Evaluation framework: trajectory, semantic, rubric, LLM-judge
-adk-telemetry/   OpenTelemetry integration for agent observability
+adk-telemetry/   OpenTelemetry 0.31 integration for agent observability
 adk-guardrail/   Input/output guardrails: validation, content filtering, PII redaction
 adk-auth/        Authentication: API keys, JWT, OAuth2, OIDC, SSO
 adk-plugin/      Plugin system for agent lifecycle hooks
 adk-skill/       Skill discovery, parsing, and convention-based agent capabilities
 adk-cli/         Command-line launcher for agents
+adk-anthropic/   Dedicated Anthropic API client with streaming, thinking, caching, citations, pricing
 adk-doc-audit/   Documentation audit: rustdoc coverage, link checking, crate validation
+adk-rust-macros/ Procedural macros (#[tool] attribute)
+adk-code/        Code execution (experimental)
+adk-sandbox/     Sandboxed execution environments (experimental)
+adk-audio/       Audio processing, STT/TTS providers, Deepgram streaming (experimental)
+adk-rag/         Retrieval-augmented generation pipelines
+adk-action/      Action node execution for deterministic workflow operations
+adk-deploy/      Deployment utilities
+adk-payments/    Payment integration for agent services
+cargo-adk/       Cargo subcommand for project scaffolding
 adk-rust/        Umbrella crate re-exporting all of the above
 ```
 
@@ -104,6 +114,7 @@ docs/official_docs/    Comprehensive documentation site content
 `gemini` is the default. All others are opt-in:
 
 - `gemini` (default), `openai`, `anthropic`, `deepseek`, `ollama`, `groq`
+- `openrouter` — OpenRouter native chat, responses, routing, discovery, and credits APIs
 - `bedrock` — Amazon Bedrock via AWS SDK Converse API
 - `azure-ai` — Azure AI Inference endpoints
 - `all-providers` — enables all eight real feature flags
@@ -125,7 +136,7 @@ All opt-in, no defaults:
 
 Four presets control which crates are compiled:
 
-- `standard` **(default)** — agents, models, gemini, tools, skills, sessions, artifacts, memory, runner, telemetry, guardrail, auth, plugin. Everything needed to build and run agents.
+- `standard` **(default)** — agents, models, gemini, anthropic, tools, skills, sessions, artifacts, memory, runner, telemetry, guardrail, auth, plugin. Everything needed to build and run agents.
 - `full` — standard + graph, realtime, browser, eval, rag. All stable specialist crates. Does **not** include experimental crates.
 - `labs` — standard + code, sandbox, audio. Experimental crates that may have unstable APIs.
 - `minimal` — agents, gemini, runner. Fastest possible build.
@@ -343,13 +354,14 @@ Crates must be published in dependency order. Wait for each crate to be indexed 
 
 ```
 Tier 1: adk-core
-Tier 2: adk-telemetry, adk-memory, adk-artifact, adk-plugin, adk-skill, adk-auth, adk-guardrail, adk-gemini
+Tier 2: adk-telemetry, adk-memory, adk-artifact, adk-plugin, adk-skill, adk-auth, adk-guardrail, adk-gemini, adk-anthropic, adk-rust-macros
 Tier 3: adk-session
-Tier 4: adk-tool, adk-model, adk-ui, adk-browser
-Tier 5: adk-agent, adk-graph
-Tier 6: adk-runner, adk-realtime, adk-eval
-Tier 7: adk-server, adk-cli
-Tier 8: adk-rust (umbrella — always last)
+Tier 4: adk-tool, adk-model, adk-browser, adk-audio
+Tier 5: adk-agent, adk-graph, adk-action
+Tier 6: adk-runner, adk-realtime, adk-eval, adk-rag
+Tier 7: adk-server, adk-cli, adk-deploy, adk-payments
+Tier 8: cargo-adk
+Tier 9: adk-rust (umbrella — always last)
 ```
 
 ### Publish workflow
@@ -376,6 +388,19 @@ cargo publish -p <crate-name>
 ## Crate-specific guides
 
 - `adk-gemini/AGENTS.md` — Gemini client tracing conventions and instrumentation patterns
+- `STABILITY.md` — Crate stability tiers (Stable/Beta/Experimental), deprecation policy, 1.0 milestone
+
+## Convenience APIs (0.5.0+)
+
+- `adk_rust::provider_from_env()` — auto-detect LLM provider from `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `GOOGLE_API_KEY`
+- `adk_rust::run(instructions, input)` — single-function agent invocation with auto provider detection
+- Prompt caching is enabled by default for Anthropic and Bedrock. Gemini explicit caching activates when `cache_capable` is set on the runner.
+- Pricing modules: `adk_gemini::pricing`, `adk_model::openai::pricing`, `adk_anthropic::pricing`
+- `EncryptedSession<S>` in `adk-session` (behind `encrypted-session` feature) — AES-256-GCM encryption with key rotation
+- `InterruptionDetection` enum in `adk-realtime` — `Manual` (default) or `Automatic` VAD-based interruption
+- `ToolSearchConfig` in `adk-anthropic` — regex-based tool filtering for the Anthropic provider
+- MCP Resource API: `McpToolset::list_resources()`, `list_resource_templates()`, `read_resource(uri)`
+- Graph durable resume: `PregelExecutor` resumes from last checkpoint on startup
 
 ## adk-studio (separate repo)
 

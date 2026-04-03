@@ -105,7 +105,7 @@ fn content_to_input_items(content: &Content) -> Vec<InputItem> {
             Part::FunctionResponse { function_response, id } => {
                 let call_id = id.clone().unwrap_or_else(|| "unknown".to_string());
                 let output_text =
-                    serde_json::to_string(&function_response.response).unwrap_or_default();
+                    crate::tool_result::serialize_tool_result(&function_response.response);
                 items.push(InputItem::Item(Item::FunctionCallOutput(
                     FunctionCallOutputItemParam {
                         call_id,
@@ -568,6 +568,7 @@ fn convert_usage(usage: &ResponseUsage) -> UsageMetadata {
         prompt_token_count: usage.input_tokens as i32,
         candidates_token_count: usage.output_tokens as i32,
         total_token_count: (usage.input_tokens + usage.output_tokens) as i32,
+        cache_read_input_token_count: Some(usage.input_tokens_details.cached_tokens as i32),
         thinking_token_count: Some(usage.output_tokens_details.reasoning_tokens as i32),
         ..Default::default()
     }

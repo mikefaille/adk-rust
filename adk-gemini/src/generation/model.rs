@@ -544,6 +544,25 @@ pub struct GenerateContentRequest {
     pub cached_content: Option<String>,
 }
 
+impl GenerateContentRequest {
+    /// Strips fields that Vertex AI does not support.
+    ///
+    /// The Vertex AI surface (`aiplatform.googleapis.com`) rejects
+    /// `includeServerSideToolInvocations` with a 400 error. Vertex AI handles
+    /// built-in tools (Google Search, URL Context, etc.) natively without
+    /// needing this flag. This method clears the flag so the request can be
+    /// sent to Vertex AI without modification.
+    ///
+    /// AI Studio (`generativelanguage.googleapis.com`) requires the flag for
+    /// Gemini 3 models to return `toolCall`/`toolResponse` parts instead of
+    /// silently truncating the response.
+    pub fn strip_vertex_unsupported_fields(&mut self) {
+        if let Some(tc) = &mut self.tool_config {
+            tc.include_server_side_tool_invocations = None;
+        }
+    }
+}
+
 /// Native thinking level for Gemini 3 models.
 ///
 /// Controls the amount of reasoning effort the model applies. This is the

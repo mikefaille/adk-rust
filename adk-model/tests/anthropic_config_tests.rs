@@ -5,7 +5,7 @@
 //! **Validates: Requirements 13.1, 13.3**
 #![cfg(feature = "anthropic")]
 
-use adk_model::anthropic::AnthropicConfig;
+use adk_model::anthropic::{AnthropicConfig, ThinkingMode};
 use proptest::prelude::*;
 
 /// Generator for optional thinking budget (0 means disabled).
@@ -58,8 +58,12 @@ proptest! {
 
         match budget {
             Some(b) => {
-                let thinking = config.thinking.as_ref().unwrap();
-                prop_assert_eq!(thinking.budget_tokens, b);
+                match config.thinking.as_ref() {
+                    Some(ThinkingMode::Enabled { budget_tokens }) => {
+                        prop_assert_eq!(*budget_tokens, b);
+                    }
+                    other => prop_assert!(false, "expected Enabled thinking mode, got {other:?}"),
+                }
             }
             None => prop_assert!(config.thinking.is_none()),
         }
@@ -71,7 +75,7 @@ proptest! {
     /// **Feature: anthropic-deep-integration, Property 15: Backward compatibility**
     /// *For any* LlmRequest, building API parameters with a default AnthropicConfig
     /// (no optional features enabled) SHALL produce a config with no `thinking`
-    /// parameter, no `cache_control` on any block, prompt_caching false,
+    /// parameter, prompt_caching true (enabled by default for cost/latency savings),
     /// empty beta_features, and no api_version override.
     /// **Validates: Requirements 13.3**
     #[test]
@@ -83,7 +87,7 @@ proptest! {
             .with_max_tokens(max_tokens);
 
         // All new fields must be at their disabled/empty defaults
-        prop_assert!(!config.prompt_caching, "prompt_caching should be false by default");
+        prop_assert!(config.prompt_caching, "prompt_caching should be true by default");
         prop_assert!(config.thinking.is_none(), "thinking should be None by default");
         prop_assert!(config.beta_features.is_empty(), "beta_features should be empty by default");
         prop_assert!(config.api_version.is_none(), "api_version should be None by default");

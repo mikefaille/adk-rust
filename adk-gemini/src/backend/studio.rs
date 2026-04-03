@@ -63,6 +63,10 @@ pub struct StudioBackend {
     pub(crate) http_client: Client,
     pub(crate) base_url: Url,
     pub(crate) model: Model,
+    /// Whether the base URL points to Vertex AI (`aiplatform.googleapis.com`).
+    /// When true, `includeServerSideToolInvocations` is stripped from requests
+    /// because Vertex AI rejects it with `INVALID_ARGUMENT`.
+    pub(crate) is_vertex_url: bool,
 }
 
 impl StudioBackend {
@@ -78,12 +82,19 @@ impl StudioBackend {
             .build()
             .expect("all parameters must be valid");
 
-        Ok(Self { http_client, base_url, model })
+        let is_vertex_url = Self::detect_vertex_url(&base_url);
+        Ok(Self { http_client, base_url, model, is_vertex_url })
     }
 
     /// Create with a custom `reqwest::Client` (e.g. for proxy support).
     pub fn with_client(http_client: Client, model: Model, base_url: Url) -> Self {
-        Self { http_client, base_url, model }
+        let is_vertex_url = Self::detect_vertex_url(&base_url);
+        Self { http_client, base_url, model, is_vertex_url }
+    }
+
+    /// Returns `true` if the URL points to a Vertex AI endpoint.
+    fn detect_vertex_url(url: &Url) -> bool {
+        url.host_str().is_some_and(|h| h.ends_with("aiplatform.googleapis.com"))
     }
 
     // ── URL helpers ─────────────────────────────────────────────────────
@@ -195,16 +206,22 @@ impl GeminiBackend for StudioBackend {
 
     async fn generate_content(
         &self,
-        request: GenerateContentRequest,
+        mut request: GenerateContentRequest,
     ) -> Result<GenerationResponse, Error> {
+        if self.is_vertex_url {
+            request.strip_vertex_unsupported_fields();
+        }
         let url = self.build_url("generateContent")?;
         self.post_json(url, &request).await
     }
 
     async fn generate_content_stream(
         &self,
-        request: GenerateContentRequest,
+        mut request: GenerateContentRequest,
     ) -> Result<BackendStream<GenerationResponse>, Error> {
+        if self.is_vertex_url {
+            request.strip_vertex_unsupported_fields();
+        }
         let mut url = self.build_url("streamGenerateContent")?;
         url.query_pairs_mut().append_pair("alt", "sse");
 
@@ -444,5 +461,52 @@ impl GeminiBackend for StudioBackend {
             if name.starts_with("models/") { name.to_string() } else { format!("models/{name}") };
         let url = self.build_url_with_suffix(&qualified)?;
         self.get_json(url).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detect_vertex_url_regional() {
+        let url = Url::parse("https://us-central1-aiplatform.googleapis.com/v1/publishers/google/")
+            .unwrap();
+        assert!(StudioBackend::detect_vertex_url(&url));
+    }
+
+    #[test]
+    fn detect_vertex_url_global() {
+        let url = Url::parse(
+            "https://aiplatform.googleapis.com/v1/publishers/google/models/gemini-3-flash-preview",
+        )
+        .unwrap();
+        assert!(StudioBackend::detect_vertex_url(&url));
+    }
+
+    #[test]
+    fn detect_vertex_url_with_project() {
+        let url = Url::parse(
+            "https://us-central1-aiplatform.googleapis.com/v1/projects/my-project/locations/us-central1/publishers/google/"
+        ).unwrap();
+        assert!(StudioBackend::detect_vertex_url(&url));
+    }
+
+    #[test]
+    fn detect_studio_url() {
+        let url = Url::parse("https://generativelanguage.googleapis.com/v1beta/").unwrap();
+        assert!(!StudioBackend::detect_vertex_url(&url));
+    }
+
+    #[test]
+    fn detect_studio_v1_url() {
+        let url = Url::parse("https://generativelanguage.googleapis.com/v1/").unwrap();
+        assert!(!StudioBackend::detect_vertex_url(&url));
+    }
+
+    #[test]
+    fn detect_custom_url() {
+        let url = Url::parse("https://my-proxy.example.com/gemini/").unwrap();
+        assert!(!StudioBackend::detect_vertex_url(&url));
     }
 }

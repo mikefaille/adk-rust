@@ -7,6 +7,9 @@
 - DeepSeek: `DEEPSEEK_API_KEY`
 - Groq: `GROQ_API_KEY`
 - Ollama: local `ollama serve`
+- OpenRouter: `OPENROUTER_API_KEY`
+- Bedrock: AWS IAM credentials (standard AWS credential chain)
+- Azure AI: `AZURE_AI_API_KEY`
 
 ## Feature flags
 - `openai`
@@ -15,6 +18,23 @@
 - `groq`
 - `ollama`
 - `mistralrs` (separate crate flow)
+- `openrouter`
+- `bedrock`
+- `azure-ai`
+- `fireworks`, `together`, `mistral`, `perplexity`, `cerebras`, `sambanova` — backward-compat aliases for `openai`. Use `OpenAICompatibleConfig` presets instead of separate client types.
+
+## Convenience APIs
+- `provider_from_env()` — auto-detect provider from env vars (precedence: Anthropic > OpenAI > Gemini)
+- `adk::run(instructions, input)` — one-liner agent invocation with auto provider detection
+
+## Prompt caching
+- Enabled by default for Anthropic and Bedrock
+- Gemini explicit caching activates when `cache_capable` is set on the runner
+
+## Pricing modules
+- `adk_gemini::pricing`
+- `adk_model::openai::pricing`
+- `adk_anthropic::pricing`
 
 ## Verification
 ```bash

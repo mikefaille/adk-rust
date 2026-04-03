@@ -14,7 +14,7 @@ A flexible framework for developing AI agents with simplicity and power. Model-a
 |----------|-------------|---------------|
 | Gemini | `gemini` (default) | `gemini-2.5-flash` |
 | OpenAI | `openai` | `gpt-5-mini` |
-| Anthropic | `anthropic` | `claude-sonnet-4-5-20250929` |
+| Anthropic | `anthropic` | `claude-sonnet-4-6` |
 | DeepSeek | `deepseek` | `deepseek-chat` |
 | Groq | `groq` | `llama-3.3-70b-versatile` |
 | Ollama | `ollama` | `llama3.2` |
@@ -24,7 +24,7 @@ A flexible framework for developing AI agents with simplicity and power. Model-a
 | Perplexity | `perplexity` | `sonar` |
 | Cerebras | `cerebras` | `llama-3.3-70b` |
 | SambaNova | `sambanova` | `Meta-Llama-3.3-70B-Instruct` |
-| Amazon Bedrock | `bedrock` | `anthropic.claude-sonnet-4-20250514-v1:0` |
+| Amazon Bedrock | `bedrock` | `us.anthropic.claude-sonnet-4-6` |
 | Azure AI Inference | `azure-ai` | (endpoint-specific) |
 
 ## Quick Start
@@ -78,6 +78,25 @@ async fn main() -> AnyhowResult<()> {
 ```bash
 cargo run
 ```
+
+### Even Faster — `adk::run()`
+
+Auto-detect your provider and run an agent in one call:
+
+```rust
+use adk_rust::run;
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    dotenvy::dotenv().ok();
+    // Set ANTHROPIC_API_KEY, OPENAI_API_KEY, or GOOGLE_API_KEY
+    let response = run("You are a helpful assistant.", "What is Rust?").await?;
+    println!("{response}");
+    Ok(())
+}
+```
+
+`provider_from_env()` checks `ANTHROPIC_API_KEY` → `OPENAI_API_KEY` → `GOOGLE_API_KEY` in order.
 
 ## Adding Tools
 
@@ -139,6 +158,7 @@ Features:
 - LiveKit WebRTC bridge for production audio routing
 - Bidirectional audio (PCM16, G711, Opus)
 - Server-side VAD
+- Mid-session context mutation (swap instructions/tools without dropping the call)
 - Real-time tool calling
 - Multi-agent handoffs
 

@@ -1,4 +1,5 @@
 //! # adk-realtime
+#![allow(clippy::result_large_err)]
 //!
 //! Real-time bidirectional audio/video streaming for ADK agents.
 //!
@@ -99,7 +100,9 @@ pub mod livekit;
 // Re-exports
 pub use agent::{RealtimeAgent, RealtimeAgentBuilder};
 pub use audio::{AudioEncoding, AudioFormat};
-pub use config::{RealtimeConfig, RealtimeConfigBuilder, VadConfig, VadMode};
+pub use config::{
+    InterruptionDetection, RealtimeConfig, RealtimeConfigBuilder, VadConfig, VadMode,
+};
 pub use error::{RealtimeError, Result};
 pub use events::{ClientEvent, ServerEvent, ToolCall, ToolResponse};
 pub use model::{BoxedModel, RealtimeModel};

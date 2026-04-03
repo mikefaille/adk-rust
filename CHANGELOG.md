@@ -9,6 +9,76 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+#### Competitive Improvements — Stability, Ergonomics, Encryption, Graph Resume, Tool Search
+
+- **STABILITY.md**: New stability roadmap at the repository root defining three tiers (Stable, Beta, Experimental) with contracts, a crate-tier mapping table for every public `adk-*` crate, deprecation lifecycle policy (N+2 minor releases with `#[deprecated(since, note)]`), and 1.0 milestone criteria with GitHub milestone link.
+- **Semver CI enforcement**: New `.github/workflows/semver.yml` runs `cargo semver-checks check-release` on every PR — fails for Stable-tier crates, warns for Beta/Experimental.
+- **`provider_from_env()`** (`adk-rust`): Auto-detect LLM provider from environment variables. Checks `ANTHROPIC_API_KEY` → `OPENAI_API_KEY` → `GOOGLE_API_KEY` in precedence order, returns `Arc<dyn Llm>`. Feature-gated per provider.
+- **`adk::run()`** (`adk-rust`): Single-function agent invocation — `run("instructions", "input").await` handles provider detection, session creation, agent building, and execution. Returns `Result<String>`.
+- **MCP Resource API** (`adk-tool`): `McpToolset::list_resources()`, `list_resource_templates()`, and `read_resource(uri)` methods delegating to rmcp's `resources/list`, `resourceTemplates/list`, and `resources/read` protocol methods. Returns empty vec when server doesn't support resources. Re-exports `Resource`, `ResourceTemplate`, `ResourceContents` from `rmcp::model`.
+- **Graph durable resume** (`adk-graph`): `PregelExecutor` now checks for existing checkpoints before starting execution. If a checkpoint exists for the thread ID, state, pending nodes, and step are restored from it — skipping already-completed nodes. Both `run()` and `run_stream()` support resume. New `StreamEvent::Resumed` variant emitted when execution resumes from a checkpoint.
+- **Deepgram streaming STT** (`adk-audio`): Full WebSocket streaming implementation for `DeepgramStt::transcribe_stream()` — connects to `wss://api.deepgram.com/v1/listen`, forwards audio frames as binary messages, yields interim and final `Transcript` values. Supports diarization, language detection, and model selection.
+- **Structured tool output fix** (`adk-model`): Shared `serialize_tool_result()` helper prevents double-encoding of JSON objects in tool results across all 7 provider convert modules (OpenAI, Anthropic, Groq, DeepSeek, Azure AI, Bedrock, Ollama).
+- **`InterruptionDetection` enum** (`adk-realtime`): `Manual` (default) and `Automatic` variants controlling how voice activity detection handles user interruptions. Added to `RealtimeConfig` with `with_interruption_detection()` builder method.
+- **`EncryptionKey`** (`adk-session`): AES-256-GCM key management behind `encrypted-session` feature flag. `generate()`, `from_env(var_name)`, `from_bytes(&[u8])` constructors. Debug impl redacts key bytes.
+- **`EncryptedSession<S>`** (`adk-session`): Transparent encryption wrapper for any `SessionService`. Encrypts state with AES-256-GCM (random 96-bit nonce, stored as `[nonce || ciphertext]`). Supports key rotation — tries current key first, falls back to previous keys, re-encrypts with current key on successful fallback.
+- **`ToolSearchConfig`** (`adk-anthropic`): Regex-based tool name filtering. `matches(tool_name)` method compiles pattern and checks match.
+- **`AnthropicConfig::with_tool_search()`** (`adk-model`): Optional `ToolSearchConfig` on the Anthropic provider — when set, only tools matching the regex pattern are sent to the API.
+- **Validation examples**: Three standalone example crates (`competitive_ergonomics`, `competitive_graph_resume`, `competitive_tool_search`) exercising all new APIs with 37 runtime assertions.
+
+#### Realtime Context Mutation & LiveKit Performance ([@mikefaille](https://github.com/mikefaille))
+
+- **Provider-agnostic context mutation** (`adk-realtime`, #232): Mid-session instruction and tool swapping without dropping the call. `SessionUpdateConfig` newtype for safe partial session updates. `ContextMutationOutcome` enum — `Applied` (OpenAI: in-place `session.update`) or `RequiresResumption` (Gemini: session resumption with `SessionResumptionConfig`). `RealtimeRunner::update_session()` and `update_session_with_bridge()` orchestrate the provider-appropriate path. Includes `SESSION_MANAGEMENT.md` architecture documentation.
+- **`RealtimeRunner` session management** (`adk-realtime`, #105/#232): `update_session()`, `next_event()`, and `send_tool_response()` methods for dynamic FSM IVR state transitions. `SessionUpdateConfig` uses the Newtype pattern wrapping `RealtimeConfig` with `Deref`/`DerefMut` for ergonomic field access.
+- **Gemini session resumption** (`adk-realtime`, #232): `SessionResumptionConfig` with handle-based reconnection. `GeminiLiveSession` enables session resumption in setup, receives `SessionResumptionUpdate` messages, and reconnects with the handle for context changes.
+- **Two realtime examples** (`adk-realtime`, #232): `openai_session_update` (mid-session persona switch with tool swap) and `gemini_context_mutation` (session resumption for context changes).
+- **Zero-allocation LiveKit audio output** (`adk-realtime`, #236): Replaced manual `Vec::push` loops with `bytemuck::try_cast_slice` for O(0) copy. `Cow::Borrowed` passes aligned slices directly to WebRTC FFI. Vectorized iterator fallback for unaligned WebSocket chunks. Safety guards skip invalid audio frames. Includes `livekit_pcm_bench` benchmark.
+
+#### devenv & CI ([@mikefaille](https://github.com/mikefaille))
+
+- **devenv v2.0.6 upgrade** (#230): Updated `setup.sh` with v2 experimental features. Added `dbus` and `pkgs.dbus.dev` dependencies for `keyring` crate (adk-cli secure credential storage). Conditional `~/.bashrc` modification (CI-only) to avoid duplicate entries for local devs. Fixed `adk-rag` missing `gemini` feature in examples config.
+
+#### adk-anthropic — Dedicated Anthropic API Client (NEW CRATE)
+- **Standalone crate** replacing the `claudius` dependency in `adk-model`. Follows the same pattern as `adk-gemini` — a dedicated, publishable client crate.
+- **Full Anthropic API parity** (March 2026): Messages, Batches, Files, Skills, Models, Token Counting APIs.
+- **Current model support**: Claude Opus 4.6, Sonnet 4.6, Haiku 4.5, plus legacy 4.5/4.0/4.1 models. `KnownModel` enum with `Model::Custom(String)` fallback.
+- **Adaptive thinking**: `ThinkingConfig::adaptive()` for 4.6 models. Effort controlled via `OutputConfig::with_effort()` (supports `Low`, `Medium`, `High`, `Max`).
+- **Budget-based thinking**: `ThinkingConfig::enabled(budget_tokens)` for older models (deprecated on 4.6).
+- **Structured outputs**: `OutputConfig` with `OutputFormat::Json` and `OutputFormat::JsonSchema`.
+- **Prompt caching**: Top-level `cache_control: CacheControlEphemeral` for automatic caching, plus block-level `cache_control` on system prompts, tools, and content blocks.
+- **Context management** (beta): `ContextManagement` with `ClearToolUses` and `ClearThinking` strategies. Auto-injects `context-management-2025-06-27` beta header.
+- **Fast mode** (beta): `SpeedMode::Fast` for Opus 4.6. Auto-injects `fast-mode-2026-02-01` beta header.
+- **Citations**: `CitationsConfig` on documents with `TextCitation` variants (char location, page location, content block location, web search result).
+- **Vision**: URL and base64 image analysis via `ImageBlock`.
+- **PDF processing**: URL, base64, and Files API PDF analysis via `DocumentBlock`.
+- **SSE streaming**: Full event set including `ToolInputStart`, `ToolInputDelta`, `CompactionEvent`, `StreamError`.
+- **Token counting**: `count_tokens()` method for pre-send estimation.
+- **Token pricing**: `pricing` module with `ModelPricing` constants for all current models and `estimate_cost()` / `estimate_cost_1h()` calculators.
+- **Stop reasons**: `StopReason` enum with `EndTurn`, `MaxTokens`, `StopSequence`, `ToolUse`, `PauseTurn`, `Refusal`, `PauseRun`, `ModelContextWindowExceeded`.
+- **Container support**: `container` field on `MessageCreateParams` and `ContainerInfo` on `Message` response.
+- **Service tier**: `service_tier` field for priority capacity.
+- **14 examples**: `basic`, `streaming`, `thinking`, `tools`, `structured_output`, `caching`, `context_editing`, `compaction`, `token_counting`, `stop_reasons`, `fast_mode`, `citations`, `pdf_processing`, `vision`.
+- **373 unit tests** covering all types, serialization round-trips, client logic, and SSE parsing.
+
+#### adk-model — Anthropic Migration
+- Replaced `claudius` dependency with `adk-anthropic` in `adk-model`. Import paths changed from `use claudius::` to `use adk_anthropic::`.
+- Renamed `convert_claudius_error` to `convert_anthropic_error` across all Anthropic adapter modules.
+- All 72 adk-model lib tests pass with the new dependency.
+
+#### MCP Elicitation Support (adk-tool)
+- **`ElicitationHandler` trait**: User-implementable trait for handling MCP elicitation requests from servers. Supports form-based elicitation (structured schemas) and URL-based elicitation. Requires `Send + Sync` for async safety.
+- **`AutoDeclineElicitationHandler`**: Built-in zero-size handler that declines all elicitation requests, preserving backward-compatible behavior identical to rmcp's `()` ClientHandler default.
+- **`AdkClientHandler`**: Bridge struct implementing rmcp's `ClientHandler` trait, advertising elicitation capabilities and delegating requests to the user's `ElicitationHandler`. Catches panics and errors gracefully, falling back to Decline.
+- **`McpToolset::with_elicitation_handler()`**: Async factory method that creates an MCP client connection with elicitation support from any transport and an `Arc<dyn ElicitationHandler>`.
+- **`McpToolset::with_client_handler()`**: Factory method for using a custom `ClientHandler` type with `McpToolset`.
+- **`McpHttpClientBuilder::with_elicitation_handler()` / `connect_with_elicitation()`**: Builder methods for HTTP-based MCP connections with elicitation support.
+- **Capability advertisement**: `AdkClientHandler` advertises form and URL elicitation capabilities to MCP servers during initialization.
+- **Elicitation example**: `examples/mcp_elicitation/` — standalone crate with a real MCP server using `peer.elicit::<T>()` and an LLM-powered agent client with interactive stdin-based `ElicitationHandler`.
+- Full backward compatibility: `McpToolset::new()` with `()` handler continues to work unchanged.
+
+#### Gemini built-in tool tracing example (examples)
+- **`gemini_search_bug`**: Standalone example reproducing GitHub Issue #224 — demonstrates Google Search + URL Context + function tool coexistence through the ADK runner with full `ServerToolCall`/`ServerToolResponse` tracing, thought signature propagation, and grounding metadata display. Uses `gemini-3-pro-preview` with `include_server_side_tool_invocations` to surface the complete tool call chain.
+
 #### Action Node Graph Standardization (adk-action, adk-graph, adk-rust)
 - **`adk-action` crate**: New shared crate containing all 14 action node type definitions, `StandardProperties`, `ActionError` enum, and variable interpolation utilities. Zero runtime dependencies beyond `serde`, `serde_json`, `thiserror`, and `regex`.
 - **`ActionNodeExecutor`** in `adk-graph`: Implements the `Node` trait for any `ActionNodeConfig`, applying error handling (stop/continue/retry/fallback), timeout enforcement, and skip conditions uniformly across all node types.
@@ -21,12 +91,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+#### adk-gemini
+- Fixed Gemini 3 built-in tools (Google Search, URL Context) causing truncated responses (#224). `ContentBuilder::build()` now auto-sets `includeServerSideToolInvocations: true` when server-side tools are present, enabling Gemini 3 to return `toolCall`/`toolResponse` parts on AI Studio instead of silently truncating.
+- Fixed Vertex AI 400 error when `includeServerSideToolInvocations` was sent. Vertex AI rejects this field — it handles built-in tools natively. Both the Vertex backend and the Studio backend (when `with_base_url` points at `aiplatform.googleapis.com`) now strip the field before sending.
+
 #### adk-model
 - Fixed `test_server_tool_response_round_trip_as_openai_items` test — JSON fixture had `outcome` fields flattened instead of nested, causing deserialization mismatch with `async-openai` 0.33 structs.
+- Fixed Anthropic system prompt tests (`test_heuristic_skipped_when_explicit_system_exists`, `test_instruction_rerouting_to_system`, `test_multiple_system_entries_concatenated`) that expected `SystemPrompt::String` but received `SystemPrompt::Blocks` after `prompt_caching` default changed to `true`.
+- Fixed `prop_default_config_backward_compatible` property test asserting `prompt_caching` should be `false` — updated to match the actual default of `true`.
 - Removed unused `OutputStatus` import in `responses_convert.rs`.
 - Replaced `drain(..).collect()` with `std::mem::take()` in Anthropic streaming client per clippy `drain_collect` lint.
 
 ### Changed
+
+#### Dependency upgrade (adk-gemini)
+- **google-cloud-aiplatform-v1 1.8.0 → 1.9.0**: Migrated `EmbedContentRequest` from deprecated top-level `title`, `task_type`, and `output_dimensionality` fields to the new `EmbedContentConfig` struct. Eliminates 3 deprecation warnings on every build.
 
 #### Provider-native built-in tool support (adk-tool, adk-model, adk-gemini, examples)
 - Added typed built-in tool wrappers for Gemini (`GoogleMapsTool`, `GeminiCodeExecutionTool`, `GeminiFileSearchTool`, `GeminiComputerUseTool`), OpenAI Responses (`OpenAIWebSearchTool`, `OpenAIFileSearchTool`, `OpenAICodeInterpreterTool`, `OpenAIImageGenerationTool`, `OpenAIComputerUseTool`, `OpenAIMcpTool`, `OpenAILocalShellTool`, `OpenAIShellTool`, `OpenAIApplyPatchTool`), and Anthropic (`WebSearchTool`, native bash, native text editor variants).

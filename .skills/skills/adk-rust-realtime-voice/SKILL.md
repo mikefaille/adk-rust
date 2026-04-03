@@ -13,11 +13,14 @@ Build low-latency bidirectional audio flows with explicit session/event handling
 2. Validate session configuration and VAD settings.
 3. Handle client/server events with explicit match branches.
 4. Verify tool call lifecycle in realtime paths.
+5. Configure interruption detection (Manual or Automatic).
+6. Use SessionUpdateConfig for mid-session context mutation (swap instructions/tools without dropping the call).
 
 ## Guardrails
 1. Fail fast on unsupported modalities.
 2. Keep audio encoding assumptions explicit.
 3. Add coverage for cancellation, interruptions, and error events.
+4. Use ContextMutationOutcome to handle provider differences (OpenAI: Applied, Gemini: RequiresResumption).
 
 ## References
 - Use `references/realtime-voice-playbook.md`.

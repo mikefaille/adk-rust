@@ -392,7 +392,7 @@ impl GeminiModel {
             gemini_tools.push(adk_gemini::Tool::with_functions(function_declarations));
         }
 
-        if has_provider_native_tools && has_function_declarations {
+        if has_provider_native_tools {
             tool_config_json.insert(
                 "includeServerSideToolInvocations".to_string(),
                 serde_json::Value::Bool(true),
@@ -839,6 +839,54 @@ mod native_tool_tests {
 
         assert_eq!(gemini_tools.len(), 2);
         assert_eq!(tool_config.include_server_side_tool_invocations, Some(true));
+    }
+
+    #[test]
+    fn test_build_gemini_tools_sets_flag_for_builtin_only() {
+        let mut tools = std::collections::HashMap::new();
+        tools.insert(
+            "google_search".to_string(),
+            serde_json::json!({
+                "x-adk-gemini-tool": {
+                    "google_search": {}
+                }
+            }),
+        );
+
+        let (_gemini_tools, tool_config) =
+            GeminiModel::build_gemini_tools(&tools).expect("tool conversion should succeed");
+
+        assert_eq!(
+            tool_config.include_server_side_tool_invocations,
+            Some(true),
+            "includeServerSideToolInvocations should be set even with only built-in tools"
+        );
+    }
+
+    #[test]
+    fn test_build_gemini_tools_no_flag_for_function_only() {
+        let mut tools = std::collections::HashMap::new();
+        tools.insert(
+            "lookup_weather".to_string(),
+            serde_json::json!({
+                "name": "lookup_weather",
+                "description": "lookup weather",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "city": { "type": "string" }
+                    }
+                }
+            }),
+        );
+
+        let (_gemini_tools, tool_config) =
+            GeminiModel::build_gemini_tools(&tools).expect("tool conversion should succeed");
+
+        assert_eq!(
+            tool_config.include_server_side_tool_invocations, None,
+            "includeServerSideToolInvocations should NOT be set for function-only tools"
+        );
     }
 
     #[test]

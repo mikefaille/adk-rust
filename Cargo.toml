@@ -31,6 +31,7 @@ members = [
     "adk-deploy",
     "adk-payments",
     "adk-action",
+    "adk-anthropic",
 
     # CLI tools
     "cargo-adk",
@@ -112,7 +113,7 @@ chrono = { version = "0.4.44", features = ["serde"] }
 regex = "1.10"
 tracing = "0.1"
 tracing-subscriber = "0.3"
-opentelemetry = "0.28"
+opentelemetry = "0.31"
 tokio-tungstenite = { version = "0.28", features = ["rustls-tls-native-roots"] }
 reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls","multipart"] }
 toml = "0.8"
@@ -152,3 +153,4 @@ adk-audio = { path = "adk-audio", version = "0.5.0" }
 adk-deploy = { path = "adk-deploy", version = "0.5.0" }
 adk-payments = { path = "adk-payments", version = "0.5.0" }
 adk-action = { path = "adk-action", version = "0.5.0" }
+adk-anthropic = { path = "adk-anthropic", version = "0.5.0" }

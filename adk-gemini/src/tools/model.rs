@@ -101,6 +101,16 @@ impl Tool {
     pub fn mcp_server(config: Value) -> Self {
         Self::McpServer { mcp_server: config }
     }
+
+    /// Returns `true` if this tool is a server-side built-in tool (e.g., Google Search,
+    /// URL Context, Google Maps, Code Execution) that Gemini 3 executes internally.
+    ///
+    /// When server-side tools are present, `includeServerSideToolInvocations` should be
+    /// set in the `ToolConfig` so Gemini 3 returns `toolCall`/`toolResponse` parts instead
+    /// of silently truncating the response.
+    pub fn is_server_side(&self) -> bool {
+        !matches!(self, Self::Function { .. })
+    }
 }
 
 /// Defines the function behavior

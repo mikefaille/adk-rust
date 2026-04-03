@@ -24,7 +24,7 @@ pub trait ReadonlyContext: Send + Sync {
     ///
     /// # Errors
     ///
-    /// Returns [`AdkError::Config`](crate::AdkError::Config) when the
+    /// Returns an error when the
     /// underlying string is not a valid identifier.
     fn try_app_name(&self) -> Result<AppName> {
         Ok(AppName::try_from(self.app_name())?)
@@ -37,7 +37,7 @@ pub trait ReadonlyContext: Send + Sync {
     ///
     /// # Errors
     ///
-    /// Returns [`AdkError::Config`](crate::AdkError::Config) when the
+    /// Returns an error when the
     /// underlying string is not a valid identifier.
     fn try_user_id(&self) -> Result<UserId> {
         Ok(UserId::try_from(self.user_id())?)
@@ -50,7 +50,7 @@ pub trait ReadonlyContext: Send + Sync {
     ///
     /// # Errors
     ///
-    /// Returns [`AdkError::Config`](crate::AdkError::Config) when the
+    /// Returns an error when the
     /// underlying string is not a valid identifier.
     fn try_session_id(&self) -> Result<SessionId> {
         Ok(SessionId::try_from(self.session_id())?)
@@ -63,7 +63,7 @@ pub trait ReadonlyContext: Send + Sync {
     ///
     /// # Errors
     ///
-    /// Returns [`AdkError::Config`](crate::AdkError::Config) when the
+    /// Returns an error when the
     /// underlying string is not a valid identifier.
     fn try_invocation_id(&self) -> Result<InvocationId> {
         Ok(InvocationId::try_from(self.invocation_id())?)
@@ -180,7 +180,7 @@ pub trait Session: Send + Sync {
     ///
     /// # Errors
     ///
-    /// Returns [`AdkError::Config`](crate::AdkError::Config) when the
+    /// Returns an error when the
     /// underlying string is not a valid identifier.
     fn try_app_name(&self) -> Result<AppName> {
         Ok(AppName::try_from(self.app_name())?)
@@ -193,7 +193,7 @@ pub trait Session: Send + Sync {
     ///
     /// # Errors
     ///
-    /// Returns [`AdkError::Config`](crate::AdkError::Config) when the
+    /// Returns an error when the
     /// underlying string is not a valid identifier.
     fn try_user_id(&self) -> Result<UserId> {
         Ok(UserId::try_from(self.user_id())?)
@@ -206,7 +206,7 @@ pub trait Session: Send + Sync {
     ///
     /// # Errors
     ///
-    /// Returns [`AdkError::Config`](crate::AdkError::Config) when the
+    /// Returns an error when the
     /// underlying string is not a valid identifier.
     fn try_session_id(&self) -> Result<SessionId> {
         Ok(SessionId::try_from(self.id())?)
@@ -435,6 +435,14 @@ pub struct RunConfig {
     /// The name of the parent agent, if this agent was invoked via transfer.
     /// Used by the agent to apply `disallow_transfer_to_parent` filtering.
     pub parent_agent: Option<String>,
+    /// Enable automatic prompt caching for all providers that support it.
+    ///
+    /// When `true` (the default), the runner enables provider-level caching:
+    /// - Anthropic: sets `prompt_caching = true` on the config
+    /// - Bedrock: sets `prompt_caching = Some(BedrockCacheConfig::default())`
+    /// - OpenAI / DeepSeek: no action needed (caching is automatic)
+    /// - Gemini: handled separately via `ContextCacheConfig`
+    pub auto_cache: bool,
 }
 
 impl Default for RunConfig {
@@ -445,6 +453,7 @@ impl Default for RunConfig {
             cached_content: None,
             transfer_targets: Vec::new(),
             parent_agent: None,
+            auto_cache: true,
         }
     }
 }

@@ -332,13 +332,30 @@ impl ContentBuilder {
     }
 
     /// Builds the `GenerateContentRequest`.
+    ///
+    /// When server-side tools (Google Search, URL Context, etc.) are present,
+    /// `includeServerSideToolInvocations` is automatically set in the `ToolConfig`
+    /// so Gemini 3 returns `toolCall`/`toolResponse` parts instead of silently
+    /// truncating the response.
     pub fn build(self) -> GenerateContentRequest {
+        let mut tool_config = self.tool_config;
+
+        // Auto-set includeServerSideToolInvocations when server-side tools are present
+        if let Some(tools) = &self.tools {
+            let has_server_side = tools.iter().any(|t| t.is_server_side());
+            if has_server_side {
+                tool_config
+                    .get_or_insert_with(Default::default)
+                    .include_server_side_tool_invocations = Some(true);
+            }
+        }
+
         GenerateContentRequest {
             contents: self.contents,
             generation_config: self.generation_config,
             safety_settings: None,
             tools: self.tools,
-            tool_config: self.tool_config,
+            tool_config,
             system_instruction: self.system_instruction,
             cached_content: self.cached_content,
         }
