@@ -84,6 +84,7 @@ pub enum RealtimeError {
 }
 
 #[cfg(feature = "livekit")]
+/// Manually implement `From` to box the inner error and avoid `clippy::result_large_err`.
 impl From<crate::livekit::LiveKitError> for RealtimeError {
     fn from(err: crate::livekit::LiveKitError) -> Self {
         RealtimeError::LiveKitNativeError(Box::new(err))
