@@ -137,3 +137,29 @@ impl RealtimeError {
         Self::LiveKitError(msg.into())
     }
 }
+
+#[cfg(test)]
+mod tests {
+
+    #[cfg(feature = "livekit")]
+    #[test]
+    fn test_livekit_native_error_conversion() {
+        // Construct a simple LiveKitError variant
+        let inner = crate::livekit::LiveKitError::ConfigError("test config error".to_string());
+
+        // Convert into RealtimeError
+        let realtime_err: RealtimeError = inner.into();
+
+        // Verify it matches the Boxed variant and formats correctly
+        match realtime_err {
+            RealtimeError::LiveKitNativeError(boxed_err) => {
+                assert!(matches!(*boxed_err, crate::livekit::LiveKitError::ConfigError(_)));
+                assert_eq!(
+                    format!("{}", boxed_err),
+                    "LiveKit configuration error: test config error"
+                );
+            }
+            _ => panic!("Expected LiveKitNativeError variant"),
+        }
+    }
+}
