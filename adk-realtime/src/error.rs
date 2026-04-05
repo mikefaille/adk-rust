@@ -80,7 +80,14 @@ pub enum RealtimeError {
     /// Native LiveKit component error.
     #[cfg(feature = "livekit")]
     #[error(transparent)]
-    LiveKitNativeError(#[from] crate::livekit::LiveKitError),
+    LiveKitNativeError(Box<crate::livekit::LiveKitError>),
+}
+
+#[cfg(feature = "livekit")]
+impl From<crate::livekit::LiveKitError> for RealtimeError {
+    fn from(err: crate::livekit::LiveKitError) -> Self {
+        RealtimeError::LiveKitNativeError(Box::new(err))
+    }
 }
 
 impl RealtimeError {
