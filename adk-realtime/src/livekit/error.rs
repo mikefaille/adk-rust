@@ -11,14 +11,14 @@ pub enum LiveKitError {
     ConnectionError(Box<livekit::prelude::RoomError>),
 }
 
-/// Manually implement `From` to box the inner error and avoid `clippy::result_large_err`.
+/// Manually implemented to box the inner error, keeping `Result` small on the happy path.
 impl From<livekit_api::access_token::AccessTokenError> for LiveKitError {
     fn from(err: livekit_api::access_token::AccessTokenError) -> Self {
         LiveKitError::TokenGenerationError(Box::new(err))
     }
 }
 
-/// Manually implement `From` to box the inner error and avoid `clippy::result_large_err`.
+/// Manually implemented to box the inner error, keeping `Result` small on the happy path.
 impl From<livekit::prelude::RoomError> for LiveKitError {
     fn from(err: livekit::prelude::RoomError) -> Self {
         LiveKitError::ConnectionError(Box::new(err))
