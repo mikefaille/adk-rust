@@ -11,7 +11,6 @@ pub enum LiveKitError {
     ConnectionError(Box<livekit::prelude::RoomError>),
 }
 
-
 impl From<livekit_api::access_token::AccessTokenError> for LiveKitError {
     fn from(err: livekit_api::access_token::AccessTokenError) -> Self {
         LiveKitError::TokenGenerationError(Box::new(err))
