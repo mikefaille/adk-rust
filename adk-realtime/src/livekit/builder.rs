@@ -213,7 +213,7 @@ mod tests {
         assert_eq!(builder.identity.as_deref(), Some("agent1"));
         assert_eq!(builder.name.as_deref(), Some("Agent"));
         assert_eq!(builder.room_name.as_deref(), Some("test-room"));
-        assert_eq!(builder.options.auto_subscribe, false);
+        assert!(!builder.options.auto_subscribe);
         assert_eq!(builder.grants.unwrap().room, "test-room");
     }
 

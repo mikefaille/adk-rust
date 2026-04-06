@@ -289,7 +289,7 @@ impl GeminiRealtimeSession {
             event_queue: Arc::new(Mutex::new(std::collections::VecDeque::new())),
         };
 
-        session.send_setup(&model, config).await?;
+        session.send_setup(model, config).await?;
         Ok(session)
     }
 
