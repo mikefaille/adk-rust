@@ -140,7 +140,7 @@ impl LiveKitRoomBuilder<Present> {
 
         let (room, events) = Room::connect(&self.config.url, &token, self.options)
             .await
-            .map_err(LiveKitError::ConnectionError)?;
+            .map_err(|e| LiveKitError::ConnectionError(Box::new(e)))?;
 
         tracing::info!(
             participant = %room.local_participant().identity(),
@@ -176,7 +176,7 @@ impl LiveKitRoomBuilder<Present> {
                     },
                 )
                 .await
-                .map_err(LiveKitError::ConnectionError)?;
+                .map_err(|e| LiveKitError::ConnectionError(Box::new(e)))?;
 
             audio_source = Some(source);
             audio_track = Some(track);

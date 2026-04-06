@@ -148,11 +148,11 @@ mod tests {
         let inner = crate::livekit::LiveKitError::ConfigError("test config error".to_string());
 
         // Convert into RealtimeError
-        let realtime_err: RealtimeError = inner.into();
+        let realtime_err: crate::error::RealtimeError = inner.into();
 
         // Verify it matches the Boxed variant and formats correctly
         match realtime_err {
-            RealtimeError::LiveKitNativeError(boxed_err) => {
+            crate::error::RealtimeError::LiveKitNativeError(boxed_err) => {
                 assert!(matches!(*boxed_err, crate::livekit::LiveKitError::ConfigError(_)));
                 assert_eq!(
                     format!("{}", boxed_err),
