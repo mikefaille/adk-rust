@@ -399,18 +399,20 @@ impl GeminiRealtimeSession {
         let mut receiver = self.receiver.lock().await;
 
         match receiver.next().await {
-            Some(Ok(Message::Text(text))) => match self.translate_gemini_event(&text) {
-                Ok(events) => {
-                    let mut queue = self.event_queue.lock().await;
-                    let mut iter = events.into_iter();
-                    let first = iter.next();
-                    for event in iter {
-                        queue.push_back(event);
+            Some(Ok(Message::Text(text))) => {
+                match self.translate_gemini_event(&text) {
+                    Ok(events) => {
+                        let mut queue = self.event_queue.lock().await;
+                        let mut iter = events.into_iter();
+                        let first = iter.next();
+                        for event in iter {
+                            queue.push_back(event);
+                        }
+                        first.map(Ok)
                     }
-                    first.map(Ok)
+                    Err(e) => Some(Err(e)),
                 }
-                Err(e) => Some(Err(e)),
-            },
+            }
             Some(Ok(Message::Binary(bytes))) => match String::from_utf8(bytes.to_vec()) {
                 Ok(text) => match self.translate_gemini_event(&text) {
                     Ok(events) => {
