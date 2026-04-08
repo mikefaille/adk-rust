@@ -6,10 +6,15 @@
 [![Wiki](https://img.shields.io/badge/docs-Wiki-blue)](https://github.com/zavora-ai/adk-rust/wiki)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 ![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)
+[![GitHub Discussions](https://img.shields.io/github/discussions/zavora-ai/adk-rust?style=flat&logo=github&color=5865F2)](https://github.com/zavora-ai/adk-rust/discussions)
 
 > **🚀 v0.5.0 Released!** Structured error envelope (`AdkError` redesign), OpenAI Responses API client, OpenRouter deep integration, config validation, typed `Runner::run()` parameters, `labs` feature preset, `provider_from_env()` auto-detection, `adk::run()` one-liner, encrypted sessions with key rotation, graph durable resume, MCP resource API, Deepgram streaming STT, `ToolSearchConfig` for Anthropic. Breaking: `AdkError` is now a multi-axis struct, `Runner::run()` takes `UserId`/`SessionId` types. See [CHANGELOG](CHANGELOG.md) for full details and migration guide.
 >
 > **Contributors:** Many thanks to [@mikefaille](https://github.com/mikefaille) — AdkIdentity design, realtime audio, LiveKit bridge, skill system. [@rohan-panickar](https://github.com/rohan-panickar) — OpenAI-compatible providers, xAI, multimodal content. [@dhruv-pant](https://github.com/dhruv-pant) — Gemini service account auth. [@danielsan](https://github.com/danielsan) — Google deps issue & PR (#181, #203), RAG crash report (#205). [@CodingFlow](https://github.com/CodingFlow) — Gemini 3 thinking level, global endpoint, citationSources (#177, #178, #179). [@ctylx](https://github.com/ctylx) — skill discovery fix (#204). [@poborin](https://github.com/poborin) — project config proposal (#176). [Get started →](https://github.com/zavora-ai/adk-rust/wiki/quickstart)
+>
+> **Announcements:** ADK-Rust Roadmap launched for 2026, we welcome suggestions, comments and ideas. ADK Playground launched! You can now run 70+ ADK-Rust AI Agents online for free. Compile and click. No login, no install. https://playground.adk-rust.com (https://playground.adk-rust.com) And many more discussions, feel free to discuss: [![GitHub Discussions](https://img.shields.io/github/discussions/zavora-ai/adk-rust?style=flat&logo=github&color=5865F2)](https://github.com/zavora-ai/adk-rust/discussions)
+
+
 
 A production-ready Rust framework for building AI agents enabling you to create powerful and high-performance AI agent systems with a flexible, modular architecture. Model-agnostic. Type-safe. Async.
 
