@@ -666,7 +666,6 @@ impl RealtimeRunner {
     pub async fn run(&self) -> Result<()> {
         loop {
             let session = self.session_handle().await?;
-            let old_session_id = session.session_id().to_string();
             let event = session.next_event().await;
 
             match event {
@@ -679,9 +678,8 @@ impl RealtimeRunner {
                 }
                 None => {
                     // Session closed or swapped out. Check if a new session was installed (e.g., during reconnect).
-                    let current_session_id = self.session_id().await;
-                    if let Some(id) = current_session_id {
-                        if id != old_session_id {
+                    if let Ok(new_session) = self.session_handle().await {
+                        if !Arc::ptr_eq(&session, &new_session) {
                             // A new session handle was installed concurrently. Continue polling.
                             continue;
                         }
