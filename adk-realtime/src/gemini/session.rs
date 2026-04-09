@@ -10,6 +10,7 @@ use crate::events::{ClientEvent, ServerEvent, ToolResponse};
 use crate::session::{ContextMutationOutcome, RealtimeSession};
 use async_trait::async_trait;
 use base64::Engine;
+use bytes::{BufMut, Bytes, BytesMut};
 use futures::stream::Stream;
 use futures::{SinkExt, StreamExt};
 use parking_lot::Mutex as ParkingMutex;
@@ -18,7 +19,8 @@ use serde_json::{Value, json};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, mpsc};
+use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
@@ -26,6 +28,7 @@ type WsStream =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 type WsSink = futures::stream::SplitSink<WsStream, Message>;
 type WsSource = futures::stream::SplitStream<WsStream>;
+const WRITER_CHANNEL_CAPACITY: usize = 64;
 
 /// Backend configuration for Gemini Live connections.
 ///
@@ -190,9 +193,10 @@ struct GeminiTurn {
 pub struct GeminiRealtimeSession {
     session_id: String,
     connected: Arc<AtomicBool>,
-    sender: Arc<Mutex<WsSink>>,
+    outbound_tx: mpsc::Sender<Message>,
+    writer_task: Arc<Mutex<Option<JoinHandle<()>>>>,
     receiver: Arc<Mutex<WsSource>>,
-    audio_buffer: Arc<ParkingMutex<Vec<u8>>>,
+    audio_buffer: Arc<ParkingMutex<BytesMut>>,
     event_queue: Arc<Mutex<std::collections::VecDeque<ServerEvent>>>,
 }
 
@@ -278,15 +282,29 @@ impl GeminiRealtimeSession {
             }
         };
 
-        let (sink, source) = ws_stream.split();
+        let (mut sink, source) = ws_stream.split();
+        let connected = Arc::new(AtomicBool::new(true));
+        let (outbound_tx, mut outbound_rx) = mpsc::channel(WRITER_CHANNEL_CAPACITY);
+        let writer_connected = Arc::clone(&connected);
+        let writer_task = tokio::spawn(async move {
+            while let Some(message) = outbound_rx.recv().await {
+                if let Err(error) = sink.send(message).await {
+                    writer_connected.store(false, Ordering::SeqCst);
+                    tracing::warn!(error = %error, "gemini websocket writer send failed");
+                    break;
+                }
+            }
+        });
+
         let session_id = uuid::Uuid::new_v4().to_string();
 
         let session = Self {
             session_id,
-            connected: Arc::new(AtomicBool::new(true)),
-            sender: Arc::new(Mutex::new(sink)),
+            connected,
+            outbound_tx,
+            writer_task: Arc::new(Mutex::new(Some(writer_task))),
             receiver: Arc::new(Mutex::new(source)),
-            audio_buffer: Arc::new(ParkingMutex::new(Vec::new())),
+            audio_buffer: Arc::new(ParkingMutex::new(BytesMut::new())),
             event_queue: Arc::new(Mutex::new(std::collections::VecDeque::new())),
         };
 
@@ -298,15 +316,19 @@ impl GeminiRealtimeSession {
     async fn flush_audio(&self) -> Result<()> {
         let data = {
             let mut buffer = self.audio_buffer.lock();
-            if !buffer.is_empty() { Some(std::mem::take(&mut *buffer)) } else { None }
+            if !buffer.is_empty() { Some(std::mem::take(&mut *buffer).freeze()) } else { None }
         };
 
         if let Some(data) = data {
-            // Assume standard Gemini format (16kHz PCM)
-            let chunk = AudioChunk::pcm16_16khz(data);
-            self.send_audio_base64(&chunk.to_base64()).await?;
+            self.send_audio_bytes(data).await?;
         }
         Ok(())
+    }
+
+    /// Send a raw PCM audio payload by encoding it to base64 for Gemini wire format.
+    async fn send_audio_bytes(&self, audio_bytes: Bytes) -> Result<()> {
+        let audio_base64 = base64::engine::general_purpose::STANDARD.encode(audio_bytes);
+        self.send_audio_base64(&audio_base64).await
     }
 
     /// Send initial setup message.
@@ -379,11 +401,10 @@ impl GeminiRealtimeSession {
         let msg = serde_json::to_string(value)
             .map_err(|e| RealtimeError::protocol(format!("JSON serialize error: {}", e)))?;
 
-        let mut sender = self.sender.lock().await;
-        sender
+        self.outbound_tx
             .send(Message::Text(msg.into()))
             .await
-            .map_err(|e| RealtimeError::connection(format!("Send error: {}", e)))?;
+            .map_err(|e| RealtimeError::connection(format!("Send queue error: {e}")))?;
 
         Ok(())
     }
@@ -570,16 +591,14 @@ impl RealtimeSession for GeminiRealtimeSession {
         // Smart Audio Buffering: buffer small chunks to avoid overhead
         let data = {
             let mut buffer = self.audio_buffer.lock();
-            buffer.extend_from_slice(&audio.data);
+            buffer.put_slice(&audio.data);
 
             // 3200 bytes = 100ms at 16kHz 16-bit mono
-            if buffer.len() >= 3200 { Some(std::mem::take(&mut *buffer)) } else { None }
+            if buffer.len() >= 3200 { Some(std::mem::take(&mut *buffer).freeze()) } else { None }
         };
 
         if let Some(data) = data {
-            // We use the format from the current chunk, assuming consistency
-            let chunk = AudioChunk::new(data, audio.format.clone());
-            self.send_audio_base64(&chunk.to_base64()).await?;
+            self.send_audio_bytes(data).await?;
         }
         Ok(())
     }
@@ -738,8 +757,12 @@ impl RealtimeSession for GeminiRealtimeSession {
 
     async fn close(&self) -> Result<()> {
         self.connected.store(false, Ordering::SeqCst);
-        let mut sender = self.sender.lock().await;
-        let _ = sender.send(Message::Close(None)).await;
+        let _ = self.outbound_tx.send(Message::Close(None)).await;
+
+        let mut writer_task = self.writer_task.lock().await;
+        if let Some(handle) = writer_task.take() {
+            let _ = handle.await;
+        }
         Ok(())
     }
 
