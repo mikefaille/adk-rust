@@ -316,10 +316,7 @@ impl RealtimeRunner {
     /// Helper to safely acquire a cloned Arc of the current session, dropping the lock.
     async fn session_handle(&self) -> Result<Arc<dyn crate::session::RealtimeSession>> {
         let guard = self.session.read().await;
-        guard
-            .as_ref()
-            .cloned()
-            .ok_or_else(|| RealtimeError::connection("Not connected"))
+        guard.as_ref().cloned().ok_or_else(|| RealtimeError::connection("Not connected"))
     }
 
     /// Create a new builder.
