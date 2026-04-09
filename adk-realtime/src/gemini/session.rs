@@ -17,6 +17,7 @@ use serde_json::{Value, json};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use parking_lot::Mutex as ParkingMutex;
 use tokio::sync::Mutex;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
@@ -191,7 +192,7 @@ pub struct GeminiRealtimeSession {
     connected: Arc<AtomicBool>,
     sender: Arc<Mutex<WsSink>>,
     receiver: Arc<Mutex<WsSource>>,
-    audio_buffer: Arc<Mutex<Vec<u8>>>,
+    audio_buffer: Arc<ParkingMutex<Vec<u8>>>,
     event_queue: Arc<Mutex<std::collections::VecDeque<ServerEvent>>>,
 }
 
@@ -285,7 +286,7 @@ impl GeminiRealtimeSession {
             connected: Arc::new(AtomicBool::new(true)),
             sender: Arc::new(Mutex::new(sink)),
             receiver: Arc::new(Mutex::new(source)),
-            audio_buffer: Arc::new(Mutex::new(Vec::new())),
+            audio_buffer: Arc::new(ParkingMutex::new(Vec::new())),
             event_queue: Arc::new(Mutex::new(std::collections::VecDeque::new())),
         };
 
@@ -295,11 +296,16 @@ impl GeminiRealtimeSession {
 
     /// Flush any buffered audio to the server.
     async fn flush_audio(&self) -> Result<()> {
-        let mut buffer = self.audio_buffer.lock().await;
-        if !buffer.is_empty() {
-            let data = std::mem::take(&mut *buffer);
-            drop(buffer);
+        let data = {
+            let mut buffer = self.audio_buffer.lock();
+            if !buffer.is_empty() {
+                Some(std::mem::take(&mut *buffer))
+            } else {
+                None
+            }
+        };
 
+        if let Some(data) = data {
             // Assume standard Gemini format (16kHz PCM)
             let chunk = AudioChunk::pcm16_16khz(data);
             self.send_audio_base64(&chunk.to_base64()).await?;
@@ -566,14 +572,19 @@ impl RealtimeSession for GeminiRealtimeSession {
 
     async fn send_audio(&self, audio: &AudioChunk) -> Result<()> {
         // Smart Audio Buffering: buffer small chunks to avoid overhead
-        let mut buffer = self.audio_buffer.lock().await;
-        buffer.extend_from_slice(&audio.data);
+        let data = {
+            let mut buffer = self.audio_buffer.lock();
+            buffer.extend_from_slice(&audio.data);
 
-        // 3200 bytes = 100ms at 16kHz 16-bit mono
-        if buffer.len() >= 3200 {
-            let data = std::mem::take(&mut *buffer);
-            drop(buffer); // Release lock before sending
+            // 3200 bytes = 100ms at 16kHz 16-bit mono
+            if buffer.len() >= 3200 {
+                Some(std::mem::take(&mut *buffer))
+            } else {
+                None
+            }
+        };
 
+        if let Some(data) = data {
             // We use the format from the current chunk, assuming consistency
             let chunk = AudioChunk::new(data, audio.format.clone());
             self.send_audio_base64(&chunk.to_base64()).await?;
@@ -639,7 +650,7 @@ impl RealtimeSession for GeminiRealtimeSession {
     }
 
     async fn clear_audio(&self) -> Result<()> {
-        let mut buffer = self.audio_buffer.lock().await;
+        let mut buffer = self.audio_buffer.lock();
         buffer.clear();
         Ok(())
     }
