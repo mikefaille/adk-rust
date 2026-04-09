@@ -3,7 +3,7 @@
 //! Manages a WebSocket connection to Google's Gemini Live API with support
 //! for both AI Studio (API key) and Vertex AI (OAuth/ADC) backends.
 
-use crate::audio::AudioChunk;
+use crate::audio::{AudioChunk, AudioFormat};
 use crate::config::{RealtimeConfig, ToolDefinition};
 use crate::error::{RealtimeError, Result};
 use crate::events::{ClientEvent, ServerEvent, ToolResponse};
@@ -29,6 +29,7 @@ type WsStream =
 type WsSink = futures::stream::SplitSink<WsStream, Message>;
 type WsSource = futures::stream::SplitStream<WsStream>;
 const WRITER_CHANNEL_CAPACITY: usize = 64;
+const AUDIO_FLUSH_TARGET_MS: usize = 40;
 
 /// Backend configuration for Gemini Live connections.
 ///
@@ -201,6 +202,11 @@ pub struct GeminiRealtimeSession {
 }
 
 impl GeminiRealtimeSession {
+    fn flush_threshold_bytes(format: &AudioFormat) -> usize {
+        let bytes_per_second = format.bytes_per_second() as usize;
+        bytes_per_second.saturating_mul(AUDIO_FLUSH_TARGET_MS).div_ceil(1000).max(1)
+    }
+
     /// Connect to Gemini Live API using the specified backend.
     pub async fn connect(
         backend: GeminiLiveBackend,
@@ -588,13 +594,18 @@ impl RealtimeSession for GeminiRealtimeSession {
     }
 
     async fn send_audio(&self, audio: &AudioChunk) -> Result<()> {
+        let flush_threshold_bytes = Self::flush_threshold_bytes(&audio.format);
+
         // Smart Audio Buffering: buffer small chunks to avoid overhead
         let data = {
             let mut buffer = self.audio_buffer.lock();
             buffer.put_slice(&audio.data);
 
-            // 3200 bytes = 100ms at 16kHz 16-bit mono
-            if buffer.len() >= 3200 { Some(std::mem::take(&mut *buffer).freeze()) } else { None }
+            if buffer.len() >= flush_threshold_bytes {
+                Some(std::mem::take(&mut *buffer).freeze())
+            } else {
+                None
+            }
         };
 
         if let Some(data) = data {
@@ -1054,5 +1065,11 @@ mod tests {
             setup_json.get("model").expect("model missing from setup payload").as_str().unwrap(),
             "models/gemini-2.5-flash-native-audio-latest"
         );
+    }
+
+    #[test]
+    fn test_flush_threshold_bytes_pcm16_16khz_40ms() {
+        let threshold = GeminiRealtimeSession::flush_threshold_bytes(&AudioFormat::pcm16_16khz());
+        assert_eq!(threshold, 1280);
     }
 }
