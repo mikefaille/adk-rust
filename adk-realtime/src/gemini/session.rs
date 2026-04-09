@@ -294,12 +294,17 @@ impl GeminiRealtimeSession {
         let writer_connected = Arc::clone(&connected);
         let writer_task = tokio::spawn(async move {
             while let Some(message) = outbound_rx.recv().await {
+                let should_close = matches!(message, Message::Close(_));
                 if let Err(error) = sink.send(message).await {
                     writer_connected.store(false, Ordering::SeqCst);
                     tracing::warn!(error = %error, "gemini websocket writer send failed");
                     break;
                 }
+                if should_close {
+                    break;
+                }
             }
+            writer_connected.store(false, Ordering::SeqCst);
         });
 
         let session_id = uuid::Uuid::new_v4().to_string();
