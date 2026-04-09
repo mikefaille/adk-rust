@@ -228,6 +228,11 @@ pub struct OpenAIWebRTCSession {
     /// ID of the "oai-events" data channel for JSON event exchange.
     data_channel_id: ChannelId,
     /// Opus encoder for PCM16 → Opus conversion.
+    ///
+    /// We use a synchronous `parking_lot::Mutex` here instead of an async `tokio::sync::Mutex`
+    /// because Opus encoding is a fast, CPU-bound operation. The lock is only held briefly
+    /// for `encode()` and is strictly released *before* any `.await` points to prevent
+    /// stalling the async executor.
     opus_encoder: Arc<ParkingMutex<OpusCodec>>,
     /// Cached Opus payload type negotiated during SDP exchange.
     opus_pt: Pt,

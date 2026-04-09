@@ -12,12 +12,12 @@ use async_trait::async_trait;
 use base64::Engine;
 use futures::stream::Stream;
 use futures::{SinkExt, StreamExt};
+use parking_lot::Mutex as ParkingMutex;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use parking_lot::Mutex as ParkingMutex;
 use tokio::sync::Mutex;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
@@ -298,11 +298,7 @@ impl GeminiRealtimeSession {
     async fn flush_audio(&self) -> Result<()> {
         let data = {
             let mut buffer = self.audio_buffer.lock();
-            if !buffer.is_empty() {
-                Some(std::mem::take(&mut *buffer))
-            } else {
-                None
-            }
+            if !buffer.is_empty() { Some(std::mem::take(&mut *buffer)) } else { None }
         };
 
         if let Some(data) = data {
@@ -577,11 +573,7 @@ impl RealtimeSession for GeminiRealtimeSession {
             buffer.extend_from_slice(&audio.data);
 
             // 3200 bytes = 100ms at 16kHz 16-bit mono
-            if buffer.len() >= 3200 {
-                Some(std::mem::take(&mut *buffer))
-            } else {
-                None
-            }
+            if buffer.len() >= 3200 { Some(std::mem::take(&mut *buffer)) } else { None }
         };
 
         if let Some(data) = data {
