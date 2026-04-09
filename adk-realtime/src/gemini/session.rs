@@ -204,6 +204,8 @@ pub struct GeminiRealtimeSession {
 impl GeminiRealtimeSession {
     fn flush_threshold_bytes(format: &AudioFormat) -> usize {
         let bytes_per_second = format.bytes_per_second() as usize;
+        // Compute target bytes for a 40ms chunk and round up so we don't under-buffer.
+        // `max(1)` keeps the threshold valid even for pathological/invalid formats.
         bytes_per_second.saturating_mul(AUDIO_FLUSH_TARGET_MS).div_ceil(1000).max(1)
     }
 
@@ -294,6 +296,7 @@ impl GeminiRealtimeSession {
         let writer_connected = Arc::clone(&connected);
         let writer_task = tokio::spawn(async move {
             while let Some(message) = outbound_rx.recv().await {
+                // Close frames are terminal for the writer lifecycle: send once then stop.
                 let should_close = matches!(message, Message::Close(_));
                 if let Err(error) = sink.send(message).await {
                     writer_connected.store(false, Ordering::SeqCst);
@@ -304,6 +307,7 @@ impl GeminiRealtimeSession {
                     break;
                 }
             }
+            // Mark disconnected on *any* writer exit path (error, close, channel shutdown).
             writer_connected.store(false, Ordering::SeqCst);
         });
 
@@ -599,6 +603,7 @@ impl RealtimeSession for GeminiRealtimeSession {
     }
 
     async fn send_audio(&self, audio: &AudioChunk) -> Result<()> {
+        // Format-aware threshold (sample rate/channels/bit depth), avoids hardcoded 16k assumptions.
         let flush_threshold_bytes = Self::flush_threshold_bytes(&audio.format);
 
         // Smart Audio Buffering: buffer small chunks to avoid overhead
@@ -773,10 +778,12 @@ impl RealtimeSession for GeminiRealtimeSession {
 
     async fn close(&self) -> Result<()> {
         self.connected.store(false, Ordering::SeqCst);
+        // Route close through the same channel as normal writes so ordering is preserved.
         let _ = self.outbound_tx.send(Message::Close(None)).await;
 
         let mut writer_task = self.writer_task.lock().await;
         if let Some(handle) = writer_task.take() {
+            // Ensure deterministic teardown: don't return until the writer released the sink.
             let _ = handle.await;
         }
         Ok(())
