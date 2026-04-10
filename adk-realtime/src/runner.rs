@@ -571,43 +571,37 @@ impl RealtimeRunner {
             role: "user".to_string(),
             parts: vec![adk_core::types::Part::Text { text: msg }],
         };
-        let guard = self.session.read().await;
-        let session = guard.as_ref().ok_or_else(|| RealtimeError::connection("Not connected"))?;
+        let session = self.session_handle().await?;
         session.send_event(event).await
     }
 
     /// Send audio to the session.
     pub async fn send_audio(&self, audio_base64: &str) -> Result<()> {
-        let guard = self.session.read().await;
-        let session = guard.as_ref().ok_or_else(|| RealtimeError::connection("Not connected"))?;
+        let session = self.session_handle().await?;
         session.send_audio_base64(audio_base64).await
     }
 
     /// Send text to the session.
     pub async fn send_text(&self, text: &str) -> Result<()> {
-        let guard = self.session.read().await;
-        let session = guard.as_ref().ok_or_else(|| RealtimeError::connection("Not connected"))?;
+        let session = self.session_handle().await?;
         session.send_text(text).await
     }
 
     /// Commit the audio buffer (for manual VAD mode).
     pub async fn commit_audio(&self) -> Result<()> {
-        let guard = self.session.read().await;
-        let session = guard.as_ref().ok_or_else(|| RealtimeError::connection("Not connected"))?;
+        let session = self.session_handle().await?;
         session.commit_audio().await
     }
 
     /// Trigger a response from the model.
     pub async fn create_response(&self) -> Result<()> {
-        let guard = self.session.read().await;
-        let session = guard.as_ref().ok_or_else(|| RealtimeError::connection("Not connected"))?;
+        let session = self.session_handle().await?;
         session.create_response().await
     }
 
     /// Interrupt the current response.
     pub async fn interrupt(&self) -> Result<()> {
-        let guard = self.session.read().await;
-        let session = guard.as_ref().ok_or_else(|| RealtimeError::connection("Not connected"))?;
+        let session = self.session_handle().await?;
         session.interrupt().await
     }
 
@@ -630,15 +624,17 @@ impl RealtimeRunner {
     /// }
     /// ```
     pub async fn next_event(&self) -> Option<Result<ServerEvent>> {
-        let guard = self.session.read().await;
-        if let Some(session) = guard.as_ref() {
-            // Some sessions might yield inside next_event, but just in case, yield here too
-            tokio::task::yield_now().await;
-            session.next_event().await
-        } else {
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            None
-        }
+        let session = match self.session_handle().await {
+            Ok(session) => session,
+            Err(_) => {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                return None;
+            }
+        };
+
+        // Some sessions might yield inside next_event, but just in case, yield here too
+        tokio::task::yield_now().await;
+        session.next_event().await
     }
 
     /// Send a tool response to the session.

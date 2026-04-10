@@ -1596,7 +1596,7 @@ impl Agent for LlmAgent {
                     }
 
                     // Wrap circuit breaker in Mutex for shared access across parallel futures.
-                    let cb_mutex = tokio::sync::Mutex::new(circuit_breaker_state.take());
+                    let cb_mutex = std::sync::Mutex::new(circuit_breaker_state.take());
 
                     // Per-tool execution async block. Returns (index, Content, EventActions, escalate_or_skip).
                     // Each tool retains its own retry budget, circuit breaker, tracing span,
@@ -1691,7 +1691,7 @@ impl Agent for LlmAgent {
 
                             // Circuit breaker check
                             if response_content.is_none() {
-                                let guard = cb_mutex.lock().await;
+                                let guard = cb_mutex.lock().unwrap_or_else(|e| e.into_inner());
                                 if let Some(ref cb_state) = *guard {
                                     if cb_state.is_open(&name) {
                                         let msg = format!(
@@ -1798,7 +1798,7 @@ impl Agent for LlmAgent {
 
                                     // Circuit breaker recording
                                     {
-                                        let mut guard = cb_mutex.lock().await;
+                                        let mut guard = cb_mutex.lock().unwrap_or_else(|e| e.into_inner());
                                         if let Some(ref mut cb_state) = *guard {
                                             cb_state.record(tool_outcome_for_callback.as_ref().unwrap());
                                         }
@@ -1973,7 +1973,7 @@ impl Agent for LlmAgent {
                     };
 
                     // Restore circuit breaker state from the mutex
-                    circuit_breaker_state = cb_mutex.into_inner();
+                    circuit_breaker_state = cb_mutex.into_inner().unwrap_or_else(|e| e.into_inner());
 
                     // Yield results in original order
                     for (_, response_content, tool_actions, escalate_or_skip) in results {

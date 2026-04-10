@@ -14,8 +14,8 @@ const DEFAULT_SAMPLE_RATE: i32 = 24000;
 const GEMINI_SAMPLE_RATE: i32 = 16000;
 /// Default number of audio channels (mono).
 const DEFAULT_NUM_CHANNELS: i32 = 1;
-/// Target duration for smart audio buffering (60ms).
-const BUFFER_DURATION_MS: u32 = 60;
+/// Target duration for smart audio buffering (40ms).
+const BUFFER_DURATION_MS: u32 = 40;
 
 /// Reads audio frames from a LiveKit [`RemoteAudioTrack`] and sends them as
 /// base64-encoded PCM16 audio (24kHz) to the given [`RealtimeRunner`].
@@ -29,9 +29,8 @@ const BUFFER_DURATION_MS: u32 = 60;
 /// * `track` — The LiveKit remote audio track to read from.
 /// * `runner` — The realtime runner to send audio to.
 pub async fn bridge_input(track: RemoteAudioTrack, runner: &RealtimeRunner) -> Result<()> {
-    let mut stream = tokio::task::block_in_place(|| {
-        NativeAudioStream::new(track.rtc_track(), DEFAULT_SAMPLE_RATE, DEFAULT_NUM_CHANNELS)
-    });
+    let mut stream =
+        NativeAudioStream::new(track.rtc_track(), DEFAULT_SAMPLE_RATE, DEFAULT_NUM_CHANNELS);
     let mut buffer = SmartAudioBuffer::new(DEFAULT_SAMPLE_RATE as u32, BUFFER_DURATION_MS);
 
     while let Some(frame) = stream.next().await {
@@ -64,9 +63,8 @@ pub async fn bridge_input(track: RemoteAudioTrack, runner: &RealtimeRunner) -> R
 /// * `runner` — The realtime runner to send audio to.
 pub async fn bridge_gemini_input(track: RemoteAudioTrack, runner: &RealtimeRunner) -> Result<()> {
     // Request 16kHz mono from LiveKit — it handles resampling for us.
-    let mut stream = tokio::task::block_in_place(|| {
-        NativeAudioStream::new(track.rtc_track(), GEMINI_SAMPLE_RATE, DEFAULT_NUM_CHANNELS)
-    });
+    let mut stream =
+        NativeAudioStream::new(track.rtc_track(), GEMINI_SAMPLE_RATE, DEFAULT_NUM_CHANNELS);
     let mut buffer = SmartAudioBuffer::new(GEMINI_SAMPLE_RATE as u32, BUFFER_DURATION_MS);
 
     while let Some(frame) = stream.next().await {
