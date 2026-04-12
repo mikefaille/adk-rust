@@ -10,7 +10,7 @@
 
 > **🚀 v0.6.0 Released!** A2A Protocol v1.0.0 full compliance (9 fixes, all 11 operations), ParallelAgent `SharedState` for cross-agent coordination (`set_shared`/`get_shared`/`wait_for_key`), tool authorization documentation (HITL confirmation, callbacks, RBAC, graph interrupts), parallel tool execution (`ToolExecutionStrategy::Parallel`/`Auto`). Breaking: `build_v1_agent_card()` signature, `TaskStore`/`PushNotificationSender` trait changes, `message_stream` return type. See [CHANGELOG](CHANGELOG.md) for full details.
 >
-> **Contributors:** Many thanks to [@mikefaille](https://github.com/mikefaille) — AdkIdentity design, realtime audio, LiveKit bridge, skill system. [@rohan-panickar](https://github.com/rohan-panickar) — OpenAI-compatible providers, xAI, multimodal content. [@dhruv-pant](https://github.com/dhruv-pant) — Gemini service account auth. [@danielsan](https://github.com/danielsan) — Google deps issue & PR (#181, #203), RAG crash report (#205). [@CodingFlow](https://github.com/CodingFlow) — Gemini 3 thinking level, global endpoint, citationSources (#177, #178, #179). [@ctylx](https://github.com/ctylx) — skill discovery fix (#204). [@poborin](https://github.com/poborin) — project config proposal (#176). [Get started →](https://github.com/zavora-ai/adk-rust/wiki/quickstart)
+> **Contributors:** Many thanks to [@mikefaille](https://github.com/mikefaille) — AdkIdentity design, realtime audio, LiveKit bridge, skill system. [@rohan-panickar](https://github.com/rohan-panickar) — OpenAI-compatible providers, xAI, multimodal content. [@dhruv-pant](https://github.com/dhruv-pant) — Gemini service account auth. [@tomtom215](https://github.com/tomtom215) — A2A Protocol v1.0.0 types crate ([a2a-protocol-types](https://crates.io/crates/a2a-protocol-types)), Foundation-verified wire types powering our A2A v1 layer. [@danielsan](https://github.com/danielsan) — Google deps issue & PR (#181, #203), RAG crash report (#205). [@CodingFlow](https://github.com/CodingFlow) — Gemini 3 thinking level, global endpoint, citationSources (#177, #178, #179). [@ctylx](https://github.com/ctylx) — skill discovery fix (#204). [@poborin](https://github.com/poborin) — project config proposal (#176). [Get started →](https://github.com/zavora-ai/adk-rust/wiki/quickstart)
 >
 > **Announcements:** ADK-Rust Roadmap launched for 2026, we welcome suggestions, comments and ideas. ADK Playground launched! You can now run 70+ ADK-Rust AI Agents online for free. Compile and click. No login, no install. https://playground.adk-rust.com (https://playground.adk-rust.com) And many more discussions, feel free to discuss: [![GitHub Discussions](https://img.shields.io/github/discussions/zavora-ai/adk-rust?style=flat&logo=github&color=5865F2)](https://github.com/zavora-ai/adk-rust/discussions)
 
@@ -56,7 +56,7 @@ ADK-Rust follows a clean layered architecture from application interface down to
 
 **Workflow Agents**: Deterministic orchestration patterns.
 - `SequentialAgent`: Execute agents in sequence
-- `ParallelAgent`: Execute agents concurrently
+- `ParallelAgent`: Execute agents concurrently, with optional `SharedState` for cross-agent coordination
 - `LoopAgent`: Iterative execution with exit conditions
 
 **Custom Agents**: Implement the `Agent` trait for specialized behavior.
@@ -133,6 +133,7 @@ Built-in tools:
 - **Memory System**: Long-term memory with semantic search and vector embeddings
 - **Servers**: REST API with SSE streaming, A2A v1.0.0 protocol for agent-to-agent communication
 - **Guardrails**: PII redaction, content filtering, JSON schema validation
+- **Tool Authorization**: Human-in-the-loop confirmation, before-tool callbacks, RBAC, graph interrupts
 - **Payments**: ACP and AP2 commerce support through `adk-payments`
 - **Observability**: OpenTelemetry tracing, structured logging
 

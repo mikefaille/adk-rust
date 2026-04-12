@@ -77,6 +77,22 @@ Five adoption fixes reported by a real-world integrator (zavora-cli):
 
 ### Added
 
+#### Realtime Improvements ([@mikefaille](https://github.com/mikefaille))
+
+- **Gemini 3.1 Live API**: Support for multiple parts in Gemini Live sessions (#122).
+- **Realtime optimizations** (#272): Concurrency improvements, audio hot path documentation, AGENTS.md guide for realtime development.
+- **clippy fix**: Resolved `result_large_err` in adk-realtime (#121).
+
+### Fixed
+
+- **Sandbox dependency discovery** (`adk-code`): Robust rlib discovery for stale build artifacts.
+
+### Changed
+
+- **Dependencies**: `wasmtime` 43.0.0 → 43.0.1, `rubato` 1.0.1 → 2.0.0.
+
+### Added
+
 #### Realtime — LiveKit Typestate Builder, OpenAI Protocol Centralization ([@mikefaille](https://github.com/mikefaille))
 
 - **`LiveKitConfig`** (`adk-realtime`): Secure LiveKit configuration with `secrecy::SecretString` for API keys. URL validation and empty-credential rejection at construction time.
