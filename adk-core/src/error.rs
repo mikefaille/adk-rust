@@ -172,13 +172,11 @@ pub struct ErrorDetails {
 ///     "model.openai.rate_limited",
 ///     "rate limited",
 /// );
+/// assert!(err.is_retryable()); // RateLimited → should_retry = true
 ///
 /// // Backward-compat construction (for migration)
 /// let err = AdkError::model("rate limited");
-///
-/// // Checking
 /// assert!(err.is_model());
-/// assert!(err.is_retryable()); // reads retry.should_retry
 /// ```
 pub struct AdkError {
     pub component: ErrorComponent,

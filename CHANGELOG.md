@@ -5,15 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.6.0] - Unreleased
+## [0.6.0] - 2026-04-12
 
-### Breaking Changes (A2A v1)
+### Breaking Changes
 
-- **`build_v1_agent_card()`** now requires an `AgentCapabilities` parameter (was hardcoded to default). Update call sites to pass `AgentCapabilities::none()` for previous behavior, or declare actual capabilities.
+- **`build_v1_agent_card()`** now requires an `AgentCapabilities` parameter (was hardcoded to default). Pass `AgentCapabilities::none()` for previous behavior.
 - **`TaskStore` trait** gains `find_task_by_context()` method. Custom implementors must add this method.
-- **`PushNotificationSender` trait** methods gain `config: &TaskPushNotificationConfig` parameter. Custom implementors must update signatures.
-- **`message_stream()` return type** changed from `BoxStream<Result<TaskStatusUpdateEvent>>` to `BoxStream<Result<StreamResponse>>` to support Task-as-first-event.
-- **`tasks_subscribe()` return type** changed similarly.
+- **`PushNotificationSender` trait** methods gain `config: &TaskPushNotificationConfig` parameter.
+- **`message_stream()` and `tasks_subscribe()` return type** changed from `BoxStream<Result<TaskStatusUpdateEvent>>` to `BoxStream<Result<StreamResponse>>`.
+- **`CallbackContext` trait** gains `shared_state()` default method (returns `None` — no action needed for existing implementors).
 
 ### Added
 
@@ -21,32 +21,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Nine compliance fixes bringing the A2A implementation to full conformance with the A2A Protocol v1.0.0 specification:
 
-- **RFC 3339 timestamps** (`executor.rs`): All `TaskStatus` objects now include ISO 8601 timestamps via `TaskStatus::with_timestamp()`. Every state transition carries a `timestamp` field.
-- **Agent capabilities declaration** (`card.rs`): `build_v1_agent_card()` accepts an `AgentCapabilities` parameter — callers declare `streaming`, `pushNotifications`, and `extendedAgentCard` explicitly instead of hardcoded defaults.
-- **Input validation** (`request_handler.rs`): `validate_message()` rejects zero-part messages, empty/whitespace messageIds, IDs over 256 chars, and metadata over 64 KB. `validate_id()` applied to `GetTask` and `CancelTask` taskId parameters.
-- **Content-Type header** (`jsonrpc_handler.rs`): All non-streaming JSON-RPC responses use `Content-Type: application/a2a+json` per spec §9. SSE streams remain `text/event-stream`.
-- **Context-scoped task lookup** (`task_store.rs`): New `find_task_by_context()` method on `TaskStore` trait returns the most recently updated non-terminal task for a given `contextId`.
-- **Message ID idempotency** (`request_handler.rs`): Duplicate `SendMessage`/`SendStreamingMessage` requests with the same `messageId` return the previously created task without re-processing. Stale entries are cleaned up automatically.
-- **Push notification authentication** (`push.rs`): `PushNotificationSender` trait methods accept `TaskPushNotificationConfig` and set `Authorization: Bearer` and `a2a-notification-token` headers when configured.
-- **INPUT_REQUIRED multi-turn flow** (`request_handler.rs`): Follow-up messages with a `contextId` matching an existing `INPUT_REQUIRED` task resume that task instead of creating a new one.
-- **Streaming first event** (`stream.rs`, `request_handler.rs`): `message_stream` and `tasks_subscribe` emit a complete `Task` object as the first SSE event before status update events, per spec §3.1.2.
-- **A2A examples**: Two standalone example agents (`a2a-research-agent`, `a2a-writing-agent`) with a client exercising all 11 v1 operations end-to-end.
+- **RFC 3339 timestamps** (`executor.rs`): All `TaskStatus` objects now include ISO 8601 timestamps via `TaskStatus::with_timestamp()`.
+- **Agent capabilities declaration** (`card.rs`): `build_v1_agent_card()` accepts an `AgentCapabilities` parameter.
+- **Input validation** (`request_handler.rs`): `validate_message()` and `validate_id()` reject malformed inputs.
+- **Content-Type header** (`jsonrpc_handler.rs`): `Content-Type: application/a2a+json` on all non-streaming responses.
+- **Context-scoped task lookup** (`task_store.rs`): `find_task_by_context()` on `TaskStore` trait.
+- **Message ID idempotency** (`request_handler.rs`): Duplicate requests return previously created task.
+- **Push notification authentication** (`push.rs`): Bearer and token headers on webhook deliveries.
+- **INPUT_REQUIRED multi-turn flow** (`request_handler.rs`): Resume existing tasks via `contextId`.
+- **Streaming first event** (`stream.rs`): Task object as first SSE event per spec §3.1.2.
+- **A2A examples**: `a2a-research-agent` and `a2a-writing-agent` with full client validation.
 - **Wire types**: Powered by Foundation-verified [`a2a-protocol-types`](https://crates.io/crates/a2a-protocol-types) v0.5 by [@tomtom215](https://github.com/tomtom215).
+
+#### ParallelAgent SharedState (`adk-core`, `adk-agent`, `adk-runner`)
+
+Thread-safe key-value store for parallel agent coordination:
+
+- **`SharedState`** (`adk-core`): Concurrent `HashMap` with `set_shared`, `get_shared`, and `wait_for_key` (timeout-based blocking via `tokio::sync::Notify`).
+- **`SharedStateError`** (`adk-core`): Dedicated error type with `EmptyKey`, `KeyTooLong`, `Timeout`, `InvalidTimeout` variants.
+- **`shared_state()` on `CallbackContext`** (`adk-core`): Default method returning `None` for backward compatibility.
+- **`SharedStateContext`** (`adk-agent`): Context wrapper injecting `SharedState` into the context chain.
+- **`ParallelAgent::with_shared_state()`** (`adk-agent`): Opt-in builder method creating fresh `SharedState` per `run()`.
+- **`AgentToolContext` delegation** (`adk-agent`): Tools can now access `shared_state()` through the full context chain.
+- **`InvocationContext` delegation** (`adk-runner`): Runner context propagates `shared_state()`.
+- **Example crate** (`examples/parallel_shared_state/`): Basic and LLM-powered workbook coordination pattern.
 
 #### Tool Authorization Documentation
 
-- **Tool authorization guide** (`docs/official_docs/security/tool-authorization.md`): Comprehensive documentation covering `ToolConfirmationPolicy` (built-in HITL), `BeforeToolCallback` (programmatic gate), RBAC (`adk-auth`), and graph interrupts. Includes CLI and web server examples.
+- **Tool authorization guide** (`docs/official_docs/security/tool-authorization.md`): `ToolConfirmationPolicy` (HITL), `BeforeToolCallback`, RBAC, graph interrupts with CLI and web server examples.
 
 #### Crate Adoption Feedback (GitHub issue #262)
 
 Five adoption fixes reported by a real-world integrator (zavora-cli):
 
-- **SQLx lifetime fix** (`adk-memory`): `SqliteMemoryService` now clones the pool into a local variable before passing to `sqlx::query()`, resolving lifetime conflicts when called from `#[async_trait]` tool implementations. `MemoryServiceAdapter` receives the same `inner.clone()` treatment so the fix applies at both the service and adapter levels.
-- **Tool context in callbacks** (`adk-core`, `adk-agent`, `adk-realtime`): `CallbackContext` gains `tool_name()` and `tool_input()` default methods. New `ToolCallbackContext` wrapper injects tool metadata at all before-tool and after-tool callback sites.
-- **Composable telemetry layer** (`adk-telemetry`): New `build_otlp_layer<S>(service_name, endpoint)` returns a `Box<dyn Layer<S> + Send + Sync>` for composition into custom subscriber stacks without calling `.init()`. Uses a generic subscriber bound so the layer can be stored and composed across crate boundaries.
-- **Developer-friendly content filter** (`adk-guardrail`): `ContentFilter::harmful_content()` no longer blocks "hack" and "exploit". New `harmful_content_strict()` variant retains the full original keyword list.
-- **PluginBuilder documentation** (`adk-plugin`): Expanded rustdoc on `PluginBuilder` with end-to-end examples. Added Quick Start section showing both `PluginConfig` and `PluginBuilder` usage side by side.
-- **Showcase example** (`examples/crate_adoption_feedback`): Standalone example demonstrating all five fixes with a live LLM agent.
+- **SQLx lifetime fix** (`adk-memory`): `SqliteMemoryService` pool cloning for `#[async_trait]` compatibility.
+- **Tool context in callbacks** (`adk-core`, `adk-agent`, `adk-realtime`): `tool_name()` and `tool_input()` on `CallbackContext`.
+- **Composable telemetry layer** (`adk-telemetry`): `build_otlp_layer()` for custom subscriber stacks.
+- **Developer-friendly content filter** (`adk-guardrail`): `harmful_content_strict()` variant.
+- **PluginBuilder documentation** (`adk-plugin`): Expanded rustdoc with examples.
+
+#### Realtime Improvements ([@mikefaille](https://github.com/mikefaille))
+
+- **Gemini 3.1 Live API**: Multiple parts support in Gemini Live sessions.
+- **Realtime optimizations**: Concurrency improvements, audio hot path documentation.
+
+### Fixed
+
+- **Sandbox dependency discovery** (`adk-code`): Robust rlib discovery for stale build artifacts.
+
+### Changed
+
+- **Dependencies**: `wasmtime` 43.0.0 → 43.0.1, `rubato` 1.0.1 → 2.0.0.
+
+## [0.5.0] - 2026-03-26
+
+### Added
 
 #### Realtime Improvements ([@mikefaille](https://github.com/mikefaille))
 
@@ -61,8 +90,6 @@ Five adoption fixes reported by a real-world integrator (zavora-cli):
 ### Changed
 
 - **Dependencies**: `wasmtime` 43.0.0 → 43.0.1, `rubato` 1.0.1 → 2.0.0.
-
-## [0.5.0] - 2026-03-26
 
 ### Added
 

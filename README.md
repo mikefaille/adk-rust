@@ -8,7 +8,7 @@
 ![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)
 [![GitHub Discussions](https://img.shields.io/github/discussions/zavora-ai/adk-rust?style=flat&logo=github&color=5865F2)](https://github.com/zavora-ai/adk-rust/discussions)
 
-> **🚀 v0.5.0 Released!** Structured error envelope (`AdkError` redesign), OpenAI Responses API client, OpenRouter deep integration, config validation, typed `Runner::run()` parameters, `labs` feature preset, `provider_from_env()` auto-detection, `adk::run()` one-liner, encrypted sessions with key rotation, graph durable resume, MCP resource API, Deepgram streaming STT, `ToolSearchConfig` for Anthropic. Breaking: `AdkError` is now a multi-axis struct, `Runner::run()` takes `UserId`/`SessionId` types. See [CHANGELOG](CHANGELOG.md) for full details and migration guide.
+> **🚀 v0.6.0 Released!** A2A Protocol v1.0.0 full compliance (9 fixes, all 11 operations), ParallelAgent `SharedState` for cross-agent coordination (`set_shared`/`get_shared`/`wait_for_key`), tool authorization documentation (HITL confirmation, callbacks, RBAC, graph interrupts), parallel tool execution (`ToolExecutionStrategy::Parallel`/`Auto`). Breaking: `build_v1_agent_card()` signature, `TaskStore`/`PushNotificationSender` trait changes, `message_stream` return type. See [CHANGELOG](CHANGELOG.md) for full details.
 >
 > **Contributors:** Many thanks to [@mikefaille](https://github.com/mikefaille) — AdkIdentity design, realtime audio, LiveKit bridge, skill system. [@rohan-panickar](https://github.com/rohan-panickar) — OpenAI-compatible providers, xAI, multimodal content. [@dhruv-pant](https://github.com/dhruv-pant) — Gemini service account auth. [@tomtom215](https://github.com/tomtom215) — A2A Protocol v1.0.0 types crate ([a2a-protocol-types](https://crates.io/crates/a2a-protocol-types)), Foundation-verified wire types powering our A2A v1 layer. [@danielsan](https://github.com/danielsan) — Google deps issue & PR (#181, #203), RAG crash report (#205). [@CodingFlow](https://github.com/CodingFlow) — Gemini 3 thinking level, global endpoint, citationSources (#177, #178, #179). [@ctylx](https://github.com/ctylx) — skill discovery fix (#204). [@poborin](https://github.com/poborin) — project config proposal (#176). [Get started →](https://github.com/zavora-ai/adk-rust/wiki/quickstart)
 >
@@ -191,10 +191,10 @@ Requires Rust 1.85 or later (Rust 2024 edition). Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-adk-rust = "0.5.0"  # Standard: agents, models, tools, sessions, runner, server, CLI
+adk-rust = "0.6.0"  # Standard: agents, models, tools, sessions, runner, server, CLI
 
 # Need graph, browser, eval, realtime, audio, RAG?
-# adk-rust = { version = "0.5.0", features = ["full"] }
+# adk-rust = { version = "0.6.0", features = ["full"] }
 ```
 
 Set your API key:
@@ -785,20 +785,20 @@ Add to your `Cargo.toml`:
 ```toml
 [dependencies]
 # Standard (default) — agents, models, tools, sessions, runner, server, CLI, guardrails, auth
-adk-rust = "0.5.0"
+adk-rust = "0.6.0"
 
 # Full — adds graph, browser, eval, realtime, audio, RAG, code, sandbox
-adk-rust = { version = "0.5.0", features = ["full"] }
+adk-rust = { version = "0.6.0", features = ["full"] }
 
 # Minimal — just agents + Gemini + runner (fastest build)
-adk-rust = { version = "0.5.0", default-features = false, features = ["minimal"] }
+adk-rust = { version = "0.6.0", default-features = false, features = ["minimal"] }
 
 # Or individual crates for finer control
-adk-core = "0.5.0"
-adk-agent = "0.5.0"
-adk-model = { version = "0.5.0", features = ["openai", "anthropic"] }
-adk-tool = "0.5.0"
-adk-runner = "0.5.0"
+adk-core = "0.6.0"
+adk-agent = "0.6.0"
+adk-model = { version = "0.6.0", features = ["openai", "anthropic"] }
+adk-tool = "0.6.0"
+adk-runner = "0.6.0"
 ```
 
 ## Examples
@@ -969,19 +969,16 @@ Contributions welcome! Please open an issue or pull request on GitHub.
 
 ## Roadmap
 
-**v0.5.0** (current) — Structured errors, OpenAI Responses API, OpenRouter, production hardening:
-- **Breaking: Structured Error Envelope** — `AdkError` redesigned from flat enum to multi-axis struct with `ErrorComponent`, `ErrorCategory`, `RetryHint`, `http_status_code()`, `to_problem_json()`. All crates migrated. Backward-compatible constructors preserved.
-- **Breaking: Typed Runner parameters** — `Runner::run()` now takes `UserId` and `SessionId` types instead of raw strings.
-- **OpenAI Responses API** — New `OpenAIResponsesClient` for `/v1/responses` with reasoning summaries, built-in tools, and server-side state.
-- **OpenRouter deep integration** — Native `OpenRouterClient` with chat, responses, routing, discovery, and credits APIs.
-- **Config validation** — `ThinkingConfig::validate()` and `GenerationConfig::validate()` in adk-gemini reject invalid configs before sending.
-- **`labs` feature preset** — Experimental crates (`code`, `sandbox`, `audio`) moved out of `full` into `labs`.
-- **Debug endpoint honesty** — `get_graph` and `get_eval_sets` return 501 instead of fake 200s.
-- **Error handling hardening** — Eliminated panic-on-error paths across 4 crates, upgraded OTel to 0.28, eliminated reqwest 0.11.
-- **Bug fixes** — Gemini 3.x thought_signature, AgentTool infinite loop, MongoDB standalone, PostgreSQL migration types.
+**v0.6.0** (current) — A2A v1.0.0 compliance, ParallelAgent SharedState, tool authorization:
+- **A2A v1.0.0 Protocol Compliance** — 9 fixes: timestamps, capabilities, idempotency, push auth, multi-turn, validation, Content-Type, streaming first-event, context lookup. All 11 JSON-RPC operations. Wire types by [@tomtom215](https://github.com/tomtom215).
+- **ParallelAgent SharedState** — `set_shared`/`get_shared`/`wait_for_key` coordination primitives for cross-agent state sharing. Enables parallel sub-agents to work on the same artifact.
+- **Tool Authorization** — Documentation for `ToolConfirmationPolicy` (HITL), `BeforeToolCallback`, RBAC, graph interrupts with CLI and web server examples.
+- **Breaking** — `build_v1_agent_card()` signature, `TaskStore`/`PushNotificationSender` trait changes, `message_stream` return type, `CallbackContext::shared_state()` default method.
 
 <details>
-<summary>v0.4.0 and earlier</summary>
+<summary>v0.5.0 and earlier</summary>
+
+**v0.5.0**: Structured errors, OpenAI Responses API, OpenRouter, production hardening. `AdkError` redesign, typed `Runner::run()`, `labs` preset, `provider_from_env()`, encrypted sessions, graph durable resume, MCP resource API, Deepgram streaming STT.
 
 **v0.4.0**: Framework focus & performance. Extracted UI/Studio/Playground to standalone repos. Tiered feature presets (`minimal`/`standard`/`full`). Consolidated 7 OpenAI-compatible providers. Vertex AI deps opt-in. `cargo-adk` scaffolding CLI. `#[tool]` proc macro. nextest CI. Multimodal vision for Bedrock/OpenAI/Anthropic.
 
