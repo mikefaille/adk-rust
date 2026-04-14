@@ -218,13 +218,13 @@ impl GeminiModel {
                     }
                     adk_gemini::Part::FunctionResponse { function_response, .. } => {
                         converted_parts.push(Part::FunctionResponse {
-                            function_response: adk_core::FunctionResponseData {
-                                name: function_response.name.clone(),
-                                response: function_response
+                            function_response: adk_core::FunctionResponseData::new(
+                                function_response.name.clone(),
+                                function_response
                                     .response
                                     .clone()
                                     .unwrap_or(serde_json::Value::Null),
-                            },
+                            ),
                             id: None,
                         });
                     }
@@ -238,6 +238,12 @@ impl GeminiModel {
                         let value = serde_json::to_value(p).unwrap_or(serde_json::Value::Null);
                         converted_parts
                             .push(Part::ServerToolResponse { server_tool_response: value });
+                    }
+                    adk_gemini::Part::FileData { file_data } => {
+                        converted_parts.push(Part::FileData {
+                            mime_type: file_data.mime_type.clone(),
+                            file_uri: file_data.file_uri.clone(),
+                        });
                     }
                 }
             }
@@ -618,13 +624,37 @@ impl GeminiModel {
                     for part in &content.parts {
                         if let Part::FunctionResponse { function_response, .. } = part {
                             let sig = fn_call_signatures.get(&function_response.name).cloned();
-                            gemini_parts.push(adk_gemini::Part::FunctionResponse {
-                                function_response: adk_gemini::tools::FunctionResponse::new(
-                                    &function_response.name,
-                                    Self::gemini_function_response_payload(
-                                        function_response.response.clone(),
-                                    ),
+
+                            // Build nested FunctionResponsePart entries for multimodal data
+                            let mut fr_parts = Vec::new();
+                            for inline in &function_response.inline_data {
+                                let encoded = attachment::encode_base64(&inline.data);
+                                fr_parts.push(adk_gemini::FunctionResponsePart::InlineData {
+                                    inline_data: adk_gemini::Blob {
+                                        mime_type: inline.mime_type.clone(),
+                                        data: encoded,
+                                    },
+                                });
+                            }
+                            for file in &function_response.file_data {
+                                fr_parts.push(adk_gemini::FunctionResponsePart::FileData {
+                                    file_data: adk_gemini::FileDataRef {
+                                        mime_type: file.mime_type.clone(),
+                                        file_uri: file.file_uri.clone(),
+                                    },
+                                });
+                            }
+
+                            let mut gemini_fr = adk_gemini::tools::FunctionResponse::new(
+                                &function_response.name,
+                                Self::gemini_function_response_payload(
+                                    function_response.response.clone(),
                                 ),
+                            );
+                            gemini_fr.parts = fr_parts;
+
+                            gemini_parts.push(adk_gemini::Part::FunctionResponse {
+                                function_response: gemini_fr,
                                 thought_signature: sig,
                             });
                         }
@@ -1193,5 +1223,116 @@ mod tests {
             GeminiModel::gemini_function_response_payload(serde_json::json!([{ "id": "pricing" }]));
 
         assert_eq!(payload, serde_json::json!({ "result": [{ "id": "pricing" }] }));
+    }
+
+    // ===== Multimodal function response conversion tests =====
+
+    /// Helper to build a FunctionResponse with nested multimodal parts
+    /// simulating the conversion logic from generate_content_internal.
+    fn convert_function_response_to_gemini_fr(
+        frd: &adk_core::FunctionResponseData,
+    ) -> adk_gemini::tools::FunctionResponse {
+        let mut fr_parts = Vec::new();
+
+        for inline in &frd.inline_data {
+            let encoded = crate::attachment::encode_base64(&inline.data);
+            fr_parts.push(adk_gemini::FunctionResponsePart::InlineData {
+                inline_data: adk_gemini::Blob {
+                    mime_type: inline.mime_type.clone(),
+                    data: encoded,
+                },
+            });
+        }
+
+        for file in &frd.file_data {
+            fr_parts.push(adk_gemini::FunctionResponsePart::FileData {
+                file_data: adk_gemini::FileDataRef {
+                    mime_type: file.mime_type.clone(),
+                    file_uri: file.file_uri.clone(),
+                },
+            });
+        }
+
+        let mut gemini_fr = adk_gemini::tools::FunctionResponse::new(
+            &frd.name,
+            GeminiModel::gemini_function_response_payload(frd.response.clone()),
+        );
+        gemini_fr.parts = fr_parts;
+        gemini_fr
+    }
+
+    #[test]
+    fn json_only_function_response_has_no_nested_parts() {
+        let frd = adk_core::FunctionResponseData::new("tool", serde_json::json!({"ok": true}));
+        let gemini_fr = convert_function_response_to_gemini_fr(&frd);
+        assert!(gemini_fr.parts.is_empty());
+        // Serialized JSON should have name and response but no parts key
+        let json = serde_json::to_string(&gemini_fr).unwrap();
+        assert!(!json.contains("\"parts\""));
+    }
+
+    #[test]
+    fn function_response_with_inline_data_has_nested_parts() {
+        let frd = adk_core::FunctionResponseData::with_inline_data(
+            "chart",
+            serde_json::json!({"status": "ok"}),
+            vec![adk_core::InlineDataPart {
+                mime_type: "image/png".to_string(),
+                data: vec![0x89, 0x50, 0x4E, 0x47],
+            }],
+        );
+        let gemini_fr = convert_function_response_to_gemini_fr(&frd);
+        assert_eq!(gemini_fr.parts.len(), 1);
+        match &gemini_fr.parts[0] {
+            adk_gemini::FunctionResponsePart::InlineData { inline_data } => {
+                assert_eq!(inline_data.mime_type, "image/png");
+                let decoded = BASE64_STANDARD.decode(&inline_data.data).unwrap();
+                assert_eq!(decoded, vec![0x89, 0x50, 0x4E, 0x47]);
+            }
+            other => panic!("expected InlineData, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn function_response_with_file_data_has_nested_parts() {
+        let frd = adk_core::FunctionResponseData::with_file_data(
+            "doc",
+            serde_json::json!({"ok": true}),
+            vec![adk_core::FileDataPart {
+                mime_type: "application/pdf".to_string(),
+                file_uri: "gs://bucket/report.pdf".to_string(),
+            }],
+        );
+        let gemini_fr = convert_function_response_to_gemini_fr(&frd);
+        assert_eq!(gemini_fr.parts.len(), 1);
+        match &gemini_fr.parts[0] {
+            adk_gemini::FunctionResponsePart::FileData { file_data } => {
+                assert_eq!(file_data.mime_type, "application/pdf");
+                assert_eq!(file_data.file_uri, "gs://bucket/report.pdf");
+            }
+            other => panic!("expected FileData, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn function_response_with_both_inline_and_file_data_ordering() {
+        let frd = adk_core::FunctionResponseData::with_multimodal(
+            "multi",
+            serde_json::json!({}),
+            vec![
+                adk_core::InlineDataPart { mime_type: "image/png".to_string(), data: vec![1, 2] },
+                adk_core::InlineDataPart { mime_type: "image/jpeg".to_string(), data: vec![3, 4] },
+            ],
+            vec![adk_core::FileDataPart {
+                mime_type: "application/pdf".to_string(),
+                file_uri: "gs://b/f.pdf".to_string(),
+            }],
+        );
+        let gemini_fr = convert_function_response_to_gemini_fr(&frd);
+        // 2 inline + 1 file = 3 nested parts
+        assert_eq!(gemini_fr.parts.len(), 3);
+        assert!(matches!(&gemini_fr.parts[0], adk_gemini::FunctionResponsePart::InlineData { .. }));
+        assert!(matches!(&gemini_fr.parts[1], adk_gemini::FunctionResponsePart::InlineData { .. }));
+        assert!(matches!(&gemini_fr.parts[2], adk_gemini::FunctionResponsePart::FileData { .. }));
     }
 }

@@ -117,7 +117,9 @@ pub use tool::{
     RetryBudget, Tool, ToolContext, ToolExecutionStrategy, ToolPredicate, ToolRegistry, Toolset,
     ValidationMode,
 };
-pub use types::{Content, FunctionResponseData, MAX_INLINE_DATA_SIZE, Part};
+pub use types::{
+    Content, FileDataPart, FunctionResponseData, InlineDataPart, MAX_INLINE_DATA_SIZE, Part,
+};
 
 // Re-export async_trait so the #[tool] macro's generated code can reference it
 // via adk_tool::async_trait (adk_tool re-exports from adk_core).

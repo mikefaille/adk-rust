@@ -279,6 +279,30 @@ pub struct FunctionResponse {
     /// This must be a valid JSON object
     #[serde(skip_serializing_if = "Option::is_none")]
     pub response: Option<serde_json::Value>,
+    /// Multimodal parts nested inside the functionResponse wire object.
+    /// Contains `inlineData` and/or `fileData` entries that accompany the JSON response.
+    /// Gemini 3 expects these inside the `functionResponse`, not as sibling Content parts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parts: Vec<FunctionResponsePart>,
+}
+
+/// A part nested inside a `functionResponse` wire object.
+///
+/// Gemini 3 expects multimodal data (images, audio, files) as `inlineData` or `fileData`
+/// entries in a `parts` array within the `functionResponse` JSON.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(untagged)]
+pub enum FunctionResponsePart {
+    /// Inline binary data (base64-encoded).
+    InlineData {
+        #[serde(rename = "inlineData")]
+        inline_data: crate::Blob,
+    },
+    /// File data referenced by URI.
+    FileData {
+        #[serde(rename = "fileData")]
+        file_data: crate::FileDataRef,
+    },
 }
 
 impl FunctionResponse {
@@ -288,7 +312,50 @@ impl FunctionResponse {
             serde_json::Value::Object(_) => response,
             other => serde_json::json!({ "result": other }),
         };
-        Self { name: name.into(), response: Some(response) }
+        Self { name: name.into(), response: Some(response), parts: Vec::new() }
+    }
+
+    /// Create with JSON response and inline data blobs.
+    pub fn with_inline_data(
+        name: impl Into<String>,
+        response: serde_json::Value,
+        inline_data: Vec<crate::Blob>,
+    ) -> Self {
+        let response = match response {
+            serde_json::Value::Object(_) => response,
+            other => serde_json::json!({ "result": other }),
+        };
+        let parts = inline_data
+            .into_iter()
+            .map(|blob| FunctionResponsePart::InlineData { inline_data: blob })
+            .collect();
+        Self { name: name.into(), response: Some(response), parts }
+    }
+
+    /// Create with JSON response and file data references.
+    pub fn with_file_data(
+        name: impl Into<String>,
+        response: serde_json::Value,
+        file_data: Vec<crate::FileDataRef>,
+    ) -> Self {
+        let response = match response {
+            serde_json::Value::Object(_) => response,
+            other => serde_json::json!({ "result": other }),
+        };
+        let parts = file_data
+            .into_iter()
+            .map(|fdr| FunctionResponsePart::FileData { file_data: fdr })
+            .collect();
+        Self { name: name.into(), response: Some(response), parts }
+    }
+
+    /// Create with inline data only (no JSON response).
+    pub fn inline_data_only(name: impl Into<String>, inline_data: Vec<crate::Blob>) -> Self {
+        let parts = inline_data
+            .into_iter()
+            .map(|blob| FunctionResponsePart::InlineData { inline_data: blob })
+            .collect();
+        Self { name: name.into(), response: None, parts }
     }
 
     /// Create a new function response from a serializable type that will be parsed as JSON

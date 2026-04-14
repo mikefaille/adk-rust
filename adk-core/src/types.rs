@@ -4,10 +4,167 @@ use serde::{Deserialize, Serialize};
 /// Prevents accidental or malicious embedding of oversized payloads in Content parts.
 pub const MAX_INLINE_DATA_SIZE: usize = 10 * 1024 * 1024;
 
+/// Data part for inline binary content in a function response.
+///
+/// Carries a MIME type and raw binary payload for images, audio, PDFs, etc.
+///
+/// # Example
+///
+/// ```rust
+/// use adk_core::InlineDataPart;
+///
+/// let part = InlineDataPart {
+///     mime_type: "image/png".to_string(),
+///     data: vec![0x89, 0x50, 0x4E, 0x47],
+/// };
+/// ```
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct InlineDataPart {
+    pub mime_type: String,
+    pub data: Vec<u8>,
+}
+
+/// Data part for file references in a function response.
+///
+/// Carries a MIME type and URI (URL or cloud storage path) for external files.
+///
+/// # Example
+///
+/// ```rust
+/// use adk_core::FileDataPart;
+///
+/// let part = FileDataPart {
+///     mime_type: "application/pdf".to_string(),
+///     file_uri: "gs://my-bucket/report.pdf".to_string(),
+/// };
+/// ```
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FileDataPart {
+    pub mime_type: String,
+    pub file_uri: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FunctionResponseData {
     pub name: String,
     pub response: serde_json::Value,
+    /// Optional inline binary data parts (images, audio, PDFs).
+    /// Each part is validated against [`MAX_INLINE_DATA_SIZE`] on construction.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inline_data: Vec<InlineDataPart>,
+    /// Optional file data references (URIs to external files).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub file_data: Vec<FileDataPart>,
+}
+
+impl FunctionResponseData {
+    /// Create with JSON response only (backward-compatible).
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use adk_core::FunctionResponseData;
+    ///
+    /// let frd = FunctionResponseData::new("my_tool", serde_json::json!({"status": "ok"}));
+    /// assert!(frd.inline_data.is_empty());
+    /// assert!(frd.file_data.is_empty());
+    /// ```
+    pub fn new(name: impl Into<String>, response: serde_json::Value) -> Self {
+        Self { name: name.into(), response, inline_data: Vec::new(), file_data: Vec::new() }
+    }
+
+    /// Create with JSON response and inline data parts.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any inline data part exceeds [`MAX_INLINE_DATA_SIZE`] (10 MB).
+    pub fn with_inline_data(
+        name: impl Into<String>,
+        response: serde_json::Value,
+        inline_data: Vec<InlineDataPart>,
+    ) -> Self {
+        for part in &inline_data {
+            assert!(
+                part.data.len() <= MAX_INLINE_DATA_SIZE,
+                "Inline data size {} exceeds maximum allowed size of {MAX_INLINE_DATA_SIZE} bytes",
+                part.data.len(),
+            );
+        }
+        Self { name: name.into(), response, inline_data, file_data: Vec::new() }
+    }
+
+    /// Create with JSON response and file data references.
+    pub fn with_file_data(
+        name: impl Into<String>,
+        response: serde_json::Value,
+        file_data: Vec<FileDataPart>,
+    ) -> Self {
+        Self { name: name.into(), response, inline_data: Vec::new(), file_data }
+    }
+
+    /// Create with JSON response, inline data, and file data.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any inline data part exceeds [`MAX_INLINE_DATA_SIZE`] (10 MB).
+    pub fn with_multimodal(
+        name: impl Into<String>,
+        response: serde_json::Value,
+        inline_data: Vec<InlineDataPart>,
+        file_data: Vec<FileDataPart>,
+    ) -> Self {
+        for part in &inline_data {
+            assert!(
+                part.data.len() <= MAX_INLINE_DATA_SIZE,
+                "Inline data size {} exceeds maximum allowed size of {MAX_INLINE_DATA_SIZE} bytes",
+                part.data.len(),
+            );
+        }
+        Self { name: name.into(), response, inline_data, file_data }
+    }
+
+    /// Construct from a tool's return value, preserving multimodal parts if present.
+    ///
+    /// If `value` is a JSON object containing `inline_data` or `file_data` arrays
+    /// (matching the `FunctionResponseData` schema), the multimodal parts are extracted
+    /// and the `response` field is used as the JSON payload. Otherwise, the entire
+    /// `value` is used as a plain JSON response (backward-compatible).
+    ///
+    /// This allows tools to return multimodal data by including `inline_data` and/or
+    /// `file_data` in their JSON return value.
+    pub fn from_tool_result(name: impl Into<String>, value: serde_json::Value) -> Self {
+        let name = name.into();
+        // Check if the value has multimodal fields
+        if let serde_json::Value::Object(ref map) = value {
+            let has_inline = map.get("inline_data").is_some_and(|v| v.is_array());
+            let has_file = map.get("file_data").is_some_and(|v| v.is_array());
+            if has_inline || has_file {
+                // Try to deserialize the multimodal parts
+                let inline_data: Vec<InlineDataPart> = map
+                    .get("inline_data")
+                    .and_then(|v| serde_json::from_value(v.clone()).ok())
+                    .unwrap_or_default();
+                let file_data: Vec<FileDataPart> = map
+                    .get("file_data")
+                    .and_then(|v| serde_json::from_value(v.clone()).ok())
+                    .unwrap_or_default();
+
+                if !inline_data.is_empty() || !file_data.is_empty() {
+                    // Extract the response field, or use the remaining fields as response
+                    let response = map.get("response").cloned().unwrap_or_else(|| {
+                        let mut clean = map.clone();
+                        clean.remove("inline_data");
+                        clean.remove("file_data");
+                        clean.remove("name");
+                        serde_json::Value::Object(clean)
+                    });
+                    return Self { name, response, inline_data, file_data };
+                }
+            }
+        }
+        // Fallback: plain JSON response
+        Self::new(name, value)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -457,5 +614,215 @@ mod tests {
         assert!(!part.is_media());
         assert!(!part.is_thinking());
         assert_eq!(part.thinking_text(), None);
+    }
+
+    // ===== Multimodal FunctionResponseData tests =====
+
+    #[test]
+    fn test_inline_data_part_serde_round_trip() {
+        let part = InlineDataPart { mime_type: "image/png".to_string(), data: vec![1, 2, 3, 4] };
+        let json = serde_json::to_string(&part).unwrap();
+        let deserialized: InlineDataPart = serde_json::from_str(&json).unwrap();
+        assert_eq!(part, deserialized);
+    }
+
+    #[test]
+    fn test_file_data_part_serde_round_trip() {
+        let part = FileDataPart {
+            mime_type: "application/pdf".to_string(),
+            file_uri: "gs://bucket/report.pdf".to_string(),
+        };
+        let json = serde_json::to_string(&part).unwrap();
+        let deserialized: FileDataPart = serde_json::from_str(&json).unwrap();
+        assert_eq!(part, deserialized);
+    }
+
+    #[test]
+    fn test_function_response_data_new_constructor() {
+        let frd = FunctionResponseData::new("my_tool", serde_json::json!({"status": "ok"}));
+        assert_eq!(frd.name, "my_tool");
+        assert_eq!(frd.response, serde_json::json!({"status": "ok"}));
+        assert!(frd.inline_data.is_empty());
+        assert!(frd.file_data.is_empty());
+    }
+
+    #[test]
+    fn test_function_response_data_with_inline_data() {
+        let inline =
+            vec![InlineDataPart { mime_type: "image/png".to_string(), data: vec![0x89, 0x50] }];
+        let frd = FunctionResponseData::with_inline_data(
+            "chart_tool",
+            serde_json::json!({"ok": true}),
+            inline.clone(),
+        );
+        assert_eq!(frd.inline_data, inline);
+        assert!(frd.file_data.is_empty());
+    }
+
+    #[test]
+    fn test_function_response_data_with_file_data() {
+        let files = vec![FileDataPart {
+            mime_type: "application/pdf".to_string(),
+            file_uri: "gs://bucket/doc.pdf".to_string(),
+        }];
+        let frd = FunctionResponseData::with_file_data(
+            "doc_tool",
+            serde_json::json!({"ok": true}),
+            files.clone(),
+        );
+        assert!(frd.inline_data.is_empty());
+        assert_eq!(frd.file_data, files);
+    }
+
+    #[test]
+    fn test_function_response_data_with_multimodal() {
+        let inline =
+            vec![InlineDataPart { mime_type: "image/png".to_string(), data: vec![1, 2, 3] }];
+        let files = vec![FileDataPart {
+            mime_type: "audio/wav".to_string(),
+            file_uri: "https://example.com/audio.wav".to_string(),
+        }];
+        let frd = FunctionResponseData::with_multimodal(
+            "multi_tool",
+            serde_json::json!({}),
+            inline.clone(),
+            files.clone(),
+        );
+        assert_eq!(frd.inline_data, inline);
+        assert_eq!(frd.file_data, files);
+    }
+
+    #[test]
+    fn test_json_only_function_response_data_serializes_without_multimodal_keys() {
+        let frd = FunctionResponseData::new("tool", serde_json::json!({"result": 42}));
+        let json = serde_json::to_string(&frd).unwrap();
+        assert!(!json.contains("inline_data"));
+        assert!(!json.contains("file_data"));
+        // Should only have name and response
+        let map: serde_json::Map<String, serde_json::Value> = serde_json::from_str(&json).unwrap();
+        assert!(map.contains_key("name"));
+        assert!(map.contains_key("response"));
+        assert_eq!(map.len(), 2);
+    }
+
+    #[test]
+    fn test_function_response_data_serde_round_trip_with_multimodal() {
+        let frd = FunctionResponseData::with_multimodal(
+            "tool",
+            serde_json::json!({"status": "ok"}),
+            vec![InlineDataPart { mime_type: "image/png".to_string(), data: vec![1, 2] }],
+            vec![FileDataPart {
+                mime_type: "application/pdf".to_string(),
+                file_uri: "gs://b/f.pdf".to_string(),
+            }],
+        );
+        let json = serde_json::to_string(&frd).unwrap();
+        let deserialized: FunctionResponseData = serde_json::from_str(&json).unwrap();
+        assert_eq!(frd, deserialized);
+    }
+
+    #[test]
+    #[should_panic(expected = "exceeds maximum allowed size")]
+    fn test_with_inline_data_panics_on_oversized() {
+        let oversized = vec![InlineDataPart {
+            mime_type: "image/png".to_string(),
+            data: vec![0u8; MAX_INLINE_DATA_SIZE + 1],
+        }];
+        let _ = FunctionResponseData::with_inline_data("tool", serde_json::json!({}), oversized);
+    }
+
+    #[test]
+    #[should_panic(expected = "exceeds maximum allowed size")]
+    fn test_with_multimodal_panics_on_oversized() {
+        let oversized = vec![InlineDataPart {
+            mime_type: "image/png".to_string(),
+            data: vec![0u8; MAX_INLINE_DATA_SIZE + 1],
+        }];
+        let _ =
+            FunctionResponseData::with_multimodal("tool", serde_json::json!({}), oversized, vec![]);
+    }
+
+    // ===== from_tool_result tests =====
+
+    #[test]
+    fn test_from_tool_result_plain_json() {
+        let value = serde_json::json!({"temperature": 72, "unit": "F"});
+        let frd = FunctionResponseData::from_tool_result("weather", value.clone());
+        assert_eq!(frd.name, "weather");
+        assert_eq!(frd.response, value);
+        assert!(frd.inline_data.is_empty());
+        assert!(frd.file_data.is_empty());
+    }
+
+    #[test]
+    fn test_from_tool_result_with_inline_data() {
+        let value = serde_json::json!({
+            "response": {"status": "ok", "description": "chart generated"},
+            "inline_data": [
+                {"mime_type": "image/png", "data": [0x89, 0x50, 0x4E, 0x47]}
+            ]
+        });
+        let frd = FunctionResponseData::from_tool_result("chart_tool", value);
+        assert_eq!(frd.name, "chart_tool");
+        assert_eq!(
+            frd.response,
+            serde_json::json!({"status": "ok", "description": "chart generated"})
+        );
+        assert_eq!(frd.inline_data.len(), 1);
+        assert_eq!(frd.inline_data[0].mime_type, "image/png");
+        assert_eq!(frd.inline_data[0].data, vec![0x89, 0x50, 0x4E, 0x47]);
+        assert!(frd.file_data.is_empty());
+    }
+
+    #[test]
+    fn test_from_tool_result_with_file_data() {
+        let value = serde_json::json!({
+            "response": {"doc_id": "report-2024"},
+            "file_data": [
+                {"mime_type": "application/pdf", "file_uri": "gs://bucket/report.pdf"}
+            ]
+        });
+        let frd = FunctionResponseData::from_tool_result("doc_tool", value);
+        assert_eq!(frd.name, "doc_tool");
+        assert_eq!(frd.file_data.len(), 1);
+        assert_eq!(frd.file_data[0].file_uri, "gs://bucket/report.pdf");
+    }
+
+    #[test]
+    fn test_from_tool_result_with_both() {
+        let value = serde_json::json!({
+            "response": {"ok": true},
+            "inline_data": [{"mime_type": "image/png", "data": [1, 2]}],
+            "file_data": [{"mime_type": "application/pdf", "file_uri": "gs://b/f.pdf"}]
+        });
+        let frd = FunctionResponseData::from_tool_result("multi", value);
+        assert_eq!(frd.inline_data.len(), 1);
+        assert_eq!(frd.file_data.len(), 1);
+    }
+
+    #[test]
+    fn test_from_tool_result_empty_arrays_treated_as_plain() {
+        // Empty inline_data/file_data arrays should not trigger multimodal extraction
+        let value = serde_json::json!({
+            "response": {"ok": true},
+            "inline_data": [],
+            "file_data": []
+        });
+        let frd = FunctionResponseData::from_tool_result("tool", value.clone());
+        // Falls through to plain JSON since arrays are empty after deserialization
+        assert!(frd.inline_data.is_empty());
+        assert!(frd.file_data.is_empty());
+    }
+
+    #[test]
+    fn test_from_tool_result_no_response_field_uses_remaining() {
+        // If there's no explicit "response" field, the remaining fields become the response
+        let value = serde_json::json!({
+            "status": "ok",
+            "inline_data": [{"mime_type": "image/png", "data": [1]}]
+        });
+        let frd = FunctionResponseData::from_tool_result("tool", value);
+        assert_eq!(frd.inline_data.len(), 1);
+        assert_eq!(frd.response, serde_json::json!({"status": "ok"}));
     }
 }

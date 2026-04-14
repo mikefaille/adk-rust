@@ -902,10 +902,10 @@ mod tests {
             Content {
                 role: "user".to_string(),
                 parts: vec![Part::FunctionResponse {
-                    function_response: adk_core::FunctionResponseData {
-                        name: "tool".to_string(),
-                        response: serde_json::json!({"result": "ok"}),
-                    },
+                    function_response: adk_core::FunctionResponseData::new(
+                        "tool",
+                        serde_json::json!({"result": "ok"}),
+                    ),
                     id: Some("call_1".to_string()),
                 }],
             },

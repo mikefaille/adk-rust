@@ -567,4 +567,80 @@ let cache_tool = StatefulTool::new(
 
 ---
 
+## Multimodal Function Responses
+
+Gemini 3 models support receiving images, audio, PDFs, and file references in function responses — not just JSON. Tools can return multimodal data by including `inline_data` and/or `file_data` arrays in their JSON return value:
+
+```rust
+/// Tool that returns a chart image alongside JSON metadata.
+async fn generate_chart(
+    _ctx: Arc<dyn ToolContext>,
+    args: serde_json::Value,
+) -> Result<serde_json::Value> {
+    let png_bytes: Vec<u8> = render_chart(&args);
+
+    // Include inline_data in the return value — the framework extracts it automatically
+    Ok(json!({
+        "response": {
+            "title": "Q4 Sales",
+            "chart_type": "bar"
+        },
+        "inline_data": [{
+            "mime_type": "image/png",
+            "data": png_bytes
+        }]
+    }))
+}
+```
+
+The framework automatically:
+1. Detects `inline_data`/`file_data` via `FunctionResponseData::from_tool_result()`
+2. Base64-encodes inline binary data
+3. Nests the parts inside the `functionResponse` wire object (matching the Gemini 3 API format)
+
+### File References
+
+For large files stored externally, use `file_data` with a URI instead of embedding bytes:
+
+```rust
+Ok(json!({
+    "response": { "document_id": "report-2024", "pages": 12 },
+    "file_data": [{
+        "mime_type": "application/pdf",
+        "file_uri": "gs://my-bucket/reports/report-2024.pdf"
+    }]
+}))
+```
+
+### Direct Construction
+
+For framework-level code (custom agents, conversion layers), construct `FunctionResponseData` directly:
+
+```rust
+use adk_core::{FunctionResponseData, InlineDataPart, FileDataPart};
+
+// JSON + inline image
+let frd = FunctionResponseData::with_inline_data(
+    "chart_tool",
+    json!({"title": "Q4 Chart"}),
+    vec![InlineDataPart { mime_type: "image/png".into(), data: png_bytes }],
+);
+
+// JSON + file reference
+let frd = FunctionResponseData::with_file_data(
+    "doc_tool",
+    json!({"status": "ok"}),
+    vec![FileDataPart { mime_type: "application/pdf".into(), file_uri: "gs://bucket/file.pdf".into() }],
+);
+
+// JSON + both
+let frd = FunctionResponseData::with_multimodal("tool", json, inline_parts, file_parts);
+```
+
+> **Note**: Multimodal function responses require Gemini 3 series models (`gemini-3-flash-preview`, `gemini-3-pro-preview`). Earlier models return a 400 error.
+
+See `examples/multimodal_function_response/` for a complete working example.
+
+---
+
 **Previous**: [← mistral.rs](../models/mistralrs.md) | **Next**: [Built-in Tools →](built-in-tools.md)

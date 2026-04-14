@@ -682,10 +682,10 @@ mod tests {
         let contents = vec![Content {
             role: "user".to_string(),
             parts: vec![Part::FunctionResponse {
-                function_response: FunctionResponseData {
-                    name: "get_weather".to_string(),
-                    response: serde_json::json!({"temp": 72}),
-                },
+                function_response: FunctionResponseData::new(
+                    "get_weather",
+                    serde_json::json!({"temp": 72}),
+                ),
                 id: Some("call_123".to_string()),
             }],
         }];

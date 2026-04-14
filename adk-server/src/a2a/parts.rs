@@ -112,7 +112,7 @@ pub fn a2a_parts_to_adk(parts: &[crate::a2a::Part]) -> Result<Vec<Part>> {
                         resp.get("response").cloned().unwrap_or(Value::Object(Map::new()));
                     let id = resp.get("id").and_then(|v| v.as_str()).map(String::from);
                     Ok(Part::FunctionResponse {
-                        function_response: adk_core::FunctionResponseData { name, response },
+                        function_response: adk_core::FunctionResponseData::new(name, response),
                         id,
                     })
                 } else {

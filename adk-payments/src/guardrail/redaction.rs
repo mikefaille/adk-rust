@@ -137,10 +137,10 @@ impl SensitivePaymentDataGuardrail {
                         changed = true;
                     }
                     new_parts.push(Part::FunctionResponse {
-                        function_response: adk_core::FunctionResponseData {
-                            name: function_response.name.clone(),
-                            response: redacted_response,
-                        },
+                        function_response: adk_core::FunctionResponseData::new(
+                            function_response.name.clone(),
+                            redacted_response,
+                        ),
                         id: id.clone(),
                     });
                 }
@@ -461,9 +461,9 @@ mod tests {
             parts: vec![
                 Part::Text { text: "card 4111 1111 1111 1111".to_string() },
                 Part::FunctionResponse {
-                    function_response: FunctionResponseData {
-                        name: "checkout".to_string(),
-                        response: json!({
+                    function_response: FunctionResponseData::new(
+                        "checkout",
+                        json!({
                             "signedAuthorization": "signed_blob",
                             "billingAddress": {
                                 "country": "US",
@@ -471,7 +471,7 @@ mod tests {
                                 "line1": "123 Main St"
                             }
                         }),
-                    },
+                    ),
                     id: None,
                 },
             ],

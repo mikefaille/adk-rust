@@ -1518,15 +1518,15 @@ impl Agent for LlmAgent {
                                 let error_content = Content {
                                     role: "function".to_string(),
                                     parts: vec![Part::FunctionResponse {
-                                        function_response: FunctionResponseData {
-                                            name: fc_name.clone(),
-                                            response: serde_json::json!({
+                                        function_response: FunctionResponseData::new(
+                                            fc_name.clone(),
+                                            serde_json::json!({
                                                 "error": format!(
                                                     "Agent '{}' not found. Available agents: {:?}",
                                                     target_agent, valid_transfer_targets
                                                 )
                                             }),
-                                        },
+                                        ),
                                         id: fc_id.clone(),
                                     }],
                                 };
@@ -1640,12 +1640,12 @@ impl Agent for LlmAgent {
                                         response_content = Some(Content {
                                             role: "function".to_string(),
                                             parts: vec![Part::FunctionResponse {
-                                                function_response: FunctionResponseData {
-                                                    name: name.clone(),
-                                                    response: serde_json::json!({
+                                                function_response: FunctionResponseData::new(
+                                                    name.clone(),
+                                                    serde_json::json!({
                                                         "error": format!("Tool '{}' execution denied by confirmation policy", name)
                                                     }),
-                                                },
+                                                ),
                                                 id: id.clone(),
                                             }],
                                         });
@@ -1655,12 +1655,12 @@ impl Agent for LlmAgent {
                                         response_content = Some(Content {
                                             role: "function".to_string(),
                                             parts: vec![Part::FunctionResponse {
-                                                function_response: FunctionResponseData {
-                                                    name: name.clone(),
-                                                    response: serde_json::json!({
+                                                function_response: FunctionResponseData::new(
+                                                    name.clone(),
+                                                    serde_json::json!({
                                                         "error": format!("Tool '{}' requires confirmation", name)
                                                     }),
-                                                },
+                                                ),
                                                 id: id.clone(),
                                             }],
                                         });
@@ -1684,10 +1684,10 @@ impl Agent for LlmAgent {
                                             response_content = Some(Content {
                                                 role: "function".to_string(),
                                                 parts: vec![Part::FunctionResponse {
-                                                    function_response: FunctionResponseData {
-                                                        name: name.clone(),
-                                                        response: serde_json::json!({ "error": e.to_string() }),
-                                                    },
+                                                    function_response: FunctionResponseData::new(
+                                                        name.clone(),
+                                                        serde_json::json!({ "error": e.to_string() }),
+                                                    ),
                                                     id: id.clone(),
                                                 }],
                                             });
@@ -1711,10 +1711,10 @@ impl Agent for LlmAgent {
                                         response_content = Some(Content {
                                             role: "function".to_string(),
                                             parts: vec![Part::FunctionResponse {
-                                                function_response: FunctionResponseData {
-                                                    name: name.clone(),
-                                                    response: serde_json::json!({ "error": msg }),
-                                                },
+                                                function_response: FunctionResponseData::new(
+                                                    name.clone(),
+                                                    serde_json::json!({ "error": msg }),
+                                                ),
                                                 id: id.clone(),
                                             }],
                                         });
@@ -1844,10 +1844,10 @@ impl Agent for LlmAgent {
                                     response_content = Some(Content {
                                         role: "function".to_string(),
                                         parts: vec![Part::FunctionResponse {
-                                            function_response: FunctionResponseData {
-                                                name: name.clone(),
-                                                response: final_function_response,
-                                            },
+                                            function_response: FunctionResponseData::from_tool_result(
+                                                name.clone(),
+                                                final_function_response,
+                                            ),
                                             id: id.clone(),
                                         }],
                                     });
@@ -1855,12 +1855,12 @@ impl Agent for LlmAgent {
                                     response_content = Some(Content {
                                         role: "function".to_string(),
                                         parts: vec![Part::FunctionResponse {
-                                            function_response: FunctionResponseData {
-                                                name: name.clone(),
-                                                response: serde_json::json!({
+                                            function_response: FunctionResponseData::new(
+                                                name.clone(),
+                                                serde_json::json!({
                                                     "error": format!("Tool {} not found", name)
                                                 }),
-                                            },
+                                            ),
                                             id: id.clone(),
                                         }],
                                     });
@@ -1890,10 +1890,10 @@ impl Agent for LlmAgent {
                                             response_content = Content {
                                                 role: "function".to_string(),
                                                 parts: vec![Part::FunctionResponse {
-                                                    function_response: FunctionResponseData {
-                                                        name: name.clone(),
-                                                        response: serde_json::json!({ "error": e.to_string() }),
-                                                    },
+                                                    function_response: FunctionResponseData::new(
+                                                        name.clone(),
+                                                        serde_json::json!({ "error": e.to_string() }),
+                                                    ),
                                                     id: id.clone(),
                                                 }],
                                             };
@@ -1910,10 +1910,10 @@ impl Agent for LlmAgent {
                                                 response_content = Content {
                                                     role: "function".to_string(),
                                                     parts: vec![Part::FunctionResponse {
-                                                        function_response: FunctionResponseData {
-                                                            name: name.clone(),
-                                                            response: modified_value,
-                                                        },
+                                                        function_response: FunctionResponseData::from_tool_result(
+                                                            name.clone(),
+                                                            modified_value,
+                                                        ),
                                                         id: id.clone(),
                                                     }],
                                                 };
@@ -1924,10 +1924,10 @@ impl Agent for LlmAgent {
                                                 response_content = Content {
                                                     role: "function".to_string(),
                                                     parts: vec![Part::FunctionResponse {
-                                                        function_response: FunctionResponseData {
-                                                            name: name.clone(),
-                                                            response: serde_json::json!({ "error": e.to_string() }),
-                                                        },
+                                                        function_response: FunctionResponseData::new(
+                                                            name.clone(),
+                                                            serde_json::json!({ "error": e.to_string() }),
+                                                        ),
                                                         id: id.clone(),
                                                     }],
                                                 };

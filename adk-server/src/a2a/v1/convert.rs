@@ -70,7 +70,7 @@ fn wire_data_to_adk(data: &Value) -> Result<adk_core::Part, A2aError> {
         let response = resp.get("response").cloned().unwrap_or(Value::Object(Map::new()));
         let id = resp.get("id").and_then(|v| v.as_str()).map(String::from);
         Ok(adk_core::Part::FunctionResponse {
-            function_response: adk_core::FunctionResponseData { name, response },
+            function_response: adk_core::FunctionResponseData::new(name, response),
             id,
         })
     } else if let Some(stc) = data.get("server_tool_call") {
@@ -552,10 +552,10 @@ mod tests {
     #[test]
     fn function_response_adk_to_wire() {
         let adk = adk_core::Part::FunctionResponse {
-            function_response: adk_core::FunctionResponseData {
-                name: "test_fn".to_string(),
-                response: json!({"result": 42}),
-            },
+            function_response: adk_core::FunctionResponseData::new(
+                "test_fn",
+                json!({"result": 42}),
+            ),
             id: Some("r1".to_string()),
         };
         let wire = adk_part_to_wire(&adk).unwrap();

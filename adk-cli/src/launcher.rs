@@ -908,10 +908,10 @@ mod tests {
 
         // FunctionResponse
         printer.handle_part(&Part::FunctionResponse {
-            function_response: adk_core::FunctionResponseData {
-                name: "get_weather".into(),
-                response: serde_json::json!({"temp": 72}),
-            },
+            function_response: adk_core::FunctionResponseData::new(
+                "get_weather",
+                serde_json::json!({"temp": 72}),
+            ),
             id: None,
         });
 

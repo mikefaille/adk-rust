@@ -256,10 +256,10 @@ mod tests {
         event.llm_response.content = Some(Content {
             role: "function".to_string(),
             parts: vec![Part::FunctionResponse {
-                function_response: crate::FunctionResponseData {
-                    name: "get_weather".to_string(),
-                    response: serde_json::json!({"temp": 72}),
-                },
+                function_response: crate::FunctionResponseData::new(
+                    "get_weather",
+                    serde_json::json!({"temp": 72}),
+                ),
                 id: Some("call_123".to_string()),
             }],
         });
@@ -286,10 +286,10 @@ mod tests {
         event.llm_response.content = Some(Content {
             role: "function".to_string(),
             parts: vec![Part::FunctionResponse {
-                function_response: crate::FunctionResponseData {
-                    name: "tool".to_string(),
-                    response: serde_json::json!({"result": "done"}),
-                },
+                function_response: crate::FunctionResponseData::new(
+                    "tool",
+                    serde_json::json!({"result": "done"}),
+                ),
                 id: Some("call_tool".to_string()),
             }],
         });
@@ -378,10 +378,10 @@ mod tests {
             parts: vec![
                 Part::Text { text: "Running code...".to_string() },
                 Part::FunctionResponse {
-                    function_response: crate::FunctionResponseData {
-                        name: "code_exec".to_string(),
-                        response: serde_json::json!({"output": "42"}),
-                    },
+                    function_response: crate::FunctionResponseData::new(
+                        "code_exec",
+                        serde_json::json!({"output": "42"}),
+                    ),
                     id: Some("call_exec".to_string()),
                 },
             ],
@@ -400,10 +400,10 @@ mod tests {
             role: "model".to_string(),
             parts: vec![
                 Part::FunctionResponse {
-                    function_response: crate::FunctionResponseData {
-                        name: "tool".to_string(),
-                        response: serde_json::json!({}),
-                    },
+                    function_response: crate::FunctionResponseData::new(
+                        "tool",
+                        serde_json::json!({}),
+                    ),
                     id: Some("call_1".to_string()),
                 },
                 Part::Text { text: "Done".to_string() },
