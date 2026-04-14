@@ -107,6 +107,32 @@ enum Part {
 }
 ```
 
+### Multimodal Function Responses
+
+Tools can return images, audio, or file references alongside JSON:
+
+```rust
+// Tool returns JSON with inline_data — framework extracts automatically
+Ok(json!({
+    "response": { "title": "Q4 Chart" },
+    "inline_data": [{ "mime_type": "image/png", "data": png_bytes }]
+}))
+
+// Direct construction
+let frd = FunctionResponseData::with_inline_data(
+    "chart_tool",
+    json!({"title": "Q4 Chart"}),
+    vec![InlineDataPart { mime_type: "image/png".into(), data: png_bytes }],
+);
+
+// File references (URIs to external files)
+let frd = FunctionResponseData::with_file_data(
+    "doc_tool",
+    json!({"status": "ok"}),
+    vec![FileDataPart { mime_type: "application/pdf".into(), file_uri: "gs://bucket/report.pdf".into() }],
+);
+```
+
 ### Event
 
 ```rust

@@ -50,6 +50,24 @@ Thread-safe key-value store for parallel agent coordination:
 
 - **Tool authorization guide** (`docs/official_docs/security/tool-authorization.md`): `ToolConfirmationPolicy` (HITL), `BeforeToolCallback`, RBAC, graph interrupts with CLI and web server examples.
 
+#### Multimodal Function Responses (`adk-core`, `adk-gemini`, `adk-model`, `adk-agent`)
+
+Tools can now return images, audio, PDFs, and file references alongside JSON in function responses to Gemini 3 models:
+
+- **`InlineDataPart` / `FileDataPart`** (`adk-core`): New types for binary data (MIME type + bytes) and file references (MIME type + URI).
+- **`FunctionResponseData` multimodal fields** (`adk-core`): `inline_data: Vec<InlineDataPart>` and `file_data: Vec<FileDataPart>` with serde skip-when-empty for backward compatibility.
+- **`FunctionResponseData::from_tool_result()`** (`adk-core`): Automatically extracts `inline_data`/`file_data` from a tool's JSON return value.
+- **`FunctionResponseData` constructors** (`adk-core`): `with_inline_data()`, `with_file_data()`, `with_multimodal()` for direct construction.
+- **`FunctionResponse.parts`** (`adk-gemini`): Nested `parts` array inside the `functionResponse` wire object matching the Gemini 3 API format.
+- **`FunctionResponsePart`** (`adk-gemini`): Enum for `InlineData` and `FileData` entries nested inside function responses.
+- **`FileDataRef`** (`adk-gemini`): Wire-format struct for file references with camelCase serialization.
+- **`Part::FileData`** (`adk-gemini`): New variant in the Gemini Part enum for file data references.
+- **`Content::function_response_multimodal()`** (`adk-gemini`): Constructor for multimodal function response content.
+- **`ContentBuilder::with_function_response_multimodal()`** (`adk-gemini`): Builder method for multimodal function responses.
+- **Conversion layer** (`adk-model`): Base64-encodes inline data and maps file references into nested `FunctionResponse.parts` for the Gemini wire format.
+- **Agent pipeline** (`adk-agent`): Uses `from_tool_result()` for tool results and `AfterToolCallbackFull` results, enabling tools to return multimodal data.
+- **Example** (`examples/multimodal_function_response/`): Chart tool (PNG + JSON) and document tool (file URI + JSON) with Gemini 3.
+
 #### Gemini 3 Function Calling Compliance (`adk-gemini`, `adk-model`)
 
 Four additions bringing `adk-gemini` to full compliance with the Gemini function calling specification:

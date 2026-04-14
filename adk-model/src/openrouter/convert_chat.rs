@@ -430,10 +430,10 @@ mod tests {
         let messages = adk_contents_to_chat_messages(&[Content {
             role: "tool".to_string(),
             parts: vec![Part::FunctionResponse {
-                function_response: FunctionResponseData {
-                    name: "get_weather".to_string(),
-                    response: serde_json::json!({ "temperature": "22C" }),
-                },
+                function_response: FunctionResponseData::new(
+                    "get_weather",
+                    serde_json::json!({ "temperature": "22C" }),
+                ),
                 id: Some("call_weather".to_string()),
             }],
         }])

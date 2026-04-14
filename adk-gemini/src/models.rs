@@ -59,6 +59,11 @@ pub enum Part {
         #[serde(rename = "inlineData")]
         inline_data: Blob,
     },
+    /// File data referenced by URI
+    FileData {
+        #[serde(rename = "fileData")]
+        file_data: FileDataRef,
+    },
     /// Function call from the model
     FunctionCall {
         /// The function call details
@@ -132,6 +137,25 @@ impl Blob {
     pub fn new(mime_type: impl Into<String>, data: impl Into<String>) -> Self {
         Self { mime_type: mime_type.into(), data: data.into() }
     }
+}
+
+/// Reference to an external file by URI, used in Gemini wire format.
+///
+/// # Example
+///
+/// ```rust
+/// use adk_gemini::FileDataRef;
+///
+/// let file_ref = FileDataRef {
+///     mime_type: "application/pdf".to_string(),
+///     file_uri: "gs://my-bucket/report.pdf".to_string(),
+/// };
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct FileDataRef {
+    pub mime_type: String,
+    pub file_uri: String,
 }
 
 /// Content of a message
@@ -237,6 +261,21 @@ impl Content {
     pub fn inline_data(mime_type: impl Into<String>, data: impl Into<String>) -> Self {
         Self {
             parts: Some(vec![Part::InlineData { inline_data: Blob::new(mime_type, data) }]),
+            role: None,
+        }
+    }
+
+    /// Create function response content with multimodal parts.
+    ///
+    /// The `FunctionResponse` carries its multimodal data (inline images, file references)
+    /// in its own `parts` field, matching the Gemini wire format where `inlineData`/`fileData`
+    /// entries are nested inside the `functionResponse` object.
+    pub fn function_response_multimodal(function_response: super::tools::FunctionResponse) -> Self {
+        Self {
+            parts: Some(vec![Part::FunctionResponse {
+                function_response,
+                thought_signature: None,
+            }]),
             role: None,
         }
     }
@@ -428,5 +467,172 @@ mod tests {
             }
             other => panic!("expected Part::CodeExecutionResult, got {other:?}"),
         }
+    }
+
+    // ===== Multimodal function response tests =====
+
+    #[test]
+    fn test_file_data_ref_serde_round_trip() {
+        let file_ref = FileDataRef {
+            mime_type: "application/pdf".to_string(),
+            file_uri: "gs://bucket/report.pdf".to_string(),
+        };
+        let json = serde_json::to_string(&file_ref).unwrap();
+        assert!(json.contains("mimeType"));
+        assert!(json.contains("fileUri"));
+        let deserialized: FileDataRef = serde_json::from_str(&json).unwrap();
+        assert_eq!(file_ref, deserialized);
+    }
+
+    #[test]
+    fn test_part_file_data_serde_round_trip() {
+        let part = Part::FileData {
+            file_data: FileDataRef {
+                mime_type: "image/jpeg".to_string(),
+                file_uri: "https://example.com/img.jpg".to_string(),
+            },
+        };
+        let json = serde_json::to_string(&part).unwrap();
+        assert!(json.contains("fileData"));
+        let deserialized: Part = serde_json::from_str(&json).unwrap();
+        assert_eq!(part, deserialized);
+    }
+
+    #[test]
+    fn test_function_response_new_backward_compat() {
+        let fr =
+            super::super::tools::FunctionResponse::new("tool", serde_json::json!({"ok": true}));
+        let json = serde_json::to_string(&fr).unwrap();
+        // Should only have name and response — no inline_data or file_data keys
+        let map: serde_json::Map<String, serde_json::Value> = serde_json::from_str(&json).unwrap();
+        assert!(map.contains_key("name"));
+        assert!(map.contains_key("response"));
+        assert!(!map.contains_key("inline_data"));
+        assert!(!map.contains_key("file_data"));
+    }
+
+    #[test]
+    fn test_function_response_with_inline_data_constructor() {
+        let blobs = vec![Blob::new("image/png", "base64data")];
+        let fr = super::super::tools::FunctionResponse::with_inline_data(
+            "chart",
+            serde_json::json!({"status": "ok"}),
+            blobs.clone(),
+        );
+        assert_eq!(fr.name, "chart");
+        assert_eq!(fr.parts.len(), 1);
+        assert!(matches!(
+            &fr.parts[0],
+            super::super::tools::FunctionResponsePart::InlineData { inline_data }
+            if inline_data == &blobs[0]
+        ));
+    }
+
+    #[test]
+    fn test_function_response_with_file_data_constructor() {
+        let files = vec![FileDataRef {
+            mime_type: "application/pdf".to_string(),
+            file_uri: "gs://b/f.pdf".to_string(),
+        }];
+        let fr = super::super::tools::FunctionResponse::with_file_data(
+            "doc",
+            serde_json::json!({"ok": true}),
+            files.clone(),
+        );
+        assert_eq!(fr.name, "doc");
+        assert_eq!(fr.parts.len(), 1);
+        assert!(matches!(
+            &fr.parts[0],
+            super::super::tools::FunctionResponsePart::FileData { file_data }
+            if file_data == &files[0]
+        ));
+    }
+
+    #[test]
+    fn test_function_response_inline_data_only_constructor() {
+        let blobs = vec![Blob::new("audio/wav", "audiodata")];
+        let fr =
+            super::super::tools::FunctionResponse::inline_data_only("audio_tool", blobs.clone());
+        assert_eq!(fr.name, "audio_tool");
+        assert!(fr.response.is_none());
+        assert_eq!(fr.parts.len(), 1);
+    }
+
+    #[test]
+    fn test_content_function_response_multimodal_parts_nested() {
+        use super::super::tools::FunctionResponsePart;
+        let blobs = vec![Blob::new("image/png", "img1"), Blob::new("image/jpeg", "img2")];
+        let files = vec![FileDataRef {
+            mime_type: "application/pdf".to_string(),
+            file_uri: "gs://b/f.pdf".to_string(),
+        }];
+        let mut fr_parts: Vec<FunctionResponsePart> = blobs
+            .iter()
+            .map(|b| FunctionResponsePart::InlineData { inline_data: b.clone() })
+            .collect();
+        fr_parts
+            .extend(files.iter().map(|f| FunctionResponsePart::FileData { file_data: f.clone() }));
+        let fr = super::super::tools::FunctionResponse {
+            name: "tool".to_string(),
+            response: Some(serde_json::json!({"ok": true})),
+            parts: fr_parts,
+        };
+        let content = Content::function_response_multimodal(fr);
+        let content_parts = content.parts.unwrap();
+        // Single FunctionResponse part in the Content
+        assert_eq!(content_parts.len(), 1);
+        assert!(matches!(&content_parts[0], Part::FunctionResponse { .. }));
+        // The multimodal data is nested inside the FunctionResponse
+        if let Part::FunctionResponse { function_response, .. } = &content_parts[0] {
+            // 2 inline + 1 file = 3 nested parts
+            assert_eq!(function_response.parts.len(), 3);
+        } else {
+            panic!("expected FunctionResponse part");
+        }
+    }
+
+    #[test]
+    fn test_multimodal_function_response_wire_format() {
+        // Verify the serialized JSON matches the Gemini API wire format:
+        // The `parts` array with `inlineData` lives INSIDE the `functionResponse` object.
+        use super::super::tools::FunctionResponsePart;
+        let fr = super::super::tools::FunctionResponse {
+            name: "get_image".to_string(),
+            response: Some(serde_json::json!({"image_ref": {"$ref": "photo.jpg"}})),
+            parts: vec![FunctionResponsePart::InlineData {
+                inline_data: Blob::new("image/jpeg", "base64encodeddata"),
+            }],
+        };
+
+        let part = Part::FunctionResponse { function_response: fr, thought_signature: None };
+        let json = serde_json::to_value(&part).unwrap();
+
+        // The functionResponse object should contain name, response, AND parts
+        let fr_obj = &json["functionResponse"];
+        assert_eq!(fr_obj["name"], "get_image");
+        assert!(fr_obj["response"].is_object());
+        assert!(fr_obj["parts"].is_array());
+        assert_eq!(fr_obj["parts"].as_array().unwrap().len(), 1);
+
+        // The nested part should have inlineData with mimeType and data
+        let inline = &fr_obj["parts"][0]["inlineData"];
+        assert_eq!(inline["mimeType"], "image/jpeg");
+        assert_eq!(inline["data"], "base64encodeddata");
+    }
+
+    #[test]
+    fn test_json_only_function_response_has_no_parts_key() {
+        // When there are no multimodal parts, the `parts` key should be absent
+        let fr = super::super::tools::FunctionResponse::new(
+            "simple_tool",
+            serde_json::json!({"result": "ok"}),
+        );
+        let part = Part::FunctionResponse { function_response: fr, thought_signature: None };
+        let json = serde_json::to_string(&part).unwrap();
+        // Should NOT contain "parts" key at all
+        assert!(
+            !json.contains(r#""parts""#),
+            "JSON-only response should not have parts key: {json}"
+        );
     }
 }

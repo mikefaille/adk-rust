@@ -3,7 +3,7 @@ use std::sync::Arc;
 use tracing::instrument;
 
 use crate::{
-    Content, FunctionCallingMode, FunctionDeclaration, GenerationConfig, GenerationResponse,
+    Blob, Content, FunctionCallingMode, FunctionDeclaration, GenerationConfig, GenerationResponse,
     Message, Role, Tool,
     cache::CachedContentHandle,
     client::{Error as ClientError, GeminiClient},
@@ -111,6 +111,23 @@ impl ContentBuilder {
         let content = Content::function_response_json(name, json).with_role(Role::User);
         self.contents.push(content);
         Ok(self)
+    }
+
+    /// Adds a function response with inline data parts to the request.
+    ///
+    /// Each inline data entry is a `(mime_type, base64_data)` pair.
+    pub fn with_function_response_multimodal(
+        mut self,
+        name: impl Into<String>,
+        response: serde_json::Value,
+        inline_data: Vec<(String, String)>,
+    ) -> Self {
+        let blobs: Vec<Blob> =
+            inline_data.into_iter().map(|(mime, data)| Blob::new(mime, data)).collect();
+        let fr = crate::FunctionResponse::with_inline_data(name, response, blobs);
+        let content = Content::function_response_multimodal(fr).with_role(Role::User);
+        self.contents.push(content);
+        self
     }
 
     /// Adds a `Message` to the conversation history.

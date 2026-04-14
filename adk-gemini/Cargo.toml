@@ -302,6 +302,10 @@ features = ["serde"]
 name = "config_validation_tests"
 path = "tests/config_validation_tests.rs"
 
+[[test]]
+name = "multimodal_fn_response_tests"
+path = "tests/multimodal_fn_response_tests.rs"
+
 [dev-dependencies.display-error-chain]
 version = "0.2"
 

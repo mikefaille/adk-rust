@@ -448,10 +448,10 @@ fn conversation_history_preserves_tool_role() {
     tool_event.llm_response.content = Some(Content {
         role: "function".to_string(),
         parts: vec![Part::FunctionResponse {
-            function_response: FunctionResponseData {
-                name: "browser_navigate".into(),
-                response: serde_json::json!({"success": true}),
-            },
+            function_response: FunctionResponseData::new(
+                "browser_navigate",
+                serde_json::json!({"success": true}),
+            ),
             id: Some("call_1".into()),
         }],
     });
@@ -518,10 +518,10 @@ fn conversation_history_for_agent_filters_other_agents_events() {
     coord_tool_resp.llm_response.content = Some(Content {
         role: "function".to_string(),
         parts: vec![Part::FunctionResponse {
-            function_response: FunctionResponseData {
-                name: "get_profile".into(),
-                response: serde_json::json!({"name": "Alice"}),
-            },
+            function_response: FunctionResponseData::new(
+                "get_profile",
+                serde_json::json!({"name": "Alice"}),
+            ),
             id: Some("call_1".into()),
         }],
     });
@@ -584,10 +584,10 @@ fn conversation_history_for_agent_keeps_own_events() {
     tool_resp.llm_response.content = Some(Content {
         role: "function".to_string(),
         parts: vec![Part::FunctionResponse {
-            function_response: FunctionResponseData {
-                name: "search_jobs".into(),
-                response: serde_json::json!({"jobs": []}),
-            },
+            function_response: FunctionResponseData::new(
+                "search_jobs",
+                serde_json::json!({"jobs": []}),
+            ),
             id: Some("call_2".into()),
         }],
     });
@@ -624,10 +624,10 @@ fn conversation_history_for_agent_excludes_other_agents_function_responses() {
     other_tool.llm_response.content = Some(Content {
         role: "function".to_string(),
         parts: vec![Part::FunctionResponse {
-            function_response: FunctionResponseData {
-                name: "some_tool".into(),
-                response: serde_json::json!({"data": "value"}),
-            },
+            function_response: FunctionResponseData::new(
+                "some_tool",
+                serde_json::json!({"data": "value"}),
+            ),
             id: None,
         }],
     });
@@ -701,10 +701,10 @@ fn conversation_history_for_agent_double_transfer_sees_own_prior_events() {
     sourcing_resp1.llm_response.content = Some(Content {
         role: "function".to_string(),
         parts: vec![Part::FunctionResponse {
-            function_response: FunctionResponseData {
-                name: "search_jobs".into(),
-                response: serde_json::json!({"jobs": ["job_1", "job_2"]}),
-            },
+            function_response: FunctionResponseData::new(
+                "search_jobs",
+                serde_json::json!({"jobs": ["job_1", "job_2"]}),
+            ),
             id: Some("call_s1".into()),
         }],
     });
@@ -740,10 +740,10 @@ fn conversation_history_for_agent_double_transfer_sees_own_prior_events() {
     coord_resp.llm_response.content = Some(Content {
         role: "function".to_string(),
         parts: vec![Part::FunctionResponse {
-            function_response: FunctionResponseData {
-                name: "rank_candidates".into(),
-                response: serde_json::json!({"ranked": ["job_1"]}),
-            },
+            function_response: FunctionResponseData::new(
+                "rank_candidates",
+                serde_json::json!({"ranked": ["job_1"]}),
+            ),
             id: Some("call_c2".into()),
         }],
     });

@@ -669,10 +669,10 @@ mod tests {
         let content = Content {
             role: "function".to_string(),
             parts: vec![Part::FunctionResponse {
-                function_response: adk_core::FunctionResponseData {
-                    name: "bash".to_string(),
-                    response: Value::String("hello".to_string()),
-                },
+                function_response: adk_core::FunctionResponseData::new(
+                    "bash",
+                    Value::String("hello".to_string()),
+                ),
                 id: Some("tool_123".to_string()),
             }],
         };
