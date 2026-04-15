@@ -102,14 +102,13 @@ impl MistralRsModel {
 
         // Apply PagedAttention if configured
         if config.paged_attention {
-            builder = builder
-                .with_paged_attn(|| PagedAttentionMetaBuilder::default().build())
-                .map_err(|e| {
-                    MistralRsError::model_load(
-                        &model_id,
-                        format!("PagedAttention initialization failed: {e}"),
-                    )
-                })?;
+            let paged_attn_cfg = PagedAttentionMetaBuilder::default().build().map_err(|e| {
+                MistralRsError::model_load(
+                    &model_id,
+                    format!("PagedAttention initialization failed: {e}"),
+                )
+            })?;
+            builder = builder.with_paged_attn(paged_attn_cfg);
             debug!("PagedAttention enabled");
         }
 
@@ -374,6 +373,7 @@ impl MistralRsModel {
             error_code: None,
             error_message: None,
             citation_metadata: None,
+            provider_metadata: None,
         }
     }
 }
@@ -430,6 +430,7 @@ impl Llm for MistralRsModel {
                                                 citation_metadata: None,
                                                 error_code: None,
                                                 error_message: None,
+                                                provider_metadata: None,
                                             };
                                             yield Ok(response);
                                         }
@@ -453,6 +454,7 @@ impl Llm for MistralRsModel {
                                         error_code: None,
                                         error_message: None,
                                         citation_metadata: None,
+                                        provider_metadata: None,
                                     };
                                     yield Ok(response);
                                 }
@@ -461,7 +463,7 @@ impl Llm for MistralRsModel {
                         }
                     }
                     Err(e) => {
-                        yield Err(adk_core::AdkError::Model(e.to_string()));
+                        yield Err(adk_core::AdkError::model(e.to_string()));
                     }
                 }
             };
@@ -473,7 +475,7 @@ impl Llm for MistralRsModel {
                 .model
                 .send_chat_request(messages)
                 .await
-                .map_err(|e| adk_core::AdkError::Model(e.to_string()))?;
+                .map_err(|e| adk_core::AdkError::model(e.to_string()))?;
 
             // Log inference completion with timing
             let duration_ms = inference_start.elapsed().as_millis() as u64;

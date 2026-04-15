@@ -85,7 +85,7 @@ adk-rust/        Umbrella crate re-exporting all of the above
 ### Excluded from workspace
 
 ```
-adk-mistralrs/   Local LLM inference via mistral.rs (GPU deps — build explicitly)
+adk-mistralrs/   Local LLM inference via mistral.rs v0.8.0 (Gemma 4, Qwen 3.5, Voxtral — GPU deps, build explicitly)
                  Excluded so `--all-features` works without CUDA toolkit.
                  Has its own CI workflow (.github/workflows/mistralrs-tests.yml).
 

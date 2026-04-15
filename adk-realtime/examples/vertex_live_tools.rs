@@ -171,7 +171,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // --- 4. Connect ---
     println!("Connecting to Vertex AI Live (Gemini)...");
     let session = model.connect(config).await?;
-    println!("Connected! Session ID: {}\n", session.session_id());
+    println!("Connected! Session established.\n");
 
     // --- 5. Send a prompt that should trigger tool use ---
     let prompt = "What's the weather like in Nairobi right now, and what time is it there?";

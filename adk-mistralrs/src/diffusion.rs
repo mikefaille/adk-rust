@@ -407,6 +407,7 @@ impl MistralRsDiffusionModel {
                 prompt.to_string(),
                 ImageGenerationResponseFormat::Url,
                 mistralrs_params,
+                None,
             )
             .await
             .map_err(|e| MistralRsError::diffusion(format!("Image generation failed: {}", e)))?;
@@ -459,6 +460,7 @@ impl MistralRsDiffusionModel {
                 prompt.to_string(),
                 ImageGenerationResponseFormat::B64Json,
                 mistralrs_params,
+                None,
             )
             .await
             .map_err(|e| MistralRsError::diffusion(format!("Image generation failed: {}", e)))?;

@@ -2,6 +2,8 @@
 
 Native [mistral.rs](https://github.com/EricLBuehler/mistral.rs) integration for ADK-Rust, providing blazingly fast local LLM inference without external dependencies like Ollama.
 
+Pinned to **mistral.rs v0.8.0** with support for **Gemma 4**, Qwen 3.5, Voxtral speech recognition, MXFP4 quantization, and candle 0.10.
+
 > **Note:** This crate is NOT published to crates.io because mistral.rs depends on unpublished git dependencies. Add it via git dependency instead.
 
 ## Building
