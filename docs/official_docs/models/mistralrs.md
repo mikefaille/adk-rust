@@ -6,15 +6,16 @@ Run LLMs locally with native Rust inference - no external servers, no API keys.
 
 ## What is mistral.rs?
 
-[mistral.rs](https://github.com/EricLBuehler/mistral.rs) is a high-performance Rust inference engine that runs LLMs directly on your hardware. ADK-Rust integrates it through the `adk-mistralrs` crate.
+[mistral.rs](https://github.com/EricLBuehler/mistral.rs) is a high-performance Rust inference engine that runs LLMs directly on your hardware. ADK-Rust integrates it through the `adk-mistralrs` crate, pinned to **v0.8.0** with **Gemma 4** support.
 
 > **Key highlights**:
 > - 🦀 **Native Rust** - No Python, no external servers
 > - 🔒 **Fully offline** - No API keys or internet required
-> - ⚡ **Hardware acceleration** - CUDA, Metal, CPU optimizations
-> - 📦 **Quantization** - Run large models on limited hardware
+> - ⚡ **Hardware acceleration** - CUDA, Metal (3.1 bfloat16), CPU optimizations
+> - 📦 **Quantization** - ISQ, MXFP4, GGUF, UQFF for running large models on limited hardware
 > - 🔧 **LoRA adapters** - Fine-tuned model support with hot-swapping
-> - 👁️ **Vision models** - Image understanding capabilities
+> - 👁️ **Multimodal** - Vision, audio, and video understanding (Gemma 4, Qwen 3 VL)
+> - 🎤 **Speech** - Voxtral real-time speech recognition
 > - 🎯 **Multi-model** - Serve multiple models from one instance
 
 ---
@@ -265,9 +266,12 @@ ModelSource::gguf("/path/to/model.Q4_K_M.gguf")
 
 | Model | Size | RAM Needed | Best For |
 |-------|------|------------|----------|
+| **`google/gemma-4-4b-it`** | **4B** | **8GB** | **Gemma 4 — multimodal (text, image, audio, video), Apache 2.0** |
+| **`google/gemma-4-12b-it`** | **12B** | **24GB** | **Gemma 4 — high-quality multimodal reasoning** |
 | `microsoft/Phi-3.5-mini-instruct` | 3.8B | 8GB | Fast, general purpose |
 | `microsoft/Phi-3.5-vision-instruct` | 4.2B | 10GB | Vision + text |
-| `Qwen/Qwen2.5-3B-Instruct` | 3B | 6GB | Multilingual, coding |
+| `Qwen/Qwen3-4B` | 4B | 8GB | Multilingual, coding, reasoning |
+| `Qwen/Qwen3.5-7B-Instruct` | 7B | 16GB | Latest Qwen with strong reasoning |
 | `google/gemma-2-2b-it` | 2B | 4GB | Lightweight |
 | `mistralai/Mistral-7B-Instruct-v0.3` | 7B | 16GB | High quality |
 

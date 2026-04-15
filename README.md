@@ -115,7 +115,7 @@ ADK supports multiple LLM providers with a unified API:
 | xAI (Grok) | `grok-3-mini` | `openai` (preset) |
 | Amazon Bedrock | `anthropic.claude-sonnet-4-20250514-v1:0` | `bedrock` |
 | Azure AI Inference | (endpoint-specific) | `azure-ai` |
-| mistral.rs | Phi-3, Mistral, Llama, Gemma, LLaVa, FLUX | git dependency |
+| mistral.rs | **Gemma 4**, Phi-3, Llama, Qwen 3.5, Voxtral, FLUX | git dependency |
 
 All providers support streaming, function calling, and multimodal inputs (where available).
 
@@ -175,7 +175,7 @@ Built-in tools:
 | `adk-model` | LLM integrations | Gemini, OpenAI, Anthropic, DeepSeek, Groq, Ollama, Bedrock, Azure AI + OpenAI-compatible presets (Fireworks, Together, Mistral, Perplexity, Cerebras, SambaNova, xAI) |
 | `adk-gemini` | Gemini client | Google Gemini API client with streaming and multimodal support |
 | `adk-anthropic` | Anthropic client | Dedicated Anthropic API client with streaming, thinking, caching, citations, vision, PDF, pricing |
-| `adk-mistralrs` | Native local inference | mistral.rs integration, ISQ quantization, LoRA adapters (git-only) |
+| `adk-mistralrs` | Native local inference | mistral.rs v0.8.0 — **Gemma 4**, Qwen 3.5, Voxtral, ISQ/MXFP4 quantization, LoRA adapters (git-only) |
 | `adk-tool` | Tool system and extensibility | `FunctionTool`, Google Search, MCP protocol with elicitation, schema validation |
 | `adk-session` | Session and state management | SQLite/in-memory backends, conversation history, state persistence |
 | `adk-artifact` | Artifact storage system | File-based storage, MIME type handling, image/PDF/video support |
@@ -692,7 +692,7 @@ assert!(report.all_passed());
 
 ### Local Inference with mistral.rs
 
-For native local inference without external dependencies, use the `adk-mistralrs` crate:
+For native local inference without external dependencies, use the `adk-mistralrs` crate (v0.8.0 — **Gemma 4**, Qwen 3.5, Voxtral):
 
 ```rust
 use adk_mistralrs::{MistralRsModel, MistralRsConfig, ModelSource, QuantizationLevel};
@@ -701,9 +701,9 @@ use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Load model with ISQ quantization for reduced memory
+    // Run Gemma 4 locally with 4-bit quantization
     let config = MistralRsConfig::builder()
-        .model_source(ModelSource::huggingface("microsoft/Phi-3.5-mini-instruct"))
+        .model_source(ModelSource::huggingface("google/gemma-4-4b-it"))
         .isq(QuantizationLevel::Q4_0)
         .paged_attention(true)
         .build();
@@ -726,7 +726,7 @@ adk-mistralrs = { git = "https://github.com/zavora-ai/adk-rust" }
 # With CUDA: features = ["cuda"]
 ```
 
-**Features**: ISQ quantization, PagedAttention, multi-GPU splitting, LoRA/X-LoRA adapters, vision/speech/diffusion models, MCP integration.
+**Features**: Gemma 4 multimodal, ISQ/MXFP4 quantization, PagedAttention with prefix caching, multi-GPU splitting, LoRA/X-LoRA adapters, vision/speech/diffusion models, MCP integration.
 
 ## Building from Source
 
