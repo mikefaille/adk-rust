@@ -40,8 +40,8 @@ uuid = { version = "1.0", features = ["v4"] }
 
 # mistral.rs - native Rust LLM inference engine (git dependency)
 # Note: This is why this crate cannot be published to crates.io
-# Pinned to a specific commit for reproducible builds across CI and local.
-mistralrs = { git = "https://github.com/EricLBuehler/mistral.rs", rev = "c2356df" }
+# Pinned to v0.8.0 tag for Gemma 4, Qwen 3.5, Voxtral, and candle 0.10 support.
+mistralrs = { git = "https://github.com/EricLBuehler/mistral.rs", tag = "v0.8.0" }
 
 # Optional HTTP client for URL image loading
 reqwest = { version = "0.12", features = ["blocking"], optional = true }

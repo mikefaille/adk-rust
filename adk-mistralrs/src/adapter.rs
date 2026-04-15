@@ -46,11 +46,11 @@ use adk_core::{
 };
 use async_trait::async_trait;
 use futures::stream;
-use mistralrs::Ordering;
+use mistralrs::core::Ordering;
 use mistralrs::{
     AutoDeviceMapParams, DeviceMapSetting, IsqType, LoraModelBuilder, PagedAttentionMetaBuilder,
-    RequestBuilder, Response, TextMessageRole, TextMessages, TextModelBuilder, Topology,
-    XLoraModelBuilder,
+    RequestBuilder, Response, TextMessageRole, TextMessages, TextModelBuilder,
+    Topology, XLoraModelBuilder,
 };
 use tokio::sync::RwLock;
 use tracing::{debug, info, instrument, warn};
@@ -164,14 +164,13 @@ impl MistralRsAdapterModel {
 
         // Apply PagedAttention if configured
         if config.paged_attention {
-            text_builder = text_builder
-                .with_paged_attn(|| PagedAttentionMetaBuilder::default().build())
-                .map_err(|e| {
-                    MistralRsError::model_load(
-                        &model_id,
-                        format!("PagedAttention initialization failed: {e}"),
-                    )
-                })?;
+            let paged_attn_cfg = PagedAttentionMetaBuilder::default().build().map_err(|e| {
+                MistralRsError::model_load(
+                    &model_id,
+                    format!("PagedAttention initialization failed: {e}"),
+                )
+            })?;
+            text_builder = text_builder.with_paged_attn(paged_attn_cfg);
             debug!("PagedAttention enabled");
         }
 
@@ -524,6 +523,7 @@ impl MistralRsAdapterModel {
             error_code: None,
             error_message: None,
             citation_metadata: None,
+            provider_metadata: None,
         }
     }
 }
@@ -586,6 +586,7 @@ impl Llm for MistralRsAdapterModel {
                                                 citation_metadata: None,
                                                 error_code: None,
                                                 error_message: None,
+                                                provider_metadata: None,
                                             };
                                             yield Ok(response);
                                         }
@@ -609,6 +610,7 @@ impl Llm for MistralRsAdapterModel {
                                         error_code: None,
                                         error_message: None,
                                         citation_metadata: None,
+                                        provider_metadata: None,
                                     };
                                     yield Ok(response);
                                 }
@@ -617,7 +619,7 @@ impl Llm for MistralRsAdapterModel {
                         }
                     }
                     Err(e) => {
-                        yield Err(adk_core::AdkError::Model(e.to_string()));
+                        yield Err(adk_core::AdkError::model(e.to_string()));
                     }
                 }
             };
@@ -635,7 +637,7 @@ impl Llm for MistralRsAdapterModel {
                 .model
                 .send_chat_request(request)
                 .await
-                .map_err(|e| adk_core::AdkError::Model(e.to_string()))?;
+                .map_err(|e| adk_core::AdkError::model(e.to_string()))?;
 
             let adk_response = self.convert_response(&response);
             Ok(Box::pin(stream::once(async { Ok(adk_response) })))

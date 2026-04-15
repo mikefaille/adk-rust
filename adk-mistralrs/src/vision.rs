@@ -37,7 +37,8 @@ use futures::stream;
 use image::DynamicImage;
 use mistralrs::{
     AudioInput, AutoDeviceMapParams, DeviceMapSetting, IsqType, PagedAttentionMetaBuilder,
-    Response, TextMessageRole, Topology, VisionMessages, VisionModelBuilder,
+    Response, TextMessageRole, Topology, MultimodalMessages,
+    MultimodalModelBuilder,
 };
 use tracing::{debug, info, instrument, warn};
 
@@ -101,7 +102,7 @@ impl MistralRsVisionModel {
 
         info!("Loading mistral.rs vision model: {}", model_id);
 
-        let mut builder = VisionModelBuilder::new(model_id.clone());
+        let mut builder = MultimodalModelBuilder::new(model_id.clone());
 
         // Apply ISQ quantization if configured
         if let Some(isq) = &config.isq {
@@ -117,14 +118,13 @@ impl MistralRsVisionModel {
 
         // Apply PagedAttention if configured
         if config.paged_attention {
-            builder = builder
-                .with_paged_attn(|| PagedAttentionMetaBuilder::default().build())
-                .map_err(|e| {
-                    MistralRsError::model_load(
-                        &model_id,
-                        format!("PagedAttention initialization failed: {e}"),
-                    )
-                })?;
+            let paged_attn_cfg = PagedAttentionMetaBuilder::default().build().map_err(|e| {
+                MistralRsError::model_load(
+                    &model_id,
+                    format!("PagedAttention initialization failed: {e}"),
+                )
+            })?;
+            builder = builder.with_paged_attn(paged_attn_cfg);
             debug!("PagedAttention enabled");
         }
 
@@ -278,9 +278,8 @@ impl MistralRsVisionModel {
         prompt: &str,
         images: Vec<DynamicImage>,
     ) -> Result<String> {
-        let messages = VisionMessages::new()
-            .add_image_message(TextMessageRole::User, prompt, images, &self.model)
-            .map_err(|e| MistralRsError::image_processing(e.to_string()))?;
+        let messages = MultimodalMessages::new()
+            .add_image_message(TextMessageRole::User, prompt, images);
 
         let response = self
             .model
@@ -324,9 +323,8 @@ impl MistralRsVisionModel {
         images: Vec<DynamicImage>,
         audios: Vec<AudioInput>,
     ) -> Result<String> {
-        let messages = VisionMessages::new()
-            .add_multimodal_message(TextMessageRole::User, prompt, images, audios, &self.model)
-            .map_err(|e| MistralRsError::image_processing(e.to_string()))?;
+        let messages = MultimodalMessages::new()
+            .add_multimodal_message(TextMessageRole::User, prompt, images, audios, vec![]);
 
         let response = self
             .model
@@ -341,11 +339,11 @@ impl MistralRsVisionModel {
             .ok_or_else(|| MistralRsError::inference(&self.name, "No response content"))
     }
 
-    /// Build VisionMessages from an ADK LlmRequest.
+    /// Build MultimodalMessages from an ADK LlmRequest.
     ///
     /// This extracts text, images, and audio from the request parts.
-    fn build_vision_messages(&self, request: &LlmRequest) -> Result<VisionMessages> {
-        let mut messages = VisionMessages::new();
+    fn build_vision_messages(&self, request: &LlmRequest) -> Result<MultimodalMessages> {
+        let mut messages = MultimodalMessages::new();
 
         for content in &request.contents {
             let role = match content.role.as_str() {
@@ -401,8 +399,7 @@ impl MistralRsVisionModel {
             // Add message based on content type
             if !images.is_empty() || !audios.is_empty() {
                 messages = messages
-                    .add_multimodal_message(role, &text, images, audios, &self.model)
-                    .map_err(|e| MistralRsError::image_processing(e.to_string()))?;
+                    .add_multimodal_message(role, &text, images, audios, vec![]);
             } else if !text.is_empty() {
                 messages = messages.add_message(role, text);
             }
@@ -443,6 +440,7 @@ impl MistralRsVisionModel {
             error_code: None,
             error_message: None,
             citation_metadata: None,
+            provider_metadata: None,
         }
     }
 }
@@ -463,7 +461,7 @@ impl Llm for MistralRsVisionModel {
 
         let messages = self
             .build_vision_messages(&request)
-            .map_err(|e| adk_core::AdkError::Model(e.to_string()))?;
+            .map_err(|e| adk_core::AdkError::model(e.to_string()))?;
 
         if stream {
             let model = Arc::clone(&self.model);
@@ -495,6 +493,7 @@ impl Llm for MistralRsVisionModel {
                                                 citation_metadata: None,
                                                 error_code: None,
                                                 error_message: None,
+                                                provider_metadata: None,
                                             };
                                             yield Ok(response);
                                         }
@@ -518,6 +517,7 @@ impl Llm for MistralRsVisionModel {
                                         error_code: None,
                                         error_message: None,
                                         citation_metadata: None,
+                                        provider_metadata: None,
                                     };
                                     yield Ok(response);
                                 }
@@ -526,7 +526,7 @@ impl Llm for MistralRsVisionModel {
                         }
                     }
                     Err(e) => {
-                        yield Err(adk_core::AdkError::Model(e.to_string()));
+                        yield Err(adk_core::AdkError::model(e.to_string()));
                     }
                 }
             };
@@ -537,7 +537,7 @@ impl Llm for MistralRsVisionModel {
                 .model
                 .send_chat_request(messages)
                 .await
-                .map_err(|e| adk_core::AdkError::Model(e.to_string()))?;
+                .map_err(|e| adk_core::AdkError::model(e.to_string()))?;
 
             let adk_response = self.convert_response(&response);
             Ok(Box::pin(stream::once(async { Ok(adk_response) })))
@@ -565,10 +565,10 @@ fn quantization_level_to_isq(level: QuantizationLevel) -> IsqType {
 /// Convert Device to mistral.rs DeviceMapSetting.
 fn device_to_device_map(device: &Device) -> DeviceMapSetting {
     match device {
-        Device::Auto => DeviceMapSetting::Auto(AutoDeviceMapParams::default_vision()),
+        Device::Auto => DeviceMapSetting::Auto(AutoDeviceMapParams::default_multimodal()),
         Device::Cpu => DeviceMapSetting::dummy(),
-        Device::Cuda(_) => DeviceMapSetting::Auto(AutoDeviceMapParams::default_vision()),
-        Device::Metal => DeviceMapSetting::Auto(AutoDeviceMapParams::default_vision()),
+        Device::Cuda(_) => DeviceMapSetting::Auto(AutoDeviceMapParams::default_multimodal()),
+        Device::Metal => DeviceMapSetting::Auto(AutoDeviceMapParams::default_multimodal()),
     }
 }
 
