@@ -54,7 +54,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // --- 3. Connect via WebRTC ---
     println!("Connecting to OpenAI Realtime API via WebRTC...");
     let session = model.connect(config).await?;
-    println!("Connected! Session ID: {}", session.session_id());
+    println!("Connected! Session established.");
 
     // --- 4. Send a text prompt ---
     session.send_text("Hello! Tell me a short joke.").await?;

@@ -49,7 +49,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // --- 4. Connect to Vertex AI Live ---
     println!("Connecting to Vertex AI Live...");
     let session = model.connect(config).await?;
-    println!("Connected! Session ID: {}", session.session_id());
+    println!("Connected! Session established.");
 
     // --- 5. Send a text prompt ---
     session.send_text("Hello! What can you help me with today?").await?;
