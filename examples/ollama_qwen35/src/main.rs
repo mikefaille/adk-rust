@@ -21,6 +21,10 @@ use std::sync::Arc;
 
 const APP: &str = "ollama-qwen35-test";
 
+fn model_name() -> String {
+    std::env::var("OLLAMA_MODEL").unwrap_or_else(|_| "qwen3.5".to_string())
+}
+
 async fn make_runner(agent: Arc<dyn Agent>, sid: &str) -> anyhow::Result<Runner> {
     let sessions: Arc<dyn SessionService> = Arc::new(InMemorySessionService::new());
     sessions
@@ -60,7 +64,7 @@ fn sep(title: &str) {
 async fn test_thinking() -> anyhow::Result<()> {
     sep("Scenario 1: Thinking / Reasoning");
 
-    let model = Arc::new(OllamaModel::from_model("qwen3.5")?);
+    let model = Arc::new(OllamaModel::from_model(&model_name())?);
     let agent = Arc::new(
         LlmAgentBuilder::new("thinker")
             .instruction("You are a reasoning assistant. Think step by step.")
@@ -157,7 +161,7 @@ async fn test_tool_calling() -> anyhow::Result<()> {
             .with_parameters_schema::<WeatherArgs>(),
     );
 
-    let model = Arc::new(OllamaModel::from_model("qwen3.5")?);
+    let model = Arc::new(OllamaModel::from_model(&model_name())?);
     let agent = Arc::new(
         LlmAgentBuilder::new("tool-caller")
             .instruction(
@@ -248,7 +252,7 @@ async fn test_tool_calling() -> anyhow::Result<()> {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    println!("Qwen 3.5 on Ollama — Thinking + Tool Calling Test");
+    println!("{} on Ollama — Thinking + Tool Calling Test", model_name());
     println!("==================================================\n");
 
     if let Err(e) = test_thinking().await {
@@ -305,7 +309,7 @@ async fn test_openai_compat_tool_calling() -> anyhow::Result<()> {
 
     // Use OpenAI-compatible endpoint (Ollama exposes this at /v1)
     use adk_model::openai::{OpenAIClient, OpenAIConfig};
-    let config = OpenAIConfig::compatible("ollama", "http://localhost:11434/v1", "qwen3.5");
+    let config = OpenAIConfig::compatible("ollama", "http://localhost:11434/v1", &model_name());
     let model = Arc::new(OpenAIClient::new(config)?);
 
     let agent = Arc::new(

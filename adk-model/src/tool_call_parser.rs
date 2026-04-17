@@ -357,9 +357,6 @@ const TOOL_CALL_PREFIXES: &[&str] = &[
     "<\u{ff5c}\u{2581}tool", // <｜tool (DeepSeek full-width)
 ];
 
-/// Closing tags that complete a tool call.
-const TOOL_CALL_CLOSERS: &[&str] = &["</tool_call>", "</function>", "\n"];
-
 /// Maximum buffer size before flushing as plain text (safety valve).
 const MAX_BUFFER_SIZE: usize = 4096;
 
@@ -766,7 +763,7 @@ mod tests {
     fn test_deepseek_with_text_before() {
         let text = "I'll search for that.\n```json\n{\"name\": \"search\", \"arguments\": {\"q\": \"rust\"}}\n```\n<｜tool▁call▁end｜>";
         let parts = parse_text_tool_calls(text).unwrap();
-        assert!(parts.len() >= 1);
+        assert!(!parts.is_empty());
         let has_fn_call = parts.iter().any(|p| matches!(p, Part::FunctionCall { name, .. } if name == "search"));
         assert!(has_fn_call);
     }
