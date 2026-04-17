@@ -10,9 +10,9 @@ This project is an **unofficial** community-maintained library. It is not affili
 ## Features
 
 - **Messages API** — non-streaming and SSE streaming with all content block types
-- **Adaptive thinking** — `ThinkingConfig::adaptive()` for Opus 4.6 / Sonnet 4.6
-- **Budget-based thinking** — `ThinkingConfig::enabled(budget)` for older models
-- **Effort parameter** — `OutputConfig::with_effort()` controlling response thoroughness
+- **Adaptive thinking** — `ThinkingConfig::adaptive()` for Opus 4.7 / Opus 4.6 / Sonnet 4.6
+- **Budget-based thinking** — `ThinkingConfig::enabled(budget)` for older models (rejected on Opus 4.7)
+- **Effort parameter** — `OutputConfig::with_effort()` with `low`, `medium`, `high`, `xhigh`, `max` levels
 - **Structured outputs** — JSON schema via `OutputConfig` / `OutputFormat`
 - **Tool calling** — custom function tools, server tools (web search, bash, text editor, code execution, memory)
 - **Prompt caching** — automatic (top-level `cache_control`) and explicit (block-level)
@@ -31,15 +31,25 @@ This project is an **unofficial** community-maintained library. It is not affili
 
 | Model | API ID | Generation |
 |-------|--------|------------|
-| Claude Opus 4.6 | `claude-opus-4-6` | Latest |
-| Claude Sonnet 4.6 | `claude-sonnet-4-6` | Latest |
-| Claude Haiku 4.5 | `claude-haiku-4-5` | Latest (fastest) |
+| Claude Opus 4.7 | `claude-opus-4-7` | Latest |
+| Claude Opus 4.6 | `claude-opus-4-6` | Current |
+| Claude Sonnet 4.6 | `claude-sonnet-4-6` | Current |
+| Claude Haiku 4.5 | `claude-haiku-4-5` | Current (fastest) |
 | Claude Opus 4.5 | `claude-opus-4-5` | Previous |
 | Claude Sonnet 4.5 | `claude-sonnet-4-5` | Previous |
-| Claude Sonnet 4 | `claude-sonnet-4-0` | Legacy |
-| Claude Opus 4 | `claude-opus-4-0` | Legacy |
+| Claude Sonnet 4 | `claude-sonnet-4-0` | Legacy (retiring June 2026) |
+| Claude Opus 4 | `claude-opus-4-0` | Legacy (retiring June 2026) |
 
 Any model string not matching a known variant deserializes as `Model::Custom(String)`.
+
+### Opus 4.7 Breaking Changes
+
+Opus 4.7 introduces API breaking changes versus Opus 4.6:
+
+- **Adaptive thinking only** — `thinking: {type: "enabled", budget_tokens: N}` returns 400. Use `ThinkingConfig::adaptive()`.
+- **No custom sampling** — `temperature` and `top_p` parameters are rejected.
+- **New `xhigh` effort level** — sits between `high` and `max`. Recommended for coding and agentic workflows.
+- **Updated tokenizer** — same text may produce 1.0–1.35× more tokens (especially code).
 
 ## Quick Start
 

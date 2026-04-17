@@ -5,6 +5,57 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.1] - 2026-04-17
+
+### Added
+
+#### Text-Based Tool Call Parser (`adk-model`)
+
+Automatic detection and parsing of tool calls embedded in text responses from models that don't use native function calling. Enables tool use with open-weight models served via Ollama, vLLM, and other OpenAI-compatible endpoints.
+
+- **`parse_text_tool_calls()`** (`adk-model`): Parses text containing tool call markup into `Part::FunctionCall` items. Supports 7 model-family formats:
+  - **Qwen/Hermes**: `<tool_call>{"name":"...","arguments":{...}}</tool_call>`
+  - **Qwen-Coder**: `<tool_call><function=NAME>ARGS</function></tool_call>`
+  - **Llama**: `<|python_tag|>{"name":"...","parameters":{...}}`
+  - **Mistral Nemo**: `[TOOL_CALLS][{"name":"...","arguments":{...}}]`
+  - **DeepSeek**: JSON fences with `<｜tool▁call▁end｜>` (full-width Unicode delimiters)
+  - **Gemma 4**: `<|tool_call>call:NAME{...}<tool_call|>` (non-JSON custom escaping)
+  - **Action tags**: `<|action_start|>{"name":"...","arguments":{...}}<|action_end|>`
+- **`ToolCallBuffer`** (`adk-model`): Streaming token buffer that detects tool call prefixes mid-stream, accumulates tokens until the closing tag, then parses and emits `Part::FunctionCall`. Falls back to `Part::Text` on parse failure.
+- **`contains_tool_call_tag()`** (`adk-model`): Quick check for tool call markers in text without full parsing.
+- **OpenAI-compatible streaming integration**: `ToolCallBuffer` wired into the OpenAI-compatible streaming path, automatically converting text-embedded tool calls to native function calls during streaming.
+- **OpenAI non-streaming integration**: `parse_text_tool_calls()` applied to non-streaming responses from OpenAI-compatible endpoints.
+- **Ollama non-streaming integration**: `parse_text_tool_calls()` applied to Ollama text responses.
+- **Ollama streaming with tools**: Enabled streaming for Ollama tool-calling requests (previously forced non-streaming). Ollama's API now supports streaming with tool calls natively.
+- **22 unit tests** covering all 7 formats, mixed text+tool content, multiple tool calls, malformed input, and streaming buffer behavior.
+
+#### Ollama Qwen Example (`examples/ollama_qwen35/`)
+
+- Standalone example crate demonstrating three scenarios with Qwen 3.5 / Qwen3-Coder on Ollama:
+  1. **Thinking/reasoning**: Extended thinking with `<think>` blocks
+  2. **Native Ollama tool calling**: Ollama's built-in tool call API
+  3. **OpenAI-compat tool calling**: Text-based tool call parsing via the OpenAI-compatible endpoint
+- Model configurable via `OLLAMA_MODEL` env var (default: `qwen3.5`)
+- README documents all 7 supported text-based tool call formats
+
+#### Claude Opus 4.7 Support (`adk-anthropic`, `adk-model`)
+
+Day-one support for Anthropic's Claude Opus 4.7 (released April 16, 2026):
+
+- **`KnownModel::ClaudeOpus47`** (`adk-anthropic`): New variant for `claude-opus-4-7` wire format with serde round-trip support.
+- **`EffortLevel::XHigh`** (`adk-anthropic`): New effort level between `High` and `Max` — recommended for coding and agentic workflows on Opus 4.7.
+- **`ModelPricing::OPUS_47`** (`adk-anthropic`): Pricing constant at $5/$25 per MTok (same as Opus 4.6).
+- **`Effort::XHigh`** (`adk-model`): New variant in the adk-model Anthropic config, mapped to `adk_anthropic::EffortLevel::XHigh`.
+- **Documentation updates**: ThinkingConfig, OutputConfig, and README updated to document Opus 4.7 breaking changes (adaptive thinking only, no `budget_tokens`/`temperature`/`top_p`, updated tokenizer).
+
+### Fixed
+
+- **`cargo fmt` compliance** (`adk-model`): Fixed formatting in `tool_call_parser.rs` and module ordering in `lib.rs`.
+
+### Security
+
+- **thin-vec CVE fix**: Upgraded `thin-vec` 0.2.14 → 0.2.16 (use-after-free in `IntoIter::drop` when element drop panics).
+
 ## [0.6.0] - 2026-04-12
 
 ### Breaking Changes
