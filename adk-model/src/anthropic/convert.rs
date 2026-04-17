@@ -400,6 +400,7 @@ pub fn build_message_params(
             super::config::Effort::Low => adk_anthropic::EffortLevel::Low,
             super::config::Effort::Medium => adk_anthropic::EffortLevel::Medium,
             super::config::Effort::High => adk_anthropic::EffortLevel::High,
+            super::config::Effort::XHigh => adk_anthropic::EffortLevel::XHigh,
             super::config::Effort::Max => adk_anthropic::EffortLevel::Max,
         };
         params.output_config = Some(adk_anthropic::OutputConfig::with_effort(level));

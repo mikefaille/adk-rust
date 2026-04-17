@@ -13,12 +13,17 @@ pub enum Model {
 
 /// Known Anthropic model versions.
 ///
-/// Covers the current generation (4.6), previous generation (4.5),
+/// Covers the current generation (4.7), previous generation (4.6/4.5),
 /// and legacy 4.0/4.1 models. Any string not matching a known variant
 /// deserialises into `Model::Custom`.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub enum KnownModel {
-    // 4.6 (latest)
+    // 4.7 (latest)
+    /// Claude Opus 4.7 — most capable GA model. Adaptive thinking only,
+    /// `budget_tokens`/`temperature`/`top_p` rejected. New `xhigh` effort level.
+    ClaudeOpus47,
+
+    // 4.6
     /// Claude Opus 4.6
     ClaudeOpus46,
     /// Claude Sonnet 4.6
@@ -55,6 +60,7 @@ impl KnownModel {
     /// Returns the wire-format string for this model.
     pub fn as_str(&self) -> &'static str {
         match self {
+            Self::ClaudeOpus47 => "claude-opus-4-7",
             Self::ClaudeOpus46 => "claude-opus-4-6",
             Self::ClaudeSonnet46 => "claude-sonnet-4-6",
             Self::ClaudeOpus45 => "claude-opus-4-5",
@@ -119,6 +125,7 @@ impl FromStr for KnownModel {
     type Err = ();
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
+            "claude-opus-4-7" => Ok(Self::ClaudeOpus47),
             "claude-opus-4-6" => Ok(Self::ClaudeOpus46),
             "claude-sonnet-4-6" => Ok(Self::ClaudeSonnet46),
             "claude-opus-4-5" => Ok(Self::ClaudeOpus45),
@@ -154,6 +161,7 @@ mod tests {
     #[test]
     fn current_models_roundtrip() {
         for (variant, wire) in [
+            (KnownModel::ClaudeOpus47, "claude-opus-4-7"),
             (KnownModel::ClaudeOpus46, "claude-opus-4-6"),
             (KnownModel::ClaudeSonnet46, "claude-sonnet-4-6"),
             (KnownModel::ClaudeHaiku45, "claude-haiku-4-5"),

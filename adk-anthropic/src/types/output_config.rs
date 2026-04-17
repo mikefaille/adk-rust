@@ -8,7 +8,7 @@ use crate::types::{EffortLevel, OutputFormat};
 /// response thoroughness. Maps to the API's `output_config` parameter.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OutputConfig {
-    /// Effort level controlling response thoroughness (`low`, `medium`, `high`).
+    /// Effort level controlling response thoroughness (`low`, `medium`, `high`, `xhigh`, `max`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub effort: Option<EffortLevel>,
     /// The output format configuration.

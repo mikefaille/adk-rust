@@ -7,13 +7,14 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ThinkingMode {
-    /// Budget-based thinking (legacy, deprecated on 4.6 models).
+    /// Budget-based thinking (legacy, deprecated on 4.6 models,
+    /// **rejected on Opus 4.7**).
     /// Requires `budget_tokens` < `max_tokens`.
     Enabled {
         /// Token budget for thinking (must be ≥ 1024).
         budget_tokens: u32,
     },
-    /// Adaptive thinking for Opus 4.6 / Sonnet 4.6.
+    /// Adaptive thinking for Opus 4.7 / Opus 4.6 / Sonnet 4.6.
     /// Claude decides when and how much to think.
     /// Control depth via `effort` on `AnthropicConfig`.
     Adaptive,
@@ -27,7 +28,9 @@ pub enum Effort {
     Low,
     Medium,
     High,
-    /// Opus 4.6 only.
+    /// Very deep reasoning. Opus 4.7+ recommended.
+    XHigh,
+    /// Opus 4.6+ only.
     Max,
 }
 
@@ -38,12 +41,17 @@ pub enum Effort {
 /// ```rust
 /// use adk_model::anthropic::{AnthropicConfig, ThinkingMode, Effort};
 ///
+/// // Opus 4.7 with adaptive thinking and xhigh effort (recommended)
+/// let config = AnthropicConfig::new("sk-ant-xxx", "claude-opus-4-7")
+///     .with_thinking_mode(ThinkingMode::Adaptive)
+///     .with_effort(Effort::XHigh);
+///
 /// // Adaptive thinking with medium effort (recommended for Sonnet 4.6)
 /// let config = AnthropicConfig::new("sk-ant-xxx", "claude-sonnet-4-6")
 ///     .with_thinking_mode(ThinkingMode::Adaptive)
 ///     .with_effort(Effort::Medium);
 ///
-/// // Budget-based thinking (legacy)
+/// // Budget-based thinking (legacy, rejected on Opus 4.7)
 /// let config = AnthropicConfig::new("sk-ant-xxx", "claude-sonnet-4-5")
 ///     .with_thinking_mode(ThinkingMode::Enabled { budget_tokens: 8192 });
 ///
@@ -55,7 +63,7 @@ pub enum Effort {
 pub struct AnthropicConfig {
     /// Anthropic API key.
     pub api_key: String,
-    /// Model name (e.g., `"claude-sonnet-4-6"`, `"claude-opus-4-6"`).
+    /// Model name (e.g., `"claude-opus-4-7"`, `"claude-sonnet-4-6"`).
     pub model: String,
     /// Maximum tokens to generate.
     #[serde(default = "default_max_tokens")]
@@ -81,7 +89,7 @@ pub struct AnthropicConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub effort: Option<Effort>,
 
-    /// Enable fast mode (Opus 4.6 only, beta).
+    /// Enable fast mode (Opus 4.6+ only, beta).
     /// Delivers up to 2.5× higher output tokens/sec at 6× pricing.
     #[serde(default)]
     pub fast_mode: bool,
@@ -190,7 +198,7 @@ impl AnthropicConfig {
         self
     }
 
-    /// Enable fast mode (Opus 4.6 only, beta).
+    /// Enable fast mode (Opus 4.6+ only, beta).
     pub fn with_fast_mode(mut self, enabled: bool) -> Self {
         self.fast_mode = enabled;
         self

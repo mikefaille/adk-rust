@@ -337,7 +337,8 @@ async fn main() -> anyhow::Result<()> {
 
 | Model | Description | Context |
 |-------|-------------|---------|
-| `claude-opus-4-6` | Most capable for complex autonomous tasks | 200K tokens |
+| `claude-opus-4-7` | Most capable GA model, adaptive thinking only | 1M tokens |
+| `claude-opus-4-6` | Previous flagship for complex autonomous tasks | 1M tokens |
 | `claude-sonnet-4-6` | Balanced intelligence and cost (recommended) | 1M tokens |
 | `claude-haiku-4-5-20251001` | Ultra-efficient for high-volume workloads | 200K tokens |
 | `claude-opus-4-20250514` | Hybrid model with extended thinking | 200K tokens |

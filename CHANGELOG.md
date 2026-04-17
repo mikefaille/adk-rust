@@ -38,6 +38,16 @@ Automatic detection and parsing of tool calls embedded in text responses from mo
 - Model configurable via `OLLAMA_MODEL` env var (default: `qwen3.5`)
 - README documents all 7 supported text-based tool call formats
 
+#### Claude Opus 4.7 Support (`adk-anthropic`, `adk-model`)
+
+Day-one support for Anthropic's Claude Opus 4.7 (released April 16, 2026):
+
+- **`KnownModel::ClaudeOpus47`** (`adk-anthropic`): New variant for `claude-opus-4-7` wire format with serde round-trip support.
+- **`EffortLevel::XHigh`** (`adk-anthropic`): New effort level between `High` and `Max` — recommended for coding and agentic workflows on Opus 4.7.
+- **`ModelPricing::OPUS_47`** (`adk-anthropic`): Pricing constant at $5/$25 per MTok (same as Opus 4.6).
+- **`Effort::XHigh`** (`adk-model`): New variant in the adk-model Anthropic config, mapped to `adk_anthropic::EffortLevel::XHigh`.
+- **Documentation updates**: ThinkingConfig, OutputConfig, and README updated to document Opus 4.7 breaking changes (adaptive thinking only, no `budget_tokens`/`temperature`/`top_p`, updated tokenizer).
+
 ### Fixed
 
 - **`cargo fmt` compliance** (`adk-model`): Fixed formatting in `tool_call_parser.rs` and module ordering in `lib.rs`.
