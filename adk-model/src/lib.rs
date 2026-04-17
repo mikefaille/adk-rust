@@ -276,6 +276,7 @@ pub mod openai_compatible;
 pub mod openrouter;
 pub mod provider;
 pub mod retry;
+pub mod tool_call_parser;
 #[cfg(any(
     feature = "openai",
     feature = "ollama",
@@ -285,7 +286,6 @@ pub mod retry;
     feature = "azure-ai"
 ))]
 pub(crate) mod tool_result;
-pub mod tool_call_parser;
 pub mod usage_tracking;
 
 #[cfg(feature = "anthropic")]

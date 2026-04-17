@@ -109,7 +109,10 @@ fn parse_qwen_format(text: &str, _parts: &mut Vec<Part>) -> Option<Vec<Part>> {
             result.push(part);
         } else {
             // Couldn't parse — keep as text
-            result.push(Part::Text { text: remaining[start..start + "<tool_call>".len() + end + "</tool_call>".len()].to_string() });
+            result.push(Part::Text {
+                text: remaining[start..start + "<tool_call>".len() + end + "</tool_call>".len()]
+                    .to_string(),
+            });
         }
 
         remaining = &after_open[end + "</tool_call>".len()..];
@@ -151,11 +154,8 @@ fn parse_json_tool_call(json_str: &str) -> Option<Part> {
     let value: serde_json::Value = serde_json::from_str(json_str).ok()?;
     let obj = value.as_object()?;
 
-    let name = obj
-        .get("name")
-        .or_else(|| obj.get("function"))
-        .and_then(|v| v.as_str())?
-        .to_string();
+    let name =
+        obj.get("name").or_else(|| obj.get("function")).and_then(|v| v.as_str())?.to_string();
 
     let args = obj
         .get("arguments")
@@ -455,11 +455,7 @@ impl ToolCallBuffer {
         // Otherwise emit as text
         let text = std::mem::take(&mut self.buffer);
         self.buffering = false;
-        if text.trim().is_empty() {
-            Vec::new()
-        } else {
-            vec![Part::Text { text }]
-        }
+        if text.trim().is_empty() { Vec::new() } else { vec![Part::Text { text }] }
     }
 
     fn starts_tool_call_prefix(&self) -> bool {
@@ -529,7 +525,8 @@ mod tests {
 
     #[test]
     fn test_qwen_json_format() {
-        let text = r#"<tool_call>{"name": "get_weather", "arguments": {"city": "Tokyo"}}</tool_call>"#;
+        let text =
+            r#"<tool_call>{"name": "get_weather", "arguments": {"city": "Tokyo"}}</tool_call>"#;
         let parts = parse_text_tool_calls(text).unwrap();
         assert_eq!(parts.len(), 1);
         match &parts[0] {
@@ -764,7 +761,8 @@ mod tests {
         let text = "I'll search for that.\n```json\n{\"name\": \"search\", \"arguments\": {\"q\": \"rust\"}}\n```\n<｜tool▁call▁end｜>";
         let parts = parse_text_tool_calls(text).unwrap();
         assert!(!parts.is_empty());
-        let has_fn_call = parts.iter().any(|p| matches!(p, Part::FunctionCall { name, .. } if name == "search"));
+        let has_fn_call =
+            parts.iter().any(|p| matches!(p, Part::FunctionCall { name, .. } if name == "search"));
         assert!(has_fn_call);
     }
 
@@ -816,7 +814,8 @@ mod tests {
         let text = "Let me look that up. <|action_start|>{\"name\": \"search\", \"arguments\": {}}<|action_end|> Done.";
         let parts = parse_text_tool_calls(text).unwrap();
         assert!(parts.len() >= 2); // text + function call (+ optional trailing text)
-        let has_fn_call = parts.iter().any(|p| matches!(p, Part::FunctionCall { name, .. } if name == "search"));
+        let has_fn_call =
+            parts.iter().any(|p| matches!(p, Part::FunctionCall { name, .. } if name == "search"));
         assert!(has_fn_call);
     }
 }
