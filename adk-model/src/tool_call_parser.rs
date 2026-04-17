@@ -194,6 +194,174 @@ fn parse_mistral_nemo_format(text: &str, _parts: &mut Vec<Part>) -> Option<Vec<P
     if result.is_empty() { None } else { Some(result) }
 }
 
+// ===== Streaming buffer for token-by-token tool call detection =====
+
+/// Prefixes that indicate a potential tool call is starting.
+const TOOL_CALL_PREFIXES: &[&str] = &["<tool_call", "<|python_tag|", "[TOOL_CALLS]"];
+
+/// Closing tags that complete a tool call.
+const TOOL_CALL_CLOSERS: &[&str] = &["</tool_call>", "</function>", "\n"];
+
+/// Maximum buffer size before flushing as plain text (safety valve).
+const MAX_BUFFER_SIZE: usize = 4096;
+
+/// Streaming buffer that accumulates tokens and detects tool call boundaries.
+///
+/// Use this in streaming response handlers to buffer tokens when a tool call
+/// prefix is detected, then parse and emit `Part::FunctionCall` when the
+/// closing tag arrives.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// let mut buffer = ToolCallBuffer::new();
+///
+/// for chunk in stream {
+///     match buffer.push(&chunk.text) {
+///         BufferAction::Emit(parts) => {
+///             for part in parts { yield part; }
+///         }
+///         BufferAction::Buffering => { /* still accumulating */ }
+///     }
+/// }
+/// // Flush any remaining content at end of stream
+/// for part in buffer.flush() { yield part; }
+/// ```
+pub struct ToolCallBuffer {
+    buffer: String,
+    buffering: bool,
+}
+
+/// Action returned by `ToolCallBuffer::push()`.
+pub enum BufferAction {
+    /// Emit these parts immediately (text or parsed tool calls).
+    Emit(Vec<Part>),
+    /// Still buffering — don't emit anything yet.
+    Buffering,
+}
+
+impl ToolCallBuffer {
+    /// Create a new empty buffer.
+    pub fn new() -> Self {
+        Self { buffer: String::new(), buffering: false }
+    }
+
+    /// Push a text chunk into the buffer.
+    ///
+    /// Returns `BufferAction::Emit` with parts to yield, or
+    /// `BufferAction::Buffering` if we're accumulating a potential tool call.
+    pub fn push(&mut self, text: &str) -> BufferAction {
+        self.buffer.push_str(text);
+
+        if self.buffering {
+            // Check if we have a complete tool call
+            if self.has_complete_tool_call() {
+                return self.try_parse_and_emit();
+            }
+            // Safety valve: if buffer is too large, flush as text
+            if self.buffer.len() > MAX_BUFFER_SIZE {
+                return self.flush_as_emit();
+            }
+            BufferAction::Buffering
+        } else {
+            // Check if this chunk starts or contains a tool call prefix
+            if self.starts_tool_call_prefix() {
+                self.buffering = true;
+                // Check if the complete tool call arrived in one chunk
+                if self.has_complete_tool_call() {
+                    return self.try_parse_and_emit();
+                }
+                BufferAction::Buffering
+            } else if self.has_partial_prefix() {
+                // Could be the start of a prefix split across chunks (e.g., "<tool" then "_call>")
+                self.buffering = true;
+                BufferAction::Buffering
+            } else {
+                // Normal text — emit immediately
+                self.flush_as_emit()
+            }
+        }
+    }
+
+    /// Flush any remaining buffered content as parts.
+    /// Call this when the stream ends.
+    pub fn flush(&mut self) -> Vec<Part> {
+        if self.buffer.is_empty() {
+            return Vec::new();
+        }
+
+        // Try to parse as tool calls one last time
+        if let Some(parts) = parse_text_tool_calls(&self.buffer) {
+            self.buffer.clear();
+            self.buffering = false;
+            return parts;
+        }
+
+        // Otherwise emit as text
+        let text = std::mem::take(&mut self.buffer);
+        self.buffering = false;
+        if text.trim().is_empty() {
+            Vec::new()
+        } else {
+            vec![Part::Text { text }]
+        }
+    }
+
+    fn starts_tool_call_prefix(&self) -> bool {
+        TOOL_CALL_PREFIXES.iter().any(|prefix| self.buffer.contains(prefix))
+    }
+
+    fn has_partial_prefix(&self) -> bool {
+        // Check if the buffer ends with a partial prefix like "<tool" or "<|python"
+        let buf = &self.buffer;
+        for prefix in TOOL_CALL_PREFIXES {
+            for i in 1..prefix.len() {
+                if buf.ends_with(&prefix[..i]) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    fn has_complete_tool_call(&self) -> bool {
+        (self.buffer.contains("<tool_call>") && self.buffer.contains("</tool_call>"))
+            || (self.buffer.contains("<|python_tag|>")
+                && self.buffer.contains('\n')
+                && self.buffer.len() > "<|python_tag|>".len() + 5)
+            || (self.buffer.contains("[TOOL_CALLS]")
+                && self.buffer.contains(']')
+                && self.buffer.rfind(']') > self.buffer.find("[TOOL_CALLS]").map(|i| i + 12))
+    }
+
+    fn try_parse_and_emit(&mut self) -> BufferAction {
+        if let Some(parts) = parse_text_tool_calls(&self.buffer) {
+            self.buffer.clear();
+            self.buffering = false;
+            BufferAction::Emit(parts)
+        } else {
+            // Couldn't parse — flush as text
+            self.flush_as_emit()
+        }
+    }
+
+    fn flush_as_emit(&mut self) -> BufferAction {
+        let text = std::mem::take(&mut self.buffer);
+        self.buffering = false;
+        if text.trim().is_empty() {
+            BufferAction::Emit(Vec::new())
+        } else {
+            BufferAction::Emit(vec![Part::Text { text }])
+        }
+    }
+}
+
+impl Default for ToolCallBuffer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -301,5 +469,116 @@ mod tests {
         assert!(contains_tool_call_tag("<|python_tag|>"));
         assert!(contains_tool_call_tag("[TOOL_CALLS]"));
         assert!(!contains_tool_call_tag("normal text"));
+    }
+
+    // ===== Streaming buffer tests =====
+
+    #[test]
+    fn test_buffer_normal_text_emits_immediately() {
+        let mut buf = ToolCallBuffer::new();
+        match buf.push("Hello world") {
+            BufferAction::Emit(parts) => {
+                assert_eq!(parts.len(), 1);
+                assert!(matches!(&parts[0], Part::Text { text } if text == "Hello world"));
+            }
+            BufferAction::Buffering => panic!("should emit immediately"),
+        }
+    }
+
+    #[test]
+    fn test_buffer_complete_tool_call_in_one_chunk() {
+        let mut buf = ToolCallBuffer::new();
+        let text = r#"<tool_call>{"name": "search", "arguments": {"q": "rust"}}</tool_call>"#;
+        match buf.push(text) {
+            BufferAction::Emit(parts) => {
+                assert_eq!(parts.len(), 1);
+                assert!(matches!(&parts[0], Part::FunctionCall { name, .. } if name == "search"));
+            }
+            BufferAction::Buffering => panic!("should emit parsed tool call"),
+        }
+    }
+
+    #[test]
+    fn test_buffer_tool_call_split_across_chunks() {
+        let mut buf = ToolCallBuffer::new();
+
+        // Chunk 1: prefix starts
+        assert!(matches!(buf.push("<tool_call>"), BufferAction::Buffering));
+
+        // Chunk 2: JSON body
+        assert!(matches!(
+            buf.push(r#"{"name": "get_weather", "arguments": {"city": "Tokyo"}}"#),
+            BufferAction::Buffering
+        ));
+
+        // Chunk 3: closing tag
+        match buf.push("</tool_call>") {
+            BufferAction::Emit(parts) => {
+                assert_eq!(parts.len(), 1);
+                assert!(
+                    matches!(&parts[0], Part::FunctionCall { name, .. } if name == "get_weather")
+                );
+            }
+            BufferAction::Buffering => panic!("should emit after closing tag"),
+        }
+    }
+
+    #[test]
+    fn test_buffer_text_then_tool_call() {
+        let mut buf = ToolCallBuffer::new();
+
+        // Normal text first
+        match buf.push("Let me check. ") {
+            BufferAction::Emit(parts) => {
+                assert_eq!(parts.len(), 1);
+                assert!(matches!(&parts[0], Part::Text { .. }));
+            }
+            BufferAction::Buffering => panic!("should emit text"),
+        }
+
+        // Then tool call
+        let tc = r#"<tool_call>{"name": "search", "arguments": {}}</tool_call>"#;
+        match buf.push(tc) {
+            BufferAction::Emit(parts) => {
+                assert_eq!(parts.len(), 1);
+                assert!(matches!(&parts[0], Part::FunctionCall { name, .. } if name == "search"));
+            }
+            BufferAction::Buffering => panic!("should emit tool call"),
+        }
+    }
+
+    #[test]
+    fn test_buffer_flush_incomplete_as_text() {
+        let mut buf = ToolCallBuffer::new();
+        assert!(matches!(buf.push("<tool_call>partial"), BufferAction::Buffering));
+
+        // Stream ends without closing tag
+        let parts = buf.flush();
+        assert_eq!(parts.len(), 1);
+        assert!(matches!(&parts[0], Part::Text { text } if text.contains("<tool_call>")));
+    }
+
+    #[test]
+    fn test_buffer_flush_empty() {
+        let mut buf = ToolCallBuffer::new();
+        let parts = buf.flush();
+        assert!(parts.is_empty());
+    }
+
+    #[test]
+    fn test_buffer_partial_prefix_detection() {
+        let mut buf = ToolCallBuffer::new();
+        // "<tool" could be the start of "<tool_call>"
+        assert!(matches!(buf.push("<tool"), BufferAction::Buffering));
+        // Complete it
+        assert!(matches!(buf.push("_call>"), BufferAction::Buffering));
+        // Add body and close
+        match buf.push(r#"{"name":"x","arguments":{}}</tool_call>"#) {
+            BufferAction::Emit(parts) => {
+                assert_eq!(parts.len(), 1);
+                assert!(matches!(&parts[0], Part::FunctionCall { name, .. } if name == "x"));
+            }
+            BufferAction::Buffering => panic!("should emit"),
+        }
     }
 }
