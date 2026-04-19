@@ -127,3 +127,33 @@ const _: () = {
     fn _assert_object_safe(_: &dyn AvatarProvider) {}
     fn _assert_arc_compatible(_: Arc<dyn AvatarProvider>) {}
 };
+
+/// Spawn a background keep-alive task for an avatar session.
+///
+/// Sends `keep_alive()` to the provider every `interval` seconds.
+/// Returns a `JoinHandle` that can be aborted to stop the keep-alive.
+///
+/// The task stops automatically if `keep_alive()` returns an error
+/// (indicating the session is no longer active).
+pub fn spawn_keep_alive(
+    provider: Arc<dyn AvatarProvider>,
+    session_id: String,
+    interval: std::time::Duration,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(interval);
+        ticker.tick().await; // Skip the first immediate tick
+        loop {
+            ticker.tick().await;
+            if !provider.is_active(&session_id).await {
+                tracing::debug!(session_id = %session_id, "avatar keep-alive: session no longer active, stopping");
+                break;
+            }
+            if let Err(e) = provider.keep_alive(&session_id).await {
+                tracing::warn!(session_id = %session_id, error = %e, "avatar keep-alive failed, stopping");
+                break;
+            }
+            tracing::debug!(session_id = %session_id, "avatar keep-alive sent");
+        }
+    })
+}

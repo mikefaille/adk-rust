@@ -781,6 +781,20 @@ impl Agent for RealtimeAgent {
             #[cfg(not(feature = "video-avatar"))]
             let _avatar_session_id: Option<String> = None;
 
+            // Spawn keep-alive task for avatar session
+            #[cfg(feature = "video-avatar")]
+            let _avatar_keep_alive_handle: Option<tokio::task::JoinHandle<()>> = {
+                if let (Some(provider), Some(sess_id)) = (&avatar_provider, &avatar_session_id) {
+                    Some(crate::avatar::spawn_keep_alive(
+                        provider.clone(),
+                        sess_id.clone(),
+                        std::time::Duration::from_secs(30),
+                    ))
+                } else {
+                    None
+                }
+            };
+
             // ===== SEND INITIAL USER CONTENT =====
             // If user provided text input, send it to start the conversation
             let user_content = ctx.user_content();
@@ -1003,9 +1017,16 @@ impl Agent for RealtimeAgent {
 
             // ===== STOP AVATAR SESSION (cleanup) =====
             #[cfg(feature = "video-avatar")]
-            if let (Some(provider), Some(sess_id)) = (&avatar_provider, &avatar_session_id) {
-                if let Err(e) = provider.stop_session(sess_id).await {
-                    tracing::warn!(error = %e, "avatar session cleanup failed");
+            {
+                // Abort keep-alive task
+                if let Some(handle) = _avatar_keep_alive_handle {
+                    handle.abort();
+                }
+                // Stop the avatar session
+                if let (Some(provider), Some(sess_id)) = (&avatar_provider, &avatar_session_id) {
+                    if let Err(e) = provider.stop_session(sess_id).await {
+                        tracing::warn!(error = %e, "avatar session cleanup failed");
+                    }
                 }
             }
 
