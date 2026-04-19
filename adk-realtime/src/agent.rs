@@ -663,6 +663,12 @@ impl Agent for RealtimeAgent {
         let on_speech_started = self.on_speech_started.clone();
         let on_speech_stopped = self.on_speech_stopped.clone();
 
+        // Clone avatar provider for the stream closure
+        #[cfg(feature = "video-avatar")]
+        let avatar_provider = self.avatar_provider.clone();
+        #[cfg(feature = "video-avatar")]
+        let avatar_config_for_session = self.avatar_config.clone();
+
         // ===== RESOLVE TOOLSETS =====
         let mut resolved_tools: Vec<Arc<dyn Tool>> = tools.clone();
         let static_tool_names: std::collections::HashSet<String> =
@@ -736,6 +742,45 @@ impl Agent for RealtimeAgent {
             });
             yield Ok(start_event);
 
+            // ===== START AVATAR SESSION (if configured) =====
+            #[cfg(feature = "video-avatar")]
+            let avatar_session_id: Option<String> = {
+                if let (Some(provider), Some(config)) = (&avatar_provider, &avatar_config_for_session) {
+                    match provider.start_session(config).await {
+                        Ok(session_info) => {
+                            tracing::info!(
+                                provider = %session_info.provider,
+                                session_id = %session_info.session_id,
+                                "avatar session started"
+                            );
+                            // Emit avatar session info as an event for the client
+                            let mut avatar_event = Event::new(&invocation_id);
+                            avatar_event.author = agent_name.clone();
+                            avatar_event.llm_response.content = Some(Content {
+                                role: "system".to_string(),
+                                parts: vec![Part::Text {
+                                    text: serde_json::to_string(&session_info).unwrap_or_default(),
+                                }],
+                            });
+                            yield Ok(avatar_event);
+                            Some(session_info.session_id)
+                        }
+                        Err(e) => {
+                            // Graceful degradation: log warning, continue audio-only
+                            tracing::warn!(
+                                error = %e,
+                                "avatar session creation failed, falling back to audio-only"
+                            );
+                            None
+                        }
+                    }
+                } else {
+                    None
+                }
+            };
+            #[cfg(not(feature = "video-avatar"))]
+            let _avatar_session_id: Option<String> = None;
+
             // ===== SEND INITIAL USER CONTENT =====
             // If user provided text input, send it to start the conversation
             let user_content = ctx.user_content();
@@ -761,7 +806,21 @@ impl Agent for RealtimeAgent {
                     Some(Ok(server_event)) => {
                         match server_event {
                             ServerEvent::AudioDelta { delta, item_id, .. } => {
-                                // Call audio callback if set
+                                // Route audio through avatar provider if active
+                                #[cfg(feature = "video-avatar")]
+                                if let (Some(provider), Some(sess_id)) = (&avatar_provider, &avatar_session_id) {
+                                    if let Err(e) = provider.send_audio(sess_id, &delta).await {
+                                        tracing::warn!(error = %e, "avatar send_audio failed");
+                                    }
+                                    // Don't yield raw audio to client — avatar provides video+audio
+                                    // Still call the on_audio callback for monitoring
+                                    if let Some(ref cb) = on_audio {
+                                        cb(&delta, &item_id).await;
+                                    }
+                                    continue;
+                                }
+
+                                // No avatar provider — send raw audio to client
                                 if let Some(ref cb) = on_audio {
                                     cb(&delta, &item_id).await;
                                 }
@@ -939,6 +998,14 @@ impl Agent for RealtimeAgent {
                         // Session closed
                         break;
                     }
+                }
+            }
+
+            // ===== STOP AVATAR SESSION (cleanup) =====
+            #[cfg(feature = "video-avatar")]
+            if let (Some(provider), Some(sess_id)) = (&avatar_provider, &avatar_session_id) {
+                if let Err(e) = provider.stop_session(sess_id).await {
+                    tracing::warn!(error = %e, "avatar session cleanup failed");
                 }
             }
 
