@@ -109,6 +109,10 @@ pub struct RealtimeAgent {
     // Video avatar configuration
     #[cfg(feature = "video-avatar")]
     avatar_config: Option<crate::avatar::AvatarConfig>,
+
+    // Video avatar provider instance
+    #[cfg(feature = "video-avatar")]
+    avatar_provider: Option<std::sync::Arc<dyn crate::avatar::AvatarProvider>>,
 }
 
 /// Callback for audio output events (receives raw PCM bytes).
@@ -170,6 +174,9 @@ pub struct RealtimeAgentBuilder {
 
     #[cfg(feature = "video-avatar")]
     avatar_config: Option<crate::avatar::AvatarConfig>,
+
+    #[cfg(feature = "video-avatar")]
+    avatar_provider: Option<std::sync::Arc<dyn crate::avatar::AvatarProvider>>,
 }
 
 impl RealtimeAgentBuilder {
@@ -199,6 +206,8 @@ impl RealtimeAgentBuilder {
             on_speech_stopped: None,
             #[cfg(feature = "video-avatar")]
             avatar_config: None,
+            #[cfg(feature = "video-avatar")]
+            avatar_provider: None,
         }
     }
 
@@ -352,6 +361,35 @@ impl RealtimeAgentBuilder {
         self
     }
 
+    /// Set the video avatar provider for this agent.
+    ///
+    /// When both an `AvatarConfig` (with a provider kind) and an `AvatarProvider`
+    /// instance are set, the runner routes audio through the avatar provider
+    /// for lip-sync rendering instead of sending raw audio to the client.
+    ///
+    /// Requires the `video-avatar` feature flag.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use std::sync::Arc;
+    /// use adk_realtime::avatar::heygen::{HeyGenConfig, HeyGenProvider};
+    ///
+    /// let provider = Arc::new(HeyGenProvider::new(HeyGenConfig::new("key")));
+    /// let agent = RealtimeAgentBuilder::new("assistant")
+    ///     .avatar(avatar_config)
+    ///     .avatar_provider(provider)
+    ///     .build()?;
+    /// ```
+    #[cfg(feature = "video-avatar")]
+    pub fn avatar_provider(
+        mut self,
+        provider: std::sync::Arc<dyn crate::avatar::AvatarProvider>,
+    ) -> Self {
+        self.avatar_provider = Some(provider);
+        self
+    }
+
     /// Build the RealtimeAgent.
     pub fn build(self) -> Result<RealtimeAgent> {
         let model =
@@ -381,6 +419,8 @@ impl RealtimeAgentBuilder {
             on_speech_stopped: self.on_speech_stopped,
             #[cfg(feature = "video-avatar")]
             avatar_config: self.avatar_config,
+            #[cfg(feature = "video-avatar")]
+            avatar_provider: self.avatar_provider,
         })
     }
 }
@@ -417,6 +457,14 @@ impl RealtimeAgent {
     #[cfg(feature = "video-avatar")]
     pub fn avatar_config(&self) -> Option<&crate::avatar::AvatarConfig> {
         self.avatar_config.as_ref()
+    }
+
+    /// Get the avatar provider, if set.
+    ///
+    /// Requires the `video-avatar` feature flag.
+    #[cfg(feature = "video-avatar")]
+    pub fn avatar_provider(&self) -> Option<&std::sync::Arc<dyn crate::avatar::AvatarProvider>> {
+        self.avatar_provider.as_ref()
     }
 
     /// Build the realtime configuration from agent settings.
