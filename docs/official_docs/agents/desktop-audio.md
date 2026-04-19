@@ -10,7 +10,7 @@ The desktop audio pipeline connects system audio hardware to the existing `adk-a
 Microphone → AudioCapture → AudioStream → [VAD → STT → Agent → TTS] → AudioPlayback → Speaker
 ```
 
-All components use the `cpal` crate for cross-platform audio (CoreAudio on macOS, ALSA/PulseAudio on Linux, WASAPI on Windows) and produce/consume the standard `AudioFrame` type.
+All components use the `cpal` crate for cross-platform audio (CoreAudio on macOS, PipeWire/ALSA/PulseAudio on Linux, WASAPI on Windows) and produce/consume the standard `AudioFrame` type.
 
 ## Feature Flag
 
@@ -184,8 +184,10 @@ Desktop audio errors use the existing `AudioError` enum:
 | Platform | Audio Backend | Status |
 |----------|--------------|--------|
 | macOS | CoreAudio | Supported |
-| Linux | ALSA / PulseAudio | Supported (install `libasound2-dev`) |
+| Linux | PipeWire (via ALSA compat), ALSA, PulseAudio | Supported (install `libasound2-dev`) |
 | Windows | WASAPI | Supported |
+
+On modern Linux distributions, PipeWire is the default audio server and provides full ALSA and PulseAudio compatibility. `cpal` connects through the ALSA interface, which PipeWire handles transparently — no extra configuration needed.
 
 ## Examples
 
