@@ -21,8 +21,20 @@
 pub mod config;
 pub mod types;
 
+#[cfg(feature = "heygen-avatar")]
+pub mod heygen;
+
+#[cfg(feature = "did-avatar")]
+pub mod did;
+
 pub use config::{AvatarConfig, AvatarProviderKind, LipSyncConfig, RenderingConfig};
 pub use types::{AvatarSessionInfo, IceServer, VideoStreamInfo};
+
+#[cfg(feature = "heygen-avatar")]
+pub use heygen::{HeyGenConfig, HeyGenProvider, HeyGenQuality};
+
+#[cfg(feature = "did-avatar")]
+pub use did::{DIDConfig, DIDLlmConfig, DIDProvider};
 
 use std::sync::Arc;
 
