@@ -62,3 +62,24 @@ tokio = { workspace = true, features = ["rt", "macros"] }
 tracing-subscriber = { workspace = true, features = ["fmt", "env-filter"] }
 futures = "0.3"
 wiremock = "0.6"
+
+# Examples require the openrouter feature — skip when not enabled.
+[[example]]
+name = "openrouter_chat"
+required-features = ["openrouter"]
+
+[[example]]
+name = "openrouter_adapter"
+required-features = ["openrouter"]
+
+[[example]]
+name = "openrouter_discovery"
+required-features = ["openrouter"]
+
+[[example]]
+name = "openrouter_responses"
+required-features = ["openrouter"]
+
+[[example]]
+name = "gemini_thinking"
+required-features = ["gemini"]

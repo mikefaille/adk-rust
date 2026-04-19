@@ -13,6 +13,12 @@ pub struct GeminiModel {
     client: Gemini,
     model_name: String,
     retry_config: RetryConfig,
+    /// Default thinking configuration applied to every request.
+    ///
+    /// Controls the model's reasoning effort. For Gemini 3 series, use
+    /// `ThinkingLevel` (Low/Medium/High). For Gemini 2.5 series, use
+    /// `thinking_budget` (token count).
+    thinking_config: Option<adk_gemini::ThinkingConfig>,
 }
 
 /// Convert a Gemini client error to a structured `AdkError` with proper category and retry hints.
@@ -76,7 +82,7 @@ impl GeminiModel {
         let client = Gemini::with_model(api_key.into(), model_name.clone())
             .map_err(|e| adk_core::AdkError::model(e.to_string()))?;
 
-        Ok(Self { client, model_name, retry_config: RetryConfig::default() })
+        Ok(Self { client, model_name, retry_config: RetryConfig::default(), thinking_config: None })
     }
 
     /// Create a Gemini model via Vertex AI with API key auth.
@@ -98,7 +104,7 @@ impl GeminiModel {
         )
         .map_err(|e| adk_core::AdkError::model(e.to_string()))?;
 
-        Ok(Self { client, model_name, retry_config: RetryConfig::default() })
+        Ok(Self { client, model_name, retry_config: RetryConfig::default(), thinking_config: None })
     }
 
     /// Create a Gemini model via Vertex AI with service account JSON.
@@ -120,7 +126,7 @@ impl GeminiModel {
         )
         .map_err(|e| adk_core::AdkError::model(e.to_string()))?;
 
-        Ok(Self { client, model_name, retry_config: RetryConfig::default() })
+        Ok(Self { client, model_name, retry_config: RetryConfig::default(), thinking_config: None })
     }
 
     /// Create a Gemini model via Vertex AI with Application Default Credentials.
@@ -140,7 +146,7 @@ impl GeminiModel {
         )
         .map_err(|e| adk_core::AdkError::model(e.to_string()))?;
 
-        Ok(Self { client, model_name, retry_config: RetryConfig::default() })
+        Ok(Self { client, model_name, retry_config: RetryConfig::default(), thinking_config: None })
     }
 
     /// Create a Gemini model via Vertex AI with Workload Identity Federation.
@@ -162,7 +168,7 @@ impl GeminiModel {
         )
         .map_err(|e| adk_core::AdkError::model(e.to_string()))?;
 
-        Ok(Self { client, model_name, retry_config: RetryConfig::default() })
+        Ok(Self { client, model_name, retry_config: RetryConfig::default(), thinking_config: None })
     }
 
     #[must_use]
@@ -177,6 +183,45 @@ impl GeminiModel {
 
     pub fn retry_config(&self) -> &RetryConfig {
         &self.retry_config
+    }
+
+    /// Set the default thinking configuration applied to every request.
+    ///
+    /// Controls the model's reasoning effort. For Gemini 3 series models,
+    /// use `ThinkingLevel` (Low/Medium/High). For Gemini 2.5 series, use
+    /// `thinking_budget` (token count).
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use adk_gemini::{ThinkingConfig, ThinkingLevel};
+    ///
+    /// // Gemini 3 — level-based thinking
+    /// let model = GeminiModel::new(api_key, "gemini-3.1-pro-preview")?
+    ///     .with_thinking_config(
+    ///         ThinkingConfig::new().with_thinking_level(ThinkingLevel::Low)
+    ///     );
+    ///
+    /// // Gemini 2.5 — budget-based thinking
+    /// let model = GeminiModel::new(api_key, "gemini-2.5-flash")?
+    ///     .with_thinking_config(
+    ///         ThinkingConfig::new().with_thinking_budget(2048)
+    ///     );
+    /// ```
+    #[must_use]
+    pub fn with_thinking_config(mut self, thinking_config: adk_gemini::ThinkingConfig) -> Self {
+        self.thinking_config = Some(thinking_config);
+        self
+    }
+
+    /// Set the thinking configuration (mutable reference variant).
+    pub fn set_thinking_config(&mut self, thinking_config: adk_gemini::ThinkingConfig) {
+        self.thinking_config = Some(thinking_config);
+    }
+
+    /// Returns the current thinking configuration, if set.
+    pub fn thinking_config(&self) -> Option<&adk_gemini::ThinkingConfig> {
+        self.thinking_config.as_ref()
     }
 
     fn convert_response(resp: &adk_gemini::GenerationResponse) -> Result<LlmResponse> {
@@ -688,6 +733,7 @@ impl GeminiModel {
                 } else {
                     None
                 },
+                thinking_config: self.thinking_config.clone(),
                 ..Default::default()
             };
             builder = builder.with_generation_config(gen_config);
@@ -697,6 +743,14 @@ impl GeminiModel {
                 let handle = self.client.get_cached_content(name);
                 builder = builder.with_cached_content(&handle);
             }
+        } else if self.thinking_config.is_some() {
+            // No generation config from the request, but we have a default
+            // thinking config — apply it in an otherwise-default gen config.
+            let gen_config = adk_gemini::GenerationConfig {
+                thinking_config: self.thinking_config.clone(),
+                ..Default::default()
+            };
+            builder = builder.with_generation_config(gen_config);
         }
 
         // Add tools
