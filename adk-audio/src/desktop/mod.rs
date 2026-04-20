@@ -2,8 +2,8 @@
 //!
 //! Provides microphone capture, speaker playback, and VAD-driven turn-taking
 //! for desktop applications. All types use the `cpal` crate for cross-platform
-//! system audio access (CoreAudio on macOS, ALSA/PulseAudio on Linux, WASAPI
-//! on Windows).
+//! system audio access (CoreAudio on macOS, PipeWire/ALSA/PulseAudio on Linux,
+//! WASAPI on Windows).
 //!
 //! This module is gated behind the `desktop-audio` feature flag.
 

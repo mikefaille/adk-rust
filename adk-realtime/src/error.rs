@@ -107,6 +107,15 @@ impl RealtimeError {
         Self::ProviderError(msg.into())
     }
 
+    /// Create a new avatar provider error.
+    ///
+    /// Convenience constructor that prefixes the message with "avatar:"
+    /// for clear identification in logs.
+    #[cfg(feature = "video-avatar")]
+    pub fn avatar<S: Into<String>>(msg: S) -> Self {
+        Self::ProviderError(format!("avatar: {}", msg.into()))
+    }
+
     /// Create a new configuration error.
     pub fn config<S: Into<String>>(msg: S) -> Self {
         Self::ConfigError(msg.into())

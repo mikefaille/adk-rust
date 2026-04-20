@@ -214,7 +214,7 @@ cargo test --manifest-path examples/desktop_audio/Cargo.toml --test mock_propert
 | "no input devices found" | Connect a microphone and check OS audio settings |
 | "no output devices found" | Connect speakers or headphones |
 | "GEMINI_API_KEY or GOOGLE_API_KEY not set" | Copy `.env.example` to `.env` and add your key |
-| Build errors with `cpal` on Linux | Install ALSA headers: `sudo apt install libasound2-dev` |
+| Build errors with `cpal` on Linux | Install ALSA headers: `sudo apt install libasound2-dev`. PipeWire users: this is still needed — PipeWire provides ALSA compatibility but `cpal` links against the ALSA C library at build time. |
 | STT returns empty transcripts | Speak louder or closer to the mic; check mic isn't muted |
 | TTS audio sounds distorted | Your output device may not support 24kHz — try a different device |
 
