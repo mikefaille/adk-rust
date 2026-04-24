@@ -37,7 +37,7 @@ use adk_awp::{
     AwpState, BusinessContextLoader, DefaultTrustAssigner, HealthStateMachine,
     InMemoryConsentService, InMemoryEventSubscriptionService, InMemoryRateLimiter, awp_routes,
 };
-use adk_core::{Content, UserId, SessionId};
+use adk_core::Content;
 use adk_model::GeminiModel;
 use adk_runner::Runner;
 use adk_session::InMemorySessionService;
@@ -56,6 +56,7 @@ use tracing_subscriber::EnvFilter;
 #[derive(Clone)]
 struct AppState {
     runner: Arc<Runner>,
+    session_service: Arc<InMemorySessionService>,
 }
 
 // ---------------------------------------------------------------------------
@@ -68,32 +69,36 @@ struct AskRequest {
 }
 
 async fn ask_agent(State(state): State<AppState>, Json(body): Json<AskRequest>) -> Response {
+    use adk_session::{CreateRequest, SessionService};
     use futures::StreamExt;
 
     let user_content = Content::new("user").with_text(&body.question);
+    let session_id_str = format!("session-{}", uuid::Uuid::new_v4());
 
-    let user_id = match UserId::new("visitor") {
-        Ok(id) => id,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": format!("{e}")})),
-            )
-                .into_response();
-        }
-    };
-    let session_id = match SessionId::new(format!("session-{}", uuid::Uuid::new_v4())) {
-        Ok(id) => id,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": format!("{e}")})),
-            )
-                .into_response();
-        }
-    };
+    // Create the session first — the runner requires it to exist
+    if let Err(e) = state
+        .session_service
+        .create(CreateRequest {
+            app_name: "awp-agent".into(),
+            user_id: "visitor".into(),
+            session_id: Some(session_id_str.clone()),
+            state: Default::default(),
+        })
+        .await
+    {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("session create error: {e}")})),
+        )
+            .into_response();
+    }
 
-    let mut event_stream = match state.runner.run(user_id, session_id, user_content).await {
+    // Run the agent
+    let mut event_stream = match state
+        .runner
+        .run_str("visitor", &session_id_str, user_content)
+        .await
+    {
         Ok(s) => s,
         Err(e) => {
             return (
@@ -239,11 +244,14 @@ async fn main() -> anyhow::Result<()> {
         Runner::builder()
             .app_name("awp-agent")
             .agent(Arc::new(agent) as Arc<dyn adk_core::Agent>)
-            .session_service(session_service)
+            .session_service(session_service.clone())
             .build()?,
     );
 
-    let app_state = AppState { runner };
+    let app_state = AppState {
+        runner,
+        session_service,
+    };
 
     // --- Step 4: Build AWP state with all protocol services ---
     let event_service = Arc::new(InMemoryEventSubscriptionService::new());
