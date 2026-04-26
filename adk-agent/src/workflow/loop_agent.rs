@@ -146,7 +146,65 @@ impl HistoryTrackingSession {
 
     fn apply_event(&self, event: &Event) {
         if let Some(content) = &event.llm_response.content {
-            self.append_to_history(content.clone());
+            // Consolidate streaming chunks: if the last history entry has the
+            // same role, merge text into it instead of creating a new entry.
+            // This prevents N streaming chunks from becoming N separate Content
+            // entries that bloat context for subsequent agents.
+            let mut history = self.history.write().unwrap_or_else(|e| e.into_inner());
+
+            if event.llm_response.partial {
+                // Partial chunk — merge into last entry if same role
+                if let Some(last) = history.last_mut() {
+                    if last.role == content.role {
+                        for part in &content.parts {
+                            if let adk_core::Part::Text { text } = part {
+                                // Append text to the last Text part
+                                if let Some(adk_core::Part::Text { text: existing }) =
+                                    last.parts.last_mut()
+                                {
+                                    existing.push_str(text);
+                                } else {
+                                    last.parts.push(part.clone());
+                                }
+                            } else {
+                                last.parts.push(part.clone());
+                            }
+                        }
+                        return;
+                    }
+                }
+                // No matching last entry — start a new one
+                history.push(content.clone());
+            } else {
+                // Final event (partial=false) — append as-is.
+                // For non-streaming mode this carries the full content.
+                // For streaming mode the accumulated text is already in the
+                // last history entry from partial merges above, so the final
+                // chunk (which may carry the last fragment or be empty) is
+                // merged if same role, or appended if different.
+                if let Some(last) = history.last_mut() {
+                    if last.role == content.role && !content.parts.is_empty() {
+                        // Merge any remaining text from the final chunk
+                        for part in &content.parts {
+                            if let adk_core::Part::Text { text } = part {
+                                if let Some(adk_core::Part::Text { text: existing }) =
+                                    last.parts.last_mut()
+                                {
+                                    existing.push_str(text);
+                                } else {
+                                    last.parts.push(part.clone());
+                                }
+                            } else {
+                                last.parts.push(part.clone());
+                            }
+                        }
+                    } else if !content.parts.is_empty() {
+                        history.push(content.clone());
+                    }
+                } else {
+                    history.push(content.clone());
+                }
+            }
         }
         self.state.apply_delta(&event.actions.state_delta);
     }
