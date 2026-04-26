@@ -46,24 +46,6 @@ fn require_env(name: &str) -> anyhow::Result<String> {
 }
 
 // ---------------------------------------------------------------------------
-// Helper: mask a secret value for safe display (breaks CodeQL taint chain)
-// ---------------------------------------------------------------------------
-
-/// Mask a secret value, showing only the first 4 characters.
-/// Returns a new String that is safe to print.
-#[inline(never)]
-fn mask_secret(value: &str) -> String {
-    if value.len() > 4 {
-        let mut masked = String::with_capacity(8);
-        masked.push_str(&value[..4]);
-        masked.push_str("****");
-        masked
-    } else {
-        "****".to_string()
-    }
-}
-
-// ---------------------------------------------------------------------------
 // EnvSecretProvider — reads secrets from environment variables
 // ---------------------------------------------------------------------------
 
@@ -107,8 +89,7 @@ async fn main() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
     tracing_subscriber::fmt()
         .with_env_filter(
-            EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new("info")),
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .init();
 
@@ -134,10 +115,10 @@ async fn main() -> anyhow::Result<()> {
     let base_provider = EnvSecretProvider;
 
     // Retrieve a secret directly from the base provider.
+    // NOTE: Never log secret values — only log success/failure status.
     match base_provider.get_secret("api_token").await {
-        Ok(value) => {
-            // Mask the value for security — only show the first 4 chars.
-            println!("  ✓ Retrieved secret 'api_token': {}", mask_secret(&value));
+        Ok(_) => {
+            println!("  ✓ Retrieved secret 'api_token' ({} bytes)", "api_token".len());
         }
         Err(e) => {
             println!("  ⚠ Could not retrieve 'api_token': {e}");
@@ -163,28 +144,29 @@ async fn main() -> anyhow::Result<()> {
     // First call — cache miss, hits the inner EnvSecretProvider.
     let result1 = cached_provider.get_secret("api_token").await;
     match &result1 {
-        Ok(v) => {
-            println!("  Call 1 (cache miss): {}", mask_secret(v));
-        }
+        Ok(_) => println!("  Call 1 (cache miss): secret retrieved"),
         Err(e) => println!("  Call 1 (cache miss): error — {e}"),
     }
 
     // Second call — cache hit, returns immediately without calling inner.
     let result2 = cached_provider.get_secret("api_token").await;
     match &result2 {
-        Ok(v) => {
-            println!("  Call 2 (cache hit):  {}  ← returned from cache, no inner call", mask_secret(v));
-        }
+        Ok(_) => println!("  Call 2 (cache hit):  secret retrieved  ← returned from cache, no inner call"),
         Err(e) => println!("  Call 2 (cache hit): error — {e}"),
     }
 
     // Third call — still cached.
     let result3 = cached_provider.get_secret("api_token").await;
     match &result3 {
-        Ok(v) => {
-            println!("  Call 3 (cache hit):  {}  ← still cached", mask_secret(v));
-        }
+        Ok(_) => println!("  Call 3 (cache hit):  secret retrieved  ← still cached"),
         Err(e) => println!("  Call 3 (cache hit): error — {e}"),
+    }
+
+    // Verify all three calls returned the same value (without logging it).
+    if let (Ok(v1), Ok(v2), Ok(v3)) = (&result1, &result2, &result3) {
+        assert_eq!(v1, v2, "cached value should match original");
+        assert_eq!(v2, v3, "cached value should be stable");
+        println!("  ✓ All three calls returned identical values (cache working correctly)");
     }
 
     // -----------------------------------------------------------------------
@@ -209,9 +191,10 @@ async fn main() -> anyhow::Result<()> {
 
     println!("\n--- Step 3: SecretServiceAdapter (bridges to InvocationContext) ---\n");
 
-    let adapter_provider = std::sync::Arc::new(
-        CachedSecretProvider::new(EnvSecretProvider, Duration::from_secs(60)),
-    );
+    let adapter_provider = std::sync::Arc::new(CachedSecretProvider::new(
+        EnvSecretProvider,
+        Duration::from_secs(60),
+    ));
     let _service = std::sync::Arc::new(SecretServiceAdapter::new(adapter_provider));
     println!("  ✓ Created SecretServiceAdapter");
     println!("    → Wire into runner: ctx = InvocationContext::new(...)?.with_secret_service(service)");
@@ -229,8 +212,8 @@ async fn main() -> anyhow::Result<()> {
 
     let provider = EnvSecretProvider;
     match provider.get_secret("nonexistent_key").await {
-        Ok(value) => {
-            println!("  Unexpected success: {}", mask_secret(&value));
+        Ok(_) => {
+            println!("  Unexpected success: secret was returned (value omitted)");
         }
         Err(err) => {
             println!("  ✓ Requesting nonexistent secret returned an error:");
