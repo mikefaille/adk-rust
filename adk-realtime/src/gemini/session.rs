@@ -26,7 +26,6 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 type WsStream =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
-type WsSink = futures::stream::SplitSink<WsStream, Message>;
 type WsSource = futures::stream::SplitStream<WsStream>;
 const WRITER_CHANNEL_CAPACITY: usize = 64;
 const AUDIO_FLUSH_TARGET_MS: usize = 40;
