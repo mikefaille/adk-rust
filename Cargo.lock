@@ -121,6 +121,7 @@ dependencies = [
  "ndarray 0.17.2",
  "ndarray-npy",
  "ort",
+ "parking_lot",
  "pin-project-lite",
  "proptest",
  "qwen_tts",
