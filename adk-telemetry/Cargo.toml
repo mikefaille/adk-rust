@@ -15,13 +15,17 @@ readme = "README.md"
 [dependencies]
 thiserror = { workspace = true }
 tracing = { workspace = true }
-tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt"] }
-opentelemetry = "0.31"
-opentelemetry_sdk = { version = "0.31", features = ["rt-tokio"] }
-opentelemetry-otlp = { version = "0.31", features = ["metrics", "grpc-tonic"] }
-tracing-opentelemetry = "0.32"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+opentelemetry = { version = "0.31", optional = true }
+opentelemetry_sdk = { version = "0.31", features = ["rt-tokio"], optional = true }
+opentelemetry-otlp = { version = "0.31", features = ["metrics", "grpc-tonic"], optional = true }
+tracing-opentelemetry = { version = "0.32", optional = true }
+
+[features]
+default = []
+otlp = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp", "dep:tracing-opentelemetry"]
+metrics = ["otlp"]
+json = ["tracing-subscriber/json"]
 
 [dev-dependencies]
 tokio = { version = "1.0", features = ["rt", "macros", "time"] }

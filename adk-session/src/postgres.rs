@@ -443,6 +443,71 @@ impl SessionService for PostgresSessionService {
             .await
             .map_err(|e| adk_core::AdkError::session(format!("transaction failed: {e}")))?;
 
+        if event.actions.state_delta.is_empty() {
+            let session_rows =
+                sqlx::query("SELECT app_name, user_id FROM sessions WHERE session_id = $1")
+                    .bind(session_id)
+                    .fetch_all(&mut *tx)
+                    .await
+                    .map_err(|e| adk_core::AdkError::session(format!("query failed: {e}")))?;
+
+            if session_rows.is_empty() {
+                return Err(adk_core::AdkError::session("session not found"));
+            }
+            if session_rows.len() > 1 {
+                return Err(adk_core::AdkError::session(format!(
+                    "ambiguous session_id '{session_id}'; expected a unique session identifier"
+                )));
+            }
+
+            let row = &session_rows[0];
+            let app_name: String = row.get("app_name");
+            let user_id: String = row.get("user_id");
+
+            sqlx::query(
+                "UPDATE sessions SET updated_at = $1 WHERE app_name = $2 AND user_id = $3 AND session_id = $4",
+            )
+            .bind(event.timestamp)
+            .bind(&app_name)
+            .bind(&user_id)
+            .bind(session_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| adk_core::AdkError::session(format!("update failed: {e}")))?;
+
+            let llm_response_value = serde_json::to_value(&event.llm_response)
+                .map_err(|e| adk_core::AdkError::session(format!("serialize failed: {e}")))?;
+            let actions_value = serde_json::to_value(&event.actions)
+                .map_err(|e| adk_core::AdkError::session(format!("serialize failed: {e}")))?;
+            let tool_ids_value = serde_json::to_value(&event.long_running_tool_ids)
+                .map_err(|e| adk_core::AdkError::session(format!("serialize failed: {e}")))?;
+
+            sqlx::query(
+                r#"INSERT INTO events (id, app_name, user_id, session_id, invocation_id, branch, author, timestamp, llm_response, actions, long_running_tool_ids)
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)"#,
+            )
+            .bind(&event.id)
+            .bind(&app_name)
+            .bind(&user_id)
+            .bind(session_id)
+            .bind(&event.invocation_id)
+            .bind(&event.branch)
+            .bind(&event.author)
+            .bind(event.timestamp)
+            .bind(&llm_response_value)
+            .bind(&actions_value)
+            .bind(&tool_ids_value)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| adk_core::AdkError::session(format!("insert failed: {e}")))?;
+
+            tx.commit()
+                .await
+                .map_err(|e| adk_core::AdkError::session(format!("commit failed: {e}")))?;
+
+            return Ok(());
+        }
+
         let session_rows =
             sqlx::query("SELECT app_name, user_id, state FROM sessions WHERE session_id = $1")
                 .bind(session_id)
@@ -613,6 +678,54 @@ impl SessionService for PostgresSessionService {
             .begin()
             .await
             .map_err(|e| adk_core::AdkError::session(format!("transaction failed: {e}")))?;
+
+        if event.actions.state_delta.is_empty() {
+            let result = sqlx::query(
+                "UPDATE sessions SET updated_at = $1 WHERE app_name = $2 AND user_id = $3 AND session_id = $4",
+            )
+            .bind(event.timestamp)
+            .bind(app_name)
+            .bind(user_id)
+            .bind(session_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| adk_core::AdkError::session(format!("update failed: {e}")))?;
+            if result.rows_affected() == 0 {
+                return Err(adk_core::AdkError::session("session not found"));
+            }
+
+            let llm_response_value = serde_json::to_value(&event.llm_response)
+                .map_err(|e| adk_core::AdkError::session(format!("serialize failed: {e}")))?;
+            let actions_value = serde_json::to_value(&event.actions)
+                .map_err(|e| adk_core::AdkError::session(format!("serialize failed: {e}")))?;
+            let tool_ids_value = serde_json::to_value(&event.long_running_tool_ids)
+                .map_err(|e| adk_core::AdkError::session(format!("serialize failed: {e}")))?;
+
+            sqlx::query(
+                r#"INSERT INTO events (id, app_name, user_id, session_id, invocation_id, branch, author, timestamp, llm_response, actions, long_running_tool_ids)
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)"#,
+            )
+            .bind(&event.id)
+            .bind(app_name)
+            .bind(user_id)
+            .bind(session_id)
+            .bind(&event.invocation_id)
+            .bind(&event.branch)
+            .bind(&event.author)
+            .bind(event.timestamp)
+            .bind(&llm_response_value)
+            .bind(&actions_value)
+            .bind(&tool_ids_value)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| adk_core::AdkError::session(format!("insert failed: {e}")))?;
+
+            tx.commit()
+                .await
+                .map_err(|e| adk_core::AdkError::session(format!("commit failed: {e}")))?;
+
+            return Ok(());
+        }
 
         // Use the full composite key — no ambiguity possible.
         let session_row = sqlx::query(

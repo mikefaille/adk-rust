@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "adk-artifact"
-version = "0.5.0"
+version = "0.8.0"
 dependencies = [
  "adk-core",
  "async-trait",
@@ -14,7 +14,7 @@ dependencies = [
 
 [[package]]
 name = "adk-auth"
-version = "0.5.0"
+version = "0.8.0"
 dependencies = [
  "adk-core",
  "async-trait",
@@ -28,7 +28,7 @@ dependencies = [
 
 [[package]]
 name = "adk-core"
-version = "0.5.0"
+version = "0.8.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -36,12 +36,13 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
+ "tokio",
  "uuid",
 ]
 
 [[package]]
 name = "adk-guardrail"
-version = "0.5.0"
+version = "0.8.0"
 dependencies = [
  "adk-core",
  "async-trait",
@@ -56,7 +57,7 @@ dependencies = [
 
 [[package]]
 name = "adk-memory"
-version = "0.5.0"
+version = "0.8.0"
 dependencies = [
  "adk-core",
  "async-trait",
@@ -68,7 +69,7 @@ dependencies = [
 
 [[package]]
 name = "adk-payments"
-version = "0.5.0"
+version = "0.8.0"
 dependencies = [
  "adk-artifact",
  "adk-auth",
@@ -92,7 +93,7 @@ dependencies = [
 
 [[package]]
 name = "adk-session"
-version = "0.5.0"
+version = "0.8.0"
 dependencies = [
  "adk-core",
  "async-trait",
@@ -864,9 +865,9 @@ dependencies = [
 
 [[package]]
 name = "jsonschema"
-version = "0.43.0"
+version = "0.45.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2dcfbe6df48e0121219eefc8d6a30b872ac2769c7896454bda06f7b64129fa22"
+checksum = "257eb0e588b76827bbddc9e73945a9743693dd2adeaee9da26420f93cfedb798"
 dependencies = [
  "ahash",
  "bytecount",
@@ -1184,9 +1185,9 @@ dependencies = [
 
 [[package]]
 name = "referencing"
-version = "0.43.0"
+version = "0.45.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "37add1aa1d619a975521d262d09f100f1f767791c9386c03679450f30acd78c1"
+checksum = "e2f38748ceca8d0b0013e60f534d94a6e23dfd89fd2a88318fc5a2d04fda1010"
 dependencies = [
  "ahash",
  "fluent-uri",
@@ -1555,9 +1556,9 @@ checksum = "b6c140620e7ffbb22c2dee59cafe6084a59b5ffc27a8859a5f0d494b5d52b6be"
 
 [[package]]
 name = "uuid"
-version = "1.22.0"
+version = "1.23.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a68d3c8f01c0cfa54a75291d83601161799e4a89a39e0929f4b0354d88757a37"
+checksum = "ddd74a9687298c6858e9b88ec8935ec45d22e8fd5e6394fa1bd4e99a87789c76"
 dependencies = [
  "getrandom 0.4.2",
  "js-sys",

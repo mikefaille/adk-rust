@@ -115,7 +115,7 @@ impl Llm for BedrockClient {
             ))
         })?;
 
-        if stream {
+        if stream && request.tools.is_empty() {
             let result = self.generate_streaming(bedrock_input).await?;
             Ok(crate::usage_tracking::with_usage_tracking(result, usage_span))
         } else {

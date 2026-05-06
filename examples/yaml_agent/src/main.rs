@@ -1,6 +1,6 @@
 //! # YAML Agent Definition Example
 //!
-//! Demonstrates the YAML agent definition loading feature from ADK-Rust v0.7.0.
+//! Demonstrates the YAML agent definition loading feature from ADK-Rust v0.8.0.
 //!
 //! ## What This Shows
 //! - Loading a single agent from a YAML file with `AgentConfigLoader::load_file()`
@@ -107,7 +107,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     println!("╔══════════════════════════════════════════╗");
-    println!("║  YAML Agent Definition — ADK-Rust v0.7.0 ║");
+    println!("║  YAML Agent Definition — ADK-Rust v0.8.0 ║");
     println!("╚══════════════════════════════════════════╝\n");
 
     // Read the API key from the environment. The ModelFactory uses it

@@ -15,7 +15,7 @@
 //! 1. Builder: `Anthropic::new(key)?.with_base_url(url)`
 //! 2. Env var: `ANTHROPIC_BASE_URL=https://...`
 //!
-//! Run: `ANTHROPIC_API_KEY=sk-... cargo run -p adk-anthropic --example custom_base_url`
+//! Run: `ANTHROPIC_API_KEY=sk-... cargo run -p adk-anthropic --example anthropic_custom_base_url`
 
 use adk_anthropic::{Anthropic, KnownModel, MessageCreateParams};
 

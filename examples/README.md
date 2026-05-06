@@ -20,9 +20,9 @@ playground versions are being finalized:
 - `examples/payments` — agentic commerce scenario index for ACP/AP2 validation paths
 - `examples/developer_ergonomics` — developer ergonomics validation (RunnerConfigBuilder, ToolExecutionStrategy, SimpleToolContext, StatefulTool, run_str, #[tool] attributes)
 
-## v0.7.0 Feature Examples
+## Validated Feature Examples
 
-Standalone crates demonstrating v0.7.0 features. Each has its own `Cargo.toml`, `README.md`, and `.env.example`.
+Standalone crates demonstrating current ADK-Rust features. Each has its own `Cargo.toml`, `README.md`, and `.env.example`.
 
 **No API keys required:**
 

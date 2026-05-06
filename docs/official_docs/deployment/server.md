@@ -45,10 +45,12 @@ async fn main() -> Result<()> {
 }
 ```
 
-Start the server:
+Start from the validated API scaffold:
 
 ```bash
-cargo run -- serve --port 8080
+cargo adk new my-api --template api
+cd my-api
+cargo run
 ```
 
 ## REST API Endpoints
@@ -394,10 +396,10 @@ curl -X POST http://localhost:8080/api/run_sse \
 
 ### Custom Port
 
-Specify a custom port:
+For a custom port, set `PORT` before starting the generated server:
 
 ```bash
-cargo run -- serve --port 3000
+PORT=3000 cargo run
 ```
 
 ### Custom Artifact Service
@@ -479,7 +481,7 @@ The server automatically initializes telemetry when started. Logs are output to 
 Set the log level with the `RUST_LOG` environment variable:
 
 ```bash
-RUST_LOG=debug cargo run -- serve
+RUST_LOG=debug cargo run
 ```
 
 ## Best Practices
@@ -493,7 +495,7 @@ RUST_LOG=debug cargo run -- serve
 
 ## Full-Stack Example
 
-For a complete working example of a frontend application interacting with an ADK backend, see the **Research Paper Generator** example. This demonstrates:
+For a complete working server scaffold, use the validated cargo-adk API template. This demonstrates:
 
 - **Frontend**: HTML/JavaScript client with real-time streaming
 - **Backend**: ADK agent with custom research and PDF generation tools
@@ -505,11 +507,9 @@ The example shows a production-ready pattern for building AI-powered web applica
 
 **Quick Start:**
 ```bash
-# Start the server
-cargo run --example full_stack_research -p adk-rust-guide -- serve --port 8080
-
-# Open the frontend
-open examples/research_paper/frontend.html
+cargo adk new my-api --template api
+cd my-api
+cargo run
 ```
 
 **Files:**

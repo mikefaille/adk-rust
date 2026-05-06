@@ -61,6 +61,7 @@ pub fn init_telemetry(service_name: &str) -> Result<(), TelemetryError> {
 /// init_with_otlp("my-agent", "http://localhost:4317")
 ///     .expect("Failed to initialize telemetry");
 /// ```
+#[cfg(feature = "otlp")]
 pub fn init_with_otlp(service_name: &str, endpoint: &str) -> Result<(), TelemetryError> {
     use opentelemetry::trace::TracerProvider;
     use opentelemetry_otlp::WithExportConfig;
@@ -185,6 +186,7 @@ pub fn init_with_otlp(service_name: &str, endpoint: &str) -> Result<(), Telemetr
 ///     .with(tracing_subscriber::fmt::layer())
 ///     .init();
 /// ```
+#[cfg(feature = "otlp")]
 pub fn build_otlp_layer<S>(
     service_name: &str,
     endpoint: &str,
@@ -242,12 +244,15 @@ where
 /// In OTel 0.28+, the tracer provider is shut down when the last reference is dropped.
 /// This function is kept for backward compatibility and explicitly drops the global provider.
 pub fn shutdown_telemetry() {
-    // In OTel 0.28, shutdown_tracer_provider() was removed.
-    // The SdkTracerProvider shuts down automatically when the last reference is dropped.
-    // We trigger this by replacing the global provider with a no-op, which drops the old one.
-    opentelemetry::global::set_tracer_provider(
-        opentelemetry::trace::noop::NoopTracerProvider::new(),
-    );
+    #[cfg(feature = "otlp")]
+    {
+        // In OTel 0.28, shutdown_tracer_provider() was removed.
+        // The SdkTracerProvider shuts down automatically when the last reference is dropped.
+        // We trigger this by replacing the global provider with a no-op, which drops the old one.
+        opentelemetry::global::set_tracer_provider(
+            opentelemetry::trace::noop::NoopTracerProvider::new(),
+        );
+    }
 }
 
 /// Initialize telemetry with ADK span exporter.

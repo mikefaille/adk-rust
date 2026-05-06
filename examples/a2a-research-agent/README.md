@@ -43,10 +43,10 @@ cp .env.example .env
 
 ```bash
 # Start the research agent (default: 127.0.0.1:3001)
-cargo run -p a2a-research-agent
+cargo run --manifest-path examples/a2a-research-agent/Cargo.toml
 
 # Custom host/port
-HOST=0.0.0.0 PORT=8001 cargo run -p a2a-research-agent
+HOST=0.0.0.0 PORT=8001 cargo run --manifest-path examples/a2a-research-agent/Cargo.toml
 ```
 
 On startup, the agent prints:

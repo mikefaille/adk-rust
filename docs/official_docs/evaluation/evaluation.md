@@ -271,27 +271,13 @@ async fn test_weather_agent() {
 
 ## Examples
 
-Examples are in the [adk-playground](https://github.com/zavora-ai/adk-playground) repo:
+Use the standard feature tier for evaluation APIs:
 
 ```bash
-# Basic evaluation
-cargo run --example eval_basic
-
-# Trajectory validation
-cargo run --example eval_trajectory
-
-# LLM-judged semantic matching
-cargo run --example eval_semantic
-
-# Rubric-based scoring
-cargo run --example eval_rubric
-
-# Response similarity algorithms
-cargo run --example eval_similarity
-
-# Report generation
-cargo run --example eval_report
+cargo check -p adk-rust --no-default-features --features standard
 ```
+
+The runnable evaluation gallery is maintained in [adk-playground](https://github.com/zavora-ai/adk-playground).
 
 ## Best Practices
 

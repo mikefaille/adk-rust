@@ -121,7 +121,7 @@ opentelemetry = "0.31"
 # Unify rustls crypto provider to 'aws-lc-rs' across the workspace.
 rustls = { version = "0.23", features = ["aws-lc-rs"] }
 tokio-tungstenite = { version = "0.28", features = ["rustls-tls-native-roots", "connect"] }
-reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls-native-roots", "multipart"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls-native-roots", "multipart"] }
 toml = "0.8"
 sha2 = "0.10"
 hex = "0.4"
@@ -133,15 +133,15 @@ livekit-api = { version = "0.4.18", default-features = false, features = ["signa
 # ADK internal crates (use { workspace = true } in member crates)
 adk-core = { path = "adk-core", version = "0.8.0" }
 adk-rust-macros = { path = "adk-rust-macros", version = "0.8.0" }
-adk-agent = { path = "adk-agent", version = "0.8.0" }
-adk-model = { path = "adk-model", version = "0.8.0" }
+adk-agent = { path = "adk-agent", version = "0.8.0", default-features = false }
+adk-model = { path = "adk-model", version = "0.8.0", default-features = false }
 adk-tool = { path = "adk-tool", version = "0.8.0" }
-adk-runner = { path = "adk-runner", version = "0.8.0" }
+adk-runner = { path = "adk-runner", version = "0.8.0", default-features = false }
 adk-server = { path = "adk-server", version = "0.8.0" }
 adk-session = { path = "adk-session", version = "0.8.0" }
 adk-artifact = { path = "adk-artifact", version = "0.8.0" }
 adk-memory = { path = "adk-memory", version = "0.8.0" }
-adk-cli = { path = "adk-cli", version = "0.8.0" }
+adk-cli = { path = "adk-cli", version = "0.8.0", default-features = false }
 adk-realtime = { path = "adk-realtime", version = "0.8.0" }
 adk-graph = { path = "adk-graph", version = "0.8.0" }
 adk-browser = { path = "adk-browser", version = "0.8.0" }

@@ -11,8 +11,8 @@
 //! 13: Database Node — Config validation (placeholder executors)
 //! 14: Notification Node — Slack/Discord/Teams/webhook payload dispatch
 //!
-//! Run core:  `cargo run -p action-nodes-example`
-//! Run all:   `cargo run -p action-nodes-example --features full`
+//! Run core:  `cargo run --manifest-path examples/action_nodes/Cargo.toml`
+//! Run all:   `cargo run --manifest-path examples/action_nodes/Cargo.toml --features full`
 
 mod scenarios;
 
@@ -58,7 +58,9 @@ async fn main() -> Result<()> {
     {
         println!("── Feature-gated scenarios ────────────────────");
         println!("  HTTP, Database, Notification nodes require --features http");
-        println!("  Run: cargo run -p action-nodes-example --features full\n");
+        println!(
+            "  Run: cargo run --manifest-path examples/action_nodes/Cargo.toml --features full\n"
+        );
     }
 
     println!("═══════════════════════════════════════════════════");

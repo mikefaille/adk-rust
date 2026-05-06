@@ -19,9 +19,9 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-adk-browser = "0.6.0"
-adk-agent = "0.6.0"
-adk-model = "0.6.0"
+adk-browser = "0.8.0"
+adk-agent = "0.8.0"
+adk-model = "0.8.0"
 ```
 
 ### Prerequisites
@@ -350,17 +350,8 @@ match result {
 ## Examples
 
 ```bash
-# Basic browser session
-cargo run --example browser_basic
-
-# AI agent with browser tools
-cargo run --example browser_agent
-
-# Full 46-tool interactive example
-cargo run --example browser_interactive
-
-# OpenAI-powered browser agent
-cargo run --example browser_openai --features openai
+cargo check -p adk-browser
+cargo check -p adk-rust --no-default-features --features browser
 ```
 
 ## Best Practices

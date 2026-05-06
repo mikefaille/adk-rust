@@ -25,7 +25,7 @@ cp .env.example .env
 
 ```bash
 # Default: 127.0.0.1:3002
-cargo run -p a2a-writing-agent
+cargo run --manifest-path examples/a2a-writing-agent/Cargo.toml --bin a2a-writing-agent
 ```
 
 ### Run the Research-to-Writing Pipeline
@@ -34,19 +34,19 @@ Start both agents in separate terminals, then run the client:
 
 ```bash
 # Terminal 1
-cargo run -p a2a-research-agent
+cargo run --manifest-path examples/a2a-research-agent/Cargo.toml
 
 # Terminal 2
-cargo run -p a2a-writing-agent
+cargo run --manifest-path examples/a2a-writing-agent/Cargo.toml --bin a2a-writing-agent
 
 # Terminal 3 — run the client
-cargo run -p a2a-writing-agent --bin client
+cargo run --manifest-path examples/a2a-writing-agent/Cargo.toml --bin client
 ```
 
 The client accepts CLI arguments:
 
 ```bash
-cargo run -p a2a-writing-agent --bin client -- \
+cargo run --manifest-path examples/a2a-writing-agent/Cargo.toml --bin client -- \
   --research-url http://127.0.0.1:3001 \
   --writing-url http://127.0.0.1:3002 \
   --topic "The future of quantum computing"
@@ -57,7 +57,7 @@ Or use environment variables:
 ```bash
 RESEARCH_AGENT_URL=http://127.0.0.1:3001 \
 WRITING_AGENT_URL=http://127.0.0.1:3002 \
-cargo run -p a2a-writing-agent --bin client
+cargo run --manifest-path examples/a2a-writing-agent/Cargo.toml --bin client
 ```
 
 ### Expected Output

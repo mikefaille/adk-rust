@@ -87,12 +87,16 @@ fn create_model(
     thinking_budget: Option<u32>,
 ) -> Result<Arc<dyn Llm>> {
     match provider {
+        #[cfg(feature = "gemini")]
         ModelProvider::Gemini => {
             reject_unsupported_thinking_budget(provider, thinking_budget)?;
             let key = api_key.ok_or_else(|| anyhow::anyhow!("Gemini requires an API key"))?;
             let m = adk_model::GeminiModel::new(key, model)?;
             Ok(Arc::new(m))
         }
+        #[cfg(not(feature = "gemini"))]
+        ModelProvider::Gemini => provider_feature_disabled(provider, "gemini"),
+        #[cfg(feature = "openai")]
         ModelProvider::Openai => {
             reject_unsupported_thinking_budget(provider, thinking_budget)?;
             let key = api_key.ok_or_else(|| anyhow::anyhow!("OpenAI requires an API key"))?;
@@ -100,6 +104,9 @@ fn create_model(
             let m = adk_model::OpenAIClient::new(config)?;
             Ok(Arc::new(m))
         }
+        #[cfg(not(feature = "openai"))]
+        ModelProvider::Openai => provider_feature_disabled(provider, "openai"),
+        #[cfg(feature = "anthropic")]
         ModelProvider::Anthropic => {
             let key = api_key.ok_or_else(|| anyhow::anyhow!("Anthropic requires an API key"))?;
             let mut config = adk_model::anthropic::AnthropicConfig::new(key, model);
@@ -112,6 +119,9 @@ fn create_model(
             let m = adk_model::AnthropicClient::new(config)?;
             Ok(Arc::new(m))
         }
+        #[cfg(not(feature = "anthropic"))]
+        ModelProvider::Anthropic => provider_feature_disabled(provider, "anthropic"),
+        #[cfg(feature = "deepseek")]
         ModelProvider::Deepseek => {
             reject_unsupported_thinking_budget(provider, thinking_budget)?;
             let key = api_key.ok_or_else(|| anyhow::anyhow!("DeepSeek requires an API key"))?;
@@ -119,6 +129,9 @@ fn create_model(
             let m = adk_model::DeepSeekClient::new(config)?;
             Ok(Arc::new(m))
         }
+        #[cfg(not(feature = "deepseek"))]
+        ModelProvider::Deepseek => provider_feature_disabled(provider, "deepseek"),
+        #[cfg(feature = "groq")]
         ModelProvider::Groq => {
             reject_unsupported_thinking_budget(provider, thinking_budget)?;
             let key = api_key.ok_or_else(|| anyhow::anyhow!("Groq requires an API key"))?;
@@ -126,13 +139,26 @@ fn create_model(
             let m = adk_model::GroqClient::new(config)?;
             Ok(Arc::new(m))
         }
+        #[cfg(not(feature = "groq"))]
+        ModelProvider::Groq => provider_feature_disabled(provider, "groq"),
+        #[cfg(feature = "ollama")]
         ModelProvider::Ollama => {
             reject_unsupported_thinking_budget(provider, thinking_budget)?;
             let config = adk_model::OllamaConfig::new(model);
             let m = adk_model::OllamaModel::new(config)?;
             Ok(Arc::new(m))
         }
+        #[cfg(not(feature = "ollama"))]
+        ModelProvider::Ollama => provider_feature_disabled(provider, "ollama"),
     }
+}
+
+fn provider_feature_disabled(provider: ModelProvider, feature: &str) -> Result<Arc<dyn Llm>> {
+    Err(anyhow::anyhow!(
+        "{} support is not compiled into this adk-cli build. Reinstall with `--features {}` or `--features all-providers`.",
+        provider.display_name(),
+        feature
+    ))
 }
 
 fn reject_unsupported_thinking_budget(

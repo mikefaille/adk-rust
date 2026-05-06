@@ -9,8 +9,8 @@
 //! - [`FunctionTool`] - Create tools from async Rust functions
 //! - [`AgentTool`] - Use agents as callable tools for composition
 //! - [`GoogleSearchTool`] - Web search via Gemini's grounding
-//! - [`McpToolset`] - Model Context Protocol integration
-//! - [`McpServerManager`](mcp::manager::McpServerManager) - Multi-server lifecycle management with health monitoring
+//! - `McpToolset` - Model Context Protocol integration with the `mcp` feature
+//! - `McpServerManager` - Multi-server lifecycle management with the `mcp` feature
 //! - [`BasicToolset`] - Group multiple tools together
 //! - [`ExitLoopTool`] - Control flow for loop agents
 //! - [`LoadArtifactsTool`] - Inject binary artifacts into context
@@ -60,6 +60,7 @@
 mod agent_tool;
 pub mod builtin;
 mod function_tool;
+#[cfg(feature = "mcp")]
 pub mod mcp;
 mod simple_context;
 mod stateful_tool;
@@ -98,6 +99,7 @@ pub use builtin::{
     OpenAIWebSearchTool, UrlContextTool, WebSearchTool, WebSearchUserLocation,
 };
 pub use function_tool::FunctionTool;
+#[cfg(feature = "mcp")]
 pub use mcp::{
     AutoDeclineElicitationHandler, ElicitationHandler, McpAuth, McpHttpClientBuilder,
     McpServerManager, McpTaskConfig, McpToolset, OAuth2Config, Resource, ResourceContents,

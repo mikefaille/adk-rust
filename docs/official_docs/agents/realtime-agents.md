@@ -44,16 +44,16 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-adk-realtime = { version = "0.6.0", features = ["openai"] }
+adk-realtime = { version = "0.8.0", features = ["openai"] }
 
 # For Vertex AI Live (Google Cloud with ADC auth)
-# adk-realtime = { version = "0.6.0", features = ["vertex-live"] }
+# adk-realtime = { version = "0.8.0", features = ["vertex-live"] }
 
 # For LiveKit WebRTC bridge
-# adk-realtime = { version = "0.6.0", features = ["livekit"] }
+# adk-realtime = { version = "0.8.0", features = ["livekit"] }
 
 # For all transports (except WebRTC which needs cmake)
-# adk-realtime = { version = "0.6.0", features = ["full"] }
+# adk-realtime = { version = "0.8.0", features = ["full"] }
 ```
 
 ### Basic Usage
@@ -71,7 +71,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create the realtime model
     let model: Arc<dyn RealtimeModel> = Arc::new(
-        OpenAIRealtimeModel::new(&api_key, "gpt-4o-realtime-preview-2024-12-17")
+        OpenAIRealtimeModel::new(&api_key, "gpt-realtime")
     );
 
     // Build the realtime agent
@@ -114,9 +114,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 | Provider | Model | Transport | Feature Flag | Audio Format |
 |----------|-------|-----------|--------------|--------------|
-| OpenAI | `gpt-4o-realtime-preview-2024-12-17` | WebSocket | `openai` | PCM16 24kHz |
 | OpenAI | `gpt-realtime` | WebSocket | `openai` | PCM16 24kHz |
-| OpenAI | `gpt-4o-realtime-*` | WebRTC | `openai-webrtc` | Opus |
+| OpenAI | `gpt-realtime` | WebRTC | `openai-webrtc` | Opus |
 | Google | `gemini-live-2.5-flash-native-audio` | WebSocket | `gemini` | PCM16 16kHz/24kHz |
 | Google | Gemini via Vertex AI | WebSocket + OAuth2 | `vertex-live` | PCM16 16kHz/24kHz |
 | LiveKit | Any (bridge to Gemini/OpenAI) | WebRTC | `livekit` | PCM16 |
@@ -510,10 +509,7 @@ Run the included examples:
 
 ```bash
 # OpenAI Realtime (WebSocket)
-cargo run --example realtime_basic --features realtime-openai
-cargo run --example realtime_vad --features realtime-openai
-cargo run --example realtime_tools --features realtime-openai
-cargo run --example realtime_handoff --features realtime-openai
+cargo run -p adk-realtime --example openai_session_update --features openai
 
 # Vertex AI Live (requires gcloud auth application-default login)
 cargo run -p adk-realtime --example vertex_live_voice --features vertex-live

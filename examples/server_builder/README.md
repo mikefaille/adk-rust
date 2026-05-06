@@ -1,6 +1,6 @@
 # ServerBuilder Example
 
-Demonstrates the `ServerBuilder` API from ADK-Rust v0.7.0 for registering custom Axum controllers alongside the built-in REST, A2A, and UI routes with shared middleware.
+Demonstrates the `ServerBuilder` API from ADK-Rust v0.8.0 for registering custom Axum controllers alongside the built-in REST, A2A, and UI routes with shared middleware.
 
 ## What This Shows
 
@@ -104,7 +104,7 @@ cargo run --manifest-path examples/server_builder/Cargo.toml
 
 ```
 ╔══════════════════════════════════════════╗
-║  ServerBuilder — ADK-Rust v0.7.0         ║
+║  ServerBuilder — ADK-Rust v0.8.0         ║
 ╚══════════════════════════════════════════╝
 
 📦 Created ServerConfig with no-op agent and in-memory sessions

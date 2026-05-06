@@ -101,7 +101,7 @@ instructions to `optimized_instructions.txt`. Sample output:
 
 ```
 ╔══════════════════════════════════════════╗
-║  Prompt Optimizer — ADK-Rust v0.7.0      ║
+║  Prompt Optimizer — ADK-Rust v0.8.0      ║
 ╚══════════════════════════════════════════╝
 
 📝 Initial agent instructions:

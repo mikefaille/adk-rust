@@ -16,7 +16,7 @@ Demonstrates all capabilities of the project-scoped memory feature in `adk-memor
 ## Run
 
 ```bash
-cargo run -p project-scoped-memory-example
+cargo run --manifest-path examples/project_scoped_memory/Cargo.toml
 ```
 
 No external databases or API keys required — uses the in-memory backend.

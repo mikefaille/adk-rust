@@ -20,7 +20,7 @@ Demonstrates all core action node types in `adk-graph` — deterministic, non-LL
 ## Run
 
 ```bash
-cargo run -p action-nodes-example
+cargo run --manifest-path examples/action_nodes/Cargo.toml
 ```
 
 No external services or Docker required — all scenarios use in-process execution and temp files.
@@ -36,4 +36,10 @@ action-code    → JavaScript sandbox (quick-js)
 action-email   → IMAP/SMTP (lettre, imap)
 action-rss     → RSS/Atom feeds (feed-rs)
 action-full    → All of the above
+```
+
+Run all scenarios, including HTTP-backed nodes:
+
+```bash
+cargo run --manifest-path examples/action_nodes/Cargo.toml --features full
 ```

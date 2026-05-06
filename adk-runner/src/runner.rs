@@ -1,12 +1,15 @@
 use crate::InvocationContext;
 use crate::cache::CacheManager;
+#[cfg(feature = "artifacts")]
 use adk_artifact::ArtifactService;
 use adk_core::{
     Agent, AppName, CacheCapable, Content, ContextCacheConfig, EventStream, Memory,
     ReadonlyContext, Result, RunConfig, SessionId, UserId,
 };
+#[cfg(feature = "plugins")]
 use adk_plugin::PluginManager;
 use adk_session::SessionService;
+#[cfg(feature = "skills")]
 use adk_skill::{SkillInjector, SkillInjectorConfig};
 use async_stream::stream;
 use std::sync::Arc;
@@ -17,8 +20,10 @@ pub struct RunnerConfig {
     pub app_name: String,
     pub agent: Arc<dyn Agent>,
     pub session_service: Arc<dyn SessionService>,
+    #[cfg(feature = "artifacts")]
     pub artifact_service: Option<Arc<dyn ArtifactService>>,
     pub memory_service: Option<Arc<dyn Memory>>,
+    #[cfg(feature = "plugins")]
     pub plugin_manager: Option<Arc<PluginManager>>,
     /// Optional run configuration (streaming mode, etc.)
     /// If not provided, uses default (SSE streaming)
@@ -58,9 +63,12 @@ pub struct Runner {
     app_name: String,
     root_agent: Arc<dyn Agent>,
     session_service: Arc<dyn SessionService>,
+    #[cfg(feature = "artifacts")]
     artifact_service: Option<Arc<dyn ArtifactService>>,
     memory_service: Option<Arc<dyn Memory>>,
+    #[cfg(feature = "plugins")]
     plugin_manager: Option<Arc<PluginManager>>,
+    #[cfg(feature = "skills")]
     skill_injector: Option<Arc<SkillInjector>>,
     run_config: RunConfig,
     compaction_config: Option<adk_core::EventsCompactionConfig>,
@@ -125,9 +133,12 @@ impl Runner {
             app_name: config.app_name,
             root_agent: config.agent,
             session_service: config.session_service,
+            #[cfg(feature = "artifacts")]
             artifact_service: config.artifact_service,
             memory_service: config.memory_service,
+            #[cfg(feature = "plugins")]
             plugin_manager: config.plugin_manager,
+            #[cfg(feature = "skills")]
             skill_injector: None,
             run_config,
             compaction_config: config.compaction_config,
@@ -144,12 +155,14 @@ impl Runner {
     /// Enable skill injection using a pre-built injector.
     ///
     /// Skill injection runs before plugin `on_user_message` callbacks.
+    #[cfg(feature = "skills")]
     pub fn with_skill_injector(mut self, injector: SkillInjector) -> Self {
         self.skill_injector = Some(Arc::new(injector));
         self
     }
 
     /// Enable skill injection by auto-loading `.skills/` from the given root path.
+    #[cfg(feature = "skills")]
     #[deprecated(note = "Use with_auto_skills_mut instead")]
     pub fn with_auto_skills(
         mut self,
@@ -165,6 +178,7 @@ impl Runner {
     /// Unlike [`with_auto_skills`](Self::with_auto_skills), this method borrows
     /// the Runner mutably instead of consuming it. On error, the Runner remains
     /// valid with no skill injector configured.
+    #[cfg(feature = "skills")]
     pub fn with_auto_skills_mut(
         &mut self,
         root: impl AsRef<std::path::Path>,
@@ -185,9 +199,12 @@ impl Runner {
         let typed_app_name = AppName::try_from(app_name.clone())?;
         let session_service = self.session_service.clone();
         let root_agent = self.root_agent.clone();
+        #[cfg(feature = "artifacts")]
         let artifact_service = self.artifact_service.clone();
         let memory_service = self.memory_service.clone();
+        #[cfg(feature = "plugins")]
         let plugin_manager = self.plugin_manager.clone();
+        #[cfg(feature = "skills")]
         let skill_injector = self.skill_injector.clone();
         let mut run_config = self.run_config.clone();
         let compaction_config = self.compaction_config.clone();
@@ -257,7 +274,7 @@ impl Runner {
                     app_name: app_name.clone(),
                     user_id: user_id.to_string(),
                     session_id: session_id.to_string(),
-                    num_recent_events: None,
+                    num_recent_events: run_config.history_max_events,
                     after: None,
                 })
                 .await
@@ -273,15 +290,26 @@ impl Runner {
             let agent_to_run = Self::find_agent_to_run(&root_agent, session.as_ref());
 
             // Clone services for potential reuse in transfer
+            #[cfg(feature = "artifacts")]
             let artifact_service_clone = artifact_service.clone();
             let memory_service_clone = memory_service.clone();
 
             // Create invocation context with MutableSession
             let invocation_id = format!("inv-{}", uuid::Uuid::new_v4());
+            #[cfg(any(feature = "skills", feature = "plugins"))]
             let mut effective_user_content = user_content.clone();
+            #[cfg(not(any(feature = "skills", feature = "plugins")))]
+            let effective_user_content = user_content.clone();
+            #[cfg(feature = "skills")]
             let mut selected_skill_name = String::new();
+            #[cfg(not(feature = "skills"))]
+            let selected_skill_name = String::new();
+            #[cfg(feature = "skills")]
             let mut selected_skill_id = String::new();
+            #[cfg(not(feature = "skills"))]
+            let selected_skill_id = String::new();
 
+            #[cfg(feature = "skills")]
             if let Some(injector) = skill_injector.as_ref() {
                 if let Some(matched) = adk_skill::apply_skill_injection(
                     &mut effective_user_content,
@@ -311,6 +339,7 @@ impl Runner {
             };
 
             // Add optional services
+            #[cfg(feature = "artifacts")]
             if let Some(service) = artifact_service {
                 // Wrap service with ScopedArtifacts to bind session context
                 let scoped = adk_artifact::ScopedArtifacts::new(
@@ -335,6 +364,7 @@ impl Runner {
 
             let mut ctx = Arc::new(invocation_ctx);
 
+            #[cfg(feature = "plugins")]
             if let Some(manager) = plugin_manager.as_ref() {
                 match manager
                     .run_before_run(ctx.clone() as Arc<dyn adk_core::InvocationContext>)
@@ -389,6 +419,7 @@ impl Runner {
                             }
                         };
 
+                        #[cfg(feature = "artifacts")]
                         if let Some(service) = artifact_service_clone.clone() {
                             let scoped = adk_artifact::ScopedArtifacts::new(
                                 service,
@@ -428,6 +459,7 @@ impl Runner {
             ctx.mutable_session().append_event(user_event.clone());
 
             if let Err(e) = session_service.append_event(ctx.session_id(), user_event).await {
+                #[cfg(feature = "plugins")]
                 if let Some(manager) = plugin_manager.as_ref() {
                     manager.run_after_run(ctx.clone() as Arc<dyn adk_core::InvocationContext>).await;
                 }
@@ -440,76 +472,93 @@ impl Runner {
             // create or refresh the cached content before agent execution.
             // Cache failures are non-fatal — log a warning and proceed without cache.
             if let (Some(cm_mutex), Some(cache_model)) = (&cache_manager_ref, &cache_capable) {
-                let mut cm = cm_mutex.lock().await;
-                if cm.is_enabled() {
-                    if cm.active_cache_name().is_none() || cm.needs_refresh() {
-                        // Gather system instruction from the agent's description
-                        // (the full instruction is resolved inside the agent, but the
-                        // description provides a reasonable proxy for cache keying)
-                        let system_instruction = agent_to_run.description().to_string();
-                        let tools = std::collections::HashMap::new();
-                        let ttl = context_cache_config.as_ref().map_or(600, |c| c.ttl_seconds);
+                let should_refresh_cache = {
+                    let cm = cm_mutex.lock().await;
+                    cm.is_enabled() && (cm.active_cache_name().is_none() || cm.needs_refresh())
+                };
 
-                        match cache_model.create_cache(&system_instruction, &tools, ttl).await {
-                            Ok(name) => {
-                                // Delete old cache if refreshing
-                                if let Some(old) = cm.clear_active_cache() {
-                                    if let Err(e) = cache_model.delete_cache(&old).await {
-                                        tracing::warn!(
-                                            old_cache = %old,
-                                            error = %e,
-                                            "failed to delete old cache, proceeding with new cache"
-                                        );
-                                    }
-                                }
+                if should_refresh_cache {
+                    // Gather system instruction from the agent's description
+                    // (the full instruction is resolved inside the agent, but the
+                    // description provides a reasonable proxy for cache keying).
+                    let system_instruction = agent_to_run.description().to_string();
+                    let tools = std::collections::HashMap::new();
+                    let ttl = context_cache_config.as_ref().map_or(600, |c| c.ttl_seconds);
+
+                    match cache_model.create_cache(&system_instruction, &tools, ttl).await {
+                        Ok(name) => {
+                            let old_cache = {
+                                let mut cm = cm_mutex.lock().await;
+                                let old = cm.clear_active_cache();
                                 cm.set_active_cache(name);
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    error = %e,
-                                    "cache creation failed, proceeding without cache"
-                                );
-                            }
-                        }
-                    }
+                                old
+                            };
 
-                    // Attach cache name to run config so agents can use it
-                    if let Some(cache_name) = cm.record_invocation() {
-                        run_config.cached_content = Some(cache_name.to_string());
-                        // Rebuild the invocation context with the updated run config
-                        let mut refreshed_ctx = match InvocationContext::with_mutable_session(
-                            ctx.invocation_id().to_string(),
-                            agent_to_run.clone(),
-                            ctx.user_id().to_string(),
-                            ctx.app_name().to_string(),
-                            ctx.session_id().to_string(),
-                            effective_user_content.clone(),
-                            ctx.mutable_session().clone(),
-                        ) {
-                            Ok(ctx) => ctx,
-                            Err(e) => {
-                                yield Err(e);
-                                return;
+                            if let Some(old) = old_cache {
+                                if let Err(e) = cache_model.delete_cache(&old).await {
+                                    tracing::warn!(
+                                        old_cache = %old,
+                                        error = %e,
+                                        "failed to delete old cache, proceeding with new cache"
+                                    );
+                                }
                             }
-                        };
-                        if let Some(service) = artifact_service_clone.clone() {
-                            let scoped = adk_artifact::ScopedArtifacts::new(
-                                service,
-                                ctx.app_name().to_string(),
-                                ctx.user_id().to_string(),
-                                ctx.session_id().to_string(),
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                error = %e,
+                                "cache creation failed, proceeding without cache"
                             );
-                            refreshed_ctx = refreshed_ctx.with_artifacts(Arc::new(scoped));
                         }
-                        if let Some(memory) = memory_service_clone.clone() {
-                            refreshed_ctx = refreshed_ctx.with_memory(memory);
-                        }
-                        refreshed_ctx = refreshed_ctx.with_run_config(run_config.clone());
-                        if let Some(rc) = request_context.clone() {
-                            refreshed_ctx = refreshed_ctx.with_request_context(rc);
-                        }
-                        ctx = Arc::new(refreshed_ctx);
                     }
+                }
+
+                // Attach cache name to run config so agents can use it.
+                let cache_name = {
+                    let mut cm = cm_mutex.lock().await;
+                    if cm.is_enabled() {
+                        cm.record_invocation().map(str::to_string)
+                    } else {
+                        None
+                    }
+                };
+
+                if let Some(cache_name) = cache_name {
+                    run_config.cached_content = Some(cache_name);
+                    // Rebuild the invocation context with the updated run config.
+                    let mut refreshed_ctx = match InvocationContext::with_mutable_session(
+                        ctx.invocation_id().to_string(),
+                        agent_to_run.clone(),
+                        ctx.user_id().to_string(),
+                        ctx.app_name().to_string(),
+                        ctx.session_id().to_string(),
+                        effective_user_content.clone(),
+                        ctx.mutable_session().clone(),
+                    ) {
+                        Ok(ctx) => ctx,
+                        Err(e) => {
+                            yield Err(e);
+                            return;
+                        }
+                    };
+                    #[cfg(feature = "artifacts")]
+                    if let Some(service) = artifact_service_clone.clone() {
+                        let scoped = adk_artifact::ScopedArtifacts::new(
+                            service,
+                            ctx.app_name().to_string(),
+                            ctx.user_id().to_string(),
+                            ctx.session_id().to_string(),
+                        );
+                        refreshed_ctx = refreshed_ctx.with_artifacts(Arc::new(scoped));
+                    }
+                    if let Some(memory) = memory_service_clone.clone() {
+                        refreshed_ctx = refreshed_ctx.with_memory(memory);
+                    }
+                    refreshed_ctx = refreshed_ctx.with_run_config(run_config.clone());
+                    if let Some(rc) = request_context.clone() {
+                        refreshed_ctx = refreshed_ctx.with_request_context(rc);
+                    }
+                    ctx = Arc::new(refreshed_ctx);
                 }
             }
 
@@ -548,6 +597,7 @@ impl Runner {
             let mut agent_stream = match agent_to_run.run(ctx.clone()).instrument(agent_span).await {
                 Ok(s) => s,
                 Err(e) => {
+                    #[cfg(feature = "plugins")]
                     if let Some(manager) = plugin_manager.as_ref() {
                         manager.run_after_run(ctx.clone() as Arc<dyn adk_core::InvocationContext>).await;
                     }
@@ -563,6 +613,7 @@ impl Runner {
             while let Some(result) = {
                 if let Some(token) = cancellation_token.as_ref() {
                     if token.is_cancelled() {
+                        #[cfg(feature = "plugins")]
                         if let Some(manager) = plugin_manager.as_ref() {
                             manager.run_after_run(ctx.clone() as Arc<dyn adk_core::InvocationContext>).await;
                         }
@@ -573,8 +624,10 @@ impl Runner {
             } {
                 match result {
                     Ok(event) => {
+                        #[cfg(feature = "plugins")]
                         let mut event = event;
 
+                        #[cfg(feature = "plugins")]
                         if let Some(manager) = plugin_manager.as_ref() {
                             match manager
                                 .run_on_event(
@@ -620,6 +673,7 @@ impl Runner {
                         // complete accumulated content.
                         if !event.llm_response.partial {
                             if let Err(e) = session_service.append_event(ctx.session_id(), event.clone()).await {
+                                #[cfg(feature = "plugins")]
                                 if let Some(manager) = plugin_manager.as_ref() {
                                     manager.run_after_run(ctx.clone() as Arc<dyn adk_core::InvocationContext>).await;
                                 }
@@ -630,6 +684,7 @@ impl Runner {
                         yield Ok(event);
                     }
                     Err(e) => {
+                        #[cfg(feature = "plugins")]
                         if let Some(manager) = plugin_manager.as_ref() {
                             manager.run_after_run(ctx.clone() as Arc<dyn adk_core::InvocationContext>).await;
                         }
@@ -701,6 +756,7 @@ impl Runner {
                     }
                 };
 
+                #[cfg(feature = "artifacts")]
                 if let Some(ref service) = artifact_service_clone {
                     let scoped = adk_artifact::ScopedArtifacts::new(
                         service.clone(),
@@ -724,6 +780,7 @@ impl Runner {
                 let mut transfer_stream = match target_agent.run(transfer_ctx.clone()).await {
                     Ok(s) => s,
                     Err(e) => {
+                        #[cfg(feature = "plugins")]
                         if let Some(manager) = plugin_manager.as_ref() {
                             manager.run_after_run(ctx.clone() as Arc<dyn adk_core::InvocationContext>).await;
                         }
@@ -736,6 +793,7 @@ impl Runner {
                 while let Some(result) = {
                     if let Some(token) = cancellation_token.as_ref() {
                         if token.is_cancelled() {
+                            #[cfg(feature = "plugins")]
                             if let Some(manager) = plugin_manager.as_ref() {
                                 manager.run_after_run(ctx.clone() as Arc<dyn adk_core::InvocationContext>).await;
                             }
@@ -746,7 +804,9 @@ impl Runner {
                 } {
                     match result {
                         Ok(event) => {
+                            #[cfg(feature = "plugins")]
                             let mut event = event;
+                            #[cfg(feature = "plugins")]
                             if let Some(manager) = plugin_manager.as_ref() {
                                 match manager
                                     .run_on_event(
@@ -782,6 +842,7 @@ impl Runner {
 
                             if !event.llm_response.partial {
                                 if let Err(e) = session_service.append_event(ctx.session_id(), event.clone()).await {
+                                    #[cfg(feature = "plugins")]
                                     if let Some(manager) = plugin_manager.as_ref() {
                                         manager.run_after_run(ctx.clone() as Arc<dyn adk_core::InvocationContext>).await;
                                     }
@@ -792,6 +853,7 @@ impl Runner {
                             yield Ok(event);
                         }
                         Err(e) => {
+                            #[cfg(feature = "plugins")]
                             if let Some(manager) = plugin_manager.as_ref() {
                                 manager.run_after_run(ctx.clone() as Arc<dyn adk_core::InvocationContext>).await;
                             }
@@ -870,6 +932,7 @@ impl Runner {
                 }
             }
 
+            #[cfg(feature = "plugins")]
             if let Some(manager) = plugin_manager.as_ref() {
                 manager.run_after_run(ctx.clone() as Arc<dyn adk_core::InvocationContext>).await;
             }

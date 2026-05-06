@@ -1,6 +1,6 @@
 //! # Slack Toolset Example
 //!
-//! Demonstrates the native Slack toolset from ADK-Rust v0.7.0 — sending
+//! Demonstrates the native Slack toolset from ADK-Rust v0.8.0 — sending
 //! messages, reading channels, adding reactions, and listing threads via
 //! the Slack API, all driven by an LLM agent.
 //!
@@ -103,7 +103,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     println!("╔══════════════════════════════════════════╗");
-    println!("║  Slack Toolset — ADK-Rust v0.7.0         ║");
+    println!("║  Slack Toolset — ADK-Rust v0.8.0         ║");
     println!("╚══════════════════════════════════════════╝\n");
 
     // Check for the LLM provider key (required for both modes).

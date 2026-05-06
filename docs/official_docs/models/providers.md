@@ -41,14 +41,14 @@ Add the providers you need to your `Cargo.toml`:
 ```toml
 [dependencies]
 # Pick one or more providers:
-adk-model = { version = "0.6.0", features = ["gemini"] }        # Google Gemini (default)
-adk-model = { version = "0.6.0", features = ["openai"] }        # OpenAI GPT-5
-adk-model = { version = "0.6.0", features = ["anthropic"] }     # Anthropic Claude
-adk-model = { version = "0.6.0", features = ["deepseek"] }      # DeepSeek
-adk-model = { version = "0.6.0", features = ["groq"] }          # Groq (ultra-fast)
+adk-model = { version = "0.8.0", features = ["gemini"] }        # Google Gemini (default)
+adk-model = { version = "0.8.0", features = ["openai"] }        # OpenAI GPT-5
+adk-model = { version = "0.8.0", features = ["anthropic"] }     # Anthropic Claude
+adk-model = { version = "0.8.0", features = ["deepseek"] }      # DeepSeek
+adk-model = { version = "0.8.0", features = ["groq"] }          # Groq (ultra-fast)
 
 # Or all cloud providers at once:
-adk-model = { version = "0.6.0", features = ["all-providers"] }
+adk-model = { version = "0.8.0", features = ["all-providers"] }
 ```
 
 ## Step 2: Set Your API Key
@@ -103,12 +103,11 @@ async fn main() -> anyhow::Result<()> {
 
 | Model | Description | Context |
 |-------|-------------|---------|
-| `gemini-3-pro` | Most intelligent, complex agentic workflows | 2M tokens |
-| `gemini-3-flash` | Fast and efficient for most tasks | 1M tokens |
+| `gemini-3.1-pro-preview` | Strongest reasoning for complex agentic workflows | 2M tokens |
+| `gemini-3-flash-preview` | Fast and efficient for code and agents | 1M tokens |
+| `gemini-3.1-flash-lite-preview` | Cheapest, fastest routing and high-volume tasks | 1M tokens |
 | `gemini-2.5-pro` | Advanced reasoning and multimodal | 1M tokens |
 | `gemini-2.5-flash` | Balanced speed and capability (recommended) | 1M tokens |
-| `gemini-2.5-flash-lite` | Ultra-fast for high-volume | 1M tokens |
-| `gemini-2.0-flash` | Previous generation (retiring March 2026) | 1M tokens |
 
 ### Thinking Mode
 
@@ -280,11 +279,10 @@ Available levels: `Low` (fastest), `Medium` (balanced), `High` (most thorough).
 
 | Model | Description | Context |
 |-------|-------------|---------|
-| `gpt-5.1` | Latest iteration with improved performance | 256K tokens |
 | `gpt-5` | State-of-the-art unified model with adaptive thinking | 256K tokens |
 | `gpt-5-mini` | Efficient version for most tasks (recommended) | 128K tokens |
-| `gpt-4o` | Multimodal model (deprecated August 2025) | 128K tokens |
-| `gpt-4o-mini` | Fast and affordable (deprecated August 2025) | 128K tokens |
+| `gpt-5-nano` | Lowest-cost routing and classification | 128K tokens |
+| `gpt-4.1` | Stable production model for legacy GPT-4.1 deployments | 1M tokens |
 
 ### Example Output
 
@@ -515,25 +513,15 @@ let agent = LlmAgentBuilder::new("assistant")
 
 ## Examples
 
-Examples are in the [adk-playground](https://github.com/zavora-ai/adk-playground) repo:
+Use cargo-adk to generate provider-specific projects with validated 0.8 dependencies:
 
 ```bash
-# Gemini (default)
-cargo run --example quickstart
-
-# OpenAI
-cargo run --example openai_basic --features openai
-
-# Anthropic
-cargo run --example anthropic_basic --features anthropic
-
-# DeepSeek
-cargo run --example deepseek_basic --features deepseek
-cargo run --example deepseek_reasoner --features deepseek  # Thinking mode
-
-# Groq
-cargo run --example groq_basic --features groq
+cargo adk new gemini_agent --provider gemini
+cargo adk new openai_agent --template openai
+cargo adk new anthropic_agent --provider anthropic
 ```
+
+The generated projects are compiled in CI by `scripts/check-cargo-adk-templates.sh`. The full example gallery is maintained in the [adk-playground](https://github.com/zavora-ai/adk-playground) repo.
 
 ---
 

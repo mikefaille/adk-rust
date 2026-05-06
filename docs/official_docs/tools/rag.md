@@ -29,10 +29,10 @@ This means your agent can answer questions about product docs, company policies,
 ```toml
 [dependencies]
 # Core only (in-memory store, all chunkers, no external deps)
-adk-rag = "0.6.0"
+adk-rag = "0.8.0"
 
 # With Gemini embeddings (recommended for getting started)
-adk-rag = { version = "0.6.0", features = ["gemini"] }
+adk-rag = { version = "0.8.0", features = ["gemini"] }
 ```
 
 ---
@@ -353,13 +353,13 @@ Only pull the dependencies you need:
 
 ```toml
 # Just core
-adk-rag = "0.6.0"
+adk-rag = "0.8.0"
 
 # With Gemini embeddings
-adk-rag = { version = "0.6.0", features = ["gemini"] }
+adk-rag = { version = "0.8.0", features = ["gemini"] }
 
 # Everything
-adk-rag = { version = "0.6.0", features = ["full"] }
+adk-rag = { version = "0.8.0", features = ["full"] }
 ```
 
 > **Note:** The `lancedb` feature requires `protoc` installed. Install with `brew install protobuf` (macOS) or `apt install protobuf-compiler` (Ubuntu).
@@ -386,15 +386,9 @@ The `RagPipeline` orchestrates both flows. The `RagTool` wraps the pipeline as a
 ## Run Examples
 
 ```bash
-# No API key needed
-cargo run --example rag_basic --features rag
-cargo run --example rag_markdown --features rag
-
-# Requires GOOGLE_API_KEY
-cargo run --example rag_agent --features rag-gemini
-cargo run --example rag_recursive --features rag-gemini
-cargo run --example rag_reranker --features rag-gemini
-cargo run --example rag_multi_collection --features rag-gemini
+cargo adk new rag_agent --template rag
+cd rag_agent
+cargo run
 ```
 
 ---

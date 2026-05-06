@@ -444,22 +444,9 @@ This adds a note to prevent the LLM from calling the tool repeatedly.
 ## Run Examples
 
 ```bash
-cd official_docs_examples/tools/function_tools_test
-
-# Basic tool with closure
-cargo run --bin basic
-
-# Tool with typed JSON schema
-cargo run --bin with_schema
-
-# Multi-tool agent (3 tools)
-cargo run --bin multi_tool
-
-# Tool context (session info)
-cargo run --bin context
-
-# Long-running tool
-cargo run --bin long_running
+cargo adk new tool_agent --template tools
+cd tool_agent
+cargo run
 ```
 
 ---

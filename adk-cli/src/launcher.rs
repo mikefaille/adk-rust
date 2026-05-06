@@ -466,9 +466,16 @@ impl Launcher {
                 }
             }
             TelemetryConfig::Otlp { service_name, endpoint } => {
+                #[cfg(feature = "telemetry-otlp")]
                 if let Err(e) = adk_telemetry::init_with_otlp(service_name, endpoint) {
                     warn!("failed to initialize otlp telemetry: {e}");
                 }
+                #[cfg(not(feature = "telemetry-otlp"))]
+                warn!(
+                    service.name = %service_name,
+                    otlp.endpoint = %endpoint,
+                    "otlp telemetry requested but the telemetry-otlp feature is disabled"
+                );
                 None
             }
             TelemetryConfig::None => None,

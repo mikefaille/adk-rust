@@ -14,9 +14,8 @@ readme = "README.md"
 
 [dependencies]
 adk-core.workspace = true
-adk-tool.workspace = true
 adk-telemetry.workspace = true
-adk-skill.workspace = true
+adk-skill = { workspace = true, optional = true }
 adk-guardrail = { workspace = true, optional = true }
 async-trait = { workspace = true }
 tokio = { workspace = true, features = ["time"] }
@@ -27,11 +26,14 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 
 [features]
-default = []
+default = ["skills"]
 guardrails = ["adk-guardrail"]
+skills = ["dep:adk-skill"]
+record-payloads = []
 
 [dev-dependencies]
 adk-model = { workspace = true, features = ["gemini"] }
+adk-tool = { workspace = true }
 dotenvy = "0.15"
 tempfile = "3"
 tokio = { workspace = true, features = ["rt", "macros"] }

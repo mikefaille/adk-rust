@@ -1,4 +1,4 @@
-//! # 01 — Minimal Hello World
+//! # 01 — Minimal Hello World (`adk::run()` one-liner)
 //!
 //! Verbatim from the README "Fastest Start" section.
 //! Uses default features (minimal tier) — no explicit features needed.
@@ -13,7 +13,7 @@ use adk_rust::run;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
-    // Set ANTHROPIC_API_KEY, OPENAI_API_KEY, or GOOGLE_API_KEY
+    // Minimal defaults to Gemini. Set GOOGLE_API_KEY.
     let response = run("You are a helpful assistant.", "What is 2 + 2?").await?;
     println!("{response}");
     Ok(())

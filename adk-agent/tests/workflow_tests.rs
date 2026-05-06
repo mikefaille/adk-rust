@@ -1,10 +1,9 @@
-use adk_agent::{
-    ConditionalAgent, CustomAgentBuilder, LlmConditionalAgentBuilder, LoopAgent, ParallelAgent,
-    SequentialAgent,
-};
-use adk_core::{
-    Agent, Content, Event, InvocationContext, LlmRequest, Part, ReadonlyContext, RunConfig,
-};
+#[cfg(feature = "skills")]
+use adk_agent::LlmConditionalAgentBuilder;
+use adk_agent::{ConditionalAgent, CustomAgentBuilder, LoopAgent, ParallelAgent, SequentialAgent};
+#[cfg(feature = "skills")]
+use adk_core::LlmRequest;
+use adk_core::{Agent, Content, Event, InvocationContext, Part, ReadonlyContext, RunConfig};
 use async_trait::async_trait;
 use futures::stream;
 use std::collections::HashMap;
@@ -121,16 +120,19 @@ impl InvocationContext for TestContext {
     }
 }
 
+#[cfg(feature = "skills")]
 struct MockRouterLlm {
     response_text: String,
 }
 
+#[cfg(feature = "skills")]
 impl MockRouterLlm {
     fn new(response_text: &str) -> Self {
         Self { response_text: response_text.to_string() }
     }
 }
 
+#[cfg(feature = "skills")]
 #[async_trait]
 impl adk_core::Llm for MockRouterLlm {
     fn name(&self) -> &str {
@@ -482,6 +484,7 @@ async fn test_conditional_agent_no_else() {
     assert!(result.is_none());
 }
 
+#[cfg(feature = "skills")]
 #[tokio::test]
 async fn test_sequential_agent_with_skills_injects_user_content() {
     let temp = tempfile::tempdir().unwrap();
@@ -532,6 +535,7 @@ async fn test_sequential_agent_with_skills_injects_user_content() {
     assert!(text.contains("[skill:search]"));
 }
 
+#[cfg(feature = "skills")]
 #[tokio::test]
 async fn test_parallel_agent_with_skills_injects_user_content() {
     let temp = tempfile::tempdir().unwrap();
@@ -581,6 +585,7 @@ async fn test_parallel_agent_with_skills_injects_user_content() {
     assert!(text.contains("[skill:search]"));
 }
 
+#[cfg(feature = "skills")]
 #[tokio::test]
 async fn test_conditional_agent_with_skills_injects_user_content() {
     let temp = tempfile::tempdir().unwrap();
@@ -630,6 +635,7 @@ async fn test_conditional_agent_with_skills_injects_user_content() {
     assert!(text.contains("[skill:search]"));
 }
 
+#[cfg(feature = "skills")]
 #[tokio::test]
 async fn test_llm_conditional_agent_with_skills_injects_user_content() {
     let temp = tempfile::tempdir().unwrap();

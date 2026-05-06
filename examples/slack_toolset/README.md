@@ -1,6 +1,6 @@
 # Slack Toolset Example
 
-Demonstrates the native Slack toolset from ADK-Rust v0.7.0 — an LLM agent that
+Demonstrates the native Slack toolset from ADK-Rust v0.8.0 — an LLM agent that
 reads channels, sends messages, adds reactions, and lists threads via the Slack API.
 
 ## What This Shows
@@ -56,7 +56,7 @@ cargo run --manifest-path examples/slack_toolset/Cargo.toml
 
 ```
 ╔══════════════════════════════════════════╗
-║  Slack Toolset — ADK-Rust v0.7.0         ║
+║  Slack Toolset — ADK-Rust v0.8.0         ║
 ╚══════════════════════════════════════════╝
 
 ⚠️  Running in dry-run mode (no SLACK_BOT_TOKEN set)
@@ -80,7 +80,7 @@ cargo run --manifest-path examples/slack_toolset/Cargo.toml
 
 ```
 ╔══════════════════════════════════════════╗
-║  Slack Toolset — ADK-Rust v0.7.0         ║
+║  Slack Toolset — ADK-Rust v0.8.0         ║
 ╚══════════════════════════════════════════╝
 
 🔑 Running in live mode with SLACK_BOT_TOKEN

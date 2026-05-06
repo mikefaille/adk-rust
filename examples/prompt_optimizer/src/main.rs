@@ -145,7 +145,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     println!("╔══════════════════════════════════════════╗");
-    println!("║  Prompt Optimizer — ADK-Rust v0.7.0      ║");
+    println!("║  Prompt Optimizer — ADK-Rust v0.8.0      ║");
     println!("╚══════════════════════════════════════════╝\n");
 
     let api_key = require_env("GOOGLE_API_KEY")?;

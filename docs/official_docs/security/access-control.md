@@ -126,10 +126,10 @@ sso.check_token(token, &permission).await?;
 
 ```toml
 [dependencies]
-adk-auth = "0.6.0"
+adk-auth = "0.8.0"
 
 # For SSO/OAuth support
-adk-auth = { version = "0.6.0", features = ["sso"] }
+adk-auth = { version = "0.8.0", features = ["sso"] }
 ```
 
 ## Core Components
@@ -318,15 +318,8 @@ impl AuditSink for DatabaseAuditSink {
 ## Examples
 
 ```bash
-# Core RBAC
-cargo run --example auth_basic          # Role-based access control
-cargo run --example auth_audit          # Audit logging
-
-# SSO (requires --features sso)
-cargo run --example auth_sso --features sso     # Complete SSO flow
-cargo run --example auth_jwt --features sso     # JWT validation
-cargo run --example auth_oidc --features sso    # OIDC discovery
-cargo run --example auth_google --features sso  # Google Identity
+cargo check -p adk-auth
+cargo check -p adk-auth --features sso
 ```
 
 ## Security Best Practices

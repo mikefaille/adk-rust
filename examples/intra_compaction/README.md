@@ -1,6 +1,6 @@
 # Intra-Compaction Example
 
-Demonstrates intra-invocation context compaction from ADK-Rust v0.7.0 — automatically summarizing older conversation events when the estimated token count exceeds a configurable threshold.
+Demonstrates intra-invocation context compaction from ADK-Rust v0.8.0 — automatically summarizing older conversation events when the estimated token count exceeds a configurable threshold.
 
 ## What This Shows
 
@@ -51,7 +51,7 @@ cargo run --manifest-path examples/intra_compaction/Cargo.toml
 
 ```
 ╔══════════════════════════════════════════╗
-║  Intra-Compaction — ADK-Rust v0.7.0      ║
+║  Intra-Compaction — ADK-Rust v0.8.0      ║
 ╚══════════════════════════════════════════╝
 
 --- Step 1: Compaction Configuration ---

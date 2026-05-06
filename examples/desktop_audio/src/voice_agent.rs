@@ -141,7 +141,6 @@ async fn main() -> anyhow::Result<()> {
         if speech {
             if !is_speaking {
                 is_speaking = true;
-                consecutive_silence = 0;
                 speech_buffer.clear();
                 println!("🎙️  Listening...");
             }

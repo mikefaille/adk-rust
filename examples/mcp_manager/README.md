@@ -19,7 +19,7 @@ Demonstrates `McpServerManager` from the `adk-tool` crate — managing the full 
 ## Running
 
 ```bash
-cargo run -p mcp-manager-example
+cargo run --manifest-path examples/mcp_manager/Cargo.toml
 ```
 
 ## Configuration

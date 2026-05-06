@@ -221,6 +221,8 @@ async fn validate_runner_builder() {
         cache_capable: None,
         request_context: None,
         cancellation_token: None,
+        intra_compaction_config: None,
+        intra_compaction_summarizer: None,
     })
     .unwrap();
     println!("  ✓ Runner::new(RunnerConfig {{ ... }}) still works (backward compat)");

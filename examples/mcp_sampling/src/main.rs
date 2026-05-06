@@ -104,7 +104,7 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|_| "gemini-2.5-flash".to_string());
 
     println!("╔══════════════════════════════════════════╗");
-    println!("║  MCP Sampling — ADK-Rust v0.7.0         ║");
+    println!("║  MCP Sampling — ADK-Rust v0.8.0         ║");
     println!("╚══════════════════════════════════════════╝\n");
 
     // --- Create the LLM provider ---

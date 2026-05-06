@@ -315,19 +315,9 @@ A2A errors map to both JSON-RPC codes and HTTP status codes:
 Two complete A2A v1.0.0 example agents are included:
 
 ```bash
-# Terminal 1: Start the research agent (port 3001)
-cd examples/a2a-research-agent
-cp .env.example .env  # add GOOGLE_API_KEY or OPENAI_API_KEY
-cargo run
-
-# Terminal 2: Start the writing agent (port 3002)
-cd examples/a2a-writing-agent
-cp .env.example .env
-cargo run --bin a2a-writing-agent
-
-# Terminal 3: Run the client that exercises all 11 operations
-cd examples/a2a-writing-agent
-cargo run --bin client
+cargo run --manifest-path examples/a2a-research-agent/Cargo.toml
+cargo run --manifest-path examples/a2a-writing-agent/Cargo.toml --bin a2a-writing-agent
+cargo run --manifest-path examples/a2a-writing-agent/Cargo.toml --bin client
 ```
 
 The client validates: agent card discovery, SendMessage (both agents with real LLM), GetTask, ListTasks, CancelTask error path, SendStreamingMessage, push notification CRUD, GetExtendedAgentCard, version negotiation, and error paths.

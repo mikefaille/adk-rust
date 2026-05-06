@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "adk-core"
-version = "0.5.0"
+version = "0.8.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -12,12 +12,13 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
+ "tokio",
  "uuid",
 ]
 
 [[package]]
 name = "adk-graph"
-version = "0.5.0"
+version = "0.8.0"
 dependencies = [
  "adk-core",
  "async-stream",

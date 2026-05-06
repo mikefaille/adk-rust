@@ -81,9 +81,10 @@ Welcome to the official documentation for ADK-Rust (Agent Development Kit for Ru
 ## Development
 
 - [Development Guidelines](development/development-guidelines.md) - Contributing guide and best practices
+- [Performance 0.8](development/performance-0-8.md) - Optimization release examples and adoption-focused validation
 
 ---
 
 ## Validation Status
 
-All code samples in this documentation are validated through working examples in the `official_docs_examples/` packages. Each documentation page has corresponding examples that compile and execute successfully.
+Copy-paste Cargo commands and dependency snippets in the README and official docs are validated by `scripts/check-doc-examples.sh`. CI also checks cargo-adk scaffolds with `scripts/check-cargo-adk-templates.sh`, rejects duplicate example target names with `scripts/check-example-name-collisions.sh`, and compiles workspace examples with `cargo check --workspace --examples`.

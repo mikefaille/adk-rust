@@ -118,8 +118,10 @@ impl Launcher {
                 app_name: app_name.clone(),
                 agent: agent.clone(),
                 session_service: session_service.clone(),
+                #[cfg(feature = "artifacts")]
                 artifact_service: None,
                 memory_service: self.memory_service.clone(),
+                #[cfg(feature = "plugins")]
                 plugin_manager: None,
                 run_config: None,
                 compaction_config: None,

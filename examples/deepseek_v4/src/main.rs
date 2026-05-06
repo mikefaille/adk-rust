@@ -41,6 +41,16 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tracing_subscriber::EnvFilter;
 
+fn preview_chars(text: &str, max_chars: usize) -> String {
+    let mut chars = text.chars();
+    let preview: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() {
+        format!("{preview}...")
+    } else {
+        preview
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tools for the agent
 // ---------------------------------------------------------------------------
@@ -126,12 +136,8 @@ async fn run_and_print(
                             print!("  💭 Thinking: ");
                             saw_thinking = true;
                         }
-                        // Show first 120 chars of reasoning
-                        let preview = if thinking.len() > 120 {
-                            format!("{}...", &thinking[..120])
-                        } else {
-                            thinking.clone()
-                        };
+                        // Show a compact, char-safe preview of reasoning output.
+                        let preview = preview_chars(thinking, 120);
                         print!("{preview}");
                     }
                     adk_core::Part::Text { text } => {
@@ -150,11 +156,7 @@ async fn run_and_print(
         println!();
     }
     // Truncate long responses
-    let display = if full_text.len() > 300 {
-        format!("{}...", &full_text[..300])
-    } else {
-        full_text
-    };
+    let display = preview_chars(&full_text, 300);
     if !display.is_empty() {
         println!("  📝 Response: {display}");
     }

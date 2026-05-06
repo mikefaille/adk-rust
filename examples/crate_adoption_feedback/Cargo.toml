@@ -15,7 +15,7 @@ adk-tool = { path = "../../adk-tool" }
 adk-session = { path = "../../adk-session" }
 adk-plugin = { path = "../../adk-plugin" }
 adk-guardrail = { path = "../../adk-guardrail" }
-adk-telemetry = { path = "../../adk-telemetry" }
+adk-telemetry = { path = "../../adk-telemetry", features = ["otlp"] }
 adk-memory = { path = "../../adk-memory", features = ["sqlite-memory"] }
 async-trait = "0.1"
 anyhow = "1.0"

@@ -1,13 +1,13 @@
 # Launcher
 
-The `Launcher` provides a simple, one-line way to run your ADK agents with built-in support for both interactive console mode and HTTP server mode. It handles CLI argument parsing, session management, and provides a consistent interface for deploying agents.
+The `Launcher` provides a simple, one-line way to run ADK agents. In the default minimal tier it is a lightweight console launcher from `adk-runner`. Enable an opt-in CLI feature such as `cli-openai` when you need the full CLI argument parser and HTTP server mode.
 
 ## Overview
 
 The Launcher is designed to make agent deployment as simple as possible. With a single line of code, you can:
 
 - Run your agent in an interactive console for testing and development
-- Deploy your agent as an HTTP server with a web UI
+- Deploy your agent as an HTTP server with a web UI when a `cli-*` feature or the cargo-adk `api` template is used
 - Customize the application name and artifact storage
 
 ## Basic Usage
@@ -32,7 +32,7 @@ async fn main() -> Result<()> {
         .model(model)
         .build()?;
     
-    // Run with CLI support (console by default)
+    // Run with the lightweight console launcher
     Launcher::new(Arc::new(agent)).run().await
 }
 ```
@@ -43,20 +43,17 @@ Run your agent:
 # Interactive console (default)
 cargo run
 
-# Or explicitly specify console mode
-cargo run -- chat
+# Full CLI mode is available when your app enables a `cli-*` feature
 ```
 
 ### Server Mode
 
-To run your agent as an HTTP server with a web UI:
+To run your agent as an HTTP server with a web UI, use the `api` template or enable a `cli-*` feature:
 
 ```bash
-# Start server on default port (8080)
-cargo run -- serve
-
-# Start server on custom port
-cargo run -- serve --port 3000
+cargo adk new my-api --template api
+cd my-api
+cargo run
 ```
 
 The server will start and display:
@@ -185,7 +182,7 @@ The server includes a built-in web UI accessible at `http://localhost:8080/ui/`.
 
 ## CLI Arguments
 
-The Launcher supports the following CLI commands:
+The full CLI launcher supports the following commands when a `cli-*` feature is enabled:
 
 | Command | Description | Example |
 |---------|-------------|---------|
@@ -233,7 +230,7 @@ async fn main() -> Result<()> {
         .tool(Arc::new(weather_tool))
         .build()?;
     
-    // Run with Launcher (supports both console and server modes via CLI)
+    // Run with Launcher. Enable a `cli-*` feature for full CLI/server mode.
     Launcher::new(Arc::new(agent))
         .app_name("weather_app")
         .run()
@@ -247,10 +244,12 @@ Run in console mode:
 cargo run
 ```
 
-Run in server mode:
+Run in server mode from a generated API project:
 
 ```bash
-cargo run -- serve --port 8080
+cargo adk new weather-api --template api
+cd weather-api
+cargo run
 ```
 
 ## Best Practices

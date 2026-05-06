@@ -18,8 +18,10 @@
 use std::marker::PhantomData;
 use std::sync::Arc;
 
+#[cfg(feature = "artifacts")]
 use adk_artifact::ArtifactService;
 use adk_core::{Agent, CacheCapable, ContextCacheConfig, Memory, Result, RunConfig};
+#[cfg(feature = "plugins")]
 use adk_plugin::PluginManager;
 use adk_session::SessionService;
 use tokio_util::sync::CancellationToken;
@@ -55,8 +57,10 @@ pub struct RunnerConfigBuilder<A, G, S> {
     app_name: Option<String>,
     agent: Option<Arc<dyn Agent>>,
     session_service: Option<Arc<dyn SessionService>>,
+    #[cfg(feature = "artifacts")]
     artifact_service: Option<Arc<dyn ArtifactService>>,
     memory_service: Option<Arc<dyn Memory>>,
+    #[cfg(feature = "plugins")]
     plugin_manager: Option<Arc<PluginManager>>,
     run_config: Option<RunConfig>,
     compaction_config: Option<adk_core::EventsCompactionConfig>,
@@ -76,8 +80,10 @@ impl RunnerConfigBuilder<NoAppName, NoAgent, NoSessionService> {
             app_name: None,
             agent: None,
             session_service: None,
+            #[cfg(feature = "artifacts")]
             artifact_service: None,
             memory_service: None,
+            #[cfg(feature = "plugins")]
             plugin_manager: None,
             run_config: None,
             compaction_config: None,
@@ -109,8 +115,10 @@ impl<A, G, S> RunnerConfigBuilder<A, G, S> {
             app_name: Some(name.into()),
             agent: self.agent,
             session_service: self.session_service,
+            #[cfg(feature = "artifacts")]
             artifact_service: self.artifact_service,
             memory_service: self.memory_service,
+            #[cfg(feature = "plugins")]
             plugin_manager: self.plugin_manager,
             run_config: self.run_config,
             compaction_config: self.compaction_config,
@@ -130,8 +138,10 @@ impl<A, G, S> RunnerConfigBuilder<A, G, S> {
             app_name: self.app_name,
             agent: Some(agent),
             session_service: self.session_service,
+            #[cfg(feature = "artifacts")]
             artifact_service: self.artifact_service,
             memory_service: self.memory_service,
+            #[cfg(feature = "plugins")]
             plugin_manager: self.plugin_manager,
             run_config: self.run_config,
             compaction_config: self.compaction_config,
@@ -154,8 +164,10 @@ impl<A, G, S> RunnerConfigBuilder<A, G, S> {
             app_name: self.app_name,
             agent: self.agent,
             session_service: Some(service),
+            #[cfg(feature = "artifacts")]
             artifact_service: self.artifact_service,
             memory_service: self.memory_service,
+            #[cfg(feature = "plugins")]
             plugin_manager: self.plugin_manager,
             run_config: self.run_config,
             compaction_config: self.compaction_config,
@@ -176,6 +188,7 @@ impl<A, G, S> RunnerConfigBuilder<A, G, S> {
 
 impl<A, G, S> RunnerConfigBuilder<A, G, S> {
     /// Set the artifact service (optional).
+    #[cfg(feature = "artifacts")]
     pub fn artifact_service(mut self, service: Arc<dyn ArtifactService>) -> Self {
         self.artifact_service = Some(service);
         self
@@ -188,6 +201,7 @@ impl<A, G, S> RunnerConfigBuilder<A, G, S> {
     }
 
     /// Set the plugin manager (optional).
+    #[cfg(feature = "plugins")]
     pub fn plugin_manager(mut self, manager: Arc<PluginManager>) -> Self {
         self.plugin_manager = Some(manager);
         self
@@ -265,8 +279,10 @@ impl RunnerConfigBuilder<HasAppName, HasAgent, HasSessionService> {
             session_service: self
                 .session_service
                 .expect("typestate guarantees session_service is set"),
+            #[cfg(feature = "artifacts")]
             artifact_service: self.artifact_service,
             memory_service: self.memory_service,
+            #[cfg(feature = "plugins")]
             plugin_manager: self.plugin_manager,
             run_config: self.run_config,
             compaction_config: self.compaction_config,

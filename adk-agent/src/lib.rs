@@ -72,6 +72,7 @@ pub mod compaction;
 mod custom_agent;
 pub mod guardrails;
 mod llm_agent;
+mod skill_shim;
 pub mod tool_call_markup;
 mod workflow;
 

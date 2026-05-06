@@ -9,7 +9,7 @@ publish = false
 [dependencies]
 adk-rust = { path = "../../adk-rust", features = ["bedrock"] }
 adk-tool = { path = "../../adk-tool" }
-schemars = "0.8"
+schemars = "1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tokio = { version = "1.40", features = ["full"] }

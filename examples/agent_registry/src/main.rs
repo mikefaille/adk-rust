@@ -1,6 +1,6 @@
 //! # Agent Registry Example
 //!
-//! Demonstrates the Agent Registry REST API from ADK-Rust v0.7.0.
+//! Demonstrates the Agent Registry REST API from ADK-Rust v0.8.0.
 //!
 //! ## What This Shows
 //! - Starting an in-process HTTP server hosting the Agent Registry REST API
@@ -34,7 +34,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     println!("╔══════════════════════════════════════════╗");
-    println!("║  Agent Registry — ADK-Rust v0.7.0        ║");
+    println!("║  Agent Registry — ADK-Rust v0.8.0        ║");
     println!("╚══════════════════════════════════════════╝\n");
 
     // --- Step 1: Create the in-memory registry store ---

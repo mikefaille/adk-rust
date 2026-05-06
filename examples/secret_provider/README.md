@@ -32,7 +32,7 @@ cargo run --manifest-path examples/secret_provider/Cargo.toml
 
 ```
 ╔══════════════════════════════════════════╗
-║  Secret Provider — ADK-Rust v0.7.0       ║
+║  Secret Provider — ADK-Rust v0.8.0       ║
 ╚══════════════════════════════════════════╝
 
 --- Step 1: EnvSecretProvider (reads secrets from env vars) ---

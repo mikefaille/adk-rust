@@ -1,8 +1,10 @@
+#[cfg(feature = "skills")]
+use crate::skill_shim::load_skill_index;
+use crate::skill_shim::{SelectionPolicy, SkillIndex};
 use adk_core::{
     AfterAgentCallback, Agent, BeforeAgentCallback, CallbackContext, Content, Event, EventStream,
     InvocationContext, ReadonlyContext, Result, Session, State,
 };
-use adk_skill::{SelectionPolicy, SkillIndex, load_skill_index};
 use async_stream::stream;
 use async_trait::async_trait;
 use std::collections::HashMap;
@@ -50,26 +52,31 @@ impl LoopAgent {
         self
     }
 
+    #[cfg(feature = "skills")]
     pub fn with_skills(mut self, index: SkillIndex) -> Self {
         self.skills_index = Some(Arc::new(index));
         self
     }
 
+    #[cfg(feature = "skills")]
     pub fn with_auto_skills(self) -> Result<Self> {
         self.with_skills_from_root(".")
     }
 
+    #[cfg(feature = "skills")]
     pub fn with_skills_from_root(mut self, root: impl AsRef<std::path::Path>) -> Result<Self> {
         let index = load_skill_index(root).map_err(|e| adk_core::AdkError::agent(e.to_string()))?;
         self.skills_index = Some(Arc::new(index));
         Ok(self)
     }
 
+    #[cfg(feature = "skills")]
     pub fn with_skill_policy(mut self, policy: SelectionPolicy) -> Self {
         self.skill_policy = policy;
         self
     }
 
+    #[cfg(feature = "skills")]
     pub fn with_skill_budget(mut self, max_chars: usize) -> Self {
         self.max_skill_chars = max_chars;
         self

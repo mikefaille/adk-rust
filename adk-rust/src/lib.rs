@@ -522,7 +522,7 @@ pub mod model {
 /// - [`FunctionTool`](tool::FunctionTool) - Wrap async functions as tools
 /// - [`GoogleSearchTool`](tool::GoogleSearchTool) - Web search
 /// - [`ExitLoopTool`](tool::ExitLoopTool) - Control loop agents
-/// - [`McpToolset`](tool::McpToolset) - MCP server integration
+/// - `McpToolset` - MCP server integration with the `mcp` feature
 ///
 /// Available with feature: `tools`
 #[cfg(feature = "tools")]
@@ -981,7 +981,9 @@ pub mod avatar {
 /// Detect LLM provider from environment variables.
 ///
 /// Checks environment variables in precedence order and returns the first
-/// matching provider:
+/// matching provider that was compiled through Cargo features. The default
+/// `minimal` tier detects Gemini via `GOOGLE_API_KEY`; add `openai` or
+/// `anthropic` to widen detection.
 ///
 /// 1. `ANTHROPIC_API_KEY` → Anthropic (Claude)
 /// 2. `OPENAI_API_KEY` → OpenAI
@@ -1010,7 +1012,7 @@ pub fn provider_from_env() -> Result<std::sync::Arc<dyn Llm>> {
     #[cfg(feature = "openai")]
     {
         if let Ok(key) = std::env::var("OPENAI_API_KEY") {
-            let config = model::openai::OpenAIConfig::new(key, "gpt-4o-mini");
+            let config = model::openai::OpenAIConfig::new(key, "gpt-5-mini");
             return Ok(std::sync::Arc::new(model::openai::OpenAIClient::new(config)?));
         }
     }
@@ -1126,22 +1128,14 @@ pub async fn run(instructions: &str, input: &str) -> Result<String> {
         })
         .await?;
 
-    let runner = runner::Runner::new(runner::RunnerConfig {
-        app_name: "adk_run".into(),
-        agent: Arc::new(agent),
-        session_service,
-        artifact_service: None,
-        memory_service: None,
-        plugin_manager: None,
-        run_config: None,
-        compaction_config: None,
-        context_cache_config: None,
-        cache_capable,
-        request_context: None,
-        cancellation_token: None,
-        intra_compaction_config: None,
-        intra_compaction_summarizer: None,
-    })?;
+    let mut runner_builder = runner::Runner::builder()
+        .app_name("adk_run")
+        .agent(Arc::new(agent))
+        .session_service(session_service);
+    if let Some(cache_capable) = cache_capable {
+        runner_builder = runner_builder.cache_capable(cache_capable);
+    }
+    let runner = runner_builder.build()?;
 
     let content = Content::new("user").with_text(input);
     let mut stream = runner.run(UserId::new("user")?, session_id, content).await?;
@@ -1198,7 +1192,7 @@ pub mod prelude {
     };
 
     // Models
-    #[cfg(feature = "models")]
+    #[cfg(feature = "gemini")]
     pub use crate::model::GeminiModel;
 
     // Model providers (when specific features are enabled)
@@ -1236,9 +1230,11 @@ pub mod prelude {
     pub use crate::model::azure_ai::{AzureAIClient, AzureAIConfig};
 
     // Tools
+    #[cfg(feature = "mcp")]
+    pub use crate::tool::McpToolset;
     #[cfg(feature = "tools")]
     pub use crate::tool::{
-        BasicToolset, ExitLoopTool, FunctionTool, GoogleSearchTool, LoadArtifactsTool, McpToolset,
+        BasicToolset, ExitLoopTool, FunctionTool, GoogleSearchTool, LoadArtifactsTool,
         UrlContextTool, WebSearchTool,
     };
 

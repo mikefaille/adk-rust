@@ -15,10 +15,10 @@ Guardrails validate and transform agent inputs and outputs to ensure safety, com
 
 ```toml
 [dependencies]
-adk-guardrail = "0.6.0"
+adk-guardrail = "0.8.0"
 
 # For JSON schema validation
-adk-guardrail = { version = "0.6.0", features = ["schema"] }
+adk-guardrail = { version = "0.8.0", features = ["schema"] }
 ```
 
 ## Core Concepts
@@ -303,14 +303,8 @@ Final Response
 ## Examples
 
 ```bash
-# Basic PII and content filtering
-cargo run --example guardrail_basic --features guardrails
-
-# JSON schema validation
-cargo run --example guardrail_schema --features guardrails
-
-# Full agent integration
-cargo run --example guardrail_agent --features guardrails
+cargo check -p adk-guardrail
+cargo check -p adk-rust --no-default-features --features guardrail
 ```
 
 ## Best Practices

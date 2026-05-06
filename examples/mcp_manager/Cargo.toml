@@ -8,7 +8,7 @@ publish = false
 
 [dependencies]
 adk-core = { path = "../../adk-core" }
-adk-tool = { path = "../../adk-tool" }
+adk-tool = { path = "../../adk-tool", features = ["mcp"] }
 tokio = { version = "1.40", features = ["full"] }
 serde_json = "1.0"
 tracing = "0.1"

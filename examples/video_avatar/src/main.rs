@@ -1,6 +1,6 @@
 //! # Video Avatar Example
 //!
-//! Demonstrates the video avatar configuration API from ADK-Rust v0.7.0.
+//! Demonstrates the video avatar configuration API from ADK-Rust v0.8.0.
 //!
 //! ## What This Shows
 //! - Building an `AvatarConfig` with source URL, lip-sync, and rendering settings
@@ -31,7 +31,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     println!("╔══════════════════════════════════════════╗");
-    println!("║  Video Avatar — ADK-Rust v0.7.0          ║");
+    println!("║  Video Avatar — ADK-Rust v0.8.0          ║");
     println!("╚══════════════════════════════════════════╝\n");
 
     // =========================================================================
@@ -68,6 +68,7 @@ async fn main() -> anyhow::Result<()> {
             // 30 fps provides smooth motion for most use cases.
             frame_rate: Some(30),
         }),
+        provider: None,
     };
 
     println!("📹 Built AvatarConfig:");
@@ -161,6 +162,7 @@ async fn main() -> anyhow::Result<()> {
         source_url: "https://example.com/avatars/simple.png".to_string(),
         lip_sync: None,
         rendering: None,
+        provider: None,
     };
 
     let minimal_json = serde_json::to_string_pretty(&minimal_config)?;

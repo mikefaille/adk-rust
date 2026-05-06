@@ -16,6 +16,8 @@ use clap::{Parser, Subcommand};
 use std::fs;
 use std::path::Path;
 
+const ADK_VERSION: &str = env!("CARGO_PKG_VERSION");
+
 #[derive(Parser)]
 #[command(name = "cargo-adk", bin_name = "cargo")]
 struct Cargo {
@@ -78,7 +80,7 @@ fn print_templates() {
     println!("  tools    Agent with custom function tools using #[tool] macro");
     println!("  rag      RAG agent with document ingestion and vector search");
     println!("  api      REST API server with health check and A2A protocol");
-    println!("  openai   OpenAI-powered agent (GPT-4o-mini)");
+    println!("  openai   OpenAI-powered agent (gpt-5-mini)");
     println!("\nUsage: cargo adk new my-agent --template <template>");
 }
 
@@ -122,25 +124,40 @@ fn create_project(name: &str, template: &str, provider: &str) -> Result<(), Stri
 
 // ── Template generators ─────────────────────────────────────────
 
-fn provider_dep(provider: &str) -> (&str, &str, &str) {
+fn provider_features(provider: &str) -> Vec<&'static str> {
+    match provider {
+        "openai" => vec!["agents", "models", "openai", "runner", "sessions"],
+        "anthropic" => vec!["agents", "models", "anthropic", "runner", "sessions"],
+        _ => vec!["minimal"],
+    }
+}
+
+fn adk_rust_dep(features: &[&str]) -> String {
+    format!(
+        r#"adk-rust = {{ version = "{ADK_VERSION}", default-features = false, features = [{}] }}"#,
+        features.iter().map(|feature| format!(r#""{feature}""#)).collect::<Vec<_>>().join(", ")
+    )
+}
+
+fn provider_dep(provider: &str) -> (String, &str, &str) {
     // Returns (feature_flags, model_constructor, env_var)
     match provider {
         "openai" => (
-            r#"adk-rust = { version = "0.4", default-features = false, features = ["standard", "openai"] }"#,
+            adk_rust_dep(&provider_features(provider)),
             r#"let model = adk_rust::model::openai::OpenAIClient::new(
-        adk_rust::model::openai::OpenAIConfig::new(&api_key, "gpt-4o-mini"),
+        adk_rust::model::openai::OpenAIConfig::new(&api_key, "gpt-5-mini"),
     )?;"#,
             "OPENAI_API_KEY",
         ),
         "anthropic" => (
-            r#"adk-rust = { version = "0.4", default-features = false, features = ["standard", "anthropic"] }"#,
+            adk_rust_dep(&provider_features(provider)),
             r#"let model = adk_rust::model::anthropic::AnthropicClient::new(
         adk_rust::model::anthropic::AnthropicConfig::new(&api_key, "claude-sonnet-4-5-20250929"),
     )?;"#,
             "ANTHROPIC_API_KEY",
         ),
         _ => (
-            r#"adk-rust = "0.4""#,
+            adk_rust_dep(&provider_features("gemini")),
             r#"let model = adk_rust::model::GeminiModel::new(&api_key, "gemini-2.5-flash")?;"#,
             "GOOGLE_API_KEY",
         ),
@@ -201,13 +218,13 @@ edition = "2024"
 
 [dependencies]
 {dep}
-adk-tool = "0.4"
+adk-tool = "{ADK_VERSION}"
 tokio = {{ version = "1", features = ["full"] }}
 dotenvy = "0.15"
 anyhow = "1"
 serde = {{ version = "1", features = ["derive"] }}
 serde_json = "1"
-schemars = "0.8"
+schemars = "1"
 "#
     );
 
@@ -266,9 +283,9 @@ fn generate_rag(name: &str, provider: &str) -> (String, String, String) {
     let (_, model_code, env_var) = provider_dep(provider);
     // RAG always needs gemini for embeddings
     let dep = if provider == "gemini" {
-        r#"adk-rust = { version = "0.4", features = ["rag"] }"#
+        adk_rust_dep(&["agents", "models", "gemini", "runner", "sessions", "rag"])
     } else {
-        &format!(r#"adk-rust = {{ version = "0.4", features = ["rag", "{provider}"] }}"#)
+        adk_rust_dep(&["agents", "models", provider, "runner", "sessions", "rag"])
     };
 
     let cargo = format!(
@@ -279,7 +296,7 @@ edition = "2024"
 
 [dependencies]
 {dep}
-adk-rag = {{ version = "0.4", features = ["gemini"] }}
+adk-rag = {{ version = "{ADK_VERSION}", features = ["gemini"] }}
 tokio = {{ version = "1", features = ["full"] }}
 dotenvy = "0.15"
 anyhow = "1"
@@ -347,9 +364,9 @@ async fn main() -> anyhow::Result<()> {{
 fn generate_api(name: &str, provider: &str) -> (String, String, String) {
     let (_, model_code, env_var) = provider_dep(provider);
     let dep = if provider == "gemini" {
-        r#"adk-rust = { version = "0.4", features = ["server"] }"#
+        adk_rust_dep(&["agents", "models", "gemini", "runner", "sessions", "server"])
     } else {
-        &format!(r#"adk-rust = {{ version = "0.4", features = ["server", "{provider}"] }}"#)
+        adk_rust_dep(&["agents", "models", provider, "runner", "sessions", "server"])
     };
 
     let cargo = format!(
@@ -411,4 +428,45 @@ async fn main() -> anyhow::Result<()> {{
 
     let env = format!("{env_var}=your-api-key-here\nPORT=8080\n");
     (cargo, main, env)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assert_current_template(cargo_toml: &str) {
+        assert!(
+            cargo_toml.contains(&format!(r#"version = "{ADK_VERSION}""#)),
+            "template must use the cargo-adk package version"
+        );
+        assert!(
+            !cargo_toml.contains("0.4") && !cargo_toml.contains("standard"),
+            "template should not use stale versions or the heavy standard preset"
+        );
+    }
+
+    #[test]
+    fn basic_templates_use_current_lean_dependencies() {
+        for provider in ["gemini", "openai", "anthropic"] {
+            let (cargo_toml, _, _) = generate_basic("assistant", provider);
+            assert_current_template(&cargo_toml);
+            assert!(cargo_toml.contains("default-features = false"));
+        }
+    }
+
+    #[test]
+    fn tool_template_uses_schemars_one_and_current_adk_tool() {
+        let (cargo_toml, _, _) = generate_tools("toolbox", "gemini");
+        assert_current_template(&cargo_toml);
+        assert!(cargo_toml.contains(&format!(r#"adk-tool = "{ADK_VERSION}""#)));
+        assert!(cargo_toml.contains(r#"schemars = "1""#));
+    }
+
+    #[test]
+    fn rag_and_api_templates_use_current_versions() {
+        for generator in [generate_rag, generate_api] {
+            let (cargo_toml, _, _) = generator("assistant", "gemini");
+            assert_current_template(&cargo_toml);
+        }
+    }
 }

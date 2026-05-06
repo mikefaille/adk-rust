@@ -179,7 +179,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     println!("╔══════════════════════════════════════════╗");
-    println!("║  ServerBuilder — ADK-Rust v0.7.0         ║");
+    println!("║  ServerBuilder — ADK-Rust v0.8.0         ║");
     println!("╚══════════════════════════════════════════╝\n");
 
     // --- Step 1: Create a minimal ServerConfig ---

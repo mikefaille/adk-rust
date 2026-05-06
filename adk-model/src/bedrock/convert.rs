@@ -46,7 +46,7 @@ pub(crate) fn adk_request_to_bedrock(
     config: Option<&GenerateContentConfig>,
     prompt_caching: Option<&BedrockCacheConfig>,
 ) -> Result<BedrockConverseInput, String> {
-    let mut messages = Vec::new();
+    let mut messages: Vec<Message> = Vec::new();
     let mut system = Vec::new();
 
     for content in contents {
@@ -73,6 +73,21 @@ pub(crate) fn adk_request_to_bedrock(
 
                 let blocks = adk_parts_to_bedrock(&content.parts);
                 if !blocks.is_empty() {
+                    let is_tool_result_message = matches!(role, "function" | "tool")
+                        && blocks.iter().all(|block| matches!(block, ContentBlock::ToolResult(_)));
+
+                    if is_tool_result_message
+                        && let Some(last_message) = messages.last_mut()
+                        && last_message.role == ConversationRole::User
+                        && last_message
+                            .content
+                            .iter()
+                            .all(|block| matches!(block, ContentBlock::ToolResult(_)))
+                    {
+                        last_message.content.extend(blocks);
+                        continue;
+                    }
+
                     let msg = Message::builder()
                         .role(bedrock_role)
                         .set_content(Some(blocks))
@@ -112,11 +127,13 @@ fn build_cache_point_block(cache_config: &BedrockCacheConfig) -> CachePointBlock
 
 /// Convert ADK `Part` list to Bedrock `ContentBlock` list.
 fn adk_parts_to_bedrock(parts: &[Part]) -> Vec<ContentBlock> {
+    let contains_function_call = parts.iter().any(|part| matches!(part, Part::FunctionCall { .. }));
+
     parts
         .iter()
         .filter_map(|part| match part {
             Part::Text { text } => {
-                if text.is_empty() {
+                if text.is_empty() || contains_function_call {
                     None
                 } else {
                     Some(ContentBlock::Text(text.clone()))
@@ -142,7 +159,7 @@ fn adk_parts_to_bedrock(parts: &[Part]) -> Vec<ContentBlock> {
                 Some(ContentBlock::ToolResult(tool_result))
             }
             Part::Thinking { thinking, .. } => {
-                if thinking.is_empty() {
+                if thinking.is_empty() || contains_function_call {
                     None
                 } else {
                     // Bedrock Converse API doesn't accept thinking blocks in input,
@@ -467,29 +484,9 @@ pub(crate) fn bedrock_stream_delta_to_adk(delta: &ContentBlockDelta) -> Option<L
                 })
             }
         }
-        ContentBlockDelta::ToolUse(tool_delta) => {
-            // Tool use deltas contain partial JSON argument strings.
-            // We emit them as partial text so the client can accumulate.
-            if tool_delta.input.is_empty() {
-                None
-            } else {
-                Some(LlmResponse {
-                    content: Some(Content {
-                        role: "model".to_string(),
-                        parts: vec![Part::Text { text: tool_delta.input.clone() }],
-                    }),
-                    usage_metadata: None,
-                    finish_reason: None,
-                    citation_metadata: None,
-                    partial: true,
-                    turn_complete: false,
-                    interrupted: false,
-                    error_code: None,
-                    error_message: None,
-                    provider_metadata: None,
-                })
-            }
-        }
+        // Tool-use deltas are partial JSON arguments. The streaming client
+        // buffers them and emits one complete FunctionCall at ContentBlockStop.
+        ContentBlockDelta::ToolUse(_) => None,
         ContentBlockDelta::ReasoningContent(reasoning_delta) => {
             if let Ok(text) = reasoning_delta.as_text() {
                 if text.is_empty() {
@@ -678,6 +675,29 @@ mod tests {
     }
 
     #[test]
+    fn test_function_call_history_drops_assistant_preamble_text() {
+        let contents = vec![Content {
+            role: "model".to_string(),
+            parts: vec![
+                Part::Text { text: "Let me check that.".to_string() },
+                Part::FunctionCall {
+                    name: "get_weather".to_string(),
+                    args: serde_json::json!({"city": "Seattle"}),
+                    id: Some("call_123".to_string()),
+                    thought_signature: None,
+                },
+            ],
+        }];
+
+        let result = adk_request_to_bedrock(&contents, &HashMap::new(), None, None).unwrap();
+        assert_eq!(result.messages.len(), 1);
+
+        let blocks = &result.messages[0].content;
+        assert_eq!(blocks.len(), 1);
+        assert!(matches!(&blocks[0], ContentBlock::ToolUse(_)));
+    }
+
+    #[test]
     fn test_function_response_conversion() {
         let contents = vec![Content {
             role: "user".to_string(),
@@ -696,6 +716,57 @@ mod tests {
         let blocks = &result.messages[0].content;
         assert_eq!(blocks.len(), 1);
         assert!(matches!(&blocks[0], ContentBlock::ToolResult(_)));
+    }
+
+    #[test]
+    fn test_consecutive_tool_results_are_merged_for_bedrock() {
+        let contents = vec![
+            Content {
+                role: "model".to_string(),
+                parts: vec![
+                    Part::FunctionCall {
+                        name: "review_architecture".to_string(),
+                        args: serde_json::json!({"system": "api", "rps": 5000}),
+                        id: Some("call_review".to_string()),
+                        thought_signature: None,
+                    },
+                    Part::FunctionCall {
+                        name: "analyze_threats".to_string(),
+                        args: serde_json::json!({"components": ["api", "database"]}),
+                        id: Some("call_threats".to_string()),
+                        thought_signature: None,
+                    },
+                ],
+            },
+            Content {
+                role: "function".to_string(),
+                parts: vec![Part::FunctionResponse {
+                    function_response: FunctionResponseData::new(
+                        "review_architecture",
+                        serde_json::json!({"tier": "growth"}),
+                    ),
+                    id: Some("call_review".to_string()),
+                }],
+            },
+            Content {
+                role: "function".to_string(),
+                parts: vec![Part::FunctionResponse {
+                    function_response: FunctionResponseData::new(
+                        "analyze_threats",
+                        serde_json::json!({"components_analyzed": 2}),
+                    ),
+                    id: Some("call_threats".to_string()),
+                }],
+            },
+        ];
+
+        let result = adk_request_to_bedrock(&contents, &HashMap::new(), None, None).unwrap();
+
+        assert_eq!(result.messages.len(), 2);
+        assert_eq!(result.messages[0].role, ConversationRole::Assistant);
+        assert_eq!(result.messages[1].role, ConversationRole::User);
+        assert_eq!(result.messages[1].content.len(), 2);
+        assert!(result.messages[1].content.iter().all(ContentBlock::is_tool_result));
     }
 
     #[test]
@@ -764,6 +835,15 @@ mod tests {
     #[test]
     fn test_stream_empty_text_delta_skipped() {
         let delta = ContentBlockDelta::Text(String::new());
+        assert!(bedrock_stream_delta_to_adk(&delta).is_none());
+    }
+
+    #[test]
+    fn test_stream_tool_use_delta_is_buffered_not_emitted_as_text() {
+        let delta = ContentBlockDelta::ToolUse(
+            bedrock::ToolUseBlockDelta::builder().input(r#"{"city":"Seattle"}"#).build().unwrap(),
+        );
+
         assert!(bedrock_stream_delta_to_adk(&delta).is_none());
     }
 

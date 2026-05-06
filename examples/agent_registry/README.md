@@ -1,6 +1,6 @@
 # Agent Registry Example
 
-Demonstrates the Agent Registry REST API from ADK-Rust v0.7.0 for registering, discovering, filtering, and managing agent cards.
+Demonstrates the Agent Registry REST API from ADK-Rust v0.8.0 for registering, discovering, filtering, and managing agent cards.
 
 ## What This Shows
 
@@ -44,7 +44,7 @@ cargo run --manifest-path examples/agent_registry/Cargo.toml
 
 ```
 ╔══════════════════════════════════════════╗
-║  Agent Registry — ADK-Rust v0.7.0        ║
+║  Agent Registry — ADK-Rust v0.8.0        ║
 ╚══════════════════════════════════════════╝
 
 📦 Created in-memory agent registry store

@@ -253,6 +253,8 @@ async fn make_runner(agent: Arc<dyn Agent>, session_id: &str) -> anyhow::Result<
         cache_capable: None,
         request_context: None,
         cancellation_token: None,
+        intra_compaction_config: None,
+        intra_compaction_summarizer: None,
     })?)
 }
 

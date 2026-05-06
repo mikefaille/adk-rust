@@ -40,11 +40,12 @@ pub use spans::*;
 pub use span_exporter::*;
 
 // Re-export init functions and error type
-pub use init::{
-    TelemetryError, build_otlp_layer, init_telemetry, init_with_adk_exporter, init_with_otlp,
-    shutdown_telemetry,
-};
+pub use init::{TelemetryError, init_telemetry, init_with_adk_exporter, shutdown_telemetry};
+#[cfg(feature = "otlp")]
+pub use init::{build_otlp_layer, init_with_otlp};
 
 // Re-export metrics
+#[cfg(feature = "otlp")]
 pub use opentelemetry::global;
+#[cfg(feature = "otlp")]
 pub use opentelemetry::metrics::{Meter, MeterProvider};

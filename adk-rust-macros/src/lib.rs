@@ -300,7 +300,7 @@ fn extract_args_type(func: &ItemFn) -> Option<Type> {
             // Skip context parameters (Arc<dyn ToolContext>)
             let ty = &pat_type.ty;
             let ty_str = quote!(#ty).to_string();
-            if ty_str.contains("ToolContext") || ty_str.contains("Arc") {
+            if ty_str.contains("ToolContext") {
                 continue;
             }
             return Some((*pat_type.ty).clone());

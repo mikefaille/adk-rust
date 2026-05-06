@@ -1,6 +1,9 @@
 use adk_core::{Result, Tool, ToolContext};
 use async_trait::async_trait;
-use schemars::{JsonSchema, schema::RootSchema};
+use schemars::{
+    JsonSchema,
+    generate::{SchemaGenerator, SchemaSettings},
+};
 use serde::Serialize;
 use serde_json::Value;
 use std::future::Future;
@@ -212,12 +215,14 @@ fn generate_schema<T>() -> Value
 where
     T: JsonSchema + Serialize,
 {
-    let settings = schemars::r#gen::SchemaSettings::openapi3().with(|s| {
+    let settings = SchemaSettings::openapi3().with(|s| {
         s.inline_subschemas = true;
         s.meta_schema = None;
     });
-    let generator = schemars::r#gen::SchemaGenerator::new(settings);
-    let mut schema: RootSchema = generator.into_root_schema_for::<T>();
-    schema.schema.metadata().title = None;
+    let generator = SchemaGenerator::new(settings);
+    let mut schema = generator.into_root_schema_for::<T>();
+    if let Some(object) = schema.as_object_mut() {
+        object.remove("title");
+    }
     serde_json::to_value(schema).unwrap()
 }

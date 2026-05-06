@@ -2,6 +2,7 @@ use adk_agent::LlmAgentBuilder;
 use adk_core::{
     Agent, Content, InvocationContext, LlmRequest, Part, ReadonlyContext, RunConfig, ToolContext,
 };
+#[cfg(feature = "skills")]
 use adk_skill::SelectionPolicy;
 use adk_tool::FunctionTool;
 use async_trait::async_trait;
@@ -420,6 +421,7 @@ fn test_llm_agent_builder_with_callbacks() {
     assert_eq!(agent.description(), "Test agent with callbacks");
 }
 
+#[cfg(feature = "skills")]
 #[tokio::test]
 async fn test_llm_agent_injects_skill_prompt_block() {
     let temp = tempfile::tempdir().unwrap();

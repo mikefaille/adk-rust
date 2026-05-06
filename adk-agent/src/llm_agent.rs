@@ -7,14 +7,16 @@ use adk_core::{
     ToolConfirmationDecision, ToolConfirmationPolicy, ToolConfirmationRequest, ToolContext,
     ToolExecutionStrategy, ToolOutcome, Toolset,
 };
-use adk_skill::{SelectionPolicy, SkillIndex, load_skill_index, select_skill_prompt_block};
 use async_stream::stream;
 use async_trait::async_trait;
 use std::sync::{Arc, Mutex};
 use tracing::Instrument;
 
+#[cfg(feature = "skills")]
+use crate::skill_shim::load_skill_index;
 use crate::{
     guardrails::{GuardrailSet, enforce_guardrails},
+    skill_shim::{SelectionPolicy, SkillIndex, select_skill_prompt_block},
     tool_call_markup::normalize_option_content,
     workflow::with_user_content_override,
 };
@@ -24,6 +26,28 @@ pub const DEFAULT_MAX_ITERATIONS: u32 = 100;
 
 /// Default tool execution timeout (5 minutes).
 pub const DEFAULT_TOOL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
+fn trace_json_payload<T: serde::Serialize>(
+    value: &T,
+    record_payloads: bool,
+    max_bytes: usize,
+) -> String {
+    let json = serde_json::to_string(value).unwrap_or_default();
+    if cfg!(feature = "record-payloads") && record_payloads {
+        return json;
+    }
+
+    let max_bytes = max_bytes.max(32);
+    if json.len() <= max_bytes {
+        return json;
+    }
+
+    let mut end = max_bytes;
+    while !json.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}...[truncated {} bytes]", &json[..end], json.len() - end)
+}
 
 pub struct LlmAgent {
     name: String,
@@ -258,17 +282,20 @@ impl LlmAgentBuilder {
     }
 
     /// Set a preloaded skills index for this agent.
+    #[cfg(feature = "skills")]
     pub fn with_skills(mut self, index: SkillIndex) -> Self {
         self.skills_index = Some(Arc::new(index));
         self
     }
 
     /// Auto-load skills from `.skills/` in the current working directory.
+    #[cfg(feature = "skills")]
     pub fn with_auto_skills(self) -> Result<Self> {
         self.with_skills_from_root(".")
     }
 
     /// Auto-load skills from `.skills/` under a custom root directory.
+    #[cfg(feature = "skills")]
     pub fn with_skills_from_root(mut self, root: impl AsRef<std::path::Path>) -> Result<Self> {
         let index = load_skill_index(root).map_err(|e| adk_core::AdkError::agent(e.to_string()))?;
         self.skills_index = Some(Arc::new(index));
@@ -276,12 +303,14 @@ impl LlmAgentBuilder {
     }
 
     /// Customize skill selection behavior.
+    #[cfg(feature = "skills")]
     pub fn with_skill_policy(mut self, policy: SelectionPolicy) -> Self {
         self.skill_policy = policy;
         self
     }
 
     /// Limit injected skill content length.
+    #[cfg(feature = "skills")]
     pub fn with_skill_budget(mut self, max_chars: usize) -> Self {
         self.max_skill_chars = max_chars;
         self
@@ -1265,6 +1294,11 @@ impl Agent for LlmAgent {
                 } else {
                     // Record LLM request for tracing
                     let request_json = serde_json::to_string(&request).unwrap_or_default();
+                    let trace_request_json = trace_json_payload(
+                        &request,
+                        ctx.run_config().record_payloads,
+                        ctx.run_config().trace_payload_max_bytes,
+                    );
 
                     // Create call_llm span with GCP attributes (works for all model types)
                     let llm_ts = std::time::SystemTime::now()
@@ -1278,7 +1312,7 @@ impl Agent for LlmAgent {
                         "gcp.vertex.agent.invocation_id" = %invocation_id,
                         "gcp.vertex.agent.session_id" = %ctx.session_id(),
                         "gen_ai.conversation.id" = %ctx.session_id(),
-                        "gcp.vertex.agent.llm_request" = %request_json,
+                        "gcp.vertex.agent.llm_request" = %trace_request_json,
                         "gcp.vertex.agent.llm_response" = tracing::field::Empty  // Placeholder for later recording
                     );
                     let _llm_guard = llm_span.enter();
@@ -1412,7 +1446,11 @@ impl Agent for LlmAgent {
 
                     // Record LLM response to span before guard drops
                     if let Some(ref content) = accumulated_content {
-                        let response_json = serde_json::to_string(content).unwrap_or_default();
+                        let response_json = trace_json_payload(
+                            content,
+                            ctx.run_config().record_payloads,
+                            ctx.run_config().trace_payload_max_bytes,
+                        );
                         llm_span.record("gcp.vertex.agent.llm_response", &response_json);
                     }
                 }
@@ -1475,7 +1513,11 @@ impl Agent for LlmAgent {
                     // No function calls, we're done
                     // Record LLM response for tracing
                     if let Some(ref content) = accumulated_content {
-                        let response_json = serde_json::to_string(content).unwrap_or_default();
+                        let response_json = trace_json_payload(
+                            content,
+                            ctx.run_config().record_payloads,
+                            ctx.run_config().trace_payload_max_bytes,
+                        );
                         tracing::Span::current().record("gcp.vertex.agent.llm_response", &response_json);
                     }
 
@@ -1762,12 +1804,22 @@ impl Agent for LlmAgent {
                                             tokio::time::sleep(retry_delay).await;
                                         }
                                         match async {
-                                            tracing::info!(tool.name = %name, tool.args = %args, attempt = attempt, "tool_call");
+                                            let args_payload = trace_json_payload(
+                                                &args,
+                                                ctx.run_config().record_payloads,
+                                                ctx.run_config().trace_payload_max_bytes,
+                                            );
+                                            tracing::debug!(tool.name = %name, tool.args = %args_payload, attempt = attempt, "tool_call");
                                             let exec_future = tool_clone.execute(tool_ctx.clone(), args.clone());
                                             tokio::time::timeout(tool_timeout, exec_future).await
                                         }.instrument(tool_span.clone()).await {
                                             Ok(Ok(value)) => {
-                                                tracing::info!(tool.name = %name, tool.result = %value, "tool_result");
+                                                let result_payload = trace_json_payload(
+                                                    &value,
+                                                    ctx.run_config().record_payloads,
+                                                    ctx.run_config().trace_payload_max_bytes,
+                                                );
+                                                tracing::debug!(tool.name = %name, tool.result = %result_payload, "tool_result");
                                                 retry_result = Some(value);
                                                 break;
                                             }
@@ -1948,7 +2000,7 @@ impl Agent for LlmAgent {
                     };
 
                     // ===== DISPATCH BASED ON STRATEGY =====
-                    let results: Vec<(usize, Content, EventActions, bool)> = match strategy {
+                    let mut results: Vec<(usize, Content, EventActions, bool)> = match strategy {
                         ToolExecutionStrategy::Sequential => {
                             let mut results = Vec::with_capacity(fc_parts.len());
                             for (idx, name, args, id, fcid) in fc_parts {
@@ -1957,10 +2009,20 @@ impl Agent for LlmAgent {
                             results
                         }
                         ToolExecutionStrategy::Parallel => {
-                            let futs: Vec<_> = fc_parts.into_iter()
-                                .map(|(idx, name, args, id, fcid)| execute_one_tool(idx, name, args, id, fcid))
-                                .collect();
-                            futures::future::join_all(futs).await
+                            use futures::StreamExt as _;
+                            let limit = ctx
+                                .run_config()
+                                .max_tool_concurrency
+                                .unwrap_or(fc_parts.len())
+                                .max(1);
+                            futures::stream::iter(fc_parts.into_iter().map(
+                                |(idx, name, args, id, fcid)| {
+                                    execute_one_tool(idx, name, args, id, fcid)
+                                },
+                            ))
+                            .buffer_unordered(limit)
+                            .collect()
+                            .await
                         }
                         ToolExecutionStrategy::Auto => {
                             // Partition by is_read_only()
@@ -1975,20 +2037,32 @@ impl Agent for LlmAgent {
                             let mut all_results = Vec::new();
                             // Execute read-only tools concurrently first
                             if !read_only_fcs.is_empty() {
-                                let ro_futs: Vec<_> = read_only_fcs.into_iter()
-                                    .map(|(idx, name, args, id, fcid)| execute_one_tool(idx, name, args, id, fcid))
-                                    .collect();
-                                all_results.extend(futures::future::join_all(ro_futs).await);
+                                use futures::StreamExt as _;
+                                let limit = ctx
+                                    .run_config()
+                                    .max_tool_concurrency
+                                    .unwrap_or(read_only_fcs.len())
+                                    .max(1);
+                                all_results.extend(
+                                    futures::stream::iter(read_only_fcs.into_iter().map(
+                                        |(idx, name, args, id, fcid)| {
+                                            execute_one_tool(idx, name, args, id, fcid)
+                                        },
+                                    ))
+                                    .buffer_unordered(limit)
+                                    .collect::<Vec<_>>()
+                                    .await,
+                                );
                             }
                             // Then execute mutable tools sequentially
                             for (idx, name, args, id, fcid) in mutable_fcs {
                                 all_results.push(execute_one_tool(idx, name, args, id, fcid).await);
                             }
-                            // Sort by original index to preserve LLM-returned order
-                            all_results.sort_by_key(|r| r.0);
                             all_results
                         }
                     };
+                    // Preserve LLM-returned order even when tool futures finish out of order.
+                    results.sort_by_key(|r| r.0);
 
                     // Restore circuit breaker state from the mutex
                     circuit_breaker_state = cb_mutex.into_inner().unwrap_or_else(|e| e.into_inner());

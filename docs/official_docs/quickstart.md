@@ -82,14 +82,14 @@ use adk_rust::run;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
-    // Detects ANTHROPIC_API_KEY, OPENAI_API_KEY, or GOOGLE_API_KEY automatically
+    // Minimal default: set GOOGLE_API_KEY. Add provider features for OpenAI/Anthropic.
     let response = run("You are a helpful assistant.", "Explain Rust in one sentence.").await?;
     println!("{response}");
     Ok(())
 }
 ```
 
-This handles provider detection, session creation, agent building, and execution in a single call. Great for scripts, prototypes, and quick experiments.
+This handles provider detection for compiled providers, session creation, agent building, and execution in a single call. Great for scripts, prototypes, and quick experiments.
 
 ---
 
@@ -125,7 +125,7 @@ async fn main() -> anyhow::Result<()> {
 | `prelude::*` | Imports core types: `GeminiModel`, `LlmAgentBuilder`, `Arc`, etc. |
 | `GeminiModel::new()` | Creates an LLM client with API key auth and streaming |
 | `LlmAgentBuilder` | Builder pattern: name, description, instruction (system prompt), model, tools |
-| `Launcher` | Runs the agent — console mode (default) or `-- serve` for REST API |
+| `Launcher` | Runs the agent in console mode by default; use the `api` template for HTTP serving |
 
 ---
 
@@ -135,8 +135,8 @@ The fastest way to add tools is the `#[tool]` macro. Add `adk-tool` to your depe
 
 ```toml
 [dependencies]
-adk-tool = "0.6.0"
-schemars = "0.8"
+adk-tool = "0.8.0"
+schemars = "1"
 serde = { version = "1", features = ["derive"] }
 ```
 
@@ -189,24 +189,25 @@ ADK also includes ready-to-use tools:
 
 ## Running as a Web Server
 
-Run with the `serve` command:
+Scaffold a server project when you want HTTP serving:
 
 ```bash
-cargo run -- serve
-cargo run -- serve --port 3000    # custom port
+cargo adk new my-api --template api
+cd my-api
+cargo run
 ```
 
-Or scaffold a server project directly: `cargo adk new my-api --template api`
+The default basic template uses the lightweight console launcher for fastest installs.
 
 ---
 
 ## Using Other Models
 
-Enable providers via feature flags:
+Enable providers via feature flags. The default build stays Gemini-only for fast installs, so add only the provider you need:
 
 ```toml
 [dependencies]
-adk-rust = { version = "0.6.0", features = ["openai"] }
+adk-rust = { version = "0.8.0", features = ["openai"] }
 ```
 
 Or scaffold with a provider: `cargo adk new my-agent --provider openai`

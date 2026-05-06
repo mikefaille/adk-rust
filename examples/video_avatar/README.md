@@ -1,6 +1,6 @@
 # Video Avatar Example
 
-Demonstrates the **video avatar configuration API** from ADK-Rust v0.7.0.
+Demonstrates the **video avatar configuration API** from ADK-Rust v0.8.0.
 
 Video avatars attach a visual avatar to a realtime voice agent. The avatar's lip movements synchronize with the agent's speech output, providing a visual presence for voice interactions.
 

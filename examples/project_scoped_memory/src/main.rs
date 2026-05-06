@@ -4,7 +4,7 @@
 //! feature using the `InMemoryMemoryService` backend. No external databases
 //! required.
 //!
-//! Run with: `cargo run -p project-scoped-memory-example`
+//! Run with: `cargo run --manifest-path examples/project_scoped_memory/Cargo.toml`
 //!
 //! ## Capabilities demonstrated
 //!

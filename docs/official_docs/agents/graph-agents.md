@@ -115,10 +115,10 @@ Add dependencies to `Cargo.toml`:
 
 ```toml
 [dependencies]
-adk-graph = { version = "0.6.0", features = ["sqlite"] }
-adk-agent = "0.6.0"
-adk-model = "0.6.0"
-adk-core = "0.6.0"
+adk-graph = { version = "0.8.0", features = ["sqlite"] }
+adk-agent = "0.8.0"
+adk-model = "0.8.0"
+adk-core = "0.8.0"
 tokio = { version = "1", features = ["full"] }
 dotenvy = "0.15"
 serde_json = "1.0"
@@ -1239,30 +1239,15 @@ let graph_agent = GraphAgent::builder("workflow")
 
 ## Examples
 
-All examples are in the [adk-playground](https://github.com/zavora-ai/adk-playground) repo and use real LLM integration with AgentNode:
+Validated graph examples in this repository:
 
 ```bash
-# Parallel LLM agents with before/after callbacks
-cargo run --example graph_agent
-
-# Sequential multi-agent pipeline (extractor → analyzer → formatter)
-cargo run --example graph_workflow
-
-# LLM-based sentiment classification and conditional routing
-cargo run --example graph_conditional
-
-# ReAct pattern with tools and cyclic execution
-cargo run --example graph_react
-
-# Multi-agent supervisor routing to specialists
-cargo run --example graph_supervisor
-
-# Human-in-the-loop with risk-based interrupts
-cargo run --example graph_hitl
-
-# Checkpointing and time travel debugging
-cargo run --example graph_checkpoint
+cargo run --manifest-path examples/tier_examples/standard/Cargo.toml --bin 11-standard-graph
+cargo run --manifest-path examples/tier_examples/standard/Cargo.toml --bin 12-standard-sequential
+cargo run --manifest-path examples/competitive_graph_resume/Cargo.toml
 ```
+
+The full graph gallery with real LLM integration lives in [adk-playground](https://github.com/zavora-ai/adk-playground).
 
 ## Comparison with LangGraph
 

@@ -524,6 +524,8 @@ async fn validate_runner_mut(passed: &mut u32, failed: &mut u32) {
         cache_capable: None,
         request_context: None,
         cancellation_token: None,
+        intra_compaction_config: None,
+        intra_compaction_summarizer: None,
     }).unwrap();
 
     // with_auto_skills_mut borrows mutably

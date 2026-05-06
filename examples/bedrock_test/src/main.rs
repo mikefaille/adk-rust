@@ -1,7 +1,7 @@
 use adk_rust::prelude::*;
 use adk_rust::session::{CreateRequest, SessionService};
 use adk_rust::futures::StreamExt;
-use adk_tool::tool;
+use adk_tool::{AdkError, tool};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -17,7 +17,9 @@ struct ArchReviewArgs {
 
 /// Review a cloud architecture and return component recommendations with cost estimate.
 #[tool]
-async fn review_architecture(args: ArchReviewArgs) -> adk_tool::Result<serde_json::Value> {
+async fn review_architecture(
+    args: ArchReviewArgs,
+) -> std::result::Result<serde_json::Value, AdkError> {
     let tier = if args.rps > 10000 {
         "enterprise"
     } else if args.rps > 1000 {
@@ -58,7 +60,7 @@ struct ThreatArgs {
 
 /// Perform a threat model analysis on the given architecture components.
 #[tool]
-async fn analyze_threats(args: ThreatArgs) -> adk_tool::Result<serde_json::Value> {
+async fn analyze_threats(args: ThreatArgs) -> std::result::Result<serde_json::Value, AdkError> {
     let threats: Vec<_> = args
         .components
         .iter()
@@ -100,7 +102,10 @@ async fn main() -> anyhow::Result<()> {
     let model_id = std::env::var("BEDROCK_MODEL_ID")
         .unwrap_or_else(|_| "us.anthropic.claude-sonnet-4-6".into());
 
-    let config = BedrockConfig::new(&region, &model_id);
+    let mut config = BedrockConfig::new(&region, &model_id);
+    if std::env::var("BEDROCK_PROMPT_CACHING").as_deref() != Ok("1") {
+        config = config.without_prompt_caching();
+    }
     let model = Arc::new(BedrockClient::new(config).await?);
 
     let agent = Arc::new(
@@ -127,20 +132,11 @@ async fn main() -> anyhow::Result<()> {
         })
         .await?;
 
-    let runner = Runner::new(RunnerConfig {
-        app_name: "playground".into(),
-        agent,
-        session_service: sessions,
-        artifact_service: None,
-        memory_service: None,
-        plugin_manager: None,
-        run_config: None,
-        compaction_config: None,
-        context_cache_config: None,
-        cache_capable: None,
-        request_context: None,
-        cancellation_token: None,
-    })?;
+    let runner = Runner::builder()
+        .app_name("playground")
+        .agent(agent)
+        .session_service(sessions)
+        .build()?;
 
     println!("🏗️  Amazon Bedrock — {} ({})\n", model_id, region);
 

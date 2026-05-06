@@ -1,8 +1,8 @@
+use crate::skill_shim::{SelectionPolicy, SkillIndex, apply_skill_injection};
 use adk_core::{
     Agent, CallbackContext, Content, InvocationContext, Memory, ReadonlyContext, Result, RunConfig,
     Session,
 };
-use adk_skill::{SelectionPolicy, SkillIndex, apply_skill_injection};
 use async_trait::async_trait;
 use std::sync::Arc;
 

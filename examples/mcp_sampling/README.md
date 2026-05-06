@@ -89,7 +89,7 @@ Then try prompts like:
 
 ```
 ╔══════════════════════════════════════════╗
-║  MCP Sampling — ADK-Rust v0.7.0         ║
+║  MCP Sampling — ADK-Rust v0.8.0         ║
 ╚══════════════════════════════════════════╝
 
 Starting MCP sampling server...

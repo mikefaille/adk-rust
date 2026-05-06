@@ -382,14 +382,14 @@ The agent, model, and tool operations will automatically emit structured logs an
 
 ### Telemetry Demo Example
 
-For a comprehensive working example that demonstrates all telemetry features with real Gemini API calls (non-streaming, streaming, nested spans, exporter, metrics), run:
+Validate telemetry feature selection locally:
 
 ```bash
-export GOOGLE_API_KEY=your-key
-cargo run -p telemetry-demo
+cargo check -p adk-telemetry --no-default-features
+cargo check -p adk-telemetry --no-default-features --features otlp
 ```
 
-See the [adk-playground](https://github.com/zavora-ai/adk-playground) repo for the full telemetry demo source.
+See the [adk-playground](https://github.com/zavora-ai/adk-playground) repo for a full telemetry demo with real Gemini calls.
 
 ## Custom Telemetry in Tools
 

@@ -114,18 +114,16 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-adk-rust = { version = "0.6.0", features = ["ui"] }
-# Or use individual crates:
-adk-ui = "0.6.0"
-adk-agent = "0.6.0"
-adk-model = "0.6.0"
+adk-ui = { git = "https://github.com/zavora-ai/adk-ui" }
+adk-agent = "0.8.0"
+adk-model = "0.8.0"
 ```
 
 ### Basic Usage
 
 ```rust
 use adk_rust::prelude::*;
-use adk_rust::ui::UiToolset;
+use adk_ui::UiToolset;
 use std::sync::Arc;
 
 #[tokio::main]
@@ -510,17 +508,10 @@ All 28 component types support optional `id` fields for streaming updates:
 
 ## React Client
 
-A reference React implementation is provided:
+A reference React implementation is provided in the standalone [adk-ui](https://github.com/zavora-ai/adk-ui) repository:
 
 ```bash
-cd official_docs_examples/tools/ui_test
-
-# Start the UI server
-cargo run --bin ui_server
-
-# In another terminal, start the React client
-cd ui_react_client
-npm install && npm run dev -- --host
+npm install @zavora-ai/adk-ui-react
 ```
 
 The React client includes:
@@ -619,7 +610,7 @@ Direct `/api/ui/*` bridge endpoints are the preferred lifecycle path for MCP App
 
 ## Examples
 
-Three examples demonstrate UI tools:
+The standalone [adk-ui](https://github.com/zavora-ai/adk-ui) repo contains the runnable UI examples:
 
 | Example | Description | Run Command |
 |---------|-------------|-------------|
@@ -627,7 +618,7 @@ Three examples demonstrate UI tools:
 | `ui_server` | HTTP server with SSE | `cargo run --bin ui_server` |
 | `ui_react_client` | React frontend | `cd ui_react_client && npm run dev` |
 
-Run from `official_docs_examples/tools/ui_test/`.
+Run those examples from the `adk-ui` repository so the Rust and React packages stay on the same release line.
 
 ## Sample Prompts
 

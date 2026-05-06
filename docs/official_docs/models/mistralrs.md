@@ -301,23 +301,11 @@ No features needed - CPU is the default.
 
 ---
 
-## Run Examples
+## Validate the Crate
 
 ```bash
-# Basic usage
-cargo run --bin basic
-
-# With quantization
-cargo run --bin quantized
-
-# LoRA adapters
-cargo run --bin lora
-
-# Multi-model setup
-cargo run --bin multimodel
-
-# Vision models
-cargo run --bin vision
+cargo build --manifest-path adk-mistralrs/Cargo.toml
+cargo build --manifest-path adk-mistralrs/Cargo.toml --features metal
 ```
 
 ---

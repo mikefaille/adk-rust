@@ -14,10 +14,10 @@ readme = "README.md"
 
 [dependencies]
 adk-core.workspace = true
-adk-artifact.workspace = true
+adk-artifact = { workspace = true, optional = true }
 adk-session.workspace = true
-adk-plugin.workspace = true
-adk-skill.workspace = true
+adk-plugin = { workspace = true, optional = true }
+adk-skill = { workspace = true, optional = true }
 async-trait.workspace = true
 tokio = { workspace = true, features = ["sync"] }
 futures.workspace = true
@@ -27,6 +27,12 @@ serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
 tokio-util = { version = "0.7", features = ["rt"] }
+
+[features]
+default = ["artifacts", "plugins", "skills"]
+artifacts = ["dep:adk-artifact"]
+plugins = ["dep:adk-plugin"]
+skills = ["dep:adk-skill"]
 
 [dev-dependencies]
 chrono = "0.4"

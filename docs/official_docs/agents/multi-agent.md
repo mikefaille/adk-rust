@@ -45,7 +45,7 @@ Add dependencies to `Cargo.toml`:
 
 ```toml
 [dependencies]
-adk-rust = { version = "0.6.0", features = ["agents", "models", "cli"] }
+adk-rust = "0.8.0"
 tokio = { version = "1", features = ["full"] }
 dotenvy = "0.15"
 ```
@@ -457,11 +457,7 @@ let support_agent = LlmAgentBuilder::new("support_agent")
 ### Running Examples
 
 ```bash
-# Run the customer service example
-cargo run --bin customer_service
-
-# Run the hierarchical example  
-cargo run --bin hierarchical
+cargo run --manifest-path examples/tier_examples/enterprise/Cargo.toml --bin 14-enterprise-multi-agent
 ```
 
 ### Example Test Prompts
@@ -747,11 +743,10 @@ Launcher::new(Arc::new(coordinator))
 
 ```bash
 # Interactive console mode
-cargo run --example multi_agent -- chat
+cargo run --manifest-path examples/tier_examples/enterprise/Cargo.toml --bin 14-enterprise-multi-agent
 
-# Web server mode with UI
-cargo run --example multi_agent -- serve
-cargo run --example multi_agent -- serve --port 3000
+# Use a generated API project when you need HTTP serving
+cargo adk new multi_agent_api --template api
 ```
 
 **Features:**

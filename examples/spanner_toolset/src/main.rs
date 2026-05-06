@@ -1,6 +1,6 @@
 //! # Spanner Toolset Example
 //!
-//! Demonstrates the native Spanner toolset from ADK-Rust v0.7.0 — listing
+//! Demonstrates the native Spanner toolset from ADK-Rust v0.8.0 — listing
 //! tables, inspecting table schemas, and executing SQL queries via the
 //! Cloud Spanner API, all driven by an LLM agent.
 //!
@@ -104,7 +104,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     println!("╔══════════════════════════════════════════╗");
-    println!("║  Spanner Toolset — ADK-Rust v0.7.0       ║");
+    println!("║  Spanner Toolset — ADK-Rust v0.8.0       ║");
     println!("╚══════════════════════════════════════════╝\n");
 
     // Check for the LLM provider key (required for both modes).

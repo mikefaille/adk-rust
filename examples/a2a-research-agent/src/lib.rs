@@ -108,6 +108,8 @@ pub fn build_server(agent: Arc<dyn Agent>, base_url: &str) -> Router {
         compaction_config: None,
         context_cache_config: None,
         cache_capable: None,
+        intra_compaction_config: None,
+        intra_compaction_summarizer: None,
         request_context: None,
         cancellation_token: None,
     });

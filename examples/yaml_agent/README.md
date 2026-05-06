@@ -1,6 +1,6 @@
 # YAML Agent Definition Example
 
-Demonstrates the YAML agent definition loading feature from ADK-Rust v0.7.0.
+Demonstrates the YAML agent definition loading feature from ADK-Rust v0.8.0.
 
 ## What This Shows
 
@@ -60,7 +60,7 @@ cargo run --manifest-path examples/yaml_agent/Cargo.toml
 
 ```
 ╔══════════════════════════════════════════╗
-║  YAML Agent Definition — ADK-Rust v0.7.0 ║
+║  YAML Agent Definition — ADK-Rust v0.8.0 ║
 ╚══════════════════════════════════════════╝
 
 ── Section 1: Load a single YAML file ─────────────────────

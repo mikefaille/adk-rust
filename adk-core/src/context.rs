@@ -625,6 +625,21 @@ pub struct RunConfig {
     /// - OpenAI / DeepSeek: no action needed (caching is automatic)
     /// - Gemini: handled separately via `ContextCacheConfig`
     pub auto_cache: bool,
+    /// Maximum number of recent persisted events to load at the start of a run.
+    ///
+    /// `None` preserves the previous behavior and loads the full session
+    /// history. Set this for chat surfaces that already summarize older turns
+    /// and need predictable startup latency.
+    pub history_max_events: Option<usize>,
+    /// Maximum number of tool calls to execute concurrently for parallel/auto
+    /// tool dispatch. `None` allows all eligible tool calls to run together.
+    pub max_tool_concurrency: Option<usize>,
+    /// Whether tracing spans may include full request, response, and tool
+    /// payloads when the `record-payloads` crate feature is enabled.
+    pub record_payloads: bool,
+    /// Maximum serialized bytes recorded for tracing payload fields when full
+    /// payload recording is disabled.
+    pub trace_payload_max_bytes: usize,
 }
 
 impl Default for RunConfig {
@@ -636,6 +651,10 @@ impl Default for RunConfig {
             transfer_targets: Vec::new(),
             parent_agent: None,
             auto_cache: true,
+            history_max_events: None,
+            max_tool_concurrency: None,
+            record_payloads: false,
+            trace_payload_max_bytes: 2048,
         }
     }
 }
@@ -648,6 +667,10 @@ mod tests {
     fn test_run_config_default() {
         let config = RunConfig::default();
         assert_eq!(config.streaming_mode, StreamingMode::SSE);
+        assert_eq!(config.history_max_events, None);
+        assert_eq!(config.max_tool_concurrency, None);
+        assert!(!config.record_payloads);
+        assert_eq!(config.trace_payload_max_bytes, 2048);
         assert!(config.tool_confirmation_decisions.is_empty());
     }
 

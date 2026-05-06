@@ -8,6 +8,7 @@ license.workspace = true
 authors.workspace = true
 homepage.workspace = true
 repository.workspace = true
+autoexamples = false
 
 [dependencies]
 reqwest = { workspace = true }
@@ -31,7 +32,7 @@ name = "basic"
 path = "examples/basic.rs"
 
 [[example]]
-name = "streaming"
+name = "anthropic_streaming"
 path = "examples/streaming.rs"
 
 [[example]]
@@ -39,7 +40,7 @@ name = "thinking"
 path = "examples/thinking.rs"
 
 [[example]]
-name = "tools"
+name = "anthropic_tools"
 path = "examples/tools.rs"
 
 [[example]]
@@ -83,5 +84,5 @@ name = "vision"
 path = "examples/vision.rs"
 
 [[example]]
-name = "custom_base_url"
+name = "anthropic_custom_base_url"
 path = "examples/custom_base_url.rs"

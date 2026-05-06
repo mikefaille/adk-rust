@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking Changes
 
-- **Default feature changed from `standard` to `minimal`**: `adk-rust = "0.8.0"` now activates `agents`, `gemini`, `openai`, `anthropic`, `runner`, `sessions`, `tools`, `memory`, and `telemetry`. To restore the 0.7.x default:
+- **Default feature changed from `standard` to `minimal`**: `adk-rust = "0.8.0"` now activates only `agents`, `models`, `gemini`, `runner`, and `sessions`. Add `standard` for production support crates, and opt into provider features such as `openai` and `anthropic` explicitly. For the production preset:
   ```toml
   adk-rust = { version = "0.8.0", features = ["standard"] }
   ```
@@ -22,8 +22,8 @@ Restructured the `adk-rust` umbrella crate feature tiers to reduce default build
 
 | Tier | What's included | Use case |
 |------|----------------|----------|
-| `minimal` (default) | agents, gemini, openai, anthropic, runner, sessions, tools, memory, telemetry | Building agents — fast builds |
-| `standard` | minimal + skills, graph, auth, server, cli, eval, guardrail, plugin, artifacts | Production deployment |
+| `minimal` (default) | agents, models, gemini, runner, sessions | Fast Gemini starter agents |
+| `standard` | minimal + skills, graph, auth, server, eval, guardrail, plugin, artifacts, tools, memory, telemetry | Production deployment without CLI/provider fan-out |
 | `enterprise` | standard + realtime, browser, rag, payments, awp | Full-featured production |
 | `audio` | adk-audio (STT/TTS/desktop) | Voice agents (composable add-on) |
 | `code` | adk-code + adk-sandbox | Code execution (composable add-on) |

@@ -23,8 +23,8 @@ path = "src/main.rs"
 [dependencies]
 adk-core.workspace = true
 adk-agent.workspace = true
-adk-model = { workspace = true, features = ["all-providers"] }
-adk-runner.workspace = true
+adk-model.workspace = true
+adk-runner = { workspace = true, features = ["artifacts", "plugins"] }
 adk-server.workspace = true
 adk-session.workspace = true
 adk-artifact.workspace = true
@@ -55,7 +55,15 @@ keyring = { version = "3.6.3", default-features = false, features = ["windows-na
 keyring = { version = "3.6.3", default-features = false, features = ["sync-secret-service", "crypto-rust"] }
 
 [features]
-default = []
+default = ["gemini"]
+gemini = ["adk-model/gemini"]
+openai = ["adk-model/openai"]
+anthropic = ["adk-model/anthropic"]
+deepseek = ["adk-model/deepseek"]
+groq = ["adk-model/groq"]
+ollama = ["adk-model/ollama"]
+all-providers = ["gemini", "openai", "anthropic", "deepseek", "groq", "ollama"]
+telemetry-otlp = ["adk-telemetry/otlp"]
 # Prompt optimization CLI command (adk optimize)
 optimize = []
 

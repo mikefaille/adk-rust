@@ -265,6 +265,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         cache_capable: None,
         request_context: None,
         cancellation_token: None,
+        intra_compaction_config: None,
+        intra_compaction_summarizer: None,
     })?;
 
     println!("Topic: The future of renewable energy\n");

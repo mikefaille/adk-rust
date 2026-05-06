@@ -14,8 +14,10 @@ readme = "README.md"
 
 [features]
 default = []
+# Enable Model Context Protocol clients and local child-process transport.
+mcp = ["dep:rmcp"]
 # Enable HTTP transport for remote MCP servers (streamable HTTP)
-http-transport = ["rmcp/transport-streamable-http-client-reqwest", "reqwest"]
+http-transport = ["mcp", "rmcp/transport-streamable-http-client-reqwest", "reqwest"]
 # Enable code execution tools (RustCodeTool, etc.)
 code = ["dep:adk-code", "dep:adk-sandbox"]
 # Enable embedded JavaScript execution (requires boa_engine)
@@ -29,7 +31,7 @@ bigquery = ["dep:gcp-bigquery-client"]
 # Enable native Spanner toolset (execute SQL, schemas, tables)
 spanner = ["dep:google-cloud-spanner"]
 # Enable MCP sampling callback support (sampling/createMessage handling)
-mcp-sampling = []
+mcp-sampling = ["mcp"]
 
 [dependencies]
 adk-core.workspace = true
@@ -39,8 +41,8 @@ async-trait.workspace = true
 tokio = { workspace = true, features = ["fs", "process", "sync", "time"] }
 serde.workspace = true
 serde_json.workspace = true
-schemars = "0.8"
-rmcp = { version = "1.3", features = ["client", "transport-child-process"] }
+schemars = "1.0"
+rmcp = { version = "1.3", features = ["client", "transport-child-process"], optional = true }
 tracing.workspace = true
 base64 = "0.22"
 uuid.workspace = true
@@ -61,3 +63,7 @@ async-stream.workspace = true
 proptest = "1.5"
 tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }
 adk-code = { workspace = true }
+
+[[test]]
+name = "mcp_server_lifecycle_integration_tests"
+required-features = ["mcp"]

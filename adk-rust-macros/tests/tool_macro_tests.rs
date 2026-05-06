@@ -161,3 +161,24 @@ fn tool_no_attributes_defaults_false() {
     assert!(!tool.is_concurrency_safe());
     assert!(!tool.is_long_running());
 }
+
+// === Test 9: Arg type names containing "Arc" are still args ===
+
+#[derive(Deserialize, JsonSchema)]
+struct ArchReviewArgs {
+    rps: u32,
+}
+
+/// Review architecture capacity.
+#[tool]
+async fn review_architecture(args: ArchReviewArgs) -> Result<Value, AdkError> {
+    Ok(json!({ "rps": args.rps }))
+}
+
+#[test]
+fn tool_arg_type_name_containing_arc_is_not_skipped() {
+    let tool = ReviewArchitecture;
+    let schema = tool.parameters_schema().unwrap();
+    let props = schema.get("properties").unwrap();
+    assert!(props.get("rps").is_some());
+}

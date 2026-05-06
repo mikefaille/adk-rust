@@ -98,7 +98,7 @@ ollama pull codellama:13b     # Code generation
 
 ```toml
 [dependencies]
-adk-model = { version = "0.6.0", features = ["ollama"] }
+adk-model = { version = "0.8.0", features = ["ollama"] }
 ```
 
 ---
@@ -158,7 +158,7 @@ async fn main() -> anyhow::Result<()> {
 
 ```toml
 [dependencies]
-adk-rust = { version = "0.6.0", features = ["cli", "ollama"] }
+adk-rust = { version = "0.8.0", features = ["ollama"] }
 tokio = { version = "1", features = ["full"] }
 dotenvy = "0.15"
 anyhow = "1.0"
@@ -294,10 +294,10 @@ ollama list
 ## Running Examples
 
 ```bash
-# From the official_docs_examples folder
-cd official_docs_examples/models/providers_test
-cargo run --bin ollama_example
+cargo check -p adk-rust --no-default-features --features ollama
 ```
+
+Run `ollama serve` and pull the model before starting an agent that uses this provider.
 
 ---
 

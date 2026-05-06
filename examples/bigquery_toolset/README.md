@@ -1,6 +1,6 @@
 # BigQuery Toolset Example
 
-Demonstrates the native BigQuery toolset from ADK-Rust v0.7.0 — an LLM agent that
+Demonstrates the native BigQuery toolset from ADK-Rust v0.8.0 — an LLM agent that
 lists datasets, inspects table schemas, and executes SQL queries via the BigQuery API.
 
 ## What This Shows
@@ -45,7 +45,7 @@ cargo run --manifest-path examples/bigquery_toolset/Cargo.toml
 
 ```
 ╔══════════════════════════════════════════╗
-║  BigQuery Toolset — ADK-Rust v0.7.0      ║
+║  BigQuery Toolset — ADK-Rust v0.8.0      ║
 ╚══════════════════════════════════════════╝
 
 ⚠️  Running in dry-run mode (no GOOGLE_CLOUD_PROJECT set)
@@ -69,7 +69,7 @@ cargo run --manifest-path examples/bigquery_toolset/Cargo.toml
 
 ```
 ╔══════════════════════════════════════════╗
-║  BigQuery Toolset — ADK-Rust v0.7.0      ║
+║  BigQuery Toolset — ADK-Rust v0.8.0      ║
 ╚══════════════════════════════════════════╝
 
 🔑 Running in live mode with project: your-gcp-project-id

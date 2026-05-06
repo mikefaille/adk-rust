@@ -2,7 +2,7 @@
 
 Agent Development Kit (ADK) is a flexible and modular framework for developing and deploying AI agents. While optimized for Gemini and the Google ecosystem, ADK is model-agnostic, deployment-agnostic, and built for compatibility with other frameworks. ADK was designed to make agent development feel more like software development, making it easier for developers to create, deploy, and orchestrate agentic architectures that range from simple tasks to complex workflows.
 
-> **Note:** ADK-Rust v0.6.0 requires Rust 1.85.0 or higher
+> **Note:** ADK-Rust v0.8.0 requires Rust 1.85.0 or higher.
 
 ## Installation
 
@@ -16,7 +16,7 @@ Or add it to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-adk-rust = "0.6.0"
+adk-rust = "0.8.0"
 tokio = { version = "1.40", features = ["full"] }
 ```
 
@@ -157,27 +157,26 @@ The engine that manages execution flow, orchestrates agent interactions, and coo
 
 ## Feature Flags
 
-ADK-Rust uses Cargo features for modularity. Three presets control which crates are compiled:
+ADK-Rust uses Cargo features for modularity. Four presets control which crates are compiled:
 
 ```toml
-# Standard (default) — agents, models, tools, sessions, runner, guardrails, auth
-adk-rust = "0.6.0"
+# Minimal (default) — Gemini, agents, runner, sessions
+adk-rust = "0.8.0"
 
-# Full — standard + all stable specialist crates (graph, realtime, browser, eval, rag)
-# Does NOT include experimental crates — use `labs` for those
-adk-rust = { version = "0.6.0", features = ["full"] }
+# Standard — adds tools, memory, telemetry, server, auth, graph, eval, guardrail, plugins, artifacts, skills
+adk-rust = { version = "0.8.0", features = ["standard"] }
 
-# Labs — standard + experimental crates (code, sandbox, audio)
-adk-rust = { version = "0.6.0", features = ["labs"] }
+# Enterprise — standard + realtime, browser, RAG, payments, AWP
+adk-rust = { version = "0.8.0", features = ["enterprise"] }
 
-# Full + Labs — everything including experimental crates
-adk-rust = { version = "0.6.0", features = ["full", "labs"] }
+# Full — enterprise + audio, code execution, sandbox
+adk-rust = { version = "0.8.0", features = ["full"] }
 
-# Minimal: Only agents + Gemini + runner
-adk-rust = { version = "0.6.0", default-features = false, features = ["minimal"] }
+# Equivalent explicit minimal selection
+adk-rust = { version = "0.8.0", default-features = false, features = ["minimal"] }
 
 # Custom: Pick what you need
-adk-rust = { version = "0.6.0", default-features = false, features = ["agents", "gemini", "tools"] }
+adk-rust = { version = "0.8.0", default-features = false, features = ["agents", "gemini", "tools"] }
 ```
 
 Available features:
@@ -194,16 +193,18 @@ Available features:
 - `memory`: Memory system with semantic search
 - `runner`: Agent execution runtime
 - `server`: HTTP server (REST + A2A)
-- `telemetry`: OpenTelemetry integration
-- `cli`: CLI launcher
-- `graph`: Graph-based workflows (full preset)
-- `realtime`: Voice/audio streaming (full preset)
-- `browser`: Browser automation (full preset)
-- `eval`: Agent evaluation (full preset)
-- `rag`: RAG pipeline (full preset)
-- `code`: Code execution (labs preset — experimental)
-- `sandbox`: Sandboxed execution (labs preset — experimental)
-- `audio`: Audio processing (labs preset — experimental)
+- `telemetry`: tracing helpers; add `telemetry-otlp` only when exporting OTLP
+- `cli`: CLI launcher; add `cli-openai`, `cli-anthropic`, or another CLI provider feature only when needed
+- `mcp`: Model Context Protocol integration for `adk-tool`
+- `record-payloads`: opt in to full tracing payload capture
+- `graph`: Graph-based workflows (standard preset)
+- `realtime`: Voice/audio streaming (enterprise preset)
+- `browser`: Browser automation (enterprise preset)
+- `eval`: Agent evaluation (standard preset)
+- `rag`: RAG pipeline (enterprise preset)
+- `code`: Code execution (full preset)
+- `sandbox`: Sandboxed execution (full preset)
+- `audio`: Audio processing (full preset)
 
 ## Other Languages
 

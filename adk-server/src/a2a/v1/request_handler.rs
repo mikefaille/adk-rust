@@ -296,6 +296,8 @@ impl RequestHandler {
             compaction_config: runner_config.compaction_config.clone(),
             context_cache_config: runner_config.context_cache_config.clone(),
             cache_capable: runner_config.cache_capable.clone(),
+            intra_compaction_config: runner_config.intra_compaction_config.clone(),
+            intra_compaction_summarizer: runner_config.intra_compaction_summarizer.clone(),
             request_context: runner_config.request_context.clone(),
             cancellation_token: runner_config.cancellation_token.clone(),
         })

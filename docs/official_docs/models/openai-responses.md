@@ -53,14 +53,15 @@ Use `OpenAIResponsesClient` when you need reasoning models with summaries, built
 
 ```toml
 [dependencies]
-adk-rust = { version = "0.6.0", features = ["openai"] }
+adk-rust = { version = "0.8.0", features = ["openai"] }
+adk-tool = "0.8.0"
 ```
 
 Or with `adk-model` directly:
 
 ```toml
 [dependencies]
-adk-model = { version = "0.6.0", features = ["openai"] }
+adk-model = { version = "0.8.0", features = ["openai"] }
 ```
 
 Set your API key:
@@ -108,12 +109,11 @@ async fn main() -> anyhow::Result<()> {
     }).await?;
 
     // 4. Run through the Runner
-    let runner = Runner::new(RunnerConfig {
-        app_name: "my_app".into(),
-        agent,
-        session_service: sessions,
-        ..Default::default()
-    })?;
+    let runner = Runner::builder()
+        .app_name("my_app")
+        .agent(agent)
+        .session_service(sessions)
+        .build()?;
 
     let message = Content::new("user").with_text("What is the capital of France?");
     let mut stream = runner.run(
@@ -230,6 +230,7 @@ Function tools work the same way as with `OpenAIClient` — define tools on the 
 ```rust
 use adk_rust::prelude::*;
 use adk_model::openai::{OpenAIResponsesClient, OpenAIResponsesConfig};
+use adk_tool::FunctionTool;
 use std::sync::Arc;
 
 async fn get_weather(

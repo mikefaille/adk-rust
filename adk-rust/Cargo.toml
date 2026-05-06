@@ -16,21 +16,15 @@ readme = "README.md"
 [features]
 default = ["minimal"]
 
-# Minimal (default) — a fully capable agent with major providers, tools, memory, and observability.
-# Excludes: server, CLI, auth, guardrail, skills, graph, eval, plugin, artifacts.
-# No axum, no rustyline, no clap, no jsonschema — fast builds for new users.
+# Minimal (default) — fastest starter tier for a single Gemini-powered LLM agent.
+# Excludes: tools, memory, telemetry, OpenAI, Anthropic, MCP, server, CLI, auth,
+# guardrail, skills, graph, eval, plugin, and artifacts.
 minimal = [
     "agents",
     "models",
     "gemini",
-    "openai",
-    "anthropic",
-    "anthropic-client",
     "runner",
     "sessions",
-    "tools",
-    "memory",
-    "telemetry",
 ]
 
 # Standard — production deployment with server, auth, graph workflows, and evaluation.
@@ -40,11 +34,13 @@ standard = [
     "graph",
     "auth",
     "server",
-    "cli",
     "eval",
     "guardrail",
     "plugin",
     "artifacts",
+    "tools",
+    "memory",
+    "telemetry",
 ]
 
 # Enterprise — standard + all production specialist crates.
@@ -67,9 +63,17 @@ full = [
 
 # CLI launcher support
 cli = ["dep:adk-cli", "runner", "server", "sessions", "telemetry"]
+cli-openai = ["cli", "adk-cli/openai"]
+cli-anthropic = ["cli", "adk-cli/anthropic"]
+cli-deepseek = ["cli", "adk-cli/deepseek"]
+cli-groq = ["cli", "adk-cli/groq"]
+cli-ollama = ["cli", "adk-cli/ollama"]
+cli-all-providers = ["cli", "adk-cli/all-providers"]
+cli-telemetry-otlp = ["cli", "adk-cli/telemetry-otlp"]
 
 # Component features
 agents = ["dep:adk-agent"]
+record-payloads = ["agents", "adk-agent/record-payloads"]
 models = ["dep:adk-model"]
 tools = ["dep:adk-tool"]
 skills = ["dep:adk-skill"]
@@ -79,6 +83,7 @@ memory = ["dep:adk-memory"]
 runner = ["dep:adk-runner"]
 server = ["dep:adk-server"]
 telemetry = ["dep:adk-telemetry"]
+telemetry-otlp = ["telemetry", "adk-telemetry/otlp"]
 graph = ["dep:adk-graph"]
 code = ["dep:adk-code"]
 sandbox = ["dep:adk-sandbox"]
@@ -135,7 +140,9 @@ yaml-agent = ["server", "adk-server/yaml-agent"]
 # Agent Registry REST API (forwarded to adk-server)
 agent-registry = ["server", "adk-server/agent-registry"]
 # MCP sampling callback support (forwarded to adk-tool)
-mcp-sampling = ["tools", "adk-tool/mcp-sampling"]
+mcp = ["tools", "adk-tool/mcp"]
+mcp-http = ["mcp", "adk-tool/http-transport"]
+mcp-sampling = ["mcp", "adk-tool/mcp-sampling"]
 # Native Slack toolset (forwarded to adk-tool)
 slack = ["tools", "adk-tool/slack"]
 # Native BigQuery toolset (forwarded to adk-tool)
@@ -226,6 +233,14 @@ anyhow = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "time", "macros", "net", "signal", "fs", "process", "io-util", "test-util"] }
+
+[[example]]
+name = "test_unified"
+required-features = ["minimal", "tools"]
+
+[[example]]
+name = "performance_0_8_llm_agents"
+required-features = ["minimal"]
 
 [package.metadata.docs.rs]
 # Use "full" to show the complete API surface on docs.rs.

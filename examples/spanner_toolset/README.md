@@ -1,6 +1,6 @@
 # Spanner Toolset Example
 
-Demonstrates the native Spanner toolset from ADK-Rust v0.7.0 — an LLM agent that
+Demonstrates the native Spanner toolset from ADK-Rust v0.8.0 — an LLM agent that
 lists tables, inspects table schemas, and executes SQL queries via the Cloud Spanner API.
 
 ## What This Shows
@@ -49,7 +49,7 @@ cargo run --manifest-path examples/spanner_toolset/Cargo.toml
 
 ```
 ╔══════════════════════════════════════════╗
-║  Spanner Toolset — ADK-Rust v0.7.0       ║
+║  Spanner Toolset — ADK-Rust v0.8.0       ║
 ╚══════════════════════════════════════════╝
 
 ⚠️  Running in dry-run mode (no SPANNER_PROJECT_ID set)
@@ -74,7 +74,7 @@ cargo run --manifest-path examples/spanner_toolset/Cargo.toml
 
 ```
 ╔══════════════════════════════════════════╗
-║  Spanner Toolset — ADK-Rust v0.7.0       ║
+║  Spanner Toolset — ADK-Rust v0.8.0       ║
 ╚══════════════════════════════════════════╝
 
 🔑 Running in live mode with project: your-project, instance: your-instance, database: your-db

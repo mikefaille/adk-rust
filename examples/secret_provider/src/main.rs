@@ -94,7 +94,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     println!("╔══════════════════════════════════════════╗");
-    println!("║  Secret Provider — ADK-Rust v0.7.0       ║");
+    println!("║  Secret Provider — ADK-Rust v0.8.0       ║");
     println!("╚══════════════════════════════════════════╝\n");
 
     // Verify the LLM key is available (not used for inference in this example,

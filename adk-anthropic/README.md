@@ -77,9 +77,9 @@ Run any example with `cargo run -p adk-anthropic --example <name>`:
 | Example | Description |
 |---------|-------------|
 | `basic` | Non-streaming chat |
-| `streaming` | SSE streaming with delta handling |
+| `anthropic_streaming` | SSE streaming with delta handling |
 | `thinking` | Adaptive + budget-based extended thinking |
-| `tools` | Tool calling round-trip |
+| `anthropic_tools` | Tool calling round-trip |
 | `structured_output` | JSON schema structured outputs |
 | `caching` | Multi-turn prompt caching with cost breakdown |
 | `context_editing` | Tool result and thinking block clearing (beta) |
@@ -90,7 +90,7 @@ Run any example with `cargo run -p adk-anthropic --example <name>`:
 | `citations` | Document citations (plain text, custom content, multi-doc) |
 | `pdf_processing` | PDF analysis via URL, base64, and with citations |
 | `vision` | Image understanding via URL |
-| `custom_base_url` | Custom endpoints (Ollama, Vercel, MiniMax, proxies) |
+| `anthropic_custom_base_url` | Custom endpoints (Ollama, Vercel, MiniMax, proxies) |
 
 ## Pricing Module
 
