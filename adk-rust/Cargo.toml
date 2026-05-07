@@ -30,6 +30,9 @@ minimal = [
 # Standard — production deployment with server, auth, graph workflows, and evaluation.
 standard = [
     "minimal",
+    "openai",
+    "anthropic",
+    "anthropic-client",
     "skills",
     "graph",
     "auth",

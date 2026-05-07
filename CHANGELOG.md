@@ -23,7 +23,7 @@ Restructured the `adk-rust` umbrella crate feature tiers to reduce default build
 | Tier | What's included | Use case |
 |------|----------------|----------|
 | `minimal` (default) | agents, models, gemini, runner, sessions | Fast Gemini starter agents |
-| `standard` | minimal + skills, graph, auth, server, eval, guardrail, plugin, artifacts, tools, memory, telemetry | Production deployment without CLI/provider fan-out |
+| `standard` | minimal + openai, anthropic, tools, memory, telemetry, skills, graph, auth, server, eval, guardrail, plugin, artifacts | Production deployment |
 | `enterprise` | standard + realtime, browser, rag, payments, awp | Full-featured production |
 | `audio` | adk-audio (STT/TTS/desktop) | Voice agents (composable add-on) |
 | `code` | adk-code + adk-sandbox | Code execution (composable add-on) |

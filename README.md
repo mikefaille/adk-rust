@@ -237,7 +237,7 @@ adk-rust = "0.8.0"  # Minimal (default): Gemini + agent runtime + sessions
 | Tier | Includes | Use case |
 |------|----------|----------|
 | `minimal` (default) | Gemini provider, agents, runner, sessions | Fast starter agents |
-| `standard` | minimal + tools, memory, telemetry, server, auth, graph, eval, guardrail, plugins, artifacts, skills | Production deployment without CLI overhead |
+| `standard` | minimal + OpenAI, Anthropic, tools, memory, telemetry, server, auth, graph, eval, guardrail, plugins, artifacts, skills | Production deployment |
 | `enterprise` | standard + realtime, browser, RAG, payments, AWP | Full-featured production |
 | `full` | enterprise + audio, code execution, sandbox | Everything |
 
