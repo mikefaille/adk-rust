@@ -52,6 +52,8 @@ pub enum Model {
     Gemini31ProPreview,
     #[serde(rename = "models/gemini-3.1-flash-lite-preview")]
     Gemini31FlashLitePreview,
+    #[serde(rename = "models/gemini-3.1-flash-live-preview")]
+    Gemini31FlashLivePreview,
 
     // ── Gemini 3 ─────────────────────────────────────────────────
     #[serde(rename = "models/gemini-3-pro-preview")]
@@ -125,6 +127,7 @@ impl Model {
         match self {
             Model::Gemini31ProPreview => "models/gemini-3.1-pro-preview",
             Model::Gemini31FlashLitePreview => "models/gemini-3.1-flash-lite-preview",
+            Model::Gemini31FlashLivePreview => "models/gemini-3.1-flash-live-preview",
             Model::Gemini3ProPreview => "models/gemini-3-pro-preview",
             Model::Gemini3ProImagePreview => "models/gemini-3-pro-image-preview",
             Model::Gemini3FlashPreview => "models/gemini-3-flash-preview",
@@ -159,6 +162,7 @@ impl Model {
         let model_id = match self {
             Model::Gemini31ProPreview => "gemini-3.1-pro-preview",
             Model::Gemini31FlashLitePreview => "gemini-3.1-flash-lite-preview",
+            Model::Gemini31FlashLivePreview => "gemini-3.1-flash-live-preview",
             Model::Gemini3ProPreview => "gemini-3-pro-preview",
             Model::Gemini3ProImagePreview => "gemini-3-pro-image-preview",
             Model::Gemini3FlashPreview => "gemini-3-flash-preview",
@@ -202,6 +206,7 @@ impl From<String> for Model {
         match bare {
             // Gemini 3.1 models (newest generation)
             "gemini-3.1-pro-preview" => Self::Gemini31ProPreview,
+            "gemini-3.1-flash-live-preview" => Self::Gemini31FlashLivePreview,
             // Gemini 3 models
             "gemini-3-pro-preview" => Self::Gemini3ProPreview,
             "gemini-3-pro-image-preview" => Self::Gemini3ProImagePreview,

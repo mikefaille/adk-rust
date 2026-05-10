@@ -108,7 +108,7 @@ API: `discover_instruction_files(root)`
 
 While `adk-skill` handles the **declaration** of tools via `allowed-tools`, the **implementation** and **validation** are managed via core ADK traits.
 
-- **`ToolRegistry` (Core)**: In [adk-core](file:///home/michael/src/voice_gateway/zenith/adk-rust/adk-core), use the `ToolRegistry` trait to map string identifiers (e.g., `user_profile`) to concrete `Arc<dyn Tool>` implementations.
+- **`ToolRegistry` (Core)**: In [adk-core](../adk-core), use the `ToolRegistry` trait to map string identifiers (e.g., `user_profile`) to concrete `Arc<dyn Tool>` implementations.
 - **`ValidationMode` (Core)**: Control whether the framework should strictly enforce tool availability or allow permissive binding.
 - **Selective Injection**: Use the `ContextCoordinator` to filter available tools against a skill's `allowed_tools` list, ensuring the agent only sees authorized capabilities.
 

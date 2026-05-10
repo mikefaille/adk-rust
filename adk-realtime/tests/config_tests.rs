@@ -61,6 +61,24 @@ fn test_config_modalities() {
 }
 
 #[test]
+fn test_response_modality_helpers_are_output_focused() {
+    assert_eq!(
+        RealtimeConfig::default().with_audio_response().modalities,
+        Some(vec!["audio".to_string()])
+    );
+    assert_eq!(
+        RealtimeConfig::default().with_text_response().modalities,
+        Some(vec!["text".to_string()])
+    );
+}
+
+#[test]
+fn test_config_input_audio_sample_rate() {
+    let config = RealtimeConfig::default().with_input_audio_sample_rate(24_000);
+    assert_eq!(config.input_audio_sample_rate, Some(24_000));
+}
+
+#[test]
 fn test_config_temperature() {
     let config = RealtimeConfig { temperature: Some(0.7), ..Default::default() };
 

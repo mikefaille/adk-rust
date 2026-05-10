@@ -593,7 +593,7 @@ pub enum ThinkingLevel {
 }
 
 /// Configuration for thinking (Gemini 2.5 and 3 series)
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ThinkingConfig {
     /// The thinking budget (number of thinking tokens)
