@@ -169,6 +169,10 @@ pub struct RealtimeConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub input_audio_format: Option<AudioEncoding>,
 
+    /// Input audio sample rate in Hz.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_audio_sample_rate: Option<u32>,
+
     /// Output audio format.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output_audio_format: Option<AudioEncoding>,
@@ -192,6 +196,11 @@ pub struct RealtimeConfig {
     /// Temperature for response generation.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
+
+    /// Configuration for Gemini 3 series adaptive thinking.
+    #[cfg(feature = "gemini")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking_config: Option<adk_gemini::ThinkingConfig>,
 
     /// Maximum output tokens.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -311,15 +320,48 @@ impl RealtimeConfig {
         self
     }
 
+    /// Enable text output.
+    pub fn with_text_response(mut self) -> Self {
+        self.modalities = Some(vec!["text".to_string()]);
+        self
+    }
+
+    /// Enable text-only output.
+    pub fn with_text_only(self) -> Self {
+        self.with_text_response()
+    }
+
     /// Enable text and audio output.
-    pub fn with_text_and_audio(mut self) -> Self {
+    pub fn with_text_and_audio_response(mut self) -> Self {
         self.modalities = Some(vec!["text".to_string(), "audio".to_string()]);
         self
     }
 
-    /// Enable audio-only output.
-    pub fn with_audio_only(mut self) -> Self {
+    /// Enable text and audio output.
+    pub fn with_text_and_audio(self) -> Self {
+        self.with_text_and_audio_response()
+    }
+
+    /// Enable audio output.
+    pub fn with_audio_response(mut self) -> Self {
         self.modalities = Some(vec!["audio".to_string()]);
+        self
+    }
+
+    /// Enable audio-only output.
+    pub fn with_audio_only(self) -> Self {
+        self.with_audio_response()
+    }
+
+    /// Set the input audio encoding.
+    pub fn with_input_audio_format(mut self, format: AudioEncoding) -> Self {
+        self.input_audio_format = Some(format);
+        self
+    }
+
+    /// Set the input audio sample rate in Hz.
+    pub fn with_input_audio_sample_rate(mut self, sample_rate: u32) -> Self {
+        self.input_audio_sample_rate = Some(sample_rate);
         self
     }
 
@@ -358,9 +400,23 @@ impl RealtimeConfig {
         self
     }
 
-    /// Set temperature.
-    pub fn with_temperature(mut self, temp: f32) -> Self {
-        self.temperature = Some(temp);
+    /// Set the temperature for response generation.
+    pub fn with_temperature(mut self, temperature: f32) -> Self {
+        self.temperature = Some(temperature);
+        self
+    }
+
+    /// Set the thinking configuration for Gemini 3 models.
+    #[cfg(feature = "gemini")]
+    pub fn with_thinking_config(mut self, config: adk_gemini::ThinkingConfig) -> Self {
+        self.thinking_config = Some(config);
+        self
+    }
+
+    /// Set the thinking configuration optionally.
+    #[cfg(feature = "gemini")]
+    pub fn with_thinking_config_opt(mut self, config: Option<adk_gemini::ThinkingConfig>) -> Self {
+        self.thinking_config = config;
         self
     }
 
@@ -417,6 +473,30 @@ impl RealtimeConfigBuilder {
         self
     }
 
+    /// Set output modalities.
+    pub fn response_modalities(mut self, modalities: Vec<String>) -> Self {
+        self.config.modalities = Some(modalities);
+        self
+    }
+
+    /// Enable audio output.
+    pub fn audio_response(mut self) -> Self {
+        self.config.modalities = Some(vec!["audio".to_string()]);
+        self
+    }
+
+    /// Enable text output.
+    pub fn text_response(mut self) -> Self {
+        self.config.modalities = Some(vec!["text".to_string()]);
+        self
+    }
+
+    /// Set the input audio sample rate in Hz.
+    pub fn input_audio_sample_rate(mut self, sample_rate: u32) -> Self {
+        self.config.input_audio_sample_rate = Some(sample_rate);
+        self
+    }
+
     /// Enable VAD.
     pub fn vad_enabled(mut self, enabled: bool) -> Self {
         if enabled {
@@ -457,8 +537,45 @@ impl RealtimeConfigBuilder {
         self
     }
 
+    /// Set thinking configuration (Gemini 3).
+    #[cfg(feature = "gemini")]
+    pub fn thinking_config(mut self, config: adk_gemini::ThinkingConfig) -> Self {
+        self.config.thinking_config = Some(config);
+        self
+    }
+
     /// Build the configuration.
     pub fn build(self) -> RealtimeConfig {
         self.config
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[cfg(feature = "gemini")]
+    use adk_gemini::{ThinkingConfig, ThinkingLevel};
+
+    #[test]
+    #[cfg(feature = "gemini")]
+    fn test_realtime_config_serialization_with_thinking() {
+        let config = RealtimeConfig::new().with_model("gemini-1.5-flash").with_thinking_config(
+            ThinkingConfig { include_thoughts: true, thinking_level: ThinkingLevel::Low },
+        );
+
+        let json = serde_json::to_value(&config).unwrap();
+
+        assert_eq!(json["model"], "gemini-1.5-flash");
+        assert_eq!(json["thinking_config"]["include_thoughts"], true);
+        assert_eq!(json["thinking_config"]["thinking_level"], "low");
+    }
+
+    #[test]
+    fn test_realtime_config_serialization_default() {
+        let config = RealtimeConfig::new();
+        let json = serde_json::to_value(&config).unwrap();
+
+        // Ensure empty/default config doesn't include optional fields
+        assert!(json.as_object().unwrap().is_empty());
     }
 }

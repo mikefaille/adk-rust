@@ -24,12 +24,14 @@ use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
+use super::GEMINI_LIVE_URL;
+
 type WsStream =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
-type WsSink = futures::stream::SplitSink<WsStream, Message>;
 type WsSource = futures::stream::SplitStream<WsStream>;
 const WRITER_CHANNEL_CAPACITY: usize = 64;
 const AUDIO_FLUSH_TARGET_MS: usize = 40;
+const DEFAULT_GEMINI_INPUT_SAMPLE_RATE: u32 = 16_000;
 
 /// Backend configuration for Gemini Live connections.
 ///
@@ -149,7 +151,11 @@ struct GeminiRealtimeInput {
     #[serde(skip_serializing_if = "Option::is_none")]
     media_chunks: Option<Vec<GeminiMediaChunk>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    audio: Option<GeminiMediaChunk>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    audio_stream_end: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -198,7 +204,10 @@ pub struct GeminiRealtimeSession {
     writer_task: Arc<Mutex<Option<JoinHandle<()>>>>,
     receiver: Arc<Mutex<WsSource>>,
     audio_buffer: Arc<ParkingMutex<BytesMut>>,
+    audio_buffer_sample_rate: Arc<ParkingMutex<u32>>,
     event_queue: Arc<Mutex<std::collections::VecDeque<ServerEvent>>>,
+    backend: GeminiLiveBackend,
+    input_audio_sample_rate: u32,
 }
 
 impl GeminiRealtimeSession {
@@ -209,6 +218,17 @@ impl GeminiRealtimeSession {
         bytes_per_second.saturating_mul(AUDIO_FLUSH_TARGET_MS).div_ceil(1000).max(1)
     }
 
+    fn input_sample_rate(config: &RealtimeConfig) -> u32 {
+        config.input_audio_sample_rate.unwrap_or(DEFAULT_GEMINI_INPUT_SAMPLE_RATE)
+    }
+
+    fn audio_mime_type(sample_rate: u32) -> Result<String> {
+        if sample_rate == 0 {
+            return Err(RealtimeError::audio("Gemini input audio sample rate must be non-zero"));
+        }
+        Ok(format!("audio/pcm;rate={sample_rate}"))
+    }
+
     /// Connect to Gemini Live API using the specified backend.
     pub async fn connect(
         backend: GeminiLiveBackend,
@@ -217,10 +237,7 @@ impl GeminiRealtimeSession {
     ) -> Result<Self> {
         let ws_stream = match &backend {
             GeminiLiveBackend::Studio { api_key } => {
-                let url = format!(
-                    "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key={}",
-                    api_key
-                );
+                let url = format!("{GEMINI_LIVE_URL}?key={api_key}");
                 let request = url.into_client_request().map_err(|e| {
                     RealtimeError::connection(format!("Failed to create request: {}", e))
                 })?;
@@ -312,6 +329,7 @@ impl GeminiRealtimeSession {
         });
 
         let session_id = uuid::Uuid::new_v4().to_string();
+        let input_audio_sample_rate = Self::input_sample_rate(&config);
 
         let session = Self {
             session_id,
@@ -320,7 +338,10 @@ impl GeminiRealtimeSession {
             writer_task: Arc::new(Mutex::new(Some(writer_task))),
             receiver: Arc::new(Mutex::new(source)),
             audio_buffer: Arc::new(ParkingMutex::new(BytesMut::new())),
+            audio_buffer_sample_rate: Arc::new(ParkingMutex::new(input_audio_sample_rate)),
             event_queue: Arc::new(Mutex::new(std::collections::VecDeque::new())),
+            backend: backend.clone(),
+            input_audio_sample_rate,
         };
 
         session.send_setup(model, config).await?;
@@ -329,27 +350,58 @@ impl GeminiRealtimeSession {
 
     /// Flush any buffered audio to the server.
     async fn flush_audio(&self) -> Result<()> {
-        let data = {
+        let flushed = {
+            let sample_rate = *self.audio_buffer_sample_rate.lock();
             let mut buffer = self.audio_buffer.lock();
-            if !buffer.is_empty() { Some(std::mem::take(&mut *buffer).freeze()) } else { None }
+            if !buffer.is_empty() {
+                Some((std::mem::take(&mut *buffer).freeze(), sample_rate))
+            } else {
+                None
+            }
         };
 
-        if let Some(data) = data {
-            self.send_audio_bytes(data).await?;
+        if let Some((data, sample_rate)) = flushed {
+            self.send_audio_bytes_with_rate(data, sample_rate).await?;
         }
         Ok(())
     }
 
-    /// Send a raw PCM audio payload by encoding it to base64 for Gemini wire format.
-    async fn send_audio_bytes(&self, audio_bytes: Bytes) -> Result<()> {
+    async fn send_audio_bytes_with_rate(&self, audio_bytes: Bytes, sample_rate: u32) -> Result<()> {
         let audio_base64 = base64::engine::general_purpose::STANDARD.encode(audio_bytes);
-        self.send_audio_base64(&audio_base64).await
+        self.send_audio_base64_with_rate(&audio_base64, sample_rate).await
+    }
+
+    async fn send_audio_base64_with_rate(
+        &self,
+        audio_base64: &str,
+        sample_rate: u32,
+    ) -> Result<()> {
+        let mime_type = Self::audio_mime_type(sample_rate)?;
+        let msg = GeminiClientMessage {
+            setup: None,
+            realtime_input: Some(GeminiRealtimeInput {
+                media_chunks: None,
+                audio: Some(GeminiMediaChunk { mime_type, data: audio_base64.to_string() }),
+                text: None,
+                audio_stream_end: None,
+            }),
+            tool_response: None,
+            client_content: None,
+        };
+        self.send_raw(&msg).await
     }
 
     /// Send initial setup message.
     async fn send_setup(&self, model: &str, config: RealtimeConfig) -> Result<()> {
+        let response_modalities = config
+            .modalities
+            .unwrap_or_else(|| vec!["AUDIO".to_string()])
+            .into_iter()
+            .map(|modality| modality.to_ascii_uppercase())
+            .collect::<Vec<_>>();
+
         let mut generation_config = json!({
-            "responseModalities": config.modalities.unwrap_or_else(|| vec!["AUDIO".to_string()]),
+            "responseModalities": response_modalities,
         });
 
         if let Some(voice) = &config.voice {
@@ -366,14 +418,15 @@ impl GeminiRealtimeSession {
             generation_config["temperature"] = json!(temp);
         }
 
-        if let Some(extra) = &config.extra {
-            if let Some(thinking_level) = extra.get("thinking_level") {
-                if let Some(obj) = generation_config.as_object_mut() {
-                    obj.insert(
-                        "thinkingConfig".to_string(),
-                        json!({ "thinkingLevel": thinking_level }),
-                    );
-                }
+        #[cfg(feature = "gemini")]
+        if let Some(thinking_config) = &config.thinking_config {
+            if let Some(obj) = generation_config.as_object_mut() {
+                obj.insert(
+                    "thinkingConfig".to_string(),
+                    serde_json::to_value(thinking_config).map_err(|e| {
+                        RealtimeError::protocol(format!("ThinkingConfig serialize error: {}", e))
+                    })?,
+                );
             }
         }
 
@@ -393,9 +446,21 @@ impl GeminiRealtimeSession {
 
         let session_resumption = Some(SessionResumptionConfig { handle });
 
+        // Format model for Vertex AI if needed
+        let formatted_model = match &self.backend {
+            #[cfg(feature = "vertex-live")]
+            GeminiLiveBackend::Vertex { project_id, region, .. } => {
+                let model_id = model.strip_prefix("models/").unwrap_or(model);
+                format!(
+                    "projects/{project_id}/locations/{region}/publishers/google/models/{model_id}"
+                )
+            }
+            _ => model.to_string(),
+        };
+
         let setup = GeminiClientMessage {
             setup: Some(GeminiSetup {
-                model: model.to_string(),
+                model: formatted_model,
                 system_instruction,
                 generation_config: Some(generation_config),
                 tools,
@@ -607,52 +672,46 @@ impl RealtimeSession for GeminiRealtimeSession {
         let flush_threshold_bytes = Self::flush_threshold_bytes(&audio.format);
 
         // Smart Audio Buffering: buffer small chunks to avoid overhead
-        let data = {
+        let pending = {
+            let mut pending = Vec::new();
+            let mut buffered_sample_rate = self.audio_buffer_sample_rate.lock();
             let mut buffer = self.audio_buffer.lock();
+
+            if !buffer.is_empty() && *buffered_sample_rate != audio.format.sample_rate {
+                pending.push((std::mem::take(&mut *buffer).freeze(), *buffered_sample_rate));
+            }
+
+            *buffered_sample_rate = audio.format.sample_rate;
             buffer.put_slice(&audio.data);
 
             if buffer.len() >= flush_threshold_bytes {
-                Some(std::mem::take(&mut *buffer).freeze())
-            } else {
-                None
+                pending.push((std::mem::take(&mut *buffer).freeze(), audio.format.sample_rate));
             }
+            pending
         };
 
-        if let Some(data) = data {
-            self.send_audio_bytes(data).await?;
+        for (data, sample_rate) in pending {
+            self.send_audio_bytes_with_rate(data, sample_rate).await?;
         }
         Ok(())
     }
 
     async fn send_audio_base64(&self, audio_base64: &str) -> Result<()> {
-        let msg = GeminiClientMessage {
-            setup: None,
-            realtime_input: Some(GeminiRealtimeInput {
-                media_chunks: Some(vec![GeminiMediaChunk {
-                    mime_type: "audio/pcm".to_string(),
-                    data: audio_base64.to_string(),
-                }]),
-                text: None,
-            }),
-            tool_response: None,
-            client_content: None,
-        };
-        self.send_raw(&msg).await
+        self.send_audio_base64_with_rate(audio_base64, self.input_audio_sample_rate).await
     }
 
     async fn send_text(&self, text: &str) -> Result<()> {
-        // Use client_content with turns (correct Gemini Live API format)
+        // Use realtime_input for real-time text input (Law 5)
         let msg = GeminiClientMessage {
             setup: None,
-            realtime_input: None,
-            tool_response: None,
-            client_content: Some(GeminiClientContent {
-                turns: vec![GeminiTurn {
-                    role: "user".to_string(),
-                    parts: vec![GeminiPart { text: Some(text.to_string()), inline_data: None }],
-                }],
-                turn_complete: true,
+            realtime_input: Some(GeminiRealtimeInput {
+                media_chunks: None,
+                audio: None,
+                text: Some(text.to_string()),
+                audio_stream_end: None,
             }),
+            tool_response: None,
+            client_content: None,
         };
         self.send_raw(&msg).await
     }
@@ -678,7 +737,19 @@ impl RealtimeSession for GeminiRealtimeSession {
     }
 
     async fn commit_audio(&self) -> Result<()> {
-        self.flush_audio().await
+        self.flush_audio().await?;
+        let msg = GeminiClientMessage {
+            setup: None,
+            realtime_input: Some(GeminiRealtimeInput {
+                media_chunks: None,
+                audio: None,
+                text: None,
+                audio_stream_end: Some(true),
+            }),
+            tool_response: None,
+            client_content: None,
+        };
+        self.send_raw(&msg).await
     }
 
     async fn clear_audio(&self) -> Result<()> {
@@ -820,10 +891,16 @@ pub fn build_vertex_live_url(region: &str, project_id: &str) -> Result<String> {
     if project_id.is_empty() {
         return Err(RealtimeError::config("Vertex AI Live requires a non-empty project_id"));
     }
+
+    let host = if region == "global" {
+        "aiplatform.googleapis.com".to_string()
+    } else {
+        format!("{}-aiplatform.googleapis.com", region)
+    };
+
     Ok(format!(
-        "wss://{region}-aiplatform.googleapis.com/ws/\
-         google.cloud.aiplatform.v1beta1.LlmBidiService/BidiGenerateContent\
-         ?project_id={project_id}",
+        "wss://{}/ws/google.cloud.aiplatform.v1beta1.LlmBidiService/BidiGenerateContent?project_id={}",
+        host, project_id
     ))
 }
 
@@ -1083,5 +1160,71 @@ mod tests {
     fn test_flush_threshold_bytes_pcm16_16khz_40ms() {
         let threshold = GeminiRealtimeSession::flush_threshold_bytes(&AudioFormat::pcm16_16khz());
         assert_eq!(threshold, 1280);
+    }
+
+    #[test]
+    fn test_gemini_audio_mime_type_includes_actual_rate() {
+        assert_eq!(GeminiRealtimeSession::audio_mime_type(24_000).unwrap(), "audio/pcm;rate=24000");
+        assert_eq!(GeminiRealtimeSession::audio_mime_type(16_000).unwrap(), "audio/pcm;rate=16000");
+    }
+
+    #[test]
+    fn test_gemini_realtime_text_uses_realtime_input_text() {
+        let msg = GeminiClientMessage {
+            setup: None,
+            realtime_input: Some(GeminiRealtimeInput {
+                media_chunks: None,
+                audio: None,
+                text: Some("hello".to_string()),
+                audio_stream_end: None,
+            }),
+            tool_response: None,
+            client_content: None,
+        };
+
+        let js = serde_json::to_value(&msg).unwrap();
+        assert_eq!(js["realtimeInput"]["text"], "hello");
+        assert!(js.get("clientContent").is_none());
+    }
+
+    #[test]
+    fn test_gemini_realtime_audio_uses_audio_field_with_rate() {
+        let msg = GeminiClientMessage {
+            setup: None,
+            realtime_input: Some(GeminiRealtimeInput {
+                media_chunks: None,
+                audio: Some(GeminiMediaChunk {
+                    mime_type: GeminiRealtimeSession::audio_mime_type(16_000).unwrap(),
+                    data: "AAAA".to_string(),
+                }),
+                text: None,
+                audio_stream_end: None,
+            }),
+            tool_response: None,
+            client_content: None,
+        };
+
+        let js = serde_json::to_value(&msg).unwrap();
+        assert_eq!(js["realtimeInput"]["audio"]["mimeType"], "audio/pcm;rate=16000");
+        assert_eq!(js["realtimeInput"]["audio"]["data"], "AAAA");
+        assert!(js["realtimeInput"].get("mediaChunks").is_none());
+    }
+
+    #[test]
+    fn test_gemini_commit_audio_uses_audio_stream_end() {
+        let msg = GeminiClientMessage {
+            setup: None,
+            realtime_input: Some(GeminiRealtimeInput {
+                media_chunks: None,
+                audio: None,
+                text: None,
+                audio_stream_end: Some(true),
+            }),
+            tool_response: None,
+            client_content: None,
+        };
+
+        let js = serde_json::to_value(&msg).unwrap();
+        assert_eq!(js["realtimeInput"]["audioStreamEnd"], true);
     }
 }

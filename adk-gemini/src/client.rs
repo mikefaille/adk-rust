@@ -63,6 +63,12 @@ pub enum Model {
     /// Gemini 3.1 Flash Lite — GA, most cost-efficient for high-volume agentic tasks.
     #[serde(rename = "models/gemini-3.1-flash-lite")]
     Gemini31FlashLite,
+    /// Gemini 3.1 Flash Lite preview.
+    #[serde(rename = "models/gemini-3.1-flash-lite-preview")]
+    Gemini31FlashLitePreview,
+    /// Gemini 3.1 Flash Live preview.
+    #[serde(rename = "models/gemini-3.1-flash-live-preview")]
+    Gemini31FlashLivePreview,
     /// Gemini 3.1 Flash Image (Nano Banana 2) — GA native image generation.
     #[serde(rename = "models/gemini-3.1-flash-image")]
     Gemini31FlashImage,
@@ -141,6 +147,8 @@ impl Model {
             Model::Gemini35Flash => "models/gemini-3.5-flash",
             Model::Gemini31ProPreview => "models/gemini-3.1-pro-preview",
             Model::Gemini31FlashLite => "models/gemini-3.1-flash-lite",
+            Model::Gemini31FlashLitePreview => "models/gemini-3.1-flash-lite-preview",
+            Model::Gemini31FlashLivePreview => "models/gemini-3.1-flash-live-preview",
             Model::Gemini31FlashImage => "models/gemini-3.1-flash-image",
             Model::Gemini3ProPreview => "models/gemini-3-pro-preview",
             Model::Gemini3ProImage => "models/gemini-3-pro-image",
@@ -174,6 +182,8 @@ impl Model {
             Model::Gemini35Flash => "gemini-3.5-flash",
             Model::Gemini31ProPreview => "gemini-3.1-pro-preview",
             Model::Gemini31FlashLite => "gemini-3.1-flash-lite",
+            Model::Gemini31FlashLitePreview => "gemini-3.1-flash-lite-preview",
+            Model::Gemini31FlashLivePreview => "gemini-3.1-flash-live-preview",
             Model::Gemini31FlashImage => "gemini-3.1-flash-image",
             Model::Gemini3ProPreview => "gemini-3-pro-preview",
             Model::Gemini3ProImage => "gemini-3-pro-image",
@@ -217,6 +227,8 @@ impl From<String> for Model {
             // Gemini 3.1 models
             "gemini-3.1-pro-preview" => Self::Gemini31ProPreview,
             "gemini-3.1-flash-lite" => Self::Gemini31FlashLite,
+            "gemini-3.1-flash-lite-preview" => Self::Gemini31FlashLitePreview,
+            "gemini-3.1-flash-live-preview" => Self::Gemini31FlashLivePreview,
             "gemini-3.1-flash-image" => Self::Gemini31FlashImage,
             // Gemini 3 models
             "gemini-3-pro-preview" => Self::Gemini3ProPreview,
