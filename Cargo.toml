@@ -60,7 +60,7 @@ exclude = [
 [profile.dev]
 debug = 1                    # Line tables only — faster builds, still get backtraces
 split-debuginfo = "packed"
-incremental = true           # Faster recompilation on code changes
+incremental = false           # Disabled to enable sccache hits
 opt-level = 0                # No optimization in dev — fastest compile
 
 [profile.dev.package."*"]
@@ -79,7 +79,7 @@ inherits = "dev"
 opt-level = 0
 debug = 0
 codegen-units = 256
-incremental = true
+incremental = false
 
 [profile.example-dev.package."*"]
 incremental = false
