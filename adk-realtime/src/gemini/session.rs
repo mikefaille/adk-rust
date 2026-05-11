@@ -455,7 +455,7 @@ impl GeminiRealtimeSession {
                     "projects/{project_id}/locations/{region}/publishers/google/models/{model_id}"
                 )
             }
-            _ => model.to_string(),
+            _ => model.strip_prefix("models/").unwrap_or(model).to_string(),
         };
 
         let setup = GeminiClientMessage {
