@@ -1,16 +1,18 @@
-use adk_realtime::events::{ServerEvent, ClientEvent, ToolResponse};
+use adk_realtime::events::{ClientEvent, ServerEvent, ToolResponse};
 use adk_realtime::{
-    BoxedModel, runner::EventHandler, RealtimeConfig, RealtimeError, RealtimeModel, RealtimeRunner,
-    session::{RealtimeSession, BoxedSession, ContextMutationOutcome},
-    audio::AudioChunk, audio::AudioFormat
+    BoxedModel, RealtimeConfig, RealtimeError, RealtimeModel, RealtimeRunner,
+    audio::AudioChunk,
+    audio::AudioFormat,
+    runner::EventHandler,
+    session::{BoxedSession, ContextMutationOutcome, RealtimeSession},
 };
 use async_trait::async_trait;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-use tokio::sync::mpsc;
-use tokio::sync::Mutex;
 use futures::Stream;
 use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use tokio::sync::Mutex;
+use tokio::sync::mpsc;
 
 struct FakeSession {
     events: Mutex<mpsc::Receiver<Result<ServerEvent, RealtimeError>>>,
@@ -67,7 +69,9 @@ impl RealtimeSession for FakeSession {
         events.recv().await
     }
 
-    fn events(&self) -> Pin<Box<dyn Stream<Item = Result<ServerEvent, RealtimeError>> + Send + '_>> {
+    fn events(
+        &self,
+    ) -> Pin<Box<dyn Stream<Item = Result<ServerEvent, RealtimeError>> + Send + '_>> {
         unimplemented!()
     }
 
@@ -109,10 +113,7 @@ impl RealtimeModel for FakeModel {
         vec![]
     }
 
-    async fn connect(
-        &self,
-        _config: RealtimeConfig,
-    ) -> Result<BoxedSession, RealtimeError> {
+    async fn connect(&self, _config: RealtimeConfig) -> Result<BoxedSession, RealtimeError> {
         let (tx, rx) = mpsc::channel(10);
         let mut locked_tx = self.events_tx.lock().await;
         *locked_tx = Some(tx);
@@ -135,9 +136,7 @@ impl EventHandler for TrackingEventHandler {
 #[tokio::test]
 async fn runner_run_dispatches_events_to_handler() {
     let model = Arc::new(FakeModel { events_tx: Mutex::new(None) });
-    let handler = TrackingEventHandler {
-        speech_started_called: Arc::new(AtomicBool::new(false)),
-    };
+    let handler = TrackingEventHandler { speech_started_called: Arc::new(AtomicBool::new(false)) };
     let called = handler.speech_started_called.clone();
 
     let runner = RealtimeRunner::builder()
@@ -149,7 +148,12 @@ async fn runner_run_dispatches_events_to_handler() {
     runner.connect().await.unwrap();
 
     let tx = model.events_tx.lock().await.take().unwrap();
-    tx.send(Ok(ServerEvent::SpeechStarted { audio_start_ms: 100, event_id: "test-id".to_string() })).await.unwrap();
+    tx.send(Ok(ServerEvent::SpeechStarted {
+        audio_start_ms: 100,
+        event_id: "test-id".to_string(),
+    }))
+    .await
+    .unwrap();
 
     // Send EOF to stop the runner loop
     drop(tx);
@@ -162,9 +166,7 @@ async fn runner_run_dispatches_events_to_handler() {
 #[tokio::test]
 async fn runner_next_event_does_not_invoke_handler() {
     let model = Arc::new(FakeModel { events_tx: Mutex::new(None) });
-    let handler = TrackingEventHandler {
-        speech_started_called: Arc::new(AtomicBool::new(false)),
-    };
+    let handler = TrackingEventHandler { speech_started_called: Arc::new(AtomicBool::new(false)) };
     let called = handler.speech_started_called.clone();
 
     let runner = RealtimeRunner::builder()
@@ -176,7 +178,12 @@ async fn runner_next_event_does_not_invoke_handler() {
     runner.connect().await.unwrap();
 
     let tx = model.events_tx.lock().await.take().unwrap();
-    tx.send(Ok(ServerEvent::SpeechStarted { audio_start_ms: 100, event_id: "test-id".to_string() })).await.unwrap();
+    tx.send(Ok(ServerEvent::SpeechStarted {
+        audio_start_ms: 100,
+        event_id: "test-id".to_string(),
+    }))
+    .await
+    .unwrap();
 
     let event = runner.next_event().await.unwrap().unwrap();
     assert!(matches!(event, ServerEvent::SpeechStarted { audio_start_ms: 100, .. }));
