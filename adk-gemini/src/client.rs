@@ -55,9 +55,6 @@ pub enum Model {
     #[serde(rename = "models/gemini-3.1-flash-live-preview")]
     Gemini31FlashLivePreview,
 
-    #[serde(other)]
-    Unknown,
-
     // ── Gemini 3 ─────────────────────────────────────────────────
     #[serde(rename = "models/gemini-3-pro-preview")]
     Gemini3ProPreview,
@@ -157,8 +154,6 @@ impl Model {
             Model::GeminiEmbedding001 => "models/gemini-embedding-001",
             Model::TextEmbedding004 => "models/text-embedding-004",
             Model::Custom(model) => model,
-            #[allow(unreachable_patterns)]
-            _ => "unknown",
         }
     }
 
@@ -212,9 +207,6 @@ impl From<String> for Model {
             // Gemini 3.1 models (newest generation)
             "gemini-3.1-pro-preview" => Self::Gemini31ProPreview,
             "gemini-3.1-flash-live-preview" => Self::Gemini31FlashLivePreview,
-
-    #[serde(other)]
-    Unknown,
             // Gemini 3 models
             "gemini-3-pro-preview" => Self::Gemini3ProPreview,
             "gemini-3-pro-image-preview" => Self::Gemini3ProImagePreview,
