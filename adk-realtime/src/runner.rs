@@ -605,7 +605,12 @@ impl RealtimeRunner {
         session.interrupt().await
     }
 
-    /// Get the next raw event from the session.
+    /// Get the next raw event from the session (Manual polling mode).
+    ///
+    /// In manual polling mode, the caller owns event dispatch. The raw `ServerEvent`
+    /// is returned directly to the caller, and any configured `EventHandler` will **not**
+    /// be invoked automatically. If you want events to be routed to the `EventHandler`,
+    /// you should use `runner.run()` instead.
     ///
     /// # Example
     ///
@@ -658,7 +663,11 @@ impl RealtimeRunner {
         session.send_tool_response(response).await
     }
 
-    /// Run the event loop, processing events until disconnected.
+    /// Run the event loop, processing events until disconnected (Handler-driven mode).
+    ///
+    /// In handler-driven mode, incoming `ServerEvent`s are automatically routed to
+    /// the configured `EventHandler` (e.g., `ServerEvent::AudioDelta` calls `on_audio`).
+    /// If you want to consume events manually instead, you should use `runner.next_event()`.
     pub async fn run(&self) -> Result<()> {
         loop {
             let session = self.session_handle().await?;
