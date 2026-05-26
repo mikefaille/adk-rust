@@ -162,3 +162,10 @@ adk-action = { path = "adk-action", version = "0.8.0" }
 adk-anthropic = { path = "adk-anthropic", version = "0.8.0" }
 awp-types = { path = "awp-types", version = "0.8.0" }
 adk-awp = { path = "adk-awp", version = "0.8.0" }
+
+[patch.crates-io]
+livekit = { git = "https://github.com/mikefaille/rust-sdks.git", rev = "89c5e7fd806b59a73b62f7dd7f45e67ded4d2ed0" }
+livekit-api = { git = "https://github.com/mikefaille/rust-sdks.git", rev = "89c5e7fd806b59a73b62f7dd7f45e67ded4d2ed0" }
+libwebrtc = { git = "https://github.com/mikefaille/rust-sdks.git", rev = "89c5e7fd806b59a73b62f7dd7f45e67ded4d2ed0" }
+webrtc-sys = { git = "https://github.com/mikefaille/rust-sdks.git", rev = "89c5e7fd806b59a73b62f7dd7f45e67ded4d2ed0" }
+webrtc-sys-build = { git = "https://github.com/mikefaille/rust-sdks.git", rev = "89c5e7fd806b59a73b62f7dd7f45e67ded4d2ed0" }
