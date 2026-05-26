@@ -185,6 +185,9 @@ adk-awp = { path = "adk-awp", version = "1.0.0" }
 adk-acp = { path = "adk-acp", version = "1.0.0" }
 
 [patch.crates-io]
+surrealdb = { git = "https://github.com/nresare/surrealdb.git", branch = "introduce_surrealdb_client_core_v3.0" }
+surrealdb-types = { git = "https://github.com/nresare/surrealdb.git", branch = "introduce_surrealdb_client_core_v3.0" }
+surrealdb-types-derive = { git = "https://github.com/nresare/surrealdb.git", branch = "introduce_surrealdb_client_core_v3.0" }
 livekit = { git = "https://github.com/mikefaille/rust-sdks.git", rev = "89c5e7fd806b59a73b62f7dd7f45e67ded4d2ed0" }
 livekit-api = { git = "https://github.com/mikefaille/rust-sdks.git", rev = "89c5e7fd806b59a73b62f7dd7f45e67ded4d2ed0" }
 libwebrtc = { git = "https://github.com/mikefaille/rust-sdks.git", rev = "89c5e7fd806b59a73b62f7dd7f45e67ded4d2ed0" }
