@@ -167,8 +167,8 @@ adk-awp = { path = "adk-awp", version = "0.8.0" }
 surrealdb = { git = "https://github.com/nresare/surrealdb.git", branch = "introduce_surrealdb_client_core_v3.0" }
 surrealdb-types = { git = "https://github.com/nresare/surrealdb.git", branch = "introduce_surrealdb_client_core_v3.0" }
 surrealdb-types-derive = { git = "https://github.com/nresare/surrealdb.git", branch = "introduce_surrealdb_client_core_v3.0" }
-livekit = { git = "https://github.com/mikefaille/rust-sdks.git", rev = "89c5e7fd806b59a73b62f7dd7f45e67ded4d2ed0" }
-livekit-api = { git = "https://github.com/mikefaille/rust-sdks.git", rev = "89c5e7fd806b59a73b62f7dd7f45e67ded4d2ed0" }
-libwebrtc = { git = "https://github.com/mikefaille/rust-sdks.git", rev = "89c5e7fd806b59a73b62f7dd7f45e67ded4d2ed0" }
-webrtc-sys = { git = "https://github.com/mikefaille/rust-sdks.git", rev = "89c5e7fd806b59a73b62f7dd7f45e67ded4d2ed0" }
-webrtc-sys-build = { git = "https://github.com/mikefaille/rust-sdks.git", rev = "89c5e7fd806b59a73b62f7dd7f45e67ded4d2ed0" }
+livekit = { git = "https://github.com/mikefaille/rust-sdks.git", rev = "be88852bf76500c06df89d585b04b418390f1a62" }
+livekit-api = { git = "https://github.com/mikefaille/rust-sdks.git", rev = "be88852bf76500c06df89d585b04b418390f1a62" }
+libwebrtc = { git = "https://github.com/mikefaille/rust-sdks.git", rev = "be88852bf76500c06df89d585b04b418390f1a62" }
+webrtc-sys = { git = "https://github.com/mikefaille/rust-sdks.git", rev = "be88852bf76500c06df89d585b04b418390f1a62" }
+webrtc-sys-build = { git = "https://github.com/mikefaille/rust-sdks.git", rev = "be88852bf76500c06df89d585b04b418390f1a62" }

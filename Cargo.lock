@@ -5306,7 +5306,7 @@ checksum = "abd57806937c9cc163efc8ea3910e00a62e2aeb0b8119f1793a978088f8f6b04"
 [[package]]
 name = "device-info"
 version = "0.1.1"
-source = "git+https://github.com/mikefaille/rust-sdks.git?rev=89c5e7fd806b59a73b62f7dd7f45e67ded4d2ed0#89c5e7fd806b59a73b62f7dd7f45e67ded4d2ed0"
+source = "git+https://github.com/mikefaille/rust-sdks.git?rev=be88852bf76500c06df89d585b04b418390f1a62#be88852bf76500c06df89d585b04b418390f1a62"
 dependencies = [
  "core-foundation 0.10.1",
  "jni",
@@ -6538,8 +6538,8 @@ dependencies = [
  "libc",
  "log",
  "rustversion",
- "windows-link 0.2.1",
- "windows-result 0.4.1",
+ "windows-link 0.1.3",
+ "windows-result 0.3.4",
 ]
 
 [[package]]
@@ -7710,7 +7710,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.6.3",
+ "socket2 0.5.10",
  "system-configuration 0.7.0",
  "tokio",
  "tower-service",
@@ -7797,7 +7797,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.62.2",
+ "windows-core 0.61.2",
 ]
 
 [[package]]
@@ -9202,7 +9202,7 @@ dependencies = [
 [[package]]
 name = "libwebrtc"
 version = "0.3.34"
-source = "git+https://github.com/mikefaille/rust-sdks.git?rev=89c5e7fd806b59a73b62f7dd7f45e67ded4d2ed0#89c5e7fd806b59a73b62f7dd7f45e67ded4d2ed0"
+source = "git+https://github.com/mikefaille/rust-sdks.git?rev=be88852bf76500c06df89d585b04b418390f1a62#be88852bf76500c06df89d585b04b418390f1a62"
 dependencies = [
  "cxx",
  "jni",
@@ -9275,7 +9275,7 @@ checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
 [[package]]
 name = "livekit"
 version = "0.7.42"
-source = "git+https://github.com/mikefaille/rust-sdks.git?rev=89c5e7fd806b59a73b62f7dd7f45e67ded4d2ed0#89c5e7fd806b59a73b62f7dd7f45e67ded4d2ed0"
+source = "git+https://github.com/mikefaille/rust-sdks.git?rev=be88852bf76500c06df89d585b04b418390f1a62#be88852bf76500c06df89d585b04b418390f1a62"
 dependencies = [
  "base64 0.22.1",
  "bmrng",
@@ -9302,7 +9302,7 @@ dependencies = [
 [[package]]
 name = "livekit-api"
 version = "0.4.24"
-source = "git+https://github.com/mikefaille/rust-sdks.git?rev=89c5e7fd806b59a73b62f7dd7f45e67ded4d2ed0#89c5e7fd806b59a73b62f7dd7f45e67ded4d2ed0"
+source = "git+https://github.com/mikefaille/rust-sdks.git?rev=be88852bf76500c06df89d585b04b418390f1a62#be88852bf76500c06df89d585b04b418390f1a62"
 dependencies = [
  "async-tungstenite",
  "base64 0.21.7",
@@ -9333,7 +9333,7 @@ dependencies = [
 [[package]]
 name = "livekit-datatrack"
 version = "0.1.7"
-source = "git+https://github.com/mikefaille/rust-sdks.git?rev=89c5e7fd806b59a73b62f7dd7f45e67ded4d2ed0#89c5e7fd806b59a73b62f7dd7f45e67ded4d2ed0"
+source = "git+https://github.com/mikefaille/rust-sdks.git?rev=be88852bf76500c06df89d585b04b418390f1a62#be88852bf76500c06df89d585b04b418390f1a62"
 dependencies = [
  "anyhow",
  "bytes",
@@ -9353,7 +9353,7 @@ dependencies = [
 [[package]]
 name = "livekit-protocol"
 version = "0.7.7"
-source = "git+https://github.com/mikefaille/rust-sdks.git?rev=89c5e7fd806b59a73b62f7dd7f45e67ded4d2ed0#89c5e7fd806b59a73b62f7dd7f45e67ded4d2ed0"
+source = "git+https://github.com/mikefaille/rust-sdks.git?rev=be88852bf76500c06df89d585b04b418390f1a62#be88852bf76500c06df89d585b04b418390f1a62"
 dependencies = [
  "pbjson",
  "pbjson-types",
@@ -9364,7 +9364,7 @@ dependencies = [
 [[package]]
 name = "livekit-runtime"
 version = "0.4.0"
-source = "git+https://github.com/mikefaille/rust-sdks.git?rev=89c5e7fd806b59a73b62f7dd7f45e67ded4d2ed0#89c5e7fd806b59a73b62f7dd7f45e67ded4d2ed0"
+source = "git+https://github.com/mikefaille/rust-sdks.git?rev=be88852bf76500c06df89d585b04b418390f1a62#be88852bf76500c06df89d585b04b418390f1a62"
 dependencies = [
  "tokio",
  "tokio-stream",
@@ -11775,7 +11775,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash 2.1.1",
  "rustls 0.23.40",
- "socket2 0.6.3",
+ "socket2 0.5.10",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -11813,7 +11813,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.6.3",
+ "socket2 0.5.10",
  "tracing",
  "windows-sys 0.60.2",
 ]
@@ -16870,7 +16870,7 @@ dependencies = [
 [[package]]
 name = "webrtc-sys"
 version = "0.3.32"
-source = "git+https://github.com/mikefaille/rust-sdks.git?rev=89c5e7fd806b59a73b62f7dd7f45e67ded4d2ed0#89c5e7fd806b59a73b62f7dd7f45e67ded4d2ed0"
+source = "git+https://github.com/mikefaille/rust-sdks.git?rev=be88852bf76500c06df89d585b04b418390f1a62#be88852bf76500c06df89d585b04b418390f1a62"
 dependencies = [
  "cc",
  "cxx",
@@ -16884,7 +16884,7 @@ dependencies = [
 [[package]]
 name = "webrtc-sys-build"
 version = "0.3.18"
-source = "git+https://github.com/mikefaille/rust-sdks.git?rev=89c5e7fd806b59a73b62f7dd7f45e67ded4d2ed0#89c5e7fd806b59a73b62f7dd7f45e67ded4d2ed0"
+source = "git+https://github.com/mikefaille/rust-sdks.git?rev=be88852bf76500c06df89d585b04b418390f1a62#be88852bf76500c06df89d585b04b418390f1a62"
 dependencies = [
  "anyhow",
  "fs2",
@@ -16994,7 +16994,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]
