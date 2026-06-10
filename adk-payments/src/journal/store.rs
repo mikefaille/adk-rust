@@ -120,13 +120,8 @@ impl TransactionStore for SessionBackedTransactionStore {
         let mut records = Vec::new();
 
         for locator in active.into_iter().filter(|locator| &locator.identity == identity) {
-            if let Some(record) = self
-                .get(TransactionLookup {
-                    transaction_id: locator.transaction_id,
-                    session_identity: Some(identity.clone()),
-                })
-                .await?
-            {
+            let key = transaction_state_storage_key(identity, &locator.transaction_id);
+            if let Some(record) = session.state().get(&key).map(parse_record).transpose()? {
                 if !matches!(
                     record.state,
                     TransactionState::Completed
