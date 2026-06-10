@@ -70,7 +70,7 @@
     protobuf
 
     # Frontend tooling (ADK Studio UI)
-    nodePackages.pnpm
+    pnpm
 
     # Test runner
     cargo-nextest      # Parallel test runner (~10x faster than cargo test)
