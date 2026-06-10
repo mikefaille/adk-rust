@@ -284,6 +284,8 @@ impl GeminiPricing {
             Model::Gemini35Flash => Self::GEMINI_35_FLASH,
             Model::Gemini31ProPreview => Self::GEMINI_31_PRO_PREVIEW,
             Model::Gemini31FlashLite => Self::GEMINI_31_FLASH_LITE,
+            Model::Gemini31FlashLitePreview => Self::GEMINI_31_FLASH_LITE,
+            Model::Gemini31FlashLivePreview => Self::GEMINI_31_FLASH_LIVE,
             Model::Gemini31FlashImage => Self::GEMINI_31_FLASH_IMAGE,
             Model::Gemini3FlashPreview => Self::GEMINI_3_FLASH_PREVIEW,
             Model::Gemini3ProImage | Model::Gemini3ProImagePreview => Self::GEMINI_3_PRO_IMAGE,
