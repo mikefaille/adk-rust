@@ -45,6 +45,7 @@ static V1_BASE_URL: LazyLock<Url> = LazyLock::new(|| {
 // Model enum
 // ══════════════════════════════════════════════════════════════════════
 
+#[non_exhaustive]
 #[derive(Debug, Default, Clone, PartialEq, Eq, Hash, Deserialize, Serialize)]
 pub enum Model {
     // ── Gemini 3.1 (newest generation) ────────────────────────────
