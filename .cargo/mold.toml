@@ -1,0 +1,9 @@
+# Mold linker — release artifacts, main-branch validation, nightly compat builds.
+# Usage: cargo --config .cargo/mold.toml build|test|nextest ...
+# Verify: readelf -p .comment <binary> | grep -i mold
+
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-Clink-arg=-fuse-ld=mold"]
+
+[target.aarch64-unknown-linux-gnu]
+rustflags = ["-Clink-arg=-fuse-ld=mold"]

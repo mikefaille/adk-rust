@@ -1,0 +1,9 @@
+# Wild linker — fast iterative linking for local dev and CI test builds.
+# Usage: cargo --config .cargo/wild.toml build|test|nextest ...
+# Verify: readelf -p .comment <binary> | grep 'Linker: Wild'
+
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-Clink-arg=--ld-path=wild"]
+
+[target.aarch64-unknown-linux-gnu]
+rustflags = ["-Clink-arg=--ld-path=wild"]

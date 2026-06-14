@@ -13,41 +13,18 @@
 incremental = false
 
 # ---------------------------------------------------------------------------
-# Faster linker per platform
+# Linker per platform — base (no linker selection)
 # ---------------------------------------------------------------------------
-# We use 'clang' as the compiler driver because it supports advanced linkers 
-# like 'mold' and 'wild' natively.
-#
-# -fuse-ld=mold: 
-#   Instructs clang to use a linker named 'mold'. It searches the system PATH 
-#   for a binary matching 'ld.mold'.
-#
-# --ld-path=wild: 
-#   Provides the direct filesystem path or specific binary name for the 'wild' 
-#   linker. This is more explicit than -fuse-ld and useful when multiple 
-#   versions exist or when using specialized linkers like 'wild'.
-#
-# mold is the general-purpose king of speed. 
-# wild is used in this workspace for specific performance characteristics 
-# in massive monorepo structures.
+# We use 'clang' as the compiler driver because it supports both Wild and Mold.
+# Linker selection (Wild vs Mold) is done per-invocation via:
+#   cargo --config .cargo/wild.toml   (fast iterative: local dev + CI test)
+#   cargo --config .cargo/mold.toml   (release + nightly compatibility)
 
 [target.x86_64-unknown-linux-gnu]
 linker = "clang"
-rustflags = [
-  "-C", "link-arg=--ld-path=wild"
-]
-
-[target.'cfg(all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64")))']
-linker = "clang"
-rustflags = [
-  "-C", "link-arg=--ld-path=wild"
-]
 
 [target.aarch64-unknown-linux-gnu]
 linker = "clang"
-rustflags = [
-  "-C", "link-arg=--ld-path=wild"
-]
 
 # macOS arm64 — the default ld is already fast; no override needed.
 [target.aarch64-apple-darwin]
@@ -76,7 +53,7 @@ git-fetch-with-cli = true
 protocol = "sparse"
 
 [env]
-# Enable incremental support for the 'wild' linker specifically (if it supports it)
-WILD_INCREMENTAL = "1"
-# We do NOT set CARGO_INCREMENTAL = "0" here because sccache pre-commit 
+# Final linker is selected per task through .cargo/wild.toml or .cargo/mold.toml.
+# Wild does not implement incremental linking; WILD_INCREMENTAL is not set.
+# We do NOT set CARGO_INCREMENTAL = "0" here because sccache pre-commit
 # checks often require it to be UNSET completely rather than set to 0.
