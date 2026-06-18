@@ -143,8 +143,8 @@ sha2 = "0.10"
 hex = "0.4"
 flate2 = "1.0"
 tar = "0.4"
-livekit = { version = "0.7.36", default-features = false, features = ["tokio", "native-tls"] }
-livekit-api = { version = "0.4.18", default-features = false, features = ["signal-client-tokio", "services-tokio", "access-token"] }
+livekit = { version = "0.7.46", default-features = false, features = ["tokio", "native-tls"] }
+livekit-api = { version = "0.5", default-features = false, features = ["signal-client-tokio", "services-tokio", "access-token"] }
 
 # ADK internal crates (use { workspace = true } in member crates)
 adk-core = { path = "adk-core", version = "1.0.0" }
@@ -188,8 +188,3 @@ adk-acp = { path = "adk-acp", version = "1.0.0" }
 surrealdb = { git = "https://github.com/nresare/surrealdb.git", branch = "introduce_surrealdb_client_core_v3.0" }
 surrealdb-types = { git = "https://github.com/nresare/surrealdb.git", branch = "introduce_surrealdb_client_core_v3.0" }
 surrealdb-types-derive = { git = "https://github.com/nresare/surrealdb.git", branch = "introduce_surrealdb_client_core_v3.0" }
-livekit = { git = "https://github.com/mikefaille/rust-sdks.git", rev = "89c5e7fd806b59a73b62f7dd7f45e67ded4d2ed0" }
-livekit-api = { git = "https://github.com/mikefaille/rust-sdks.git", rev = "89c5e7fd806b59a73b62f7dd7f45e67ded4d2ed0" }
-libwebrtc = { git = "https://github.com/mikefaille/rust-sdks.git", rev = "89c5e7fd806b59a73b62f7dd7f45e67ded4d2ed0" }
-webrtc-sys = { git = "https://github.com/mikefaille/rust-sdks.git", rev = "89c5e7fd806b59a73b62f7dd7f45e67ded4d2ed0" }
-webrtc-sys-build = { git = "https://github.com/mikefaille/rust-sdks.git", rev = "89c5e7fd806b59a73b62f7dd7f45e67ded4d2ed0" }

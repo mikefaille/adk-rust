@@ -6383,7 +6383,8 @@ checksum = "abd57806937c9cc163efc8ea3910e00a62e2aeb0b8119f1793a978088f8f6b04"
 [[package]]
 name = "device-info"
 version = "0.1.1"
-source = "git+https://github.com/mikefaille/rust-sdks.git?rev=89c5e7fd806b59a73b62f7dd7f45e67ded4d2ed0#89c5e7fd806b59a73b62f7dd7f45e67ded4d2ed0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a2ca8e71544c1b67dcdbc2699ab258828aff985e5bc8d5f6b486d90d7df2f848"
 dependencies = [
  "core-foundation 0.10.1",
  "jni 0.21.1",
@@ -10961,8 +10962,9 @@ dependencies = [
 
 [[package]]
 name = "libwebrtc"
-version = "0.3.34"
-source = "git+https://github.com/mikefaille/rust-sdks.git?rev=89c5e7fd806b59a73b62f7dd7f45e67ded4d2ed0#89c5e7fd806b59a73b62f7dd7f45e67ded4d2ed0"
+version = "0.3.37"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8d48c4b25dbca31dc01d68f81bfe68e84549b7b4e26969dedd01482e20613eb1"
 dependencies = [
  "cxx",
  "jni 0.21.1",
@@ -11034,8 +11036,9 @@ checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
 
 [[package]]
 name = "livekit"
-version = "0.7.42"
-source = "git+https://github.com/mikefaille/rust-sdks.git?rev=89c5e7fd806b59a73b62f7dd7f45e67ded4d2ed0#89c5e7fd806b59a73b62f7dd7f45e67ded4d2ed0"
+version = "0.7.46"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "40408235dcb0ef0502551692cf1c1a859646cb266ae973ea9d555b15285845d7"
 dependencies = [
  "base64 0.22.1",
  "bmrng",
@@ -11057,18 +11060,22 @@ dependencies = [
  "serde_json",
  "thiserror 1.0.69",
  "tokio",
+ "tokio-stream",
 ]
 
 [[package]]
 name = "livekit-api"
-version = "0.4.24"
-source = "git+https://github.com/mikefaille/rust-sdks.git?rev=89c5e7fd806b59a73b62f7dd7f45e67ded4d2ed0#89c5e7fd806b59a73b62f7dd7f45e67ded4d2ed0"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "394e625d8da0d89f811b7b30beb741df18e75077a5226176cec708957b07a1fa"
 dependencies = [
  "async-tungstenite",
  "base64 0.21.7",
  "bytes",
  "device-info",
+ "flate2",
  "futures-util",
+ "hmac 0.12.1",
  "http 1.4.2",
  "jsonwebtoken 10.4.0",
  "livekit-protocol",
@@ -11084,6 +11091,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "signature",
  "thiserror 2.0.18",
  "tokio",
  "tokio-tungstenite 0.29.0",
@@ -11092,8 +11100,9 @@ dependencies = [
 
 [[package]]
 name = "livekit-datatrack"
-version = "0.1.7"
-source = "git+https://github.com/mikefaille/rust-sdks.git?rev=89c5e7fd806b59a73b62f7dd7f45e67ded4d2ed0#89c5e7fd806b59a73b62f7dd7f45e67ded4d2ed0"
+version = "0.1.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6618b1fe027f45b2ddd42794f3a263e07a69949fec0ed5f8d0a13e394d19525f"
 dependencies = [
  "anyhow",
  "bytes",
@@ -11112,8 +11121,9 @@ dependencies = [
 
 [[package]]
 name = "livekit-protocol"
-version = "0.7.7"
-source = "git+https://github.com/mikefaille/rust-sdks.git?rev=89c5e7fd806b59a73b62f7dd7f45e67ded4d2ed0#89c5e7fd806b59a73b62f7dd7f45e67ded4d2ed0"
+version = "0.7.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "565d83442aa99684dba5d0841fa342eb572fbd916ba2aa5e92801ecf76620026"
 dependencies = [
  "pbjson",
  "pbjson-types",
@@ -11124,7 +11134,8 @@ dependencies = [
 [[package]]
 name = "livekit-runtime"
 version = "0.4.0"
-source = "git+https://github.com/mikefaille/rust-sdks.git?rev=89c5e7fd806b59a73b62f7dd7f45e67ded4d2ed0#89c5e7fd806b59a73b62f7dd7f45e67ded4d2ed0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "532e84c6cdc5fe774f2b5d9912597b5f3bea561927a48296d03e24549d21c3f6"
 dependencies = [
  "tokio",
  "tokio-stream",
@@ -20471,8 +20482,9 @@ dependencies = [
 
 [[package]]
 name = "webrtc-sys"
-version = "0.3.32"
-source = "git+https://github.com/mikefaille/rust-sdks.git?rev=89c5e7fd806b59a73b62f7dd7f45e67ded4d2ed0#89c5e7fd806b59a73b62f7dd7f45e67ded4d2ed0"
+version = "0.3.35"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "070ad07ed7f1f6a296d8b4bd7fdf14d6ab69c356aa4670c74e25abc459b3e7a1"
 dependencies = [
  "cc",
  "cxx",
@@ -20486,7 +20498,8 @@ dependencies = [
 [[package]]
 name = "webrtc-sys-build"
 version = "0.3.18"
-source = "git+https://github.com/mikefaille/rust-sdks.git?rev=89c5e7fd806b59a73b62f7dd7f45e67ded4d2ed0#89c5e7fd806b59a73b62f7dd7f45e67ded4d2ed0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7d46da6b5a5cbd091fae0400f77189f4ca4807c0d9442b85838a584f28720570"
 dependencies = [
  "anyhow",
  "fs2",
