@@ -109,6 +109,20 @@ pub struct SessionResumptionConfig {
     pub handle: Option<String>,
 }
 
+/// Normalize a model id to the fully-qualified `models/<id>` resource name the
+/// Studio (Developer API) BidiGenerateContent setup requires.
+///
+/// Sending the bare id (e.g. `gemini-3.1-flash-live-preview`) is rejected by the
+/// `v1beta` Live endpoint with a 1008 Policy close:
+/// `"<id> is not found for API version v1beta, or is not supported for
+/// bidiGenerateContent. Call ListModels..."`. The model and endpoint version are
+/// correct; only the resource-name format was wrong. Accepts an already-prefixed
+/// id idempotently.
+fn studio_model_resource(model: &str) -> String {
+    let model_id = model.strip_prefix("models/").unwrap_or(model);
+    format!("models/{model_id}")
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct GeminiSetup {
@@ -455,7 +469,7 @@ impl GeminiRealtimeSession {
                     "projects/{project_id}/locations/{region}/publishers/google/models/{model_id}"
                 )
             }
-            _ => model.strip_prefix("models/").unwrap_or(model).to_string(),
+            _ => studio_model_resource(model),
         };
 
         let setup = GeminiClientMessage {
@@ -1153,6 +1167,22 @@ mod tests {
         assert_eq!(
             setup_json.get("model").expect("model missing from setup payload").as_str().unwrap(),
             "models/gemini-2.5-flash-native-audio-latest"
+        );
+    }
+
+    #[test]
+    fn test_studio_model_resource_prefixes_bare_id() {
+        // Regression for the v1beta 1008 "not found" blocker: the Studio setup
+        // must carry the `models/` prefix. Empirically, the bare id is rejected
+        // and `models/gemini-3.1-flash-live-preview` returns setupComplete.
+        assert_eq!(
+            studio_model_resource("gemini-3.1-flash-live-preview"),
+            "models/gemini-3.1-flash-live-preview"
+        );
+        // Idempotent when already prefixed.
+        assert_eq!(
+            studio_model_resource("models/gemini-3.1-flash-live-preview"),
+            "models/gemini-3.1-flash-live-preview"
         );
     }
 
