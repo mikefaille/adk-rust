@@ -20,17 +20,11 @@ incremental = false
 #   cargo --config .cargo/wild.toml   (fast iterative: local dev + CI test)
 #   cargo --config .cargo/mold.toml   (release + nightly compatibility)
 
-# `-z muldefs` in the base config (applied to EVERY invocation, incl. `cargo
-# nextest`, which doesn't inherit the wild/mold `--config` overlay rustflags):
-# upstream crates.io `webrtc-sys` (via livekit 0.7.46) links libX11 and emits a
-# duplicate `XCloseDisplay` trampoline the linker rejects without `-z muldefs`.
 [target.x86_64-unknown-linux-gnu]
 linker = "clang"
-rustflags = ["-Clink-arg=-Wl,-z,muldefs"]
 
 [target.aarch64-unknown-linux-gnu]
 linker = "clang"
-rustflags = ["-Clink-arg=-Wl,-z,muldefs"]
 
 # macOS arm64 — the default ld is already fast; no override needed.
 [target.aarch64-apple-darwin]
