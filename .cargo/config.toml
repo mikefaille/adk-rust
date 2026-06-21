@@ -13,18 +13,22 @@
 incremental = false
 
 # ---------------------------------------------------------------------------
-# Linker per platform — base (no linker selection)
+# Linker per platform — Mold by default for Linux targets
 # ---------------------------------------------------------------------------
-# We use 'clang' as the compiler driver because it supports both Wild and Mold.
-# Linker selection (Wild vs Mold) is done per-invocation via:
-#   cargo --config .cargo/wild.toml   (fast iterative: local dev + CI test)
-#   cargo --config .cargo/mold.toml   (release + nightly compatibility)
+# We use 'clang' as the compiler driver. Mold is default for fast dev/release builds on Linux.
+# PURPOSE:
+# - Mold (Default): Production-grade, highly compatible fast linker for general
+#   dev, release builds, and C++ static linkage support (like WebRTC in adk-realtime).
+# - Wild (Available): Select via `cargo --config .cargo/wild.toml` for maximum
+#   iterative dev linking speed.
 
 [target.x86_64-unknown-linux-gnu]
 linker = "clang"
+rustflags = ["-Clink-arg=-fuse-ld=mold"]
 
 [target.aarch64-unknown-linux-gnu]
 linker = "clang"
+rustflags = ["-Clink-arg=-fuse-ld=mold"]
 
 # macOS arm64 — the default ld is already fast; no override needed.
 [target.aarch64-apple-darwin]
