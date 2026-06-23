@@ -21,7 +21,7 @@
 //! }
 //! ```
 
-use std::sync::Mutex;
+use parking_lot::Mutex;
 
 use bytes::Bytes;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -174,7 +174,7 @@ impl AudioCapture {
         let channels = config.channels;
 
         // Shared buffer for accumulating samples across cpal callbacks.
-        // Uses std::sync::Mutex because the cpal callback is a non-async context.
+        // Uses parking_lot::Mutex because the cpal callback is a non-async context.
         let buffer: Mutex<Vec<i16>> = Mutex::new(Vec::with_capacity(samples_per_frame));
 
         let cpal_stream = device
@@ -182,7 +182,7 @@ impl AudioCapture {
                 &stream_config,
                 move |data: &[f32], _: &cpal::InputCallbackInfo| {
                     // Convert f32 samples to i16 (PCM-16).
-                    let mut buf = buffer.lock().expect("audio buffer lock poisoned");
+                    let mut buf = buffer.lock();
                     for &sample in data {
                         let clamped = sample.clamp(-1.0, 1.0);
                         let as_i16 = (clamped * i16::MAX as f32) as i16;
@@ -192,7 +192,7 @@ impl AudioCapture {
                             // Convert accumulated i16 samples to PCM-16 LE bytes.
                             let pcm_bytes: Vec<u8> = buf
                                 .drain(..samples_per_frame)
-                                .flat_map(|s| s.to_le_bytes())
+                                .flat_map(|s: i16| s.to_le_bytes())
                                 .collect();
 
                             let frame =

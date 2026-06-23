@@ -20,8 +20,9 @@
 //! }
 //! ```
 
+use parking_lot::Mutex;
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
@@ -145,7 +146,7 @@ impl AudioPlayback {
         // them into the shared buffer.
         let samples = frame.samples();
         if let Some(buffer) = &self.sample_buffer {
-            let mut buf = buffer.lock().expect("playback sample buffer lock poisoned");
+            let mut buf = buffer.lock();
             buf.extend(samples.iter().copied());
         }
 
@@ -193,8 +194,7 @@ impl AudioPlayback {
             .build_output_stream(
                 &stream_config,
                 move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                    let mut buf =
-                        callback_buffer.lock().expect("playback sample buffer lock poisoned");
+                    let mut buf = callback_buffer.lock();
                     for sample in data.iter_mut() {
                         if let Some(s) = buf.pop_front() {
                             // Convert i16 back to f32 for the output device.
