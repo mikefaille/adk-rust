@@ -1111,11 +1111,11 @@ impl ToolContext for RealtimeToolContext {
     }
 
     fn actions(&self) -> EventActions {
-        self.actions.lock().unwrap().clone()
+        self.actions.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     fn set_actions(&self, actions: EventActions) {
-        *self.actions.lock().unwrap() = actions;
+        *self.actions.lock().unwrap_or_else(|e| e.into_inner()) = actions;
     }
 
     async fn search_memory(&self, query: &str) -> Result<Vec<MemoryEntry>> {
