@@ -109,7 +109,9 @@ impl LiveKitRoomBuilder<Present> {
     /// Connect to the LiveKit room and return the configured bundle.
     pub async fn connect(self) -> Result<LiveKitRoomBundle, LiveKitError> {
         let identity = self.identity.ok_or_else(|| {
-            LiveKitError::ConfigError("Identity is missing and cannot connect to LiveKit".to_string())
+            LiveKitError::ConfigError(
+                "Identity is missing and cannot connect to LiveKit".to_string(),
+            )
         })?;
 
         if identity.is_empty() {

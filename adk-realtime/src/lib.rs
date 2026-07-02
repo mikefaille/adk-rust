@@ -1,3 +1,4 @@
+#![allow(clippy::collapsible_if)]
 //! # adk-realtime
 #![allow(clippy::result_large_err)]
 //!
