@@ -1,3 +1,4 @@
+#![allow(clippy::collapsible_if)]
 #![cfg(feature = "video-avatar")]
 //! Property-based tests for Avatar Config.
 //!
