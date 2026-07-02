@@ -560,14 +560,15 @@ mod tests {
     #[cfg(feature = "gemini")]
     fn test_realtime_config_serialization_with_thinking() {
         let config = RealtimeConfig::new().with_model("gemini-1.5-flash").with_thinking_config(
-            ThinkingConfig { include_thoughts: true, thinking_level: ThinkingLevel::Low },
+            ThinkingConfig { include_thoughts: Some(true), thinking_level: Some(ThinkingLevel::Low), thinking_budget: None },
         );
 
         let json = serde_json::to_value(&config).unwrap();
 
         assert_eq!(json["model"], "gemini-1.5-flash");
-        assert_eq!(json["thinking_config"]["include_thoughts"], true);
-        assert_eq!(json["thinking_config"]["thinking_level"], "low");
+        assert_eq!(json["thinking_config"].get("includeThoughts"), Some(&serde_json::Value::Bool(true)));
+        assert_eq!(json["thinking_config"]["thinkingLevel"], "low");
+        assert_eq!(json["thinking_config"]["thinking_budget"], serde_json::Value::Null);
     }
 
     #[test]
