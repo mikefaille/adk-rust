@@ -18,6 +18,7 @@
   # Core Configuration
   # --------------------------------------------------------------------------
   name = "adk-rust";
+  imports = [ ./surrealdb.nix ];
 
   # Enable Cachix binary cache
   cachix.pull = [ "devenv" ];
