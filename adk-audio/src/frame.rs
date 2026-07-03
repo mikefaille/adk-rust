@@ -49,7 +49,9 @@ impl AudioFrame {
     /// View the raw data as a slice of i16 samples.
     pub fn samples(&self) -> &[i16] {
         #[cfg(target_endian = "big")]
-        compile_error!("adk-realtime zero-copy audio transmutations require a little-endian target architecture.");
+        compile_error!(
+            "adk-realtime zero-copy audio transmutations require a little-endian target architecture."
+        );
 
         if self.data.len() < 2 {
             return &[];
