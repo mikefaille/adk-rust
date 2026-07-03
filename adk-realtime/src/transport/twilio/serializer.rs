@@ -15,7 +15,6 @@ impl Default for TwilioMediaSerializer {
     }
 }
 
-
 impl TwilioMediaSerializer {
     pub fn new() -> Self {
         Self { format: AudioFormat::g711_ulaw() }
