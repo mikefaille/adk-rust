@@ -113,6 +113,7 @@ pub use integration::{
 // Re-exports
 pub use agent::{RealtimeAgent, RealtimeAgentBuilder};
 pub use audio::{AudioEncoding, AudioFormat};
+pub use audio_dsp::enable_hardware_dsp_optimizations;
 pub use config::{
     InterruptionDetection, RealtimeConfig, RealtimeConfigBuilder, VadConfig, VadMode,
 };
@@ -121,3 +122,4 @@ pub use events::{ClientEvent, ServerEvent, ToolCall, ToolResponse};
 pub use model::{BoxedModel, RealtimeModel};
 pub use runner::RealtimeRunner;
 pub use session::{BoxedSession, RealtimeSession, RealtimeSessionExt};
+pub mod audio_dsp;
