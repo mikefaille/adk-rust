@@ -784,6 +784,7 @@ impl Agent for RealtimeAgent {
             // Spawn keep-alive task for avatar session
             #[cfg(feature = "video-avatar")]
             let _avatar_keep_alive_handle: Option<tokio::task::JoinHandle<()>> = {
+                #[allow(clippy::collapsible_if)]
                 if let (Some(provider), Some(sess_id)) = (&avatar_provider, &avatar_session_id) {
                     Some(crate::avatar::spawn_keep_alive(
                         provider.clone(),
@@ -822,7 +823,8 @@ impl Agent for RealtimeAgent {
                             ServerEvent::AudioDelta { delta, item_id, .. } => {
                                 // Route audio through avatar provider if active
                                 #[cfg(feature = "video-avatar")]
-                                if let (Some(provider), Some(sess_id)) = (&avatar_provider, &avatar_session_id) {
+                                #[allow(clippy::collapsible_if)]
+                if let (Some(provider), Some(sess_id)) = (&avatar_provider, &avatar_session_id) {
                                     if let Err(e) = provider.send_audio(sess_id, &delta).await {
                                         tracing::warn!(error = %e, "avatar send_audio failed");
                                     }
@@ -1023,6 +1025,7 @@ impl Agent for RealtimeAgent {
                     handle.abort();
                 }
                 // Stop the avatar session
+                #[allow(clippy::collapsible_if)]
                 if let (Some(provider), Some(sess_id)) = (&avatar_provider, &avatar_session_id) {
                     if let Err(e) = provider.stop_session(sess_id).await {
                         tracing::warn!(error = %e, "avatar session cleanup failed");

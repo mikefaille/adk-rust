@@ -12,7 +12,7 @@
 #![cfg(feature = "openai-webrtc")]
 
 use adk_realtime::openai::OpusCodec;
-use audiopus::{Channels, SampleRate};
+use opus::Channels;
 use proptest::prelude::*;
 
 /// Generator for valid Opus frame sizes at 24kHz.
@@ -112,11 +112,7 @@ proptest! {
 fn test_sample_rate_matches_configured() {
     let codec = OpusCodec::new(24000, 1).expect("Failed to create OpusCodec at 24kHz mono");
 
-    assert_eq!(
-        codec.sample_rate(),
-        SampleRate::Hz24000,
-        "Codec sample rate does not match configured 24kHz"
-    );
+    assert_eq!(codec.sample_rate(), 24000, "Codec sample rate does not match configured 24kHz");
 }
 
 /// **Feature: realtime-audio-transport, Property 3: Opus Codec Lossy Round-Trip**

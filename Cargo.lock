@@ -172,7 +172,7 @@ dependencies = [
  "espeak-rs",
  "futures",
  "hf-hub 0.5.0",
- "livekit-api 0.4.24",
+ "livekit-api",
  "ndarray 0.17.2",
  "ndarray-npy",
  "ort",
@@ -708,7 +708,6 @@ dependencies = [
  "async-openai",
  "async-stream",
  "async-trait",
- "audiopus",
  "base64 0.22.1",
  "bytemuck",
  "bytes",
@@ -718,7 +717,8 @@ dependencies = [
  "getrandom 0.3.4",
  "google-cloud-auth 1.12.0",
  "livekit",
- "livekit-api 0.4.24",
+ "livekit-api",
+ "opus",
  "parking_lot",
  "proptest",
  "reqwest 0.12.28",
@@ -1856,18 +1856,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "async-native-tls"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9343dc5acf07e79ff82d0c37899f079db3534d99f189a1837c8e549c99405bec"
-dependencies = [
- "futures-util",
- "native-tls",
- "thiserror 1.0.69",
- "url",
-]
-
-[[package]]
 name = "async-openai"
 version = "0.33.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2034,24 +2022,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "async-tungstenite"
-version = "0.29.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ef0f7efedeac57d9b26170f72965ecfd31473ca52ca7a64e925b0b6f5f079886"
-dependencies = [
- "async-native-tls",
- "async-std",
- "atomic-waker",
- "futures-core",
- "futures-io",
- "futures-task",
- "futures-util",
- "log",
- "pin-project-lite",
- "tungstenite 0.26.2",
-]
-
-[[package]]
 name = "async_cell"
 version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2119,15 +2089,6 @@ checksum = "34ab94f2bc04a14e1f49ee5f222f66460e8a1b51627bdfedf34eed394d747938"
 dependencies = [
  "audio-core",
  "num-traits",
-]
-
-[[package]]
-name = "audiopus"
-version = "0.3.0-rc.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ab55eb0e56d7c6de3d59f544e5db122d7725ec33be6a276ee8241f3be6473955"
-dependencies = [
- "audiopus_sys",
 ]
 
 [[package]]
@@ -11042,7 +11003,7 @@ dependencies = [
  "lazy_static",
  "libloading 0.8.9",
  "libwebrtc",
- "livekit-api 0.5.1",
+ "livekit-api",
  "livekit-datatrack",
  "livekit-protocol",
  "livekit-runtime",
@@ -11059,41 +11020,10 @@ dependencies = [
 
 [[package]]
 name = "livekit-api"
-version = "0.4.24"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e2611299f65786fa733f38ef9aab9d796679e6f2f77572b84170949769ca9a25"
-dependencies = [
- "base64 0.21.7",
- "bytes",
- "device-info",
- "futures-util",
- "http 1.4.1",
- "jsonwebtoken 10.4.0",
- "livekit-protocol",
- "livekit-runtime",
- "log",
- "os_info",
- "parking_lot",
- "pbjson-types",
- "prost 0.12.6",
- "rand 0.9.4",
- "reqwest 0.12.28",
- "scopeguard",
- "serde",
- "sha2 0.10.9",
- "thiserror 2.0.18",
- "tokio",
- "tokio-tungstenite 0.29.0",
- "url",
-]
-
-[[package]]
-name = "livekit-api"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b8f76e6ea32cb42105951721efc633644d2733aeadf023e862c5a294f652330e"
 dependencies = [
- "async-tungstenite",
  "base64 0.21.7",
  "bytes",
  "device-info",
@@ -11110,12 +11040,14 @@ dependencies = [
  "prost 0.12.6",
  "rand 0.9.4",
  "reqwest 0.12.28",
+ "rustls-native-certs 0.8.4",
  "scopeguard",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-rustls 0.26.4",
  "tokio-tungstenite 0.29.0",
  "url",
 ]
@@ -13092,6 +13024,15 @@ name = "option-ext"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
+
+[[package]]
+name = "opus"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4d3809943dff6fbad5f0484449ea26bdb9cb7d8efdf26ed50d3c7f227f69eb5c"
+dependencies = [
+ "audiopus_sys",
+]
 
 [[package]]
 name = "ordered-float"
@@ -18423,9 +18364,11 @@ checksum = "8f72a05e828585856dacd553fba484c242c46e391fb0e58917c942ee9202915c"
 dependencies = [
  "futures-util",
  "log",
- "native-tls",
+ "rustls 0.23.40",
+ "rustls-native-certs 0.8.4",
+ "rustls-pki-types",
  "tokio",
- "tokio-native-tls",
+ "tokio-rustls 0.26.4",
  "tungstenite 0.29.0",
 ]
 
@@ -18948,25 +18891,6 @@ dependencies = [
 
 [[package]]
 name = "tungstenite"
-version = "0.26.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4793cb5e56680ecbb1d843515b23b6de9a75eb04b66643e256a396d43be33c13"
-dependencies = [
- "bytes",
- "data-encoding",
- "http 1.4.1",
- "httparse",
- "log",
- "native-tls",
- "rand 0.9.4",
- "sha1",
- "thiserror 2.0.18",
- "url",
- "utf-8",
-]
-
-[[package]]
-name = "tungstenite"
 version = "0.28.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8628dcc84e5a09eb3d8423d6cb682965dea9133204e8fb3efee74c2a0c259442"
@@ -18996,8 +18920,9 @@ dependencies = [
  "http 1.4.1",
  "httparse",
  "log",
- "native-tls",
  "rand 0.9.4",
+ "rustls 0.23.40",
+ "rustls-pki-types",
  "sha1",
  "thiserror 2.0.18",
  "url",
