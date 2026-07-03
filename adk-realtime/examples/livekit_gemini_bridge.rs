@@ -59,9 +59,19 @@ impl EventHandler for PrintingEventHandler {
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Setup basic tracing so we can see the internal connection logs
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .on_thread_start(|| {
+            adk_realtime::audio::shield_denormals();
+        })
+        .build()
+        .unwrap()
+        .block_on(async {
+            #[cfg(tokio_unstable)]
+            console_subscriber::init();
+
+            // Setup basic tracing so we can see the internal connection logs
     tracing_subscriber::fmt::init();
 
     // Initialize rustls explicitly when `ring` is used.
@@ -174,5 +184,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     runner.close().await?;
     runner_handle.abort();
 
-    Ok(())
+            Ok(())
+        })
 }

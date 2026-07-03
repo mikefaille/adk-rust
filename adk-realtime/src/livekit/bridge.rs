@@ -29,6 +29,7 @@ const BUFFER_DURATION_MS: u32 = 40;
 /// * `track` — The LiveKit remote audio track to read from.
 /// * `runner` — The realtime runner to send audio to.
 pub async fn bridge_input(track: RemoteAudioTrack, runner: &RealtimeRunner) -> Result<()> {
+    crate::audio::shield_denormals();
     let mut stream =
         NativeAudioStream::new(track.rtc_track(), DEFAULT_SAMPLE_RATE, DEFAULT_NUM_CHANNELS);
     let mut buffer = SmartAudioBuffer::new(DEFAULT_SAMPLE_RATE as u32, BUFFER_DURATION_MS);
@@ -62,6 +63,7 @@ pub async fn bridge_input(track: RemoteAudioTrack, runner: &RealtimeRunner) -> R
 /// * `track` — The LiveKit remote audio track to read from.
 /// * `runner` — The realtime runner to send audio to.
 pub async fn bridge_gemini_input(track: RemoteAudioTrack, runner: &RealtimeRunner) -> Result<()> {
+    crate::audio::shield_denormals();
     // Request 16kHz mono from LiveKit — it handles resampling for us.
     let mut stream =
         NativeAudioStream::new(track.rtc_track(), GEMINI_SAMPLE_RATE, DEFAULT_NUM_CHANNELS);

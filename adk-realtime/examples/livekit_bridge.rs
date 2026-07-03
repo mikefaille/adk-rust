@@ -84,88 +84,104 @@ impl EventHandler for PrintingEventHandler {
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    rustls::crypto::aws_lc_rs::default_provider()
-        .install_default()
-        .expect("Failed to install rustls default crypto provider");
-    tracing_subscriber::fmt::init();
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .on_thread_start(|| {
+            adk_realtime::audio::shield_denormals();
+        })
+        .build()
+        .unwrap()
+        .block_on(async {
+            #[cfg(tokio_unstable)]
+            console_subscriber::init();
 
-    // --- 1. Create the OpenAI realtime model ---
-    let api_key = std::env::var("OPENAI_API_KEY").expect("OPENAI_API_KEY env var is required");
-    let model = OpenAIRealtimeModel::new(api_key, "gpt-realtime");
+            rustls::crypto::aws_lc_rs::default_provider()
+                .install_default()
+                .expect("Failed to install rustls default crypto provider");
+            tracing_subscriber::fmt::init();
 
-    // --- 2. Build the LiveKit Config ---
-    let lk_url = std::env::var("LIVEKIT_URL").expect("LIVEKIT_URL is required");
-    let lk_api_key = std::env::var("LIVEKIT_API_KEY").expect("LIVEKIT_API_KEY is required");
-    let lk_api_secret =
-        std::env::var("LIVEKIT_API_SECRET").expect("LIVEKIT_API_SECRET is required");
+            // --- 1. Create the OpenAI realtime model ---
+            let api_key =
+                std::env::var("OPENAI_API_KEY").expect("OPENAI_API_KEY env var is required");
+            let model = OpenAIRealtimeModel::new(api_key, "gpt-realtime");
 
-    let lk_config = LiveKitConfig::new(lk_url, lk_api_key, lk_api_secret)?;
+            // --- 2. Build the LiveKit Config ---
+            let lk_url = std::env::var("LIVEKIT_URL").expect("LIVEKIT_URL is required");
+            let lk_api_key = std::env::var("LIVEKIT_API_KEY").expect("LIVEKIT_API_KEY is required");
+            let lk_api_secret =
+                std::env::var("LIVEKIT_API_SECRET").expect("LIVEKIT_API_SECRET is required");
 
-    let bundle = LiveKitRoomBuilder::new(lk_config)
-        .identity("openai-agent-01")
-        .name("OpenAI Agent")
-        .room_name("my-room")
-        .auto_subscribe(true)
-        .with_audio(24000, 1)
-        .connect()
-        .await?;
+            let lk_config = LiveKitConfig::new(lk_url, lk_api_key, lk_api_secret)?;
 
-    let _room = bundle.room;
-    let mut room_events = bundle.events;
-    let audio_source = bundle.audio_source.expect("Audio source was not created by builder");
+            let bundle = LiveKitRoomBuilder::new(lk_config)
+                .identity("openai-agent-01")
+                .name("OpenAI Agent")
+                .room_name("my-room")
+                .auto_subscribe(true)
+                .with_audio(24000, 1)
+                .connect()
+                .await?;
 
-    // --- 3. Wrap event handler with LiveKit audio output ---
-    // The LiveKitEventHandler intercepts on_audio to push model audio to the
-    // NativeAudioSource, which publishes it to the LiveKit room.
-    let inner_handler = PrintingEventHandler;
-    let lk_handler = LiveKitEventHandler::new(inner_handler, audio_source, 24000, 1);
+            let _room = bundle.room;
+            let mut room_events = bundle.events;
+            let audio_source =
+                bundle.audio_source.expect("Audio source was not created by builder");
 
-    // --- 4. Build the RealtimeRunner ---
-    let config = RealtimeConfig::default()
-        .with_instruction("You are a helpful voice assistant in a LiveKit room.")
-        .with_voice("alloy");
+            // --- 3. Wrap event handler with LiveKit audio output ---
+            // The LiveKitEventHandler intercepts on_audio to push model audio to the
+            // NativeAudioSource, which publishes it to the LiveKit room.
+            let inner_handler = PrintingEventHandler;
+            let lk_handler = LiveKitEventHandler::new(inner_handler, audio_source, 24000, 1);
 
-    let runner = Arc::new(
-        RealtimeRunner::builder()
-            .model(Arc::new(model))
-            .config(config)
-            .event_handler(lk_handler)
-            .build()?,
-    );
+            // --- 4. Build the RealtimeRunner ---
+            let config = RealtimeConfig::default()
+                .with_instruction("You are a helpful voice assistant in a LiveKit room.")
+                .with_voice("alloy");
 
-    // --- 5. Connect the runner to the AI model ---
-    runner.connect().await?;
-    println!("Connected to OpenAI Realtime API.");
+            let runner = Arc::new(
+                RealtimeRunner::builder()
+                    .model(Arc::new(model))
+                    .config(config)
+                    .event_handler(lk_handler)
+                    .build()?,
+            );
 
-    // --- 6. Bridge incoming participant audio to the model (in background) ---
-    let bridge_runner = Arc::clone(&runner);
-    let bridge_handle = tokio::spawn(async move {
-        while let Some(event) = room_events.recv().await {
-            if let RoomEvent::TrackSubscribed { track: RemoteTrack::Audio(audio_track), .. } = event
-            {
-                tracing::info!("Subscribed to remote audio track. Bridging input...");
-                let r = bridge_runner.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = bridge_input(audio_track, &r).await {
-                        tracing::error!("Bridge error: {e}");
+            // --- 5. Connect the runner to the AI model ---
+            runner.connect().await?;
+            println!("Connected to OpenAI Realtime API.");
+
+            // --- 6. Bridge incoming participant audio to the model (in background) ---
+            let bridge_runner = Arc::clone(&runner);
+            let bridge_handle = tokio::spawn(async move {
+                while let Some(event) = room_events.recv().await {
+                    if let RoomEvent::TrackSubscribed {
+                        track: RemoteTrack::Audio(audio_track),
+                        ..
+                    } = event
+                    {
+                        tracing::info!("Subscribed to remote audio track. Bridging input...");
+                        let r = bridge_runner.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) = bridge_input(audio_track, &r).await {
+                                tracing::error!("Bridge error: {e}");
+                            }
+                        });
                     }
-                });
+                }
+            });
+
+            // --- 7. Run the event loop ---
+            // This processes model responses and routes them through the
+            // LiveKitEventHandler (which publishes audio back to the room).
+            println!("Running event loop — speak into the LiveKit room...\n");
+            if let Err(e) = runner.run().await {
+                eprintln!("Runner error: {e}");
             }
-        }
-    });
 
-    // --- 7. Run the event loop ---
-    // This processes model responses and routes them through the
-    // LiveKitEventHandler (which publishes audio back to the room).
-    println!("Running event loop — speak into the LiveKit room...\n");
-    if let Err(e) = runner.run().await {
-        eprintln!("Runner error: {e}");
-    }
-
-    bridge_handle.abort();
-    runner.close().await?;
-    println!("Session closed.");
-    Ok(())
+            bridge_handle.abort();
+            runner.close().await?;
+            println!("Session closed.");
+            Ok(())
+        })
 }
