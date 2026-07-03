@@ -7,13 +7,11 @@
 //! - [`OpusCodec`] — Opus encoder/decoder wrapping `audiopus` for PCM16 ↔ Opus conversion.
 //! - [`OpenAIWebRTCSession`] — WebRTC session implementing `RealtimeSession` via `str0m`.
 
-use std::convert::TryFrom;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
-use audiopus::coder::{Decoder, Encoder};
-use audiopus::{Application, Channels, MutSignals, SampleRate};
+use opus::{Application, Channels, Decoder, Encoder};
 use parking_lot::Mutex as ParkingMutex;
 use str0m::Rtc;
 use str0m::change::SdpAnswer;
@@ -64,8 +62,8 @@ const MAX_DECODED_SAMPLES_PER_CHANNEL: usize = 5760;
 pub struct OpusCodec {
     encoder: Encoder,
     decoder: Decoder,
-    sample_rate: SampleRate,
-    channels: Channels,
+    sample_rate: u32,
+    channels: opus::Channels,
 }
 
 impl OpusCodec {
@@ -84,12 +82,9 @@ impl OpusCodec {
     /// Returns `RealtimeError::OpusCodecError` if the sample rate or channel count
     /// is not supported by Opus, or if encoder/decoder creation fails.
     pub fn new(sample_rate: u32, channels: u8) -> Result<Self> {
-        let sample_rate = SampleRate::try_from(sample_rate as i32)
-            .map_err(|e| RealtimeError::opus(format!("Invalid sample rate {sample_rate}: {e}")))?;
-
         let channels = match channels {
-            1 => Channels::Mono,
-            2 => Channels::Stereo,
+            1 => opus::Channels::Mono,
+            2 => opus::Channels::Stereo,
             other => {
                 return Err(RealtimeError::opus(format!(
                     "Invalid channel count {other}: must be 1 (mono) or 2 (stereo)"
@@ -148,22 +143,13 @@ impl OpusCodec {
         let channel_count = match self.channels {
             Channels::Mono => 1,
             Channels::Stereo => 2,
-            // Channels::Auto shouldn't occur since we only construct Mono/Stereo,
-            // but handle it defensively.
-            _ => 1,
         };
         let max_samples = MAX_DECODED_SAMPLES_PER_CHANNEL * channel_count;
         let mut output = vec![0i16; max_samples];
 
-        let packet = audiopus::packet::Packet::try_from(opus_data)
-            .map_err(|e| RealtimeError::opus(format!("Invalid Opus packet: {e}")))?;
-
-        let mut_signals = MutSignals::try_from(output.as_mut_slice())
-            .map_err(|e| RealtimeError::opus(format!("Failed to create output buffer: {e}")))?;
-
         let decoded_samples = self
             .decoder
-            .decode(Some(packet), mut_signals, false)
+            .decode(opus_data, &mut output, false)
             .map_err(|e| RealtimeError::opus(format!("Opus decode failed: {e}")))?;
 
         // decoded_samples is per-channel; total samples = decoded_samples * channels
@@ -173,12 +159,12 @@ impl OpusCodec {
     }
 
     /// Returns the configured sample rate.
-    pub fn sample_rate(&self) -> SampleRate {
+    pub fn sample_rate(&self) -> u32 {
         self.sample_rate
     }
 
     /// Returns the configured channel count.
-    pub fn channels(&self) -> Channels {
+    pub fn channels(&self) -> opus::Channels {
         self.channels
     }
 }
