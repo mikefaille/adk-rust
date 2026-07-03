@@ -1,0 +1,1 @@
+sed -i 's/if let (Some(provider), Some(sess_id)) = (\&avatar_provider, \&avatar_session_id) {/#[allow(clippy::collapsible_if)]\n                if let (Some(provider), Some(sess_id)) = (\&avatar_provider, \&avatar_session_id) {/' adk-realtime/src/agent.rs

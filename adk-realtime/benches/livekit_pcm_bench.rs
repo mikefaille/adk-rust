@@ -47,10 +47,17 @@ fn main() {
         samples2 = s;
 
         let start = Instant::now();
-        let s: Cow<[i16]> = unsafe {
-            Cow::Borrowed(std::slice::from_raw_parts(bytes.as_ptr() as *const i16, bytes.len() / 2))
+        let _s = 'cow: {
+            #[cfg(target_endian = "little")]
+            if let Ok(aligned_slice) = bytemuck::try_cast_slice::<u8, i16>(&bytes) {
+                break 'cow Cow::Borrowed(aligned_slice);
+            }
+            let fallback: Vec<i16> = bytes
+                .chunks_exact(2)
+                .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
+                .collect();
+            Cow::Owned(fallback)
         };
-        black_box(s);
         bytemuck_durations.push(start.elapsed());
     }
 

@@ -1,0 +1,30 @@
+--- adk-realtime/src/livekit/bridge.rs
++++ adk-realtime/src/livekit/bridge.rs
+@@ -69,13 +69,21 @@
+
+     while let Some(frame) = stream.next().await {
+         buffer.push(&frame.data);
+         if let Some(samples) = buffer.flush() {
+-            let chunk = AudioChunk::from_i16_samples(&samples, AudioFormat::pcm16_16khz());
++            let chunk = 'cow: {
++                #[cfg(target_endian = "little")]
++                if let Ok(aligned_slice) = bytemuck::try_cast_slice::<i16, u8>(&samples) {
++                    break 'cow crate::audio::AudioChunk::new(aligned_slice.to_vec(), AudioFormat::pcm16_16khz());
++                }
++                AudioChunk::from_i16_samples(&samples, AudioFormat::pcm16_16khz())
++            };
+             runner.send_audio(&chunk.to_base64()).await?;
+         }
+     }
+
+     if let Some(samples) = buffer.flush_remaining() {
+-        let chunk = AudioChunk::from_i16_samples(&samples, AudioFormat::pcm16_16khz());
++        let chunk = 'cow: {
++            #[cfg(target_endian = "little")]
++            if let Ok(aligned_slice) = bytemuck::try_cast_slice::<i16, u8>(&samples) {
++                break 'cow crate::audio::AudioChunk::new(aligned_slice.to_vec(), AudioFormat::pcm16_16khz());
++            }
++            AudioChunk::from_i16_samples(&samples, AudioFormat::pcm16_16khz())
++        };
+         runner.send_audio(&chunk.to_base64()).await?;
+     }
