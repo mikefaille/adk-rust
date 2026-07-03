@@ -196,7 +196,7 @@ pub struct PaymentMethodSelection {
 }
 
 /// Additional protocol reference that does not fit a well-known canonical slot.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProtocolReference {
     pub protocol: ProtocolDescriptor,

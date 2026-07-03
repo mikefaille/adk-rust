@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 /// Identifies the protocol and version that originated canonical data.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProtocolDescriptor {
     pub name: String,

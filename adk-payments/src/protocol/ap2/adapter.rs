@@ -1017,11 +1017,15 @@ impl Ap2Adapter {
             record.protocol_refs.ap2_payment_receipt_id =
                 existing.protocol_refs.ap2_payment_receipt_id;
         }
-        for reference in existing.protocol_refs.additional {
-            if !record.protocol_refs.additional.contains(&reference) {
-                record.protocol_refs.additional.push(reference);
+        let mut seen_additional: std::collections::HashSet<&crate::domain::ProtocolReference> =
+            record.protocol_refs.additional.iter().collect();
+        let mut to_add_additional = Vec::new();
+        for reference in &existing.protocol_refs.additional {
+            if seen_additional.insert(reference) {
+                to_add_additional.push(reference.clone());
             }
         }
+        record.protocol_refs.additional.extend(to_add_additional);
         for envelope in existing.extensions.0 {
             if !record.extensions.as_slice().contains(&envelope) {
                 record.attach_extension(envelope);
