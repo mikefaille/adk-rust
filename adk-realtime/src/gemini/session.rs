@@ -868,6 +868,8 @@ impl RealtimeSession for GeminiRealtimeSession {
                         tools,
                         cached_content: config.cached_content,
                         session_resumption,
+                        input_audio_transcription: None,
+                        output_audio_transcription: None,
                     }),
                     realtime_input: None,
                     tool_response: None,
@@ -1183,7 +1185,7 @@ mod tests {
     #[test]
     fn test_gemini_setup_serialization_includes_model() {
         let setup = GeminiSetup {
-            model: "models/gemini-2.5-flash-native-audio-latest".to_string(),
+            model: Some("models/gemini-2.5-flash-native-audio-latest".to_string()),
             system_instruction: None,
             generation_config: None,
             tools: None,
