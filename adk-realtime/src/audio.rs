@@ -1,5 +1,7 @@
 //! Audio format definitions and utilities.
 
+pub mod g711;
+
 use std::borrow::Cow;
 
 use serde::{Deserialize, Serialize};
