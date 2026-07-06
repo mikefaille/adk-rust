@@ -87,6 +87,7 @@ pub mod model;
 pub mod runner;
 pub mod session;
 pub mod transport;
+pub mod dispatch;
 
 // Provider implementations
 #[cfg(feature = "openai")]
