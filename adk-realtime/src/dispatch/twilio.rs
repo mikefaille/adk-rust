@@ -6,11 +6,11 @@ use crate::{
 };
 use async_trait::async_trait;
 use futures::Stream;
+use futures::StreamExt;
 use reqwest::Client;
 use std::pin::Pin;
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::BroadcastStream;
-use futures::StreamExt;
 
 /// Call control provider for Twilio.
 pub struct TwilioCallControlProvider {
@@ -36,12 +36,21 @@ impl TwilioCallControlProvider {
 
     /// Handle an incoming Twilio webhook event.
     /// This should be called by the application's webhook handler.
-    pub fn handle_webhook(&self, call_sid: &str, event_type: &str, params: &serde_json::Value) -> Result<()> {
+    pub fn handle_webhook(
+        &self,
+        call_sid: &str,
+        event_type: &str,
+        params: &serde_json::Value,
+    ) -> Result<()> {
         let event = match event_type {
             "ringing" => CallControlEvent::Ringing,
             "answered" => CallControlEvent::Answered,
             "completed" => CallControlEvent::Ended {
-                reason: params.get("CallStatus").and_then(|v| v.as_str()).unwrap_or("unknown").to_string(),
+                reason: params
+                    .get("CallStatus")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown")
+                    .to_string(),
             },
             "dtmf" => {
                 let digit = params.get("Digits").and_then(|v| v.as_str()).unwrap_or("").to_string();
@@ -109,15 +118,10 @@ mod tests {
 #[async_trait]
 impl CallControlProvider for TwilioCallControlProvider {
     async fn originate(&self, phone_number: &str, context: OriginateContext) -> Result<CallHandle> {
-        let url = format!(
-            "https://api.twilio.com/2010-04-01/Accounts/{}/Calls.json",
-            self.account_sid
-        );
+        let url =
+            format!("https://api.twilio.com/2010-04-01/Accounts/{}/Calls.json", self.account_sid);
 
-        let mut params = vec![
-            ("To", phone_number.to_string()),
-            ("From", self.from_number.clone()),
-        ];
+        let mut params = vec![("To", phone_number.to_string()), ("From", self.from_number.clone())];
 
         if let Some(extra) = context.extra {
             if let Some(url) = extra.get("url").and_then(|v| v.as_str()) {
@@ -147,10 +151,7 @@ impl CallControlProvider for TwilioCallControlProvider {
             .and_then(|v| v.as_str())
             .ok_or_else(|| RealtimeError::provider("Missing call SID in Twilio response"))?;
 
-        Ok(CallHandle {
-            provider_call_id: call_sid.to_string(),
-            room_name: None,
-        })
+        Ok(CallHandle { provider_call_id: call_sid.to_string(), room_name: None })
     }
 
     fn events(

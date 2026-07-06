@@ -6,12 +6,12 @@ use crate::{
 };
 use async_trait::async_trait;
 use futures::Stream;
-use livekit_api::services::sip::SipClient;
+use futures::StreamExt;
 use livekit_api::services::room::RoomServiceClient;
+use livekit_api::services::sip::SipClient;
 use std::pin::Pin;
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::BroadcastStream;
-use futures::StreamExt;
 
 /// Call control provider for LiveKit SIP.
 pub struct LiveKitCallControlProvider {
@@ -112,7 +112,9 @@ impl CallControlProvider for LiveKitCallControlProvider {
         self.room_client
             .remove_participant(room_name.clone(), handle.provider_call_id.clone())
             .await
-            .map_err(|e| RealtimeError::provider(format!("LiveKit remove participant error: {}", e)))?;
+            .map_err(|e| {
+                RealtimeError::provider(format!("LiveKit remove participant error: {}", e))
+            })?;
 
         Ok(())
     }
@@ -125,15 +127,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_livekit_event_translation() {
-        let provider = LiveKitCallControlProvider::new(
-            "http://localhost:7880",
-            "key",
-            "secret",
-            "ST_123",
-        );
+        let provider =
+            LiveKitCallControlProvider::new("http://localhost:7880", "key", "secret", "ST_123");
         let handle = CallHandle {
             provider_call_id: "sip_123".to_string(),
-            room_name: Some("room".to_string())
+            room_name: Some("room".to_string()),
         };
 
         let mut events = provider.events(&handle);

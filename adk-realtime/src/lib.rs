@@ -81,13 +81,13 @@
 pub mod agent;
 pub mod audio;
 pub mod config;
+pub mod dispatch;
 pub mod error;
 pub mod events;
 pub mod model;
 pub mod runner;
 pub mod session;
 pub mod transport;
-pub mod dispatch;
 
 // Provider implementations
 #[cfg(feature = "openai")]
