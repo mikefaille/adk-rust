@@ -10,7 +10,7 @@ use crate::{
 use futures_core::Stream;
 use std::pin::Pin;
 use std::sync::Arc;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 
 /// A media transport backed by Twilio Media Streams.
 pub struct TwilioMediaStreamsTransport {
@@ -88,7 +88,10 @@ impl RealtimeMediaTransport for TwilioMediaStreamsTransport {
         let msg = serializer.serialize_audio(&self.stream_sid, &audio);
 
         self.tx.send(msg).await.map_err(|e| {
-            crate::error::RealtimeError::connection(format!("Failed to send audio to Twilio: {}", e))
+            crate::error::RealtimeError::connection(format!(
+                "Failed to send audio to Twilio: {}",
+                e
+            ))
         })?;
 
         Ok(())
@@ -98,7 +101,10 @@ impl RealtimeMediaTransport for TwilioMediaStreamsTransport {
         let serializer = TwilioMediaSerializer::new();
         if let Some(msg) = serializer.serialize_control(&self.stream_sid, &control) {
             self.tx.send(msg).await.map_err(|e| {
-                crate::error::RealtimeError::connection(format!("Failed to send control to Twilio: {}", e))
+                crate::error::RealtimeError::connection(format!(
+                    "Failed to send control to Twilio: {}",
+                    e
+                ))
             })?;
         }
         Ok(())

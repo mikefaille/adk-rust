@@ -7,16 +7,16 @@ use crate::{
 use async_trait::async_trait;
 use futures::Stream;
 use futures::StreamExt;
-use livekit_api::services::room::RoomServiceClient;
-use livekit_api::services::sip::SipClient;
+use livekit_api::services::room::RoomClient;
+use livekit_api::services::sip::SIPClient;
 use std::pin::Pin;
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::BroadcastStream;
 
 /// Call control provider for LiveKit SIP.
 pub struct LiveKitCallControlProvider {
-    sip_client: SipClient,
-    room_client: RoomServiceClient,
+    sip_client: SIPClient,
+    room_client: RoomClient,
     trunk_id: String,
     event_tx: broadcast::Sender<(String, CallControlEvent)>,
 }
@@ -26,8 +26,8 @@ impl LiveKitCallControlProvider {
     pub fn new(url: &str, api_key: &str, api_secret: &str, trunk_id: &str) -> Self {
         let (event_tx, _) = broadcast::channel(100);
         Self {
-            sip_client: SipClient::with_api_key(url, api_key, api_secret),
-            room_client: RoomServiceClient::with_api_key(url, api_key, api_secret),
+            sip_client: SIPClient::with_api_key(url, api_key, api_secret),
+            room_client: RoomClient::with_api_key(url, api_key, api_secret),
             trunk_id: trunk_id.to_string(),
             event_tx,
         }
@@ -43,12 +43,15 @@ impl LiveKitCallControlProvider {
 #[async_trait]
 impl CallControlProvider for LiveKitCallControlProvider {
     async fn originate(&self, phone_number: &str, context: OriginateContext) -> Result<CallHandle> {
+        // Each call gets its own room by default so concurrent SIP calls
+        // without an explicit room_name never collide into a shared room.
         let room_name = context
             .extra
             .as_ref()
             .and_then(|e| e.get("room_name"))
             .and_then(|v| v.as_str())
-            .unwrap_or("sip_room");
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| format!("sip_room_{}", uuid::Uuid::new_v4()));
 
         let identity = context
             .extra
@@ -58,14 +61,20 @@ impl CallControlProvider for LiveKitCallControlProvider {
             .map(|s| s.to_string())
             .unwrap_or_else(|| format!("sip_{}", uuid::Uuid::new_v4()));
 
+        let options = livekit_api::services::sip::CreateSIPParticipantOptions {
+            participant_identity: identity.clone(),
+            participant_metadata: context.metadata.clone(),
+            ..Default::default()
+        };
+
         let _sip_call = self
             .sip_client
             .create_sip_participant(
                 self.trunk_id.clone(),
                 phone_number.to_string(),
-                room_name.to_string(),
-                identity.clone(),
-                None, // metadata
+                room_name.clone(),
+                options,
+                None,
             )
             .await
             .map_err(|e| RealtimeError::provider(format!("LiveKit SIP error: {}", e)))?;
@@ -74,7 +83,7 @@ impl CallControlProvider for LiveKitCallControlProvider {
             // Use identity as the provider_call_id because it's what's used
             // to identify the participant in RoomServiceClient methods.
             provider_call_id: identity,
-            room_name: Some(room_name.to_string()),
+            room_name: Some(room_name),
         })
     }
 
@@ -99,7 +108,7 @@ impl CallControlProvider for LiveKitCallControlProvider {
     }
 
     async fn redirect(&self, _handle: &CallHandle, _destination: RedirectTarget) -> Result<()> {
-        // LiveKit SIP doesn't expose a direct redirect/refer API via SipClient yet.
+        // LiveKit SIP doesn't expose a direct redirect/refer API via SIPClient yet.
         Err(RealtimeError::provider("Redirect not implemented for LiveKit SIP"))
     }
 
@@ -109,12 +118,9 @@ impl CallControlProvider for LiveKitCallControlProvider {
             .as_ref()
             .ok_or_else(|| RealtimeError::provider("Missing room_name in CallHandle"))?;
 
-        self.room_client
-            .remove_participant(room_name.clone(), handle.provider_call_id.clone())
-            .await
-            .map_err(|e| {
-                RealtimeError::provider(format!("LiveKit remove participant error: {}", e))
-            })?;
+        self.room_client.remove_participant(room_name, &handle.provider_call_id).await.map_err(
+            |e| RealtimeError::provider(format!("LiveKit remove participant error: {}", e)),
+        )?;
 
         Ok(())
     }
@@ -123,7 +129,6 @@ impl CallControlProvider for LiveKitCallControlProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
     #[tokio::test]
     async fn test_livekit_event_translation() {

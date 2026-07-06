@@ -34,6 +34,21 @@ impl TwilioCallControlProvider {
         }
     }
 
+    /// Checks a Twilio API response for a non-2xx status, returning the
+    /// response body as error context instead of silently treating any
+    /// completed request as success.
+    async fn check_success(response: reqwest::Response) -> Result<reqwest::Response> {
+        let status = response.status();
+        if !status.is_success() {
+            let err_text = response.text().await.unwrap_or_default();
+            return Err(RealtimeError::provider(format!(
+                "Twilio API returned error status {}: {}",
+                status, err_text
+            )));
+        }
+        Ok(response)
+    }
+
     /// Handle an incoming Twilio webhook event.
     /// This should be called by the application's webhook handler.
     pub fn handle_webhook(
@@ -141,6 +156,8 @@ impl CallControlProvider for TwilioCallControlProvider {
             .await
             .map_err(|e| RealtimeError::provider(format!("Twilio API error: {}", e)))?;
 
+        let response = Self::check_success(response).await?;
+
         let data: serde_json::Value = response
             .json()
             .await
@@ -189,13 +206,16 @@ impl CallControlProvider for TwilioCallControlProvider {
             }
         };
 
-        self.client
+        let response = self
+            .client
             .post(&url)
             .basic_auth(&self.account_sid, Some(&self.auth_token))
             .form(&params)
             .send()
             .await
             .map_err(|e| RealtimeError::provider(format!("Twilio redirect error: {}", e)))?;
+
+        Self::check_success(response).await?;
 
         Ok(())
     }
@@ -208,13 +228,16 @@ impl CallControlProvider for TwilioCallControlProvider {
 
         let params = [("Status", "completed")];
 
-        self.client
+        let response = self
+            .client
             .post(&url)
             .basic_auth(&self.account_sid, Some(&self.auth_token))
             .form(&params)
             .send()
             .await
             .map_err(|e| RealtimeError::provider(format!("Twilio hangup error: {}", e)))?;
+
+        Self::check_success(response).await?;
 
         Ok(())
     }

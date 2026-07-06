@@ -46,9 +46,8 @@ impl TwilioMediaSerializer {
                     msg.get("media").and_then(|m| m.get("payload")).and_then(|p| p.as_str())
                 {
                     use base64::Engine;
-                    let data = base64::engine::general_purpose::STANDARD
-                        .decode(payload)
-                        .map_err(|e| {
+                    let data =
+                        base64::engine::general_purpose::STANDARD.decode(payload).map_err(|e| {
                             crate::error::RealtimeError::provider(format!(
                                 "Invalid base64 payload: {}",
                                 e
@@ -65,7 +64,8 @@ impl TwilioMediaSerializer {
                         samples_16khz.push(sample);
                     }
 
-                    let chunk = AudioChunk::from_i16_samples(&samples_16khz, AudioFormat::pcm16_16khz());
+                    let chunk =
+                        AudioChunk::from_i16_samples(&samples_16khz, AudioFormat::pcm16_16khz());
 
                     Ok(Some(TransportEvent::Audio {
                         chunk,

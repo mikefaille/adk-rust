@@ -14,11 +14,7 @@ pub fn decode_ulaw(ulaw: u8) -> i16 {
     let mut sample = (((mantissa as i16) << 3) + 0x84) << exponent;
     sample -= 0x84;
 
-    if sign {
-        -sample
-    } else {
-        sample
-    }
+    if sign { -sample } else { sample }
 }
 
 /// Encodes a single 16-bit PCM sample to 8-bit u-law.
@@ -75,11 +71,7 @@ pub fn decode_alaw(alaw: u8) -> i16 {
         (((mantissa as i16) << 4) + 0x108) << (exponent - 1)
     };
 
-    if sign {
-        sample
-    } else {
-        -sample
-    }
+    if sign { sample } else { -sample }
 }
 
 /// Encodes a single 16-bit PCM sample to 8-bit A-law.
