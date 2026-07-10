@@ -4,7 +4,7 @@ use futures::StreamExt;
 use livekit::track::RemoteAudioTrack;
 use livekit::webrtc::audio_stream::native::NativeAudioStream;
 
-use crate::audio::{AudioChunk, AudioFormat, SmartAudioBuffer};
+use crate::audio::{AudioChunk, SmartAudioBuffer};
 use crate::error::Result;
 use crate::runner::RealtimeRunner;
 
@@ -37,14 +37,12 @@ pub async fn bridge_input(track: RemoteAudioTrack, runner: &RealtimeRunner) -> R
         buffer.push(&frame.data);
         if let Some(samples) = buffer.flush() {
             // Convert i16 samples to little-endian PCM16 bytes
-            let chunk = AudioChunk::from_i16_samples(&samples, AudioFormat::pcm16_24khz());
-            runner.send_audio(&chunk.to_base64()).await?;
+            runner.send_audio(&AudioChunk::encode_i16_to_base64(&samples)).await?;
         }
     }
 
     if let Some(samples) = buffer.flush_remaining() {
-        let chunk = AudioChunk::from_i16_samples(&samples, AudioFormat::pcm16_24khz());
-        runner.send_audio(&chunk.to_base64()).await?;
+        runner.send_audio(&AudioChunk::encode_i16_to_base64(&samples)).await?;
     }
 
     Ok(())
@@ -70,14 +68,12 @@ pub async fn bridge_gemini_input(track: RemoteAudioTrack, runner: &RealtimeRunne
     while let Some(frame) = stream.next().await {
         buffer.push(&frame.data);
         if let Some(samples) = buffer.flush() {
-            let chunk = AudioChunk::from_i16_samples(&samples, AudioFormat::pcm16_16khz());
-            runner.send_audio(&chunk.to_base64()).await?;
+            runner.send_audio(&AudioChunk::encode_i16_to_base64(&samples)).await?;
         }
     }
 
     if let Some(samples) = buffer.flush_remaining() {
-        let chunk = AudioChunk::from_i16_samples(&samples, AudioFormat::pcm16_16khz());
-        runner.send_audio(&chunk.to_base64()).await?;
+        runner.send_audio(&AudioChunk::encode_i16_to_base64(&samples)).await?;
     }
 
     Ok(())
