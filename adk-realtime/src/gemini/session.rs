@@ -339,7 +339,7 @@ impl GeminiRealtimeSession {
     async fn flush_audio(&self) -> Result<()> {
         let data = {
             let mut buffer = self.audio_buffer.lock();
-            if !buffer.is_empty() { Some(std::mem::take(&mut *buffer).freeze()) } else { None }
+            if !buffer.is_empty() { Some(buffer.split().freeze()) } else { None }
         };
 
         if let Some(data) = data {
@@ -350,7 +350,7 @@ impl GeminiRealtimeSession {
 
     /// Send a raw PCM audio payload by encoding it to base64 for Gemini wire format.
     async fn send_audio_bytes(&self, audio_bytes: Bytes) -> Result<()> {
-        let audio_base64 = base64::engine::general_purpose::STANDARD.encode(audio_bytes);
+        let audio_base64 = base64::engine::general_purpose::STANDARD.encode(&audio_bytes);
         self.send_audio_base64(&audio_base64).await
     }
 
@@ -655,13 +655,20 @@ impl RealtimeSession for GeminiRealtimeSession {
         // Format-aware threshold (sample rate/channels/bit depth), avoids hardcoded 16k assumptions.
         let flush_threshold_bytes = Self::flush_threshold_bytes(&audio.format);
 
-        // Smart Audio Buffering: buffer small chunks to avoid overhead
+        // Path A: The incoming chunk already meets the batching threshold.
+        // Send it immediately (after flushing any existing buffer) to avoid extra copies.
+        if audio.data.len() >= flush_threshold_bytes {
+            self.flush_audio().await?;
+            return self.send_audio_bytes(audio.data.clone()).await;
+        }
+
+        // Path B: Smart Audio Buffering for small chunks.
         let data = {
             let mut buffer = self.audio_buffer.lock();
             buffer.put_slice(&audio.data);
 
             if buffer.len() >= flush_threshold_bytes {
-                Some(std::mem::take(&mut *buffer).freeze())
+                Some(buffer.split().freeze())
             } else {
                 None
             }

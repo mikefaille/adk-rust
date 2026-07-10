@@ -29,6 +29,7 @@ impl EventHandler for MockEventHandler {
 
 struct TrackingSession {
     audio_count: Arc<AtomicUsize>,
+    raw_audio_count: Arc<AtomicUsize>,
 }
 #[async_trait]
 impl RealtimeSession for TrackingSession {
@@ -39,6 +40,7 @@ impl RealtimeSession for TrackingSession {
         "tracker"
     }
     async fn send_audio(&self, _audio: &AudioChunk) -> adk_realtime::error::Result<()> {
+        self.raw_audio_count.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
     async fn interrupt(&self) -> adk_realtime::error::Result<()> {
@@ -189,7 +191,11 @@ impl RealtimeSession for DummySessionWrapT2M {
 async fn test_transport_to_model() {
     let transport = Arc::new(InMemoryTransport::new("test"));
     let audio_count = Arc::new(AtomicUsize::new(0));
-    let session = Arc::new(TrackingSession { audio_count: audio_count.clone() });
+    let raw_audio_count = Arc::new(AtomicUsize::new(0));
+    let session = Arc::new(TrackingSession {
+        audio_count: audio_count.clone(),
+        raw_audio_count: raw_audio_count.clone(),
+    });
     let model = Arc::new(DummyModelT2M { session });
 
     let runner =
@@ -212,7 +218,8 @@ async fn test_transport_to_model() {
     transport.push_event(TransportEvent::Stopped { reason: None }).await.unwrap();
 
     let _: () = t2m_handle.await.unwrap().unwrap();
-    assert_eq!(audio_count.load(Ordering::SeqCst), 1);
+    // The bridge now calls send_audio_chunk, which delegates to send_audio, not send_audio_base64
+    assert_eq!(raw_audio_count.load(Ordering::SeqCst), 1);
 }
 
 struct TriggerSession {
