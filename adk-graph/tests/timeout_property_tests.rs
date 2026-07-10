@@ -1,7 +1,7 @@
 //! Property tests for node timeout enforcement.
 //!
 //! **Feature: runtime-reliability-sprint, Property 2: Timeout Precision**
-//! *For any* node with `run_timeout = D`, the node SHALL be cancelled within D + 500ms
+//! *For any* node with `run_timeout = D`, the node SHALL be cancelled within D + 200ms
 //! of starting execution.
 //! **Validates: Requirements 3.2, 4.2**
 
@@ -26,7 +26,7 @@ fn make_ctx() -> NodeContext {
 //
 // **Feature: runtime-reliability-sprint, Property 2: Timeout Precision**
 // *For any* timeout duration D in [50ms, 500ms], a node that sleeps for D + 1000ms
-// SHALL be cancelled with `GraphError::NodeTimedOut` within D + 500ms of starting.
+// SHALL be cancelled with `GraphError::NodeTimedOut` within D + 200ms of starting.
 // **Validates: Requirements 3.2, 4.2**
 
 proptest! {
@@ -74,7 +74,7 @@ proptest! {
                 }
             }
 
-            // Assert elapsed time is between D and D + 500ms
+            // Assert elapsed time is between D and D + 200ms
             prop_assert!(
                 elapsed >= d,
                 "elapsed {:?} < timeout {:?}",
@@ -82,10 +82,10 @@ proptest! {
                 d
             );
             prop_assert!(
-                elapsed <= d + Duration::from_millis(500),
+                elapsed <= d + Duration::from_millis(200),
                 "elapsed {:?} > timeout + 200ms ({:?})",
                 elapsed,
-                d + Duration::from_millis(500)
+                d + Duration::from_millis(200)
             );
 
             Ok(())
@@ -93,7 +93,7 @@ proptest! {
     }
 }
 
-// ── Property 2b: Skip policy returns Ok with empty output within D + 500ms ──
+// ── Property 2b: Skip policy returns Ok with empty output within D + 200ms ──
 
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(100))]
@@ -140,7 +140,7 @@ proptest! {
                 }
             }
 
-            // Assert elapsed time is between D and D + 500ms
+            // Assert elapsed time is between D and D + 200ms
             prop_assert!(
                 elapsed >= d,
                 "elapsed {:?} < timeout {:?}",
@@ -148,10 +148,10 @@ proptest! {
                 d
             );
             prop_assert!(
-                elapsed <= d + Duration::from_millis(500),
+                elapsed <= d + Duration::from_millis(200),
                 "elapsed {:?} > timeout + 200ms ({:?})",
                 elapsed,
-                d + Duration::from_millis(500)
+                d + Duration::from_millis(200)
             );
 
             Ok(())
