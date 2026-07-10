@@ -1,6 +1,6 @@
-use std::time::{Duration, Instant};
-use std::hint::black_box;
 use adk_realtime::audio::{AudioChunk, AudioFormat, SmartAudioBuffer};
+use std::hint::black_box;
+use std::time::Instant;
 
 #[tokio::main]
 async fn main() {
@@ -19,11 +19,8 @@ async fn main() {
 }
 
 fn benchmark_path(sample_rate: u32, duration_ms: u32) {
-    let format = if sample_rate == 16000 {
-        AudioFormat::pcm16_16khz()
-    } else {
-        AudioFormat::pcm16_24khz()
-    };
+    let format =
+        if sample_rate == 16000 { AudioFormat::pcm16_16khz() } else { AudioFormat::pcm16_24khz() };
 
     let samples_count = (sample_rate as f64 * duration_ms as f64 / 1000.0) as usize;
     let samples = vec![0i16; samples_count];
@@ -42,7 +39,12 @@ fn benchmark_path(sample_rate: u32, duration_ms: u32) {
     let elapsed = start.elapsed();
     let avg = elapsed / iterations;
 
-    println!("Rate: {}Hz, Dur: {}ms | Chunk size: {} bytes", sample_rate, duration_ms, chunk.data.len());
+    println!(
+        "Rate: {}Hz, Dur: {}ms | Chunk size: {} bytes",
+        sample_rate,
+        duration_ms,
+        chunk.data.len()
+    );
     println!("  Avg direct chunk pass time (clone): {:?}", avg);
 
     println!("  Allocated bytes/sec (direct): 0 B/s (Bytes is ref-counted)");
@@ -69,6 +71,9 @@ fn benchmark_buffer_retention() {
         });
     }
     let elapsed = start.elapsed();
-    println!("Time for {} flushes with optimized SmartAudioBuffer (process_and_clear): {:?}", iterations, elapsed);
+    println!(
+        "Time for {} flushes with optimized SmartAudioBuffer (process_and_clear): {:?}",
+        iterations, elapsed
+    );
     println!("Note: Capacity is retained.");
 }

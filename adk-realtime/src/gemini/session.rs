@@ -667,11 +667,7 @@ impl RealtimeSession for GeminiRealtimeSession {
             let mut buffer = self.audio_buffer.lock();
             buffer.put_slice(&audio.data);
 
-            if buffer.len() >= flush_threshold_bytes {
-                Some(buffer.split().freeze())
-            } else {
-                None
-            }
+            if buffer.len() >= flush_threshold_bytes { Some(buffer.split().freeze()) } else { None }
         };
 
         if let Some(data) = data {
