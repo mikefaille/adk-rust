@@ -652,6 +652,14 @@ impl RealtimeSession for GeminiRealtimeSession {
     }
 
     async fn send_audio(&self, audio: &AudioChunk) -> Result<()> {
+        // Gemini Live strictly requires mono PCM16 at 16kHz.
+        if audio.format != AudioFormat::pcm16_16khz() {
+            return Err(RealtimeError::config(format!(
+                "Gemini Live only supports pcm16 at 16kHz mono, received: {:?}",
+                audio.format
+            )));
+        }
+
         // Format-aware threshold (sample rate/channels/bit depth), avoids hardcoded 16k assumptions.
         let flush_threshold_bytes = Self::flush_threshold_bytes(&audio.format);
 
@@ -951,9 +959,7 @@ pub fn build_vertex_live_url(region: &str, project_id: &str) -> Result<String> {
         return Err(RealtimeError::config("Vertex AI Live requires a non-empty project_id"));
     }
     Ok(format!(
-        "wss://{region}-aiplatform.googleapis.com/ws/\
-         google.cloud.aiplatform.v1beta1.LlmBidiService/BidiGenerateContent\
-         ?project_id={project_id}",
+        "wss://{region}-aiplatform.googleapis.com/ws/         google.cloud.aiplatform.v1beta1.LlmBidiService/BidiGenerateContent         ?project_id={project_id}",
     ))
 }
 
