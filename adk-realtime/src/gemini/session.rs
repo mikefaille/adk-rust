@@ -1229,4 +1229,14 @@ mod tests {
         let threshold = GeminiRealtimeSession::flush_threshold_bytes(&AudioFormat::pcm16_16khz());
         assert_eq!(threshold, 1280);
     }
+
+    #[cfg(feature = "vertex-live")]
+    #[test]
+    fn test_build_vertex_live_url() {
+        let url = build_vertex_live_url("us-central1", "my-project").unwrap();
+        assert_eq!(
+            url,
+            "wss://us-central1-aiplatform.googleapis.com/ws/             google.cloud.aiplatform.v1beta1.LlmBidiService/BidiGenerateContent             ?project_id=my-project"
+        );
+    }
 }
