@@ -122,13 +122,8 @@ mod tests {
     fn advertised_input_format_matches_parsed_media() {
         let (tx, _rx) = mpsc::channel(1);
         let (_events_tx, events_rx) = mpsc::channel(1);
-        let transport = TwilioMediaStreamsTransport::new(
-            "twilio-test",
-            "MZ123",
-            "CA123",
-            tx,
-            events_rx,
-        );
+        let transport =
+            TwilioMediaStreamsTransport::new("twilio-test", "MZ123", "CA123", tx, events_rx);
 
         let message = r#"{
             "event": "media",
