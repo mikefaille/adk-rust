@@ -160,11 +160,20 @@ impl AudioChunk {
     /// This is useful when working with audio APIs (like LiveKit) that provide
     /// samples as `i16` slices rather than raw byte buffers.
     pub fn from_i16_samples(samples: &[i16], format: AudioFormat) -> Self {
-        let mut data = Vec::with_capacity(samples.len() * 2);
-        for sample in samples {
-            data.extend_from_slice(&sample.to_le_bytes());
+        #[cfg(target_endian = "little")]
+        {
+            let data = bytes::Bytes::copy_from_slice(bytemuck::cast_slice::<i16, u8>(samples));
+            Self::new(data, format)
         }
-        Self::new(data, format)
+
+        #[cfg(not(target_endian = "little"))]
+        {
+            let mut data = Vec::with_capacity(samples.len() * 2);
+            for sample in samples {
+                data.extend_from_slice(&sample.to_le_bytes());
+            }
+            Self::new(data, format)
+        }
     }
 
     /// Convert the audio data to a vector of i16 samples (assuming PCM16 little-endian).
@@ -177,6 +186,12 @@ impl AudioChunk {
                 self.data.len()
             ));
         }
+
+        #[cfg(target_endian = "little")]
+        if let Ok(aligned_slice) = bytemuck::try_cast_slice::<u8, i16>(&self.data) {
+            return Ok(aligned_slice.to_vec());
+        }
+
         let mut samples = Vec::with_capacity(self.data.len() / 2);
         for chunk in self.data.chunks_exact(2) {
             samples.push(i16::from_le_bytes([chunk[0], chunk[1]]));
