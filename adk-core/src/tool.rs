@@ -4,6 +4,80 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::Arc;
 
+/// A canonical, provider-neutral representation of a JSON Schema used in tool contracts.
+///
+/// `ToolSchema` acts as the ownership boundary for ADK-defined schemas. It preserves
+/// the original JSON document exactly as provided, without applying provider-specific
+/// projections or transformations.
+///
+/// Ownership of this type remains within `adk-core`. Provider crates are responsible
+/// for converting `ToolSchema` into their respective wire formats.
+#[derive(Debug, Clone)]
+pub struct ToolSchema {
+    document: Arc<Value>,
+}
+
+impl ToolSchema {
+    /// Create a new `ToolSchema` from a JSON value.
+    ///
+    /// This constructor does not validate or rewrite the schema. It simply
+    /// wraps it in an `Arc` for efficient sharing across the framework.
+    pub fn new(document: Value) -> Self {
+        Self { document: Arc::new(document) }
+    }
+
+    /// Returns a reference to the underlying JSON Schema document.
+    pub fn document(&self) -> &Value {
+        &self.document
+    }
+}
+
+/// A provider-neutral tool contract that defines a tool's identity and interface.
+///
+/// `ToolContract` is the canonical representation of an ADK tool's capabilities.
+/// It includes the tool's name, description, and optional input and output schemas.
+///
+/// This type represents the "source of truth" for a tool's contract before it is
+/// projected into provider-specific declarations (like OpenAI's `function` or
+/// Gemini's `FunctionDeclaration`).
+///
+/// Ownership of this type remains within `adk-core`.
+#[derive(Debug, Clone)]
+pub struct ToolContract {
+    /// The unique name of the tool.
+    pub name: String,
+    /// A human-readable description of what the tool does.
+    pub description: String,
+    /// The canonical schema for the tool's input parameters.
+    pub input_schema: Option<ToolSchema>,
+    /// The canonical schema for the tool's response.
+    pub output_schema: Option<ToolSchema>,
+}
+
+impl ToolContract {
+    /// Create a new `ToolContract` with the given name and description.
+    pub fn new(name: impl Into<String>, description: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            description: description.into(),
+            input_schema: None,
+            output_schema: None,
+        }
+    }
+
+    /// Attach an input schema to the contract.
+    pub fn with_input_schema(mut self, schema: ToolSchema) -> Self {
+        self.input_schema = Some(schema);
+        self
+    }
+
+    /// Attach an output schema to the contract.
+    pub fn with_output_schema(mut self, schema: ToolSchema) -> Self {
+        self.output_schema = Some(schema);
+        self
+    }
+}
+
 /// The core trait for all tools that agents can invoke.
 ///
 /// Tools extend agent capabilities with custom functions. Each tool has a name,
@@ -14,6 +88,25 @@ pub trait Tool: Send + Sync {
     fn name(&self) -> &str;
     /// Returns a human-readable description of what this tool does.
     fn description(&self) -> &str;
+
+    /// Returns the provider-neutral contract for this tool.
+    ///
+    /// The default implementation builds a [`ToolContract`] using the tool's
+    /// [`name()`], [`description()`], [`parameters_schema()`], and
+    /// [`response_schema()`].
+    fn contract(&self) -> ToolContract {
+        let mut contract = ToolContract::new(self.name(), self.description());
+
+        if let Some(params) = self.parameters_schema() {
+            contract = contract.with_input_schema(ToolSchema::new(params));
+        }
+
+        if let Some(response) = self.response_schema() {
+            contract = contract.with_output_schema(ToolSchema::new(response));
+        }
+
+        contract
+    }
 
     /// Returns the tool declaration that should be exposed to model providers.
     ///
@@ -379,5 +472,75 @@ mod tests {
         let ctx = Arc::new(TestContext::new()) as Arc<dyn ToolContext>;
         let result = tool.execute(ctx, Value::Null).await.unwrap();
         assert_eq!(result, Value::String("result".to_string()));
+    }
+
+    struct SchemaTool {
+        params: Option<Value>,
+        response: Option<Value>,
+    }
+
+    #[async_trait]
+    impl Tool for SchemaTool {
+        fn name(&self) -> &str {
+            "schema_tool"
+        }
+        fn description(&self) -> &str {
+            "a tool with schemas"
+        }
+        fn parameters_schema(&self) -> Option<Value> {
+            self.params.clone()
+        }
+        fn response_schema(&self) -> Option<Value> {
+            self.response.clone()
+        }
+        async fn execute(&self, _ctx: Arc<dyn ToolContext>, _args: Value) -> Result<Value> {
+            Ok(Value::Null)
+        }
+    }
+
+    #[test]
+    fn test_tool_contract_preservation() {
+        let params = serde_json::json!({
+            "type": "object",
+            "properties": { "query": { "type": "string" } }
+        });
+        let response = serde_json::json!({
+            "type": "object",
+            "properties": { "result": { "type": "string" } }
+        });
+
+        let tool = SchemaTool { params: Some(params.clone()), response: Some(response.clone()) };
+        let contract = tool.contract();
+
+        assert_eq!(contract.name, "schema_tool");
+        assert_eq!(contract.description, "a tool with schemas");
+        assert_eq!(contract.input_schema.unwrap().document(), &params);
+        assert_eq!(contract.output_schema.unwrap().document(), &response);
+    }
+
+    #[test]
+    fn test_tool_contract_empty() {
+        let tool = TestTool { name: "test".to_string() };
+        let contract = tool.contract();
+
+        assert_eq!(contract.name, "test");
+        assert_eq!(contract.description, "test tool");
+        assert!(contract.input_schema.is_none());
+        assert!(contract.output_schema.is_none());
+    }
+
+    #[test]
+    fn test_tool_declaration_unchanged() {
+        let params = serde_json::json!({
+            "type": "object",
+            "properties": { "query": { "type": "string" } }
+        });
+        let tool = SchemaTool { params: Some(params.clone()), response: None };
+
+        let decl = tool.declaration();
+        assert_eq!(decl["name"], "schema_tool");
+        assert_eq!(decl["description"], "a tool with schemas");
+        assert_eq!(decl["parameters"], params);
+        assert!(decl.get("response").is_none());
     }
 }

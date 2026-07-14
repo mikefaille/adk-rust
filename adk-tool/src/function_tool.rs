@@ -197,3 +197,45 @@ where
     }
     serde_json::to_value(schema).unwrap()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde::Deserialize;
+    use serde_json::json;
+
+    #[derive(Serialize, Deserialize, JsonSchema)]
+    struct WeatherArgs {
+        city: String,
+    }
+
+    #[derive(Serialize, Deserialize, JsonSchema)]
+    struct WeatherResponse {
+        temp: i32,
+    }
+
+    async fn dummy_handler(_ctx: Arc<dyn ToolContext>, _args: Value) -> Result<Value> {
+        Ok(json!({"temp": 72}))
+    }
+
+    #[test]
+    fn test_function_tool_contract() {
+        let tool = FunctionTool::new("get_weather", "Get weather info", dummy_handler)
+            .with_parameters_schema::<WeatherArgs>()
+            .with_response_schema::<WeatherResponse>();
+
+        let contract = tool.contract();
+        assert_eq!(contract.name, "get_weather");
+        assert_eq!(contract.description, "Get weather info");
+
+        let input_schema = contract.input_schema.unwrap();
+        let input_doc = input_schema.document();
+        assert_eq!(input_doc["type"], "object");
+        assert!(input_doc["properties"].get("city").is_some());
+
+        let output_schema = contract.output_schema.unwrap();
+        let output_doc = output_schema.document();
+        assert_eq!(output_doc["type"], "object");
+        assert!(output_doc["properties"].get("temp").is_some());
+    }
+}
