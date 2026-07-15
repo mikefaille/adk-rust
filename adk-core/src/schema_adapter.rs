@@ -4,6 +4,51 @@ use serde_json::Value;
 use std::borrow::Cow;
 use std::fmt;
 
+/// Projection policy for schema compilation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectionPolicy {
+    /// Reject any semantic loss during projection.
+    Exact,
+    /// Allow documented provider omissions only when the canonical runtime validator
+    /// remains authoritative.
+    RuntimeValidated,
+}
+
+impl Default for ProjectionPolicy {
+    fn default() -> Self {
+        Self::Exact
+    }
+}
+
+/// A diagnostic message emitted during schema projection.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ProjectionDiagnostic {
+    /// JSON Pointer path to the node where the diagnostic was emitted.
+    pub path: String,
+    /// The keyword that triggered the diagnostic.
+    pub keyword: String,
+    /// Human-readable explanation of the projection transform.
+    pub message: String,
+}
+
+/// The result of a successful schema compilation.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CompiledSchema {
+    /// The projected JSON Schema value for the provider.
+    pub value: Value,
+    /// The identifier of the compiler target.
+    pub target: String,
+    /// The version of the compiler.
+    pub version: String,
+    /// The surface identity (e.g., "studio", "vertex").
+    pub surface: Option<String>,
+    /// The policy used during compilation.
+    pub policy: ProjectionPolicy,
+    /// Diagnostics emitted during compilation (non-empty only for RuntimeValidated).
+    pub diagnostics: Vec<ProjectionDiagnostic>,
+}
+
 /// Error returned when a tool schema cannot be compiled for a specific provider.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SchemaCompileError {
@@ -46,9 +91,21 @@ pub trait SchemaAdapter: Send + Sync + std::fmt::Debug {
     /// Normalize a raw JSON Schema for this provider (infallible).
     fn normalize_schema(&self, schema: Value) -> Value;
 
+    /// Returns the projection policy for this adapter.
+    fn projection_policy(&self) -> ProjectionPolicy {
+        ProjectionPolicy::Exact
+    }
+
     /// Compiles a raw JSON Schema for this provider, returning an error if unsupported.
-    fn compile_schema(&self, schema: &Value) -> Result<Value, SchemaCompileError> {
-        Ok(self.normalize_schema(schema.clone()))
+    fn compile_schema(&self, schema: &Value) -> Result<CompiledSchema, SchemaCompileError> {
+        Ok(CompiledSchema {
+            value: self.normalize_schema(schema.clone()),
+            target: self.identifier().to_string(),
+            version: self.version().to_string(),
+            surface: self.surface().map(|s| s.to_string()),
+            policy: self.projection_policy(),
+            diagnostics: Vec::new(),
+        })
     }
 
     /// Validates a tool name for this provider's limits.

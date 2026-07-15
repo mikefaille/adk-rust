@@ -6,16 +6,37 @@ use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Mutex;
 
+/// Identity of a compiled schema in the cache.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SchemaCacheKey {
+    /// Canonical schema digest (e.g. JSON byte hash).
+    pub schema_digest: Vec<u8>,
+    /// Target compiler identity.
+    pub target: String,
+    /// Compiler version.
+    pub version: String,
+    /// Target surface.
+    pub surface: Option<String>,
+    /// Projection policy.
+    pub policy: crate::schema_adapter::ProjectionPolicy,
+    /// Operation type (normalize vs compile).
+    pub operation: String,
+}
+
 /// A thread-safe cache for normalized and compiled JSON Schemas.
 #[derive(Debug, Default)]
 pub struct SchemaCache {
     entries: Mutex<HashMap<u64, Value>>,
+    compiled: Mutex<HashMap<u64, crate::schema_adapter::CompiledSchema>>,
 }
 
 impl SchemaCache {
     /// Creates a new empty schema cache.
     pub fn new() -> Self {
-        Self { entries: Mutex::new(HashMap::new()) }
+        Self {
+            entries: Mutex::new(HashMap::new()),
+            compiled: Mutex::new(HashMap::new()),
+        }
     }
 
     /// Returns the normalized schema for the given input, using the cache if available.
@@ -30,9 +51,9 @@ impl SchemaCache {
         &self,
         schema: &Value,
         adapter: &dyn SchemaAdapter,
-    ) -> Result<Value, SchemaCompileError> {
+    ) -> Result<crate::schema_adapter::CompiledSchema, SchemaCompileError> {
         let hash = Self::hash_schema_with_adapter(schema, adapter, "compile");
-        let mut cache = self.entries.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut cache = self.compiled.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
 
         if let Some(cached) = cache.get(&hash) {
             return Ok(cached.clone());
@@ -47,12 +68,15 @@ impl SchemaCache {
     pub fn clear(&self) {
         let mut cache = self.entries.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         cache.clear();
+        let mut compiled = self.compiled.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        compiled.clear();
     }
 
     /// Returns the number of cached entries.
     pub fn len(&self) -> usize {
         let cache = self.entries.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        cache.len()
+        let compiled = self.compiled.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        cache.len() + compiled.len()
     }
 
     /// Returns true if the cache contains no entries.
@@ -65,25 +89,22 @@ impl SchemaCache {
         adapter: &dyn SchemaAdapter,
         operation: &str,
     ) -> u64 {
-        // Use a robust, collision-resistant identity for the cache key.
+        let schema_digest = match serde_json::to_vec(schema) {
+            Ok(bytes) => bytes,
+            Err(_) => b"serialization-failure-sentinel".to_vec(),
+        };
+
+        let key = SchemaCacheKey {
+            schema_digest,
+            target: adapter.identifier().to_string(),
+            version: adapter.version().to_string(),
+            surface: adapter.surface().map(|s| s.to_string()),
+            policy: adapter.projection_policy(),
+            operation: operation.to_string(),
+        };
+
         let mut hasher = DefaultHasher::new();
-
-        // 1. Identity of the schema content itself.
-        // We use the JSON string representation as a stable, canonical identity.
-        // If serialization fails (pathological), we hash a fallback sentinel.
-        match serde_json::to_vec(schema) {
-            Ok(bytes) => bytes.hash(&mut hasher),
-            Err(_) => "serialization-failure-sentinel".hash(&mut hasher),
-        }
-
-        // 2. Identity of the compiler/adapter.
-        adapter.identifier().hash(&mut hasher);
-        adapter.version().hash(&mut hasher);
-        adapter.surface().hash(&mut hasher);
-
-        // 3. Identity of the operation type.
-        operation.hash(&mut hasher);
-
+        key.hash(&mut hasher);
         hasher.finish()
     }
 }
@@ -102,6 +123,20 @@ mod tests {
         }
         fn normalize_schema(&self, schema: Value) -> Value {
             schema
+        }
+        fn compile_schema(
+            &self,
+            schema: &Value,
+        ) -> Result<crate::schema_adapter::CompiledSchema, crate::schema_adapter::SchemaCompileError>
+        {
+            Ok(crate::schema_adapter::CompiledSchema {
+                value: self.normalize_schema(schema.clone()),
+                target: self.identifier().to_string(),
+                version: self.version().to_string(),
+                surface: self.surface().map(|s| s.to_string()),
+                policy: self.projection_policy(),
+                diagnostics: Vec::new(),
+            })
         }
     }
 
