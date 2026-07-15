@@ -125,12 +125,8 @@ impl OpenAITransportLink for OpenAIRealtimeSession {
                     }
                     Ok(mut event) => {
                         // Normalize FunctionCallDone arguments: OpenAI sends them as a JSON-encoded string.
-                        if let ServerEvent::FunctionCallDone {
-                            arguments,
-                            name,
-                            call_id,
-                            ..
-                        } = &mut event
+                        if let ServerEvent::FunctionCallDone { arguments, name, call_id, .. } =
+                            &mut event
                         {
                             if call_id.trim().is_empty() {
                                 return Some(Err(RealtimeError::protocol(format!(

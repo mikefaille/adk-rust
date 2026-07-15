@@ -1,3 +1,4 @@
+use adk_core::schema_utils::normalize_tool_arguments;
 use adk_realtime::error::RealtimeError;
 use adk_realtime::events::ServerEvent;
 use serde_json::{Value, json};
@@ -37,18 +38,30 @@ mod openai_tests {
             // This mirrors the logic in OpenAIRealtimeSession::receive_raw
             match serde_json::from_str::<ServerEvent>(&text) {
                 Ok(mut event) => {
-                    if let ServerEvent::FunctionCallDone { arguments, name, .. } = &mut event {
-                        if let Value::String(s) = arguments {
-                            match serde_json::from_str::<Value>(s) {
-                                Ok(parsed) => {
-                                    *arguments = parsed;
-                                }
-                                Err(e) => {
-                                    return Some(Err(RealtimeError::protocol(format!(
-                                        "malformed function arguments for {}: {}",
-                                        name, e
-                                    ))));
-                                }
+                    if let ServerEvent::FunctionCallDone { arguments, name, call_id, .. } =
+                        &mut event
+                    {
+                        if call_id.trim().is_empty() {
+                            return Some(Err(RealtimeError::protocol(format!(
+                                "OpenAI tool call {} missing or empty 'call_id'",
+                                name
+                            ))));
+                        }
+                        if name.trim().is_empty() {
+                            return Some(Err(RealtimeError::protocol(
+                                "OpenAI tool call missing or empty 'name'".to_string(),
+                            )));
+                        }
+
+                        match normalize_tool_arguments(arguments.clone()) {
+                            Ok(parsed) => {
+                                *arguments = parsed;
+                            }
+                            Err(e) => {
+                                return Some(Err(RealtimeError::protocol(format!(
+                                    "malformed function arguments for {}: {}",
+                                    name, e
+                                ))));
                             }
                         }
                     }
@@ -295,13 +308,22 @@ async fn test_transfer_to_agent_validation() {
     // First event is session started
     let _ = stream.next().await.unwrap().unwrap();
 
-    // Second event should be the error because of empty agent_name
-    let result = stream.next().await.unwrap();
-    assert!(result.is_err());
-    assert!(
-        result
-            .unwrap_err()
-            .to_string()
-            .contains("transfer_to_agent called with missing or empty 'agent_name'")
-    );
+    // Second event should be the tool response event with the error because of empty agent_name
+    let result = stream.next().await.unwrap().unwrap();
+    if let Some(content) = result.llm_response.content {
+        let mut found_error = false;
+        for part in content.parts {
+            if let adk_core::Part::FunctionResponse { function_response, .. } = part {
+                if let Some(err) = function_response.response.get("error") {
+                    assert!(
+                        err.as_str().unwrap().contains("Transfer target (agent_name) is missing")
+                    );
+                    found_error = true;
+                }
+            }
+        }
+        assert!(found_error, "Should have found error in tool response");
+    } else {
+        panic!("Expected tool response content");
+    }
 }

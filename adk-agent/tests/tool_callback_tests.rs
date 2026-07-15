@@ -247,7 +247,10 @@ async fn test_before_tool_callback_short_circuits_tool_execution() {
                 Ok(Some(Content {
                     role: "function".to_string(),
                     parts: vec![Part::FunctionResponse {
-                        function_response: adk_core::FunctionResponseData::new("test_tool", json!("blocked")),
+                        function_response: adk_core::FunctionResponseData::new(
+                            "test_tool",
+                            json!("blocked"),
+                        ),
                         id: None,
                     }],
                 }))
@@ -306,7 +309,10 @@ async fn test_after_tool_callback_overrides_result_and_order() {
                 Ok(Some(Content {
                     role: "function".to_string(),
                     parts: vec![Part::FunctionResponse {
-                        function_response: adk_core::FunctionResponseData::new("test_tool", json!("after-override")),
+                        function_response: adk_core::FunctionResponseData::new(
+                            "test_tool",
+                            json!("after-override"),
+                        ),
                         id: None,
                     }],
                 }))

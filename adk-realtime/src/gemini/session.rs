@@ -668,8 +668,10 @@ impl GeminiRealtimeSession {
                 return Err(RealtimeError::protocol("Gemini tool call id is empty".to_string()));
             }
 
-            let normalized_args = adk_core::schema_utils::normalize_tool_arguments(args)
-                .map_err(|e| RealtimeError::protocol(format!("Gemini tool arguments error: {}", e)))?;
+            let normalized_args =
+                adk_core::schema_utils::normalize_tool_arguments(args).map_err(|e| {
+                    RealtimeError::protocol(format!("Gemini tool arguments error: {}", e))
+                })?;
 
             return Ok(vec![ServerEvent::FunctionCallDone {
                 event_id: uuid::Uuid::new_v4().to_string(),
