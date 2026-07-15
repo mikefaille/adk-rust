@@ -62,10 +62,10 @@
 //! # Example (Compilation)
 //!
 //! ```rust
-//! use adk_gemini::schema_adapter::GeminiSchemaAdapter;
-//! use adk_core::SchemaAdapter;
-//! use adk_core::schema_adapter::ProjectionPolicy;
-//! use serde_json::json;
+//! # use adk_gemini::schema_adapter::GeminiSchemaAdapter;
+//! # use adk_core::SchemaAdapter;
+//! # use adk_core::schema_adapter::ProjectionPolicy;
+//! # use serde_json::json;
 //!
 //! let adapter = GeminiSchemaAdapter::new(); // Default policy: Exact
 //! let schema = json!({
