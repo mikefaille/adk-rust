@@ -65,12 +65,25 @@ impl SchemaCache {
         adapter: &dyn SchemaAdapter,
         operation: &str,
     ) -> u64 {
-        let bytes = serde_json::to_vec(schema).unwrap_or_default();
+        // Use a robust, collision-resistant identity for the cache key.
         let mut hasher = DefaultHasher::new();
-        bytes.hash(&mut hasher);
+
+        // 1. Identity of the schema content itself.
+        // We use the JSON string representation as a stable, canonical identity.
+        // If serialization fails (pathological), we hash a fallback sentinel.
+        match serde_json::to_vec(schema) {
+            Ok(bytes) => bytes.hash(&mut hasher),
+            Err(_) => "serialization-failure-sentinel".hash(&mut hasher),
+        }
+
+        // 2. Identity of the compiler/adapter.
         adapter.identifier().hash(&mut hasher);
         adapter.version().hash(&mut hasher);
+        adapter.surface().hash(&mut hasher);
+
+        // 3. Identity of the operation type.
         operation.hash(&mut hasher);
+
         hasher.finish()
     }
 }

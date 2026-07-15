@@ -195,7 +195,11 @@ impl Default for GeminiSchemaAdapter {
 
 impl SchemaAdapter for GeminiSchemaAdapter {
     fn identifier(&self) -> &str {
-        if self.vertex_ai { "gemini-vertex" } else { "gemini" }
+        "gemini"
+    }
+
+    fn surface(&self) -> Option<&str> {
+        if self.vertex_ai { Some("vertex") } else { Some("studio") }
     }
 
     fn normalize_schema(&self, mut schema: Value) -> Value {
@@ -252,10 +256,31 @@ impl SchemaAdapter for GeminiSchemaAdapter {
     }
 
     fn compile_schema(&self, schema: &Value) -> Result<Value, adk_core::SchemaCompileError> {
-        // Perform strict validation for semantic loss BEFORE applying destructive transforms.
-        validate_schema_strict(schema)?;
+        // 1. Extract definitions for reference resolution.
+        let definitions = extract_definitions(schema);
 
+        // 2. Explicitly check for unresolved or recursive references.
+        check_unresolved_refs(schema, &definitions)?;
+
+        // 3. Inline references for strict semantic validation.
+        let mut resolved_schema = schema.clone();
+        adk_core::schema_utils::resolve_refs(&mut resolved_schema, &definitions, 0);
+
+        // 4. Perform strict validation for semantic loss on the resolved schema.
+        validate_schema_strict(&resolved_schema)?;
+
+        // 5. Normalization is infallible but applies destructive transforms.
         Ok(self.normalize_schema(schema.clone()))
+    }
+
+    fn validate_tool_name(&self, name: &str) -> Result<(), adk_core::SchemaCompileError> {
+        if name.len() > 64 {
+            return Err(adk_core::SchemaCompileError::new(format!(
+                "tool name '{}' exceeds Gemini's 64-byte limit",
+                name
+            )));
+        }
+        Ok(())
     }
 
     /// Truncates tool names exceeding 64 bytes at a valid UTF-8 character boundary.
@@ -390,30 +415,57 @@ fn validate_schema_node(schema: &Value, depth: usize) -> Result<(), adk_core::Sc
         return Ok(());
     };
 
-    // 1. Reject unresolved references
-    if obj.contains_key("$ref") {
-        return Err(adk_core::SchemaCompileError::new(
-            "Unresolved $ref detected. All references must be local and resolvable within the schema's definitions block.",
-        ));
-    }
-
-    // 2. Reject polymorphic unions (anyOf/oneOf)
+    // 1. Reject polymorphic unions (anyOf/oneOf)
     if obj.contains_key("anyOf") || obj.contains_key("oneOf") {
-        // Exception: allow if it's just a nullable type pattern that we can safely collapse.
-        // For now, following the fail-closed instruction: reject them.
         return Err(adk_core::SchemaCompileError::new(
             "Gemini does not support polymorphic unions (anyOf/oneOf). Use a single object schema or multiple tools.",
         ));
     }
 
-    // 3. Reject tuple validation (items as array)
+    // 2. Reject tuple validation (items as array)
     if let Some(items) = obj.get("items") {
         if items.is_array() {
             return Err(adk_core::SchemaCompileError::new(
                 "Gemini does not support JSON Schema tuple validation (items as an array). Use a single schema for all array elements.",
             ));
         }
-        validate_schema_node(items, depth)?;
+        // Items in an array don't necessarily increase OBJECT nesting depth,
+        // but for consistency with Mike's feedback "every schema-bearing keyword",
+        // we increment here.
+        validate_schema_node(items, depth + 1)?;
+    }
+
+    // 3. Reject other semantic-loss keywords
+    const SEMANTIC_LOSS_KEYWORDS: &[&str] = &[
+        "not",
+        "patternProperties",
+        "propertyNames",
+        "if",
+        "then",
+        "else",
+        "unevaluatedProperties",
+        "dependentRequired",
+        "dependentSchemas",
+        "contains",
+        "prefixItems",
+    ];
+
+    for keyword in SEMANTIC_LOSS_KEYWORDS {
+        if obj.contains_key(*keyword) {
+            return Err(adk_core::SchemaCompileError::new(format!(
+                "Gemini does not support JSON Schema keyword '{}'. Preserving this contract would require silent semantic loss.",
+                keyword
+            )));
+        }
+    }
+
+    // 4. Reject type arrays (polymorphism)
+    if let Some(type_val) = obj.get("type")
+        && type_val.is_array()
+    {
+        return Err(adk_core::SchemaCompileError::new(
+            "Gemini does not support JSON Schema type arrays. Each field must have exactly one type (nullable: true is supported).",
+        ));
     }
 
     // Recurse into properties
@@ -423,10 +475,114 @@ fn validate_schema_node(schema: &Value, depth: usize) -> Result<(), adk_core::Sc
         }
     }
 
+    // Recurse into additionalProperties (if it's a schema)
+    if let Some(additional) = obj.get("additionalProperties")
+        && additional.is_object()
+    {
+        validate_schema_node(additional, depth + 1)?;
+    }
+
     // Recurse into allOf
     if let Some(all_of) = obj.get("allOf").and_then(|a| a.as_array()) {
         for sub in all_of {
+            // allOf sub-schemas are merged into the current level, so depth doesn't increment.
             validate_schema_node(sub, depth)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn check_unresolved_refs(
+    schema: &Value,
+    definitions: &serde_json::Map<String, Value>,
+) -> Result<(), adk_core::SchemaCompileError> {
+    check_node_refs(schema, definitions, 0)
+}
+
+fn check_node_refs(
+    schema: &Value,
+    definitions: &serde_json::Map<String, Value>,
+    depth: usize,
+) -> Result<(), adk_core::SchemaCompileError> {
+    // 10 is the same limit used in resolve_refs
+    if depth > 10 {
+        return Err(adk_core::SchemaCompileError::new(
+            "Recursive references detected requiring truncation. Gemini requires acyclic local references.",
+        ));
+    }
+
+    let Some(obj) = schema.as_object() else {
+        return Ok(());
+    };
+
+    if let Some(ref_val) = obj.get("$ref").and_then(|v| v.as_str()) {
+        let name =
+            ref_val.strip_prefix("#/definitions/").or_else(|| ref_val.strip_prefix("#/$defs/"));
+
+        if let Some(def_name) = name
+            && let Some(def_schema) = definitions.get(def_name)
+        {
+            // Recursively check the inlined schema
+            return check_node_refs(def_schema, definitions, depth + 1);
+        }
+
+        return Err(adk_core::SchemaCompileError::new(format!(
+            "Unresolved or external $ref detected: '{}'. All references must be local and resolvable within the schema.",
+            ref_val
+        )));
+    }
+
+    // Recurse through all possible schema-bearing locations
+    if let Some(props) = obj.get("properties").and_then(|p| p.as_object()) {
+        for value in props.values() {
+            check_node_refs(value, definitions, depth)?;
+        }
+    }
+
+    if let Some(items) = obj.get("items") {
+        if let Some(arr) = items.as_array() {
+            for item in arr {
+                check_node_refs(item, definitions, depth)?;
+            }
+        } else {
+            check_node_refs(items, definitions, depth)?;
+        }
+    }
+
+    if let Some(additional) = obj.get("additionalProperties")
+        && additional.is_object()
+    {
+        check_node_refs(additional, definitions, depth + 1)?;
+    }
+
+    for keyword in &["allOf", "anyOf", "oneOf"] {
+        if let Some(arr) = obj.get(*keyword).and_then(|v| v.as_array()) {
+            for sub in arr {
+                check_node_refs(sub, definitions, depth)?;
+            }
+        }
+    }
+
+    if let Some(not_schema) = obj.get("not") {
+        check_node_refs(not_schema, definitions, depth)?;
+    }
+
+    if let Some(pattern_props) = obj.get("patternProperties").and_then(|p| p.as_object()) {
+        for value in pattern_props.values() {
+            check_node_refs(value, definitions, depth)?;
+        }
+    }
+
+    if let Some(prefix_items) = obj.get("prefixItems").and_then(|a| a.as_array()) {
+        for item in prefix_items {
+            check_node_refs(item, definitions, depth)?;
+        }
+    }
+
+    for keyword in &["if", "then", "else"] {
+        if let Some(sub) = obj.get(*keyword) {
+            check_node_refs(sub, definitions, depth)?;
         }
     }
 
@@ -1358,10 +1514,47 @@ mod tests {
             "type": "object",
             "properties": { "x": { "$ref": "#/definitions/X" } }
         });
-        // Note: normalize_schema would resolve this if it existed,
-        // but compile_schema's validate_schema_strict happens before normalization.
         let result = adapter.compile_schema(&schema);
         assert!(result.is_err());
+        assert!(result.unwrap_err().message.contains("Unresolved or external $ref"));
+    }
+
+    #[test]
+    fn test_compile_schema_supports_resolvable_ref() {
+        let adapter = GeminiSchemaAdapter::new();
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "x": { "$ref": "#/$defs/X" }
+            },
+            "$defs": {
+                "X": { "type": "string" }
+            }
+        });
+        let result = adapter.compile_schema(&schema);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_compile_schema_rejects_recursive_ref() {
+        let adapter = GeminiSchemaAdapter::new();
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "node": { "$ref": "#/$defs/Node" }
+            },
+            "$defs": {
+                "Node": {
+                    "type": "object",
+                    "properties": {
+                        "child": { "$ref": "#/$defs/Node" }
+                    }
+                }
+            }
+        });
+        let result = adapter.compile_schema(&schema);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().message.contains("Recursive references detected"));
     }
 
     #[test]

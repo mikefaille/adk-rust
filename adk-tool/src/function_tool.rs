@@ -71,20 +71,31 @@ impl FunctionTool {
     }
 
     /// Derive the parameters JSON Schema from a type implementing `JsonSchema`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if schema generation fails. For a fallible version, use `schema_for::<T>()`
+    /// directly and set the field.
     pub fn with_parameters_schema<T>(mut self) -> Self
     where
         T: JsonSchema,
     {
-        self.parameters_schema = Some(schema_for::<T>());
+        self.parameters_schema =
+            Some(schema_for::<T>().expect("failed to generate parameters schema"));
         self
     }
 
     /// Derive the response JSON Schema from a type implementing `JsonSchema`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if schema generation fails. For a fallible version, use `schema_for::<T>()`
+    /// directly and set the field.
     pub fn with_response_schema<T>(mut self) -> Self
     where
         T: JsonSchema,
     {
-        self.response_schema = Some(schema_for::<T>());
+        self.response_schema = Some(schema_for::<T>().expect("failed to generate response schema"));
         self
     }
 
@@ -186,7 +197,7 @@ impl Tool for FunctionTool {
 /// This helper uses OpenAPI 3 settings with inlined subschemas and
 /// removes the "title" field from the root object to match standard
 /// ADK tool expectations.
-pub fn schema_for<T>() -> Value
+pub fn schema_for<T>() -> adk_core::Result<Value>
 where
     T: JsonSchema,
 {
@@ -199,6 +210,6 @@ where
     if let Some(object) = schema.as_object_mut() {
         object.remove("title");
     }
-    // Safe to unwrap here because root_schema is always serializable to Value
-    serde_json::to_value(schema).expect("failed to serialize JSON Schema")
+    serde_json::to_value(schema)
+        .map_err(|e| adk_core::AdkError::tool(format!("failed to serialize JSON Schema: {e}")))
 }

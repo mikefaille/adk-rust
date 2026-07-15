@@ -29,11 +29,18 @@ impl SchemaCompileError {
 /// Normalizes JSON Schema for a specific LLM provider's function-calling API.
 pub trait SchemaAdapter: Send + Sync + std::fmt::Debug {
     /// Returns a unique identifier for this adapter (e.g., "gemini", "openai").
-    fn identifier(&self) -> &str;
+    fn identifier(&self) -> &str {
+        "generic"
+    }
 
     /// Returns the version of this adapter (e.g., "1.0.0").
     fn version(&self) -> &str {
         "1.0.0"
+    }
+
+    /// Returns the target surface (e.g., "studio", "vertex") if applicable.
+    fn surface(&self) -> Option<&str> {
+        None
     }
 
     /// Normalize a raw JSON Schema for this provider (infallible).
@@ -45,13 +52,11 @@ pub trait SchemaAdapter: Send + Sync + std::fmt::Debug {
     }
 
     /// Validates a tool name for this provider's limits.
-    fn validate_tool_name(&self, name: &str) -> Result<(), SchemaCompileError> {
-        if name.len() > 64 {
-            return Err(SchemaCompileError::new(format!(
-                "tool name '{}' exceeds provider's 64-character limit",
-                name
-            )));
-        }
+    ///
+    /// The default implementation accepts all names. Providers with specific
+    /// byte limits (e.g., Gemini's 64-byte limit) should override this to return
+    /// a `SchemaCompileError`.
+    fn validate_tool_name(&self, _name: &str) -> Result<(), SchemaCompileError> {
         Ok(())
     }
 
@@ -82,10 +87,6 @@ const GENERIC_ALLOWED_FORMATS: &[&str] =
     &["date-time", "date", "time", "email", "uri", "uuid", "int32", "int64", "float", "double"];
 
 impl SchemaAdapter for GenericSchemaAdapter {
-    fn identifier(&self) -> &str {
-        "generic"
-    }
-
     fn normalize_schema(&self, mut schema: Value) -> Value {
         schema_utils::strip_schema_keyword(&mut schema);
         schema_utils::strip_conditional_keywords(&mut schema);
