@@ -1,9 +1,9 @@
 use crate::attachment;
 use crate::retry::{RetryConfig, execute_with_retry, is_retryable_model_error};
 use adk_core::{
-    AdkError, CacheCapable, CitationMetadata, CitationSource, CompiledSchema, Content,
-    ErrorCategory, ErrorComponent, FinishReason, Llm, LlmRequest, LlmResponse, LlmResponseStream,
-    Part, Result, SchemaAdapter, SchemaCache, ToolContract, UsageMetadata,
+    CacheCapable, CitationMetadata, CitationSource, Content, ErrorCategory, ErrorComponent,
+    FinishReason, Llm, LlmRequest, LlmResponse, LlmResponseStream, Part, Result, SchemaAdapter,
+    SchemaCache, ToolContract, UsageMetadata,
 };
 use adk_gemini::Gemini;
 use adk_gemini::schema_adapter::GeminiSchemaAdapter;
@@ -726,7 +726,8 @@ impl GeminiModel {
                     serde_json::from_value::<adk_gemini::FunctionDeclaration>(func_decl_json)
                         .map_err(|error| {
                             adk_core::AdkError::model(format!(
-                                "failed to build Gemini function declaration for '{name}': {error}"
+                                "failed to build Gemini function declaration for '{}': {error}",
+                                contract.name
                             ))
                         })?;
                 function_declarations.push(func_decl);
@@ -1508,7 +1509,8 @@ mod native_tool_tests {
         let mut tools = std::collections::HashMap::new();
         let mut contract1 =
             ToolContract::new("google_search", "search", ToolSchema::new(None, None));
-        contract1.insert_native_tool("x-adk-gemini-tool", serde_json::json!({ "google_search": {} }));
+        contract1
+            .insert_native_tool("x-adk-gemini-tool", serde_json::json!({ "google_search": {} }));
         tools.insert("google_search".to_string(), contract1);
 
         tools.insert(
@@ -1540,8 +1542,10 @@ mod native_tool_tests {
     #[test]
     fn test_build_gemini_tools_sets_flag_for_builtin_only() {
         let mut tools = std::collections::HashMap::new();
-        let mut contract = ToolContract::new("google_search", "search", ToolSchema::new(None, None));
-        contract.insert_native_tool("x-adk-gemini-tool", serde_json::json!({ "google_search": {} }));
+        let mut contract =
+            ToolContract::new("google_search", "search", ToolSchema::new(None, None));
+        contract
+            .insert_native_tool("x-adk-gemini-tool", serde_json::json!({ "google_search": {} }));
         tools.insert("google_search".to_string(), contract);
 
         let adapter = test_adapter();
@@ -1593,8 +1597,10 @@ mod native_tool_tests {
     fn test_build_gemini_tools_merges_native_tool_config() {
         let mut tools = std::collections::HashMap::new();
         let mut contract = ToolContract::new("google_maps", "maps", ToolSchema::new(None, None));
-        contract
-            .insert_native_tool("x-adk-gemini-tool", serde_json::json!({ "google_maps": { "enable_widget": true } }));
+        contract.insert_native_tool(
+            "x-adk-gemini-tool",
+            serde_json::json!({ "google_maps": { "enable_widget": true } }),
+        );
         contract.insert_native_tool(
             "x-adk-gemini-tool-config",
             serde_json::json!({

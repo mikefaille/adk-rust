@@ -1469,7 +1469,7 @@ impl Agent for LlmAgent {
             // standard name/description/schema shape.
             let mut tool_declarations = std::collections::HashMap::new();
             for tool in &resolved_tools {
-                tool_declarations.insert(tool.name().to_string(), tool.declaration());
+                tool_declarations.insert(tool.name().to_string(), tool.contract());
             }
 
             // Build the list of valid transfer targets.
@@ -1510,25 +1510,28 @@ impl Agent for LlmAgent {
             // Inject transfer_to_agent tool if there are valid targets
             if !valid_transfer_targets.is_empty() {
                 let transfer_tool_name = "transfer_to_agent";
-                let transfer_tool_decl = serde_json::json!({
-                    "name": transfer_tool_name,
-                    "description": format!(
+                let transfer_tool_contract = adk_core::ToolContract::new(
+                    transfer_tool_name,
+                    format!(
                         "Transfer execution to another agent. Valid targets: {}",
                         valid_transfer_targets.join(", ")
                     ),
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "agent_name": {
-                                "type": "string",
-                                "description": "The name of the agent to transfer to.",
-                                "enum": valid_transfer_targets
-                            }
-                        },
-                        "required": ["agent_name"]
-                    }
-                });
-                tool_declarations.insert(transfer_tool_name.to_string(), transfer_tool_decl);
+                    adk_core::ToolSchema::new(
+                        Some(serde_json::json!({
+                            "type": "object",
+                            "properties": {
+                                "agent_name": {
+                                    "type": "string",
+                                    "description": "The name of the agent to transfer to.",
+                                    "enum": valid_transfer_targets
+                                }
+                            },
+                            "required": ["agent_name"]
+                        })),
+                        None,
+                    ),
+                );
+                tool_declarations.insert(transfer_tool_name.to_string(), transfer_tool_contract);
             }
 
 

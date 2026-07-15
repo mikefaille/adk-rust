@@ -13,8 +13,6 @@
 //! Both adapters share the same allowed format list as Gemini:
 //! `date-time`, `date`, `time`, `email`, `uri`, `uuid`, `int32`, `int64`, `float`, `double`.
 
-use std::borrow::Cow;
-
 use adk_core::{CompiledSchema, SchemaAdapter, SchemaCompileError, schema_utils};
 use serde_json::Value;
 

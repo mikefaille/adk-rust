@@ -168,31 +168,40 @@ mod azure_preservation {
 
         let client = make_azure_client(&server.uri());
 
+        use adk_core::{ToolContract, ToolSchema};
         let mut request = make_request();
         request.tools.insert(
             "get_weather".to_string(),
-            serde_json::json!({
-                "description": "Get weather for a city",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "city": { "type": "string" },
-                        "units": { "type": "string" }
-                    }
-                }
-            }),
+            ToolContract::new(
+                "get_weather",
+                "Get weather for a city",
+                ToolSchema::new(
+                    Some(serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "city": { "type": "string" },
+                            "units": { "type": "string" }
+                        }
+                    })),
+                    None,
+                ),
+            ),
         );
         request.tools.insert(
             "get_stock_price".to_string(),
-            serde_json::json!({
-                "description": "Get stock price",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "symbol": { "type": "string" }
-                    }
-                }
-            }),
+            ToolContract::new(
+                "get_stock_price",
+                "Get stock price",
+                ToolSchema::new(
+                    Some(serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "symbol": { "type": "string" }
+                        }
+                    })),
+                    None,
+                ),
+            ),
         );
 
         let mut stream =

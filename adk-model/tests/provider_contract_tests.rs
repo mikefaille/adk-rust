@@ -80,23 +80,27 @@ fn base_request(model_name: &str, prompt: &str) -> LlmRequest {
 }
 
 fn tools_request(model_name: &str) -> LlmRequest {
+    use adk_core::{ToolContract, ToolSchema};
     let mut request = base_request(
         model_name,
         "A tool named get_weather is available. If a tool is required, call get_weather with city=\"Boston\".",
     );
     request.tools.insert(
         "get_weather".to_string(),
-        json!({
-            "name": "get_weather",
-            "description": "Get current weather for a city.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "city": { "type": "string" }
-                },
-                "required": ["city"]
-            }
-        }),
+        ToolContract::new(
+            "get_weather",
+            "Get current weather for a city.",
+            ToolSchema::new(
+                Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "city": { "type": "string" }
+                    },
+                    "required": ["city"]
+                })),
+                None,
+            ),
+        ),
     );
     request
 }

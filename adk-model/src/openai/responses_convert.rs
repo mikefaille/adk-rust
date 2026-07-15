@@ -911,15 +911,17 @@ mod tests {
 
     #[test]
     fn test_convert_tools_supports_native_openai_tool_declarations() {
+        use adk_core::{ToolContract, ToolSchema};
         let mut tools = HashMap::new();
-        tools.insert(
-            "local_shell".to_string(),
+        let mut contract =
+            ToolContract::new("local_shell", "local shell", ToolSchema::new(None, None));
+        contract.insert_native_tool(
+            "x-adk-openai-tool",
             serde_json::json!({
-                "x-adk-openai-tool": {
-                    "type": "local_shell"
-                }
+                "type": "local_shell"
             }),
         );
+        tools.insert("local_shell".to_string(), contract);
 
         let converted = convert_tools(&tools).expect("tool conversion should succeed");
         assert_eq!(converted.len(), 1);
@@ -1015,15 +1017,17 @@ mod tests {
 
     #[test]
     fn test_request_uses_native_tools_detects_native_declarations() {
+        use adk_core::{ToolContract, ToolSchema};
         let mut tools = HashMap::new();
-        tools.insert(
-            "openai_web_search".to_string(),
+        let mut contract =
+            ToolContract::new("openai_web_search", "web search", ToolSchema::new(None, None));
+        contract.insert_native_tool(
+            "x-adk-openai-tool",
             serde_json::json!({
-                "x-adk-openai-tool": {
-                    "type": "web_search_2025_08_26"
-                }
+                "type": "web_search_2025_08_26"
             }),
         );
+        tools.insert("openai_web_search".to_string(), contract);
 
         let request = LlmRequest {
             model: "gpt-5.4".to_string(),
@@ -1038,18 +1042,20 @@ mod tests {
 
     #[test]
     fn test_build_create_response_sets_auto_truncation_for_computer_use() {
+        use adk_core::{ToolContract, ToolSchema};
         let mut tools = HashMap::new();
-        tools.insert(
-            "openai_computer_use".to_string(),
+        let mut contract =
+            ToolContract::new("openai_computer_use", "computer use", ToolSchema::new(None, None));
+        contract.insert_native_tool(
+            "x-adk-openai-tool",
             serde_json::json!({
-                "x-adk-openai-tool": {
-                    "type": "computer_use_preview",
-                    "environment": "browser",
-                    "display_width": 1440,
-                    "display_height": 900
-                }
+                "type": "computer_use_preview",
+                "environment": "browser",
+                "display_width": 1440,
+                "display_height": 900
             }),
         );
+        tools.insert("openai_computer_use".to_string(), contract);
 
         let request = LlmRequest {
             model: "computer-use-preview".to_string(),

@@ -27,7 +27,7 @@ use std::collections::HashMap;
 
 use adk_core::{
     AdkError, Content, ErrorCategory, ErrorComponent, FinishReason, GenerateContentConfig,
-    LlmRequest, LlmResponse, Part, ToolContract, UsageMetadata,
+    LlmRequest, LlmResponse, Part, UsageMetadata,
 };
 use adk_gemini::ThinkingLevel;
 use adk_gemini::interactions::{
@@ -945,7 +945,7 @@ fn stream_error_to_adk(error: &InteractionStreamError) -> AdkError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use adk_core::{FunctionResponseData, ToolSchema};
+    use adk_core::{FunctionResponseData, ToolContract, ToolSchema};
 
     fn request_with(contents: Vec<Content>) -> LlmRequest {
         LlmRequest {
@@ -1264,10 +1264,8 @@ mod tests {
             "Performs a Google search to retrieve information from the web.",
             ToolSchema::new(None, None),
         );
-        contract.insert_native_tool(
-            "x-adk-gemini-tool",
-            serde_json::json!({ "google_search": {} }),
-        );
+        contract
+            .insert_native_tool("x-adk-gemini-tool", serde_json::json!({ "google_search": {} }));
         contract
     }
 
@@ -1371,7 +1369,8 @@ mod tests {
     #[test]
     fn unrecognized_builtin_only_set_maps_to_other() {
         let mut tools = HashMap::new();
-        let mut contract = ToolContract::new("google_maps", "Maps grounding", ToolSchema::new(None, None));
+        let mut contract =
+            ToolContract::new("google_maps", "Maps grounding", ToolSchema::new(None, None));
         contract.insert_native_tool("x-adk-gemini-tool", serde_json::json!({ "google_maps": {} }));
         tools.insert("google_maps".to_string(), contract);
 

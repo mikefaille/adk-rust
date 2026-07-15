@@ -780,18 +780,23 @@ mod tests {
 
     #[test]
     fn test_tool_config_conversion() {
+        use adk_core::{ToolContract, ToolSchema};
         let mut tools = HashMap::new();
         tools.insert(
             "get_weather".to_string(),
-            serde_json::json!({
-                "description": "Get weather for a city",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "city": { "type": "string" }
-                    }
-                }
-            }),
+            ToolContract::new(
+                "get_weather",
+                "Get weather for a city",
+                ToolSchema::new(
+                    Some(serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "city": { "type": "string" }
+                        }
+                    })),
+                    None,
+                ),
+            ),
         );
 
         let result = adk_request_to_bedrock(&[], &tools, None, None).unwrap();
@@ -1020,6 +1025,7 @@ mod tests {
 
     #[test]
     fn test_cache_point_not_injected_when_none() {
+        use adk_core::{ToolContract, ToolSchema};
         let contents = vec![Content {
             role: "system".to_string(),
             parts: vec![Part::Text { text: "You are helpful.".to_string() }],
@@ -1027,10 +1033,14 @@ mod tests {
         let mut tools = HashMap::new();
         tools.insert(
             "get_weather".to_string(),
-            serde_json::json!({
-                "description": "Get weather",
-                "parameters": { "type": "object", "properties": {} }
-            }),
+            ToolContract::new(
+                "get_weather",
+                "Get weather",
+                ToolSchema::new(
+                    Some(serde_json::json!({ "type": "object", "properties": {} })),
+                    None,
+                ),
+            ),
         );
 
         let result = adk_request_to_bedrock(&contents, &tools, None, None).unwrap();
@@ -1075,13 +1085,18 @@ mod tests {
 
     #[test]
     fn test_cache_point_injected_after_tools() {
+        use adk_core::{ToolContract, ToolSchema};
         let mut tools = HashMap::new();
         tools.insert(
             "get_weather".to_string(),
-            serde_json::json!({
-                "description": "Get weather",
-                "parameters": { "type": "object", "properties": {} }
-            }),
+            ToolContract::new(
+                "get_weather",
+                "Get weather",
+                ToolSchema::new(
+                    Some(serde_json::json!({ "type": "object", "properties": {} })),
+                    None,
+                ),
+            ),
         );
         let cache_config = BedrockCacheConfig::default();
 
