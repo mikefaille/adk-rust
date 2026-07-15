@@ -125,10 +125,7 @@ pub fn validate_schema(
     }
 
     // 2. structural walk and resource accounting (skip full impl for now, just basics)
-    let stats = SchemaStats {
-        document_bytes: bytes.len(),
-        ..Default::default()
-    };
+    let stats = SchemaStats { document_bytes: bytes.len(), ..Default::default() };
 
     // 3. reject forbidden reference schemes (external refs)
     // 4. Draft 2020-12 meta-schema validation
@@ -142,22 +139,16 @@ pub fn validate_schema(
     // 5. canonical encoding & digest
     let digest = compute_digest(&raw)?;
 
-    let doc = SchemaDocument {
-        value: Arc::new(raw),
-        dialect: JsonSchemaDialect::Draft202012,
-        digest,
-    };
+    let doc =
+        SchemaDocument { value: Arc::new(raw), dialect: JsonSchemaDialect::Draft202012, digest };
 
-    Ok(ValidatedSchemaDocument {
-        document: doc,
-        stats,
-    })
+    Ok(ValidatedSchemaDocument { document: doc, stats })
 }
 
 #[cfg(feature = "schemars")]
 pub mod generation {
     use super::*;
-    use schemars::{generate::SchemaSettings, JsonSchema};
+    use schemars::{JsonSchema, generate::SchemaSettings};
 
     pub fn input_schema_for<T: JsonSchema>() -> Result<SchemaDocument, SchemaError> {
         let settings = SchemaSettings::draft2020_12().for_deserialize();

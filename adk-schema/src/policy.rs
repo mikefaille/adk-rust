@@ -47,11 +47,7 @@ pub struct PortableToolLimits {
 
 impl Default for PortableToolLimits {
     fn default() -> Self {
-        Self {
-            max_union_branches: 5,
-            allow_any_of: false,
-            allow_all_of: false,
-        }
+        Self { max_union_branches: 5, allow_any_of: false, allow_all_of: false }
     }
 }
 
@@ -75,9 +71,6 @@ impl SchemaPolicy for PortableToolSchemaPolicy {
         // Implement portable tool policy checks here (no external ref, limited unions, etc)
         // This relies on traversing the canonical document
 
-        Ok(PolicyReport {
-            warnings: vec![],
-            runtime_only_constraints: vec![],
-        })
+        Ok(PolicyReport { warnings: vec![], runtime_only_constraints: vec![] })
     }
 }

@@ -136,6 +136,11 @@ fn code_error_to_json(err: &CodeError) -> Value {
                     "status": "error",
                     "stderr": msg,
                 }),
+                #[allow(unreachable_patterns)]
+                _ => json!({
+                    "status": "error",
+                    "stderr": "Unknown sandbox error",
+                }),
             }
         }
         CodeError::InvalidCode(msg) => json!({
