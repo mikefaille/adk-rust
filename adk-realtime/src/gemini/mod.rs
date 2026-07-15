@@ -42,7 +42,7 @@
 //! ```
 
 mod model;
-mod session;
+pub(crate) mod session;
 
 pub use model::GeminiRealtimeModel;
 pub use session::{GeminiLiveBackend, GeminiRealtimeSession};
@@ -51,7 +51,7 @@ pub use session::{GeminiLiveBackend, GeminiRealtimeSession};
 pub use session::build_vertex_live_url;
 
 /// Gemini Live API WebSocket URL template.
-pub const GEMINI_LIVE_URL: &str = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent";
+pub const GEMINI_LIVE_URL: &str = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent";
 
 /// URL template for Vertex AI Live WebSocket endpoint.
 /// Use `build_vertex_live_url()` to construct the full URL with region and project ID.

@@ -1,126 +1,124 @@
-use adk_core::schema_utils::normalize_tool_arguments;
-use adk_realtime::error::RealtimeError;
 use adk_realtime::events::ServerEvent;
-use serde_json::{Value, json};
-use tokio::sync::Mutex;
+use serde_json::json;
 
 #[cfg(feature = "openai")]
 mod openai_tests {
     use super::*;
-    use adk_realtime::openai::protocol::OpenAITransportLink;
-    use async_trait::async_trait;
-
-    struct MockTransport {
-        events: Mutex<Vec<String>>,
-    }
-
-    #[async_trait]
-    impl OpenAITransportLink for MockTransport {
-        fn session_id(&self) -> &str {
-            "mock"
-        }
-        fn is_connected(&self) -> bool {
-            true
-        }
-        async fn send_raw(&self, _v: &Value) -> adk_realtime::error::Result<()> {
-            Ok(())
-        }
-        async fn close(&self) -> adk_realtime::error::Result<()> {
-            Ok(())
-        }
-        async fn receive_raw(&self) -> Option<adk_realtime::error::Result<ServerEvent>> {
-            let mut events = self.events.lock().await;
-            if events.is_empty() {
-                return None;
-            }
-            let text = events.remove(0);
-
-            // This mirrors the logic in OpenAIRealtimeSession::receive_raw
-            match serde_json::from_str::<ServerEvent>(&text) {
-                Ok(mut event) => {
-                    if let ServerEvent::FunctionCallDone { arguments, name, call_id, .. } = &mut event {
-                        if call_id.trim().is_empty() {
-                            return Some(Err(RealtimeError::protocol(format!(
-                                "OpenAI tool call {} missing or empty 'call_id'",
-                                name
-                            ))));
-                        }
-                        if name.trim().is_empty() {
-                            return Some(Err(RealtimeError::protocol(
-                                "OpenAI tool call missing or empty 'name'".to_string(),
-                            )));
-                        }
-
-                        match normalize_tool_arguments(arguments.clone()) {
-                            Ok(parsed) => {
-                                *arguments = parsed;
-                            }
-                            Err(e) => {
-                                return Some(Err(RealtimeError::protocol(format!(
-                                    "malformed function arguments for {}: {}",
-                                    name, e
-                                ))));
-                            }
-                        }
-                    }
-                    Some(Ok(event))
-                }
-                Err(_) => Some(Ok(ServerEvent::Unknown)),
-            }
-        }
-    }
+    use adk_realtime::error::RealtimeError;
+    use adk_realtime::openai::OpenAIRealtimeSession;
 
     #[tokio::test]
     async fn test_openai_argument_normalization() {
-        let transport = MockTransport {
-            events: Mutex::new(vec![
-                json!({
-                    "type": "response.function_call_arguments.done",
-                    "event_id": "evt_1",
-                    "response_id": "resp_1",
-                    "item_id": "item_1",
-                    "output_index": 0,
-                    "call_id": "call_1",
-                    "name": "test_tool",
-                    "arguments": "{\"key\": \"value\"}"
-                })
-                .to_string(),
-            ]),
-        };
+        let raw_event = json!({
+            "type": "response.function_call_arguments.done",
+            "event_id": "evt_1",
+            "response_id": "resp_1",
+            "item_id": "item_1",
+            "output_index": 0,
+            "call_id": "call_1",
+            "name": "test_tool",
+            "arguments": "{\"key\": \"value\"}"
+        })
+        .to_string();
 
-        let event = transport.receive_raw().await.unwrap().unwrap();
+        let event = OpenAIRealtimeSession::translate_event(&raw_event).unwrap();
         if let ServerEvent::FunctionCallDone { arguments, .. } = event {
             assert_eq!(arguments, json!({"key": "value"}));
         } else {
-            panic!("Expected FunctionCallDone");
+            panic!("Expected FunctionCallDone, got {:?}", event);
         }
     }
 
     #[tokio::test]
     async fn test_openai_malformed_argument_normalization() {
-        let transport = MockTransport {
-            events: Mutex::new(vec![
-                json!({
-                    "type": "response.function_call_arguments.done",
-                    "event_id": "evt_1",
-                    "response_id": "resp_1",
-                    "item_id": "item_1",
-                    "output_index": 0,
-                    "call_id": "call_1",
-                    "name": "test_tool",
-                    "arguments": "{\"key\": \"value\"" // Malformed JSON
-                })
-                .to_string(),
-            ]),
-        };
+        let raw_event = json!({
+            "type": "response.function_call_arguments.done",
+            "event_id": "evt_1",
+            "response_id": "resp_1",
+            "item_id": "item_1",
+            "output_index": 0,
+            "call_id": "call_1",
+            "name": "test_tool",
+            "arguments": "{\"key\": \"value\"" // Malformed JSON
+        })
+        .to_string();
 
-        let result = transport.receive_raw().await.unwrap();
+        let result = OpenAIRealtimeSession::translate_event(&raw_event);
         match result {
             Err(RealtimeError::Protocol(msg)) => {
                 assert!(msg.contains("malformed function arguments"));
             }
             _ => panic!("Expected Protocol error, got {:?}", result),
         }
+    }
+
+    #[tokio::test]
+    async fn test_openai_non_object_argument_rejection() {
+        let raw_event = json!({
+            "type": "response.function_call_arguments.done",
+            "event_id": "evt_1",
+            "response_id": "resp_1",
+            "item_id": "item_1",
+            "output_index": 0,
+            "call_id": "call_1",
+            "name": "test_tool",
+            "arguments": "\"just a string\""
+        })
+        .to_string();
+
+        let result = OpenAIRealtimeSession::translate_event(&raw_event);
+        match result {
+            Err(RealtimeError::Protocol(msg)) => {
+                assert!(msg.contains("malformed function arguments"));
+            }
+            _ => panic!("Expected Protocol error, got {:?}", result),
+        }
+    }
+}
+
+#[cfg(feature = "gemini")]
+mod gemini_tests {
+    use super::*;
+    use adk_realtime::gemini::GeminiRealtimeSession;
+
+    #[tokio::test]
+    async fn test_gemini_argument_normalization() {
+        let raw_event = json!({
+            "toolCall": {
+                "functionCalls": [{
+                    "name": "test_tool",
+                    "id": "call_1",
+                    "args": {"key": "value"}
+                }]
+            }
+        })
+        .to_string();
+
+        let events = GeminiRealtimeSession::translate_event_static(&raw_event).unwrap();
+        assert_eq!(events.len(), 1);
+        if let ServerEvent::FunctionCallDone { arguments, .. } = &events[0] {
+            assert_eq!(arguments, &json!({"key": "value"}));
+        } else {
+            panic!("Expected FunctionCallDone");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_gemini_non_object_argument_rejection() {
+        let raw_event = json!({
+            "toolCall": {
+                "functionCalls": [{
+                    "name": "test_tool",
+                    "id": "call_1",
+                    "args": "not_an_object"
+                }]
+            }
+        })
+        .to_string();
+
+        let result = GeminiRealtimeSession::translate_event_static(&raw_event);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("malformed Gemini tool call"));
     }
 }
 
@@ -282,7 +280,8 @@ async fn test_transfer_to_agent_validation() {
             unimplemented!()
         }
         fn run_config(&self) -> &RunConfig {
-            static R: once_cell::sync::Lazy<RunConfig> = once_cell::sync::Lazy::new(RunConfig::default);
+            static R: once_cell::sync::Lazy<RunConfig> =
+                once_cell::sync::Lazy::new(RunConfig::default);
             &R
         }
         fn end_invocation(&self) {}
@@ -314,7 +313,9 @@ async fn test_transfer_to_agent_validation() {
         for part in content.parts {
             if let adk_core::Part::FunctionResponse { function_response, .. } = part {
                 if let Some(err) = function_response.response.get("error") {
-                    assert!(err.as_str().unwrap().contains("Transfer target (agent_name) is missing"));
+                    assert!(
+                        err.as_str().unwrap().contains("Transfer target (agent_name) is missing")
+                    );
                     found_error = true;
                 }
             }

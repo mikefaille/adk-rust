@@ -2,10 +2,10 @@ use adk_core::{
     AfterAgentCallback, AfterModelCallback, AfterToolCallback, AfterToolCallbackFull, Agent,
     BeforeAgentCallback, BeforeModelCallback, BeforeModelResult, BeforeToolCallback,
     CallbackContext, Content, Event, EventActions, FunctionResponseData, GlobalInstructionProvider,
-    InstructionProvider, InvocationContext, Llm, LlmRequest, LlmResponse,
-    OnToolErrorCallback, Part, ReadonlyContext, Result, RetryBudget, Tool, ToolCallExecutor,
-    ToolConfirmationDecision, ToolConfirmationPolicy, ToolConfirmationRequest,
-    ToolExecutionStrategy, ToolExecutorOptions, ToolOutcome, Toolset,
+    InstructionProvider, InvocationContext, Llm, LlmRequest, LlmResponse, OnToolErrorCallback,
+    Part, ReadonlyContext, Result, RetryBudget, Tool, ToolCallExecutor, ToolConfirmationDecision,
+    ToolConfirmationPolicy, ToolConfirmationRequest, ToolExecutionStrategy, ToolExecutorOptions,
+    ToolOutcome, Toolset,
 };
 use async_stream::stream;
 use async_trait::async_trait;
@@ -273,7 +273,7 @@ pub fn extract_typed<T: serde::de::DeserializeOwned>(events: &[Event]) -> Result
         .map_err(|e| adk_core::AdkError::agent(format!("output deserialization failed: {e}")))
 }
 
-/// Builder for constructing an [`LlmAgent\Standard] with all configuration options.
+/// Builder for constructing an [`LlmAgent`] with all configuration options.
 pub struct LlmAgentBuilder {
     name: String,
     description: Option<String>,

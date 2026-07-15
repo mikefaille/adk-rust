@@ -531,7 +531,7 @@ impl GeminiRealtimeSession {
         Self::translate_event_static(raw)
     }
 
-    pub(crate) fn translate_event_static(raw: &str) -> Result<Vec<ServerEvent>> {
+    pub fn translate_event_static(raw: &str) -> Result<Vec<ServerEvent>> {
         tracing::debug!(%raw, "Translating Gemini event");
         let value: Value = serde_json::from_str(raw)
             .map_err(|e| RealtimeError::protocol(format!("Parse error: {}, raw: {}", e, raw)))?;
@@ -661,12 +661,10 @@ impl GeminiRealtimeSession {
                 .cloned()
                 .ok_or_else(|| RealtimeError::protocol("Gemini tool call missing 'args'"))?;
 
-            if !args.is_object() {
-                return Err(RealtimeError::protocol(format!(
-                    "Gemini tool call 'args' must be an object, got: {:?}",
-                    args
-                )));
-            }
+            let normalized_args =
+                adk_core::schema_utils::normalize_tool_arguments(args).map_err(|e| {
+                    RealtimeError::protocol(format!("malformed Gemini tool call: {}", e))
+                })?;
 
             return Ok(vec![ServerEvent::FunctionCallDone {
                 event_id: uuid::Uuid::new_v4().to_string(),
@@ -675,7 +673,7 @@ impl GeminiRealtimeSession {
                 output_index: 0,
                 call_id: id.to_string(),
                 name: name.to_string(),
-                arguments: args,
+                arguments: normalized_args,
             }]);
         }
 
@@ -1328,7 +1326,7 @@ mod tests {
                 "functionCalls": [{
                     "name": "test",
                     "id": "call_1",
-                    "args": "not_an_object"
+                    "args": "null"
                 }]
             }
         })
@@ -1336,7 +1334,7 @@ mod tests {
         let result = GeminiRealtimeSession::translate_event_static(&raw);
         assert!(result.is_err());
         assert!(
-            result.unwrap_err().to_string().contains("Gemini tool call 'args' must be an object")
+            result.unwrap_err().to_string().contains("malformed Gemini tool call: Tool arguments must be an object")
         );
 
         // 5. Valid call

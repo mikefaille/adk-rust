@@ -1,15 +1,21 @@
 use crate::{
-    AfterToolCallback, AfterToolCallbackFull, BeforeToolCallback, CallbackContext,
-    Content, InvocationContext, OnToolErrorCallback, Part, Result,
-    RetryBudget, Tool, ToolCallbackContext, ToolContext, ToolOutcome, Event, EventActions,
+    AfterToolCallback, AfterToolCallbackFull, BeforeToolCallback, CallbackContext, Content, Event,
+    EventActions, InvocationContext, OnToolErrorCallback, Part, Result, RetryBudget, Tool,
+    ToolCallbackContext, ToolContext, ToolOutcome,
 };
+use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::HashMap;
 use std::future::Future;
+use std::hash::{Hash, Hasher};
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tracing::{debug, info_span, warn, Instrument};
+use tracing::{Instrument, debug, info_span, warn};
+
+static VALIDATOR_CACHE: Lazy<Mutex<HashMap<u64, Arc<jsonschema::Validator>>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
 
 /// Disposition of a tool call attempt.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -140,13 +146,19 @@ impl ToolCallExecutor {
         // 3. Create Tool Context
         let tool_ctx: Arc<dyn ToolContext> = Arc::new(
             UnifiedToolContext::new(ctx.clone(), call_id.to_string())
-                .with_progress(options.progress_tx.clone())
+                .with_progress(options.progress_tx.clone()),
         );
 
         // 4. Interceptors (e.g. Enhanced Plugins before_tool_call)
         let mut final_args = arguments;
         for interceptor in options.interceptors.as_ref() {
-            match interceptor(tool.clone(), final_args.clone(), tool_ctx.clone() as Arc<dyn CallbackContext>).await {
+            match interceptor(
+                tool.clone(),
+                final_args.clone(),
+                tool_ctx.clone() as Arc<dyn CallbackContext>,
+            )
+            .await
+            {
                 Ok(ToolInterceptorResult::Continue(modified_args)) => {
                     final_args = modified_args;
                 }
@@ -171,11 +183,11 @@ impl ToolCallExecutor {
 
         // 5. Schema Validation (Validate AFTER interceptors but BEFORE before_tool callbacks)
         if let Some(schema) = tool.parameters_schema() {
-            // Use the agent/provider's adapter if possible for cached validation,
-            // but for now we centralize it in the executor.
             if let Err(e) = validate_against_schema(&schema, &final_args) {
                 return ToolCallResult {
-                    value: serde_json::json!({ "error": format!("Schema validation failed for tool '{}': {}", name, e) }),
+                    value: serde_json::json!({
+                        "error": format!("Schema validation failed for tool '{}': {}", name, e)
+                    }),
                     actions: tool_ctx.actions(),
                     outcome: None,
                     disposition: ToolCallDisposition::Rejected,
@@ -232,7 +244,7 @@ impl ToolCallExecutor {
         );
 
         if record_payloads {
-             tool_span.record("tool.args", &trace_json_payload(&final_args, true, max_bytes));
+            tool_span.record("tool.args", &trace_json_payload(&final_args, true, max_bytes));
         }
 
         let mut last_error = String::new();
@@ -256,10 +268,9 @@ impl ToolCallExecutor {
                 match futures::FutureExt::catch_unwind(unwind_safe_future).await {
                     Ok(Ok(Ok(value))) => Ok(value),
                     Ok(Ok(Err(e))) => Err(e.to_string()),
-                    Ok(Err(_)) => Err(format!(
-                        "Tool '{}' timed out after {:?}",
-                        name, options.timeout
-                    )),
+                    Ok(Err(_)) => {
+                        Err(format!("Tool '{}' timed out after {:?}", name, options.timeout))
+                    }
                     Err(_) => Err(format!("Tool '{}' panicked during execution", name)),
                 }
             }
@@ -377,15 +388,34 @@ impl ToolCallExecutor {
             value: processed_value,
             actions: tool_ctx.actions(),
             outcome: Some(outcome),
-            disposition: if success { ToolCallDisposition::Executed } else { ToolCallDisposition::Failed },
+            disposition: if success {
+                ToolCallDisposition::Executed
+            } else {
+                ToolCallDisposition::Failed
+            },
         }
     }
 }
 
-/// Validates a value against a JSON Schema.
+/// Validates a value against a JSON Schema using a centralized cache.
 fn validate_against_schema(schema: &Value, args: &Value) -> std::result::Result<(), String> {
-    let validator =
-        jsonschema::validator_for(schema).map_err(|e| format!("Invalid schema: {}", e))?;
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    serde_json::to_string(schema).unwrap_or_default().hash(&mut hasher);
+    let hash = hasher.finish();
+
+    let validator = {
+        let mut cache = VALIDATOR_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(cached) = cache.get(&hash) {
+            cached.clone()
+        } else {
+            let compiled =
+                jsonschema::validator_for(schema).map_err(|e| format!("Invalid schema: {}", e))?;
+            let shared = Arc::new(compiled);
+            cache.insert(hash, shared.clone());
+            shared
+        }
+    };
+
     if validator.is_valid(args) {
         Ok(())
     } else {
@@ -456,25 +486,47 @@ impl UnifiedToolContext {
 
 #[async_trait::async_trait]
 impl crate::ReadonlyContext for UnifiedToolContext {
-    fn invocation_id(&self) -> &str { self.parent_ctx.invocation_id() }
-    fn agent_name(&self) -> &str { self.parent_ctx.agent_name() }
-    fn user_id(&self) -> &str { self.parent_ctx.user_id() }
-    fn app_name(&self) -> &str { self.parent_ctx.app_name() }
-    fn session_id(&self) -> &str { self.parent_ctx.session_id() }
-    fn branch(&self) -> &str { self.parent_ctx.branch() }
-    fn user_content(&self) -> &Content { self.parent_ctx.user_content() }
+    fn invocation_id(&self) -> &str {
+        self.parent_ctx.invocation_id()
+    }
+    fn agent_name(&self) -> &str {
+        self.parent_ctx.agent_name()
+    }
+    fn user_id(&self) -> &str {
+        self.parent_ctx.user_id()
+    }
+    fn app_name(&self) -> &str {
+        self.parent_ctx.app_name()
+    }
+    fn session_id(&self) -> &str {
+        self.parent_ctx.session_id()
+    }
+    fn branch(&self) -> &str {
+        self.parent_ctx.branch()
+    }
+    fn user_content(&self) -> &Content {
+        self.parent_ctx.user_content()
+    }
 }
 
 #[async_trait::async_trait]
 impl crate::CallbackContext for UnifiedToolContext {
-    fn artifacts(&self) -> Option<Arc<dyn crate::Artifacts>> { self.parent_ctx.artifacts() }
-    fn shared_state(&self) -> Option<Arc<crate::SharedState>> { self.parent_ctx.shared_state() }
+    fn artifacts(&self) -> Option<Arc<dyn crate::Artifacts>> {
+        self.parent_ctx.artifacts()
+    }
+    fn shared_state(&self) -> Option<Arc<crate::SharedState>> {
+        self.parent_ctx.shared_state()
+    }
 }
 
 #[async_trait::async_trait]
 impl ToolContext for UnifiedToolContext {
-    fn function_call_id(&self) -> &str { &self.function_call_id }
-    fn actions(&self) -> EventActions { self.actions.read().unwrap_or_else(|e| e.into_inner()).clone() }
+    fn function_call_id(&self) -> &str {
+        &self.function_call_id
+    }
+    fn actions(&self) -> EventActions {
+        self.actions.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
     fn set_actions(&self, actions: EventActions) {
         *self.actions.write().unwrap_or_else(|e| e.into_inner()) = actions;
     }
@@ -485,7 +537,9 @@ impl ToolContext for UnifiedToolContext {
             Ok(vec![])
         }
     }
-    fn user_scopes(&self) -> Vec<String> { self.parent_ctx.user_scopes() }
+    fn user_scopes(&self) -> Vec<String> {
+        self.parent_ctx.user_scopes()
+    }
     async fn get_secret(&self, name: &str) -> Result<Option<String>> {
         self.parent_ctx.get_secret(name).await
     }
@@ -516,20 +570,44 @@ struct ToolOutcomeCallbackContext {
 
 #[async_trait::async_trait]
 impl crate::ReadonlyContext for ToolOutcomeCallbackContext {
-    fn invocation_id(&self) -> &str { self.inner.invocation_id() }
-    fn agent_name(&self) -> &str { self.inner.agent_name() }
-    fn user_id(&self) -> &str { self.inner.user_id() }
-    fn app_name(&self) -> &str { self.inner.app_name() }
-    fn session_id(&self) -> &str { self.inner.session_id() }
-    fn branch(&self) -> &str { self.inner.branch() }
-    fn user_content(&self) -> &Content { self.inner.user_content() }
+    fn invocation_id(&self) -> &str {
+        self.inner.invocation_id()
+    }
+    fn agent_name(&self) -> &str {
+        self.inner.agent_name()
+    }
+    fn user_id(&self) -> &str {
+        self.inner.user_id()
+    }
+    fn app_name(&self) -> &str {
+        self.inner.app_name()
+    }
+    fn session_id(&self) -> &str {
+        self.inner.session_id()
+    }
+    fn branch(&self) -> &str {
+        self.inner.branch()
+    }
+    fn user_content(&self) -> &Content {
+        self.inner.user_content()
+    }
 }
 
 #[async_trait::async_trait]
 impl crate::CallbackContext for ToolOutcomeCallbackContext {
-    fn artifacts(&self) -> Option<Arc<dyn crate::Artifacts>> { self.inner.artifacts() }
-    fn tool_outcome(&self) -> Option<ToolOutcome> { Some(self.outcome.clone()) }
-    fn tool_name(&self) -> Option<&str> { Some(&self.outcome.tool_name) }
-    fn tool_input(&self) -> Option<&Value> { Some(&self.outcome.tool_args) }
-    fn shared_state(&self) -> Option<Arc<crate::SharedState>> { self.inner.shared_state() }
+    fn artifacts(&self) -> Option<Arc<dyn crate::Artifacts>> {
+        self.inner.artifacts()
+    }
+    fn tool_outcome(&self) -> Option<ToolOutcome> {
+        Some(self.outcome.clone())
+    }
+    fn tool_name(&self) -> Option<&str> {
+        Some(&self.outcome.tool_name)
+    }
+    fn tool_input(&self) -> Option<&Value> {
+        Some(&self.outcome.tool_args)
+    }
+    fn shared_state(&self) -> Option<Arc<crate::SharedState>> {
+        self.inner.shared_state()
+    }
 }
