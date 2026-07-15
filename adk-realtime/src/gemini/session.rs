@@ -1334,7 +1334,10 @@ mod tests {
         let result = GeminiRealtimeSession::translate_event_static(&raw);
         assert!(result.is_err());
         assert!(
-            result.unwrap_err().to_string().contains("malformed Gemini tool call: Tool arguments must be an object")
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("malformed Gemini tool call: Tool arguments must be an object")
         );
 
         // 5. Valid call
