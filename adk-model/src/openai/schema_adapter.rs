@@ -13,7 +13,9 @@
 //! Both adapters share the same allowed format list as Gemini:
 //! `date-time`, `date`, `time`, `email`, `uri`, `uuid`, `int32`, `int64`, `float`, `double`.
 
-use adk_core::{SchemaAdapter, schema_utils};
+use std::borrow::Cow;
+
+use adk_core::{CompiledSchema, SchemaAdapter, SchemaCompileError, schema_utils};
 use serde_json::Value;
 
 /// Allowed format values for OpenAI adapters (same as Gemini/Generic).
@@ -66,6 +68,10 @@ impl SchemaAdapter for OpenAiStrictSchemaAdapter {
         "openai-strict"
     }
 
+    fn version(&self) -> &str {
+        "1.0.0"
+    }
+
     fn normalize_schema(&self, mut schema: Value) -> Value {
         schema_utils::strip_schema_keyword(&mut schema);
         schema_utils::strip_conditional_keywords(&mut schema);
@@ -74,6 +80,14 @@ impl SchemaAdapter for OpenAiStrictSchemaAdapter {
         schema_utils::strip_unsupported_formats(&mut schema, OPENAI_ALLOWED_FORMATS);
         set_additional_properties_false(&mut schema);
         schema
+    }
+
+    fn compile_schema(&self, schema: &Value) -> Result<CompiledSchema, SchemaCompileError> {
+        Ok(CompiledSchema::new(self.normalize_schema(schema.clone())))
+    }
+
+    fn validate_tool_name(&self, name: &str) -> Result<(), SchemaCompileError> {
+        validate_openai_tool_name(name)
     }
 
     /// Returns `{"type": "object", "properties": {}, "additionalProperties": false}`.
@@ -137,6 +151,10 @@ impl SchemaAdapter for OpenAiSchemaAdapter {
         "openai"
     }
 
+    fn version(&self) -> &str {
+        "1.0.0"
+    }
+
     fn normalize_schema(&self, mut schema: Value) -> Value {
         schema_utils::strip_schema_keyword(&mut schema);
         schema_utils::strip_conditional_keywords(&mut schema);
@@ -144,6 +162,14 @@ impl SchemaAdapter for OpenAiSchemaAdapter {
         schema_utils::add_implicit_object_type(&mut schema);
         schema_utils::strip_unsupported_formats(&mut schema, OPENAI_ALLOWED_FORMATS);
         schema
+    }
+
+    fn compile_schema(&self, schema: &Value) -> Result<CompiledSchema, SchemaCompileError> {
+        Ok(CompiledSchema::new(self.normalize_schema(schema.clone())))
+    }
+
+    fn validate_tool_name(&self, name: &str) -> Result<(), SchemaCompileError> {
+        validate_openai_tool_name(name)
     }
 }
 
@@ -245,6 +271,60 @@ fn set_additional_properties_false(schema: &mut Value) {
         for value in defs_obj.values_mut() {
             set_additional_properties_false(value);
         }
+    }
+}
+
+/// Validates a tool name for OpenAI's limits (64 characters, regex `^[a-zA-Z0-9_-]+$`).
+pub fn validate_openai_tool_name(name: &str) -> Result<(), SchemaCompileError> {
+    if name.len() > 64 {
+        return Err(SchemaCompileError::new(format!(
+            "tool name '{}' exceeds OpenAI's 64-character limit",
+            name
+        )));
+    }
+
+    use std::sync::LazyLock;
+    static RE: LazyLock<regex::Regex> =
+        LazyLock::new(|| regex::Regex::new("^[a-zA-Z0-9_-]+$").unwrap());
+
+    if !RE.is_match(name) {
+        return Err(SchemaCompileError::new(format!(
+            "tool name '{}' contains invalid characters for OpenAI; must match ^[a-zA-Z0-9_-]+$",
+            name
+        )));
+    }
+
+    Ok(())
+}
+
+/// OpenAI Realtime schema adapter.
+#[derive(Debug)]
+pub struct OpenAiRealtimeSchemaAdapter;
+
+impl SchemaAdapter for OpenAiRealtimeSchemaAdapter {
+    fn identifier(&self) -> &str {
+        "openai-realtime"
+    }
+
+    fn version(&self) -> &str {
+        "1.0.0"
+    }
+
+    fn normalize_schema(&self, mut schema: Value) -> Value {
+        schema_utils::strip_schema_keyword(&mut schema);
+        schema_utils::strip_conditional_keywords(&mut schema);
+        schema_utils::convert_const_to_enum(&mut schema);
+        schema_utils::add_implicit_object_type(&mut schema);
+        schema_utils::strip_unsupported_formats(&mut schema, OPENAI_ALLOWED_FORMATS);
+        schema
+    }
+
+    fn compile_schema(&self, schema: &Value) -> Result<CompiledSchema, SchemaCompileError> {
+        Ok(CompiledSchema::new(self.normalize_schema(schema.clone())))
+    }
+
+    fn validate_tool_name(&self, name: &str) -> Result<(), SchemaCompileError> {
+        validate_openai_tool_name(name)
     }
 }
 

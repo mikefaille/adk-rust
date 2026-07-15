@@ -10,7 +10,8 @@ use adk_anthropic::{
     ToolResultBlockContent, ToolUnionParam, ToolUseBlock, UrlImageSource, UrlPdfSource,
 };
 use adk_core::{
-    Content, FinishReason, LlmResponse, Part, SchemaAdapter, SchemaCache, UsageMetadata,
+    Content, FinishReason, LlmResponse, Part, SchemaAdapter, SchemaCache, ToolContract,
+    UsageMetadata,
 };
 use serde_json::Value;
 use std::collections::HashMap;
@@ -162,13 +163,14 @@ pub fn content_to_message(
 
 /// Convert ADK tools to adk-anthropic ToolUnionParam format.
 pub fn convert_tools(
-    tools: &HashMap<String, Value>,
+    tools: &HashMap<String, ToolContract>,
     adapter: &dyn SchemaAdapter,
     cache: &SchemaCache,
 ) -> Result<Vec<ToolUnionParam>, ConversionError> {
     tools
         .iter()
-        .map(|(name, decl)| {
+        .map(|(name, contract)| {
+            let decl = contract.declaration();
             if let Some(provider_tool) = decl.get("x-adk-anthropic-tool") {
                 return serde_json::from_value::<ToolUnionParam>(provider_tool.clone()).map_err(
                     |error| {
@@ -179,18 +181,24 @@ pub fn convert_tools(
                 );
             }
 
-            let description = decl.get("description").and_then(|d| d.as_str()).map(String::from);
+            adapter.validate_tool_name(&contract.name).map_err(|e| {
+                ConversionError::InvalidToolDeclaration(format!(
+                    "tool name '{}' is invalid for Anthropic: {}",
+                    contract.name, e
+                ))
+            })?;
 
-            let input_schema =
-                decl.get("parameters").cloned().unwrap_or_else(|| adapter.empty_schema());
-            let normalized_schema = cache.get_or_normalize(&input_schema, adapter);
+            let empty = adapter.empty_schema();
+            let input_schema = contract.schema.parameters.as_ref().unwrap_or(&empty);
+            let compiled = cache.get_or_compile(input_schema, adapter).map_err(|e| {
+                ConversionError::InvalidToolDeclaration(format!(
+                    "failed to compile tool schema for '{}': {}",
+                    contract.name, e
+                ))
+            })?;
 
-            let normalized_name = adapter.normalize_tool_name(name);
-
-            let mut tool_param = ToolParam::new(normalized_name.into_owned(), normalized_schema);
-            if let Some(desc) = description {
-                tool_param = tool_param.with_description(desc);
-            }
+            let mut tool_param = ToolParam::new(contract.name.clone(), compiled.schema);
+            tool_param = tool_param.with_description(contract.description.clone());
 
             Ok(ToolUnionParam::CustomTool(tool_param))
         })
@@ -636,18 +644,23 @@ mod tests {
     #[test]
     fn test_convert_tools() {
         use super::super::schema_adapter::AnthropicSchemaAdapter;
+        use adk_core::ToolSchema;
         let mut tools = HashMap::new();
         tools.insert(
             "get_weather".to_string(),
-            serde_json::json!({
-                "description": "Get weather for a city",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "city": { "type": "string" }
-                    }
-                }
-            }),
+            ToolContract::new(
+                "get_weather",
+                "Get weather for a city",
+                ToolSchema::new(
+                    Some(serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "city": { "type": "string" }
+                        }
+                    })),
+                    None,
+                ),
+            ),
         );
 
         let adapter = AnthropicSchemaAdapter;
@@ -660,16 +673,17 @@ mod tests {
     #[test]
     fn test_convert_tools_supports_native_anthropic_tool_declarations() {
         use super::super::schema_adapter::AnthropicSchemaAdapter;
+        use adk_core::ToolSchema;
         let mut tools = HashMap::new();
-        tools.insert(
-            "bash".to_string(),
+        let mut contract = ToolContract::new("bash", "bash", ToolSchema::new(None, None));
+        contract.insert_native_tool(
+            "x-adk-anthropic-tool",
             serde_json::json!({
-                "x-adk-anthropic-tool": {
-                    "type": "bash_20250124",
-                    "name": "bash"
-                }
+                "type": "bash_20250124",
+                "name": "bash"
             }),
         );
+        tools.insert("bash".to_string(), contract);
 
         let adapter = AnthropicSchemaAdapter;
         let cache = SchemaCache::new();

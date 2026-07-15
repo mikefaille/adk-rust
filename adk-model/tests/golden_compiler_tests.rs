@@ -1,7 +1,9 @@
 use adk_core::{SchemaAdapter, ToolContract, ToolSchema};
 use adk_gemini::schema_adapter::GeminiSchemaAdapter;
 use adk_model::anthropic::AnthropicSchemaAdapter;
-use adk_model::openai::{OpenAiSchemaAdapter, OpenAiStrictSchemaAdapter, OpenAiRealtimeSchemaAdapter};
+use adk_model::openai::{
+    OpenAiRealtimeSchemaAdapter, OpenAiSchemaAdapter, OpenAiStrictSchemaAdapter,
+};
 use serde_json::json;
 
 #[test]
@@ -32,10 +34,9 @@ fn test_golden_contract_parity() {
     ];
 
     for adapter in adapters {
-        let compiled = adapter.compile_schema(contract.schema.parameters.as_ref().unwrap()).expect(&format!(
-            "{} compile failed",
-            adapter.identifier()
-        ));
+        let compiled = adapter
+            .compile_schema(contract.schema.parameters.as_ref().unwrap())
+            .expect(&format!("{} compile failed", adapter.identifier()));
 
         // Verify basic structure
         assert!(compiled.schema.get("type").is_some());
@@ -72,10 +73,19 @@ fn test_tool_name_validation_parity() {
     ];
 
     for adapter in adapters {
-        assert!(adapter.validate_tool_name(&long_name).is_err());
+        assert!(
+            adapter.validate_tool_name(&long_name).is_err(),
+            "{} should reject long name",
+            adapter.identifier()
+        );
 
-        if adapter.identifier() == "openai" || adapter.identifier() == "gemini" {
-            assert!(adapter.validate_tool_name(invalid_name).is_err());
+        if adapter.identifier().starts_with("openai") || adapter.identifier() == "gemini" {
+            assert!(
+                adapter.validate_tool_name(invalid_name).is_err(),
+                "{} should reject invalid name '{}'",
+                adapter.identifier(),
+                invalid_name
+            );
         }
     }
 }

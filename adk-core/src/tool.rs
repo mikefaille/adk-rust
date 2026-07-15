@@ -47,11 +47,7 @@ impl ToolContract {
         description: impl Into<String>,
         schema: ToolSchema,
     ) -> Self {
-        Self {
-            name: name.into(),
-            description: description.into(),
-            schema,
-        }
+        Self { name: name.into(), description: description.into(), schema }
     }
 
     /// Returns the tool declaration as a JSON object.
@@ -82,6 +78,19 @@ impl ToolContract {
         }
 
         decl
+    }
+
+    /// Inserts a provider-native tool declaration (e.g. `x-adk-gemini-tool`).
+    ///
+    /// This is a convenience method for tests and manual construction.
+    pub fn insert_native_tool(&mut self, key: impl Into<String>, value: Value) {
+        if self.schema.parameters.is_none() {
+            self.schema.parameters = Some(Value::Object(serde_json::Map::new()));
+        }
+
+        if let Some(obj) = self.schema.parameters.as_mut().and_then(|v| v.as_object_mut()) {
+            obj.insert(key.into(), value);
+        }
     }
 }
 

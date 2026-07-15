@@ -1,6 +1,6 @@
 //! Schema normalization cache for LLM provider adapters.
 use crate::SchemaAdapter;
-use crate::schema_adapter::SchemaCompileError;
+use crate::schema_adapter::{CompiledSchema, SchemaCompileError};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -9,7 +9,7 @@ use std::sync::Mutex;
 /// A thread-safe cache for normalized and compiled JSON Schemas.
 #[derive(Debug, Default)]
 pub struct SchemaCache {
-    entries: Mutex<HashMap<u64, Value>>,
+    entries: Mutex<HashMap<u64, CompiledSchema>>,
 }
 
 impl SchemaCache {
@@ -22,7 +22,11 @@ impl SchemaCache {
     pub fn get_or_normalize(&self, schema: &Value, adapter: &dyn SchemaAdapter) -> Value {
         let hash = Self::hash_schema_with_adapter(schema, adapter, "normalize");
         let mut cache = self.entries.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        cache.entry(hash).or_insert_with(|| adapter.normalize_schema(schema.clone())).clone()
+        cache
+            .entry(hash)
+            .or_insert_with(|| CompiledSchema::new(adapter.normalize_schema(schema.clone())))
+            .schema
+            .clone()
     }
 
     /// Returns the compiled schema for the given input, using the cache if available.
@@ -30,7 +34,7 @@ impl SchemaCache {
         &self,
         schema: &Value,
         adapter: &dyn SchemaAdapter,
-    ) -> Result<Value, SchemaCompileError> {
+    ) -> Result<CompiledSchema, SchemaCompileError> {
         let hash = Self::hash_schema_with_adapter(schema, adapter, "compile");
         let mut cache = self.entries.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
 

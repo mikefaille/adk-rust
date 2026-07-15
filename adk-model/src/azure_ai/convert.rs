@@ -353,7 +353,7 @@ fn map_finish_reason(reason: &str) -> FinishReason {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use adk_core::FunctionResponseData;
+    use adk_core::{FunctionResponseData, ToolContract, ToolSchema};
 
     #[test]
     fn test_build_request_body_basic() {
@@ -393,15 +393,19 @@ mod tests {
         let mut tools = HashMap::new();
         tools.insert(
             "get_weather".to_string(),
-            serde_json::json!({
-                "description": "Get weather for a city",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "city": { "type": "string" }
-                    }
-                }
-            }),
+            ToolContract::new(
+                "get_weather",
+                "Get weather for a city",
+                ToolSchema::new(
+                    Some(serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "city": { "type": "string" }
+                        }
+                    })),
+                    None,
+                ),
+            ),
         );
         let body = build_request_body("m", &[], &tools, None, false);
 

@@ -1,9 +1,9 @@
 use crate::attachment;
 use crate::retry::{RetryConfig, execute_with_retry, is_retryable_model_error};
 use adk_core::{
-    CacheCapable, CitationMetadata, CitationSource, Content, ErrorCategory, ErrorComponent,
-    FinishReason, Llm, LlmRequest, LlmResponse, LlmResponseStream, Part, Result, SchemaAdapter,
-    SchemaCache, UsageMetadata,
+    AdkError, CacheCapable, CitationMetadata, CitationSource, CompiledSchema, Content,
+    ErrorCategory, ErrorComponent, FinishReason, Llm, LlmRequest, LlmResponse, LlmResponseStream,
+    Part, Result, SchemaAdapter, SchemaCache, ToolContract, UsageMetadata,
 };
 use adk_gemini::Gemini;
 use adk_gemini::schema_adapter::GeminiSchemaAdapter;
@@ -655,7 +655,7 @@ impl GeminiModel {
     }
 
     fn build_gemini_tools(
-        tools: &std::collections::HashMap<String, serde_json::Value>,
+        tools: &std::collections::HashMap<String, adk_core::ToolContract>,
         adapter: &dyn SchemaAdapter,
         cache: &SchemaCache,
     ) -> Result<(Vec<adk_gemini::Tool>, adk_gemini::ToolConfig)> {
@@ -664,43 +664,61 @@ impl GeminiModel {
         let mut has_provider_native_tools = false;
         let mut tool_config_json = serde_json::Map::new();
 
-        for (name, tool_decl) in tools {
-            if let Some(provider_tool) = tool_decl.get("x-adk-gemini-tool") {
+        for (_name, contract) in tools {
+            let decl = contract.declaration();
+            if let Some(provider_tool) = decl.get("x-adk-gemini-tool") {
                 let tool = serde_json::from_value::<adk_gemini::Tool>(provider_tool.clone())
                     .map_err(|error| {
                         adk_core::AdkError::model(format!(
-                            "failed to deserialize Gemini native tool '{name}': {error}"
+                            "failed to deserialize Gemini native tool '{}': {error}",
+                            contract.name
                         ))
                     })?;
                 has_provider_native_tools = true;
                 gemini_tools.push(tool);
             } else {
-                // Normalize tool name via the schema adapter
-                let normalized_name = adapter.normalize_tool_name(name);
+                adapter.validate_tool_name(&contract.name).map_err(|e| {
+                    adk_core::AdkError::new(
+                        ErrorComponent::Model,
+                        ErrorCategory::InvalidInput,
+                        "model.gemini.invalid_tool_name",
+                        format!("tool name '{}' is invalid for Gemini: {}", contract.name, e),
+                    )
+                    .with_provider("gemini")
+                })?;
 
-                // Get the parameters schema from the declaration, or use the
+                // Get the parameters schema from the contract, or use the
                 // adapter's empty_schema fallback when none is provided.
-                let schema =
-                    tool_decl.get("parameters").cloned().unwrap_or_else(|| adapter.empty_schema());
-                let normalized_schema = cache.get_or_normalize(&schema, adapter);
+                let empty_schema = adapter.empty_schema();
+                let parameters = contract.schema.parameters.as_ref().unwrap_or(&empty_schema);
+                let compiled = cache.get_or_compile(parameters, adapter).map_err(|e| {
+                    adk_core::AdkError::model(format!(
+                        "failed to compile tool schema for '{}': {}",
+                        contract.name, e
+                    ))
+                })?;
 
-                // Build the FunctionDeclaration with normalized values
-                let description =
-                    tool_decl.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string();
-
+                // Build the FunctionDeclaration with compiled values
                 let mut func_decl_json = serde_json::json!({
-                    "name": normalized_name.as_ref(),
-                    "description": description,
-                    "parameters": normalized_schema,
+                    "name": contract.name,
+                    "description": contract.description,
+                    "parameters": compiled.schema,
                 });
 
-                // Preserve response schema if present (normalized like parameters)
-                if let Some(response) = tool_decl.get("response") {
-                    func_decl_json["response"] = cache.get_or_normalize(response, adapter);
+                // Preserve response schema if present (compiled like parameters)
+                if let Some(response) = &contract.schema.response {
+                    let compiled_response =
+                        cache.get_or_compile(response, adapter).map_err(|e| {
+                            adk_core::AdkError::model(format!(
+                                "failed to compile tool response schema for '{}': {}",
+                                contract.name, e
+                            ))
+                        })?;
+                    func_decl_json["response"] = compiled_response.schema;
                 }
 
                 // Preserve behavior if present
-                if let Some(behavior) = tool_decl.get("behavior") {
+                if let Some(behavior) = decl.get("behavior") {
                     func_decl_json["behavior"] = behavior.clone();
                 }
 
@@ -714,7 +732,7 @@ impl GeminiModel {
                 function_declarations.push(func_decl);
             }
 
-            if let Some(tool_config) = tool_decl.get("x-adk-gemini-tool-config") {
+            if let Some(tool_config) = decl.get("x-adk-gemini-tool-config") {
                 Self::merge_object_value(&mut tool_config_json, tool_config.clone());
             }
         }
@@ -1114,7 +1132,7 @@ impl GeminiModel {
     pub async fn create_cached_content(
         &self,
         system_instruction: &str,
-        tools: &std::collections::HashMap<String, serde_json::Value>,
+        tools: &std::collections::HashMap<String, ToolContract>,
         ttl_seconds: u32,
     ) -> Result<String> {
         let mut cache_builder = self
@@ -1475,6 +1493,7 @@ impl Llm for GeminiModel {
 #[cfg(test)]
 mod native_tool_tests {
     use super::*;
+    use adk_core::ToolSchema;
 
     fn test_adapter() -> GeminiSchemaAdapter {
         GeminiSchemaAdapter::new()
@@ -1487,26 +1506,26 @@ mod native_tool_tests {
     #[test]
     fn test_build_gemini_tools_supports_native_tool_metadata() {
         let mut tools = std::collections::HashMap::new();
-        tools.insert(
-            "google_search".to_string(),
-            serde_json::json!({
-                "x-adk-gemini-tool": {
-                    "google_search": {}
-                }
-            }),
-        );
+        let mut contract1 =
+            ToolContract::new("google_search", "search", ToolSchema::new(None, None));
+        contract1.insert_native_tool("x-adk-gemini-tool", serde_json::json!({ "google_search": {} }));
+        tools.insert("google_search".to_string(), contract1);
+
         tools.insert(
             "lookup_weather".to_string(),
-            serde_json::json!({
-                "name": "lookup_weather",
-                "description": "lookup weather",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "city": { "type": "string" }
-                    }
-                }
-            }),
+            ToolContract::new(
+                "lookup_weather",
+                "lookup weather",
+                ToolSchema::new(
+                    Some(serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "city": { "type": "string" }
+                        }
+                    })),
+                    None,
+                ),
+            ),
         );
 
         let adapter = test_adapter();
@@ -1521,14 +1540,9 @@ mod native_tool_tests {
     #[test]
     fn test_build_gemini_tools_sets_flag_for_builtin_only() {
         let mut tools = std::collections::HashMap::new();
-        tools.insert(
-            "google_search".to_string(),
-            serde_json::json!({
-                "x-adk-gemini-tool": {
-                    "google_search": {}
-                }
-            }),
-        );
+        let mut contract = ToolContract::new("google_search", "search", ToolSchema::new(None, None));
+        contract.insert_native_tool("x-adk-gemini-tool", serde_json::json!({ "google_search": {} }));
+        tools.insert("google_search".to_string(), contract);
 
         let adapter = test_adapter();
         let cache = test_cache();
@@ -1548,16 +1562,19 @@ mod native_tool_tests {
         let mut tools = std::collections::HashMap::new();
         tools.insert(
             "lookup_weather".to_string(),
-            serde_json::json!({
-                "name": "lookup_weather",
-                "description": "lookup weather",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "city": { "type": "string" }
-                    }
-                }
-            }),
+            ToolContract::new(
+                "lookup_weather",
+                "lookup weather",
+                ToolSchema::new(
+                    Some(serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "city": { "type": "string" }
+                        }
+                    })),
+                    None,
+                ),
+            ),
         );
 
         let adapter = test_adapter();
@@ -1575,24 +1592,21 @@ mod native_tool_tests {
     #[test]
     fn test_build_gemini_tools_merges_native_tool_config() {
         let mut tools = std::collections::HashMap::new();
-        tools.insert(
-            "google_maps".to_string(),
+        let mut contract = ToolContract::new("google_maps", "maps", ToolSchema::new(None, None));
+        contract
+            .insert_native_tool("x-adk-gemini-tool", serde_json::json!({ "google_maps": { "enable_widget": true } }));
+        contract.insert_native_tool(
+            "x-adk-gemini-tool-config",
             serde_json::json!({
-                "x-adk-gemini-tool": {
-                    "google_maps": {
-                        "enable_widget": true
-                    }
-                },
-                "x-adk-gemini-tool-config": {
-                    "retrievalConfig": {
-                        "latLng": {
-                            "latitude": 1.23,
-                            "longitude": 4.56
-                        }
+                "retrievalConfig": {
+                    "latLng": {
+                        "latitude": 1.23,
+                        "longitude": 4.56
                     }
                 }
             }),
         );
+        tools.insert("google_maps".to_string(), contract);
 
         let adapter = test_adapter();
         let cache = test_cache();
@@ -1621,28 +1635,30 @@ mod native_tool_tests {
         let mut tools = std::collections::HashMap::new();
         tools.insert(
             "read_file".to_string(),
-            serde_json::json!({
-                "name": "read_file",
-                "description": "Read a file from the filesystem",
-                "parameters": {
-                    "$schema": "http://json-schema.org/draft-07/schema#",
-                    "type": "object",
-                    "properties": {
-                        "path": { "type": "string", "description": "File path" }
-                    },
-                    "required": ["path"],
-                    "additionalProperties": false
-                },
-                "response": {
-                    "$schema": "http://json-schema.org/draft-07/schema#",
-                    "type": "object",
-                    "properties": {
-                        "content": { "type": "string", "description": "File contents" }
-                    },
-                    "required": ["content"],
-                    "additionalProperties": false
-                }
-            }),
+            ToolContract::new(
+                "read_file",
+                "Read a file from the filesystem",
+                ToolSchema::new(
+                    Some(serde_json::json!({
+                        "$schema": "http://json-schema.org/draft-07/schema#",
+                        "type": "object",
+                        "properties": {
+                            "path": { "type": "string", "description": "File path" }
+                        },
+                        "required": ["path"],
+                        "additionalProperties": false
+                    })),
+                    Some(serde_json::json!({
+                        "$schema": "http://json-schema.org/draft-07/schema#",
+                        "type": "object",
+                        "properties": {
+                            "content": { "type": "string", "description": "File contents" }
+                        },
+                        "required": ["content"],
+                        "additionalProperties": false
+                    })),
+                ),
+            ),
         );
 
         let adapter = test_adapter();
@@ -1690,7 +1706,7 @@ impl CacheCapable for GeminiModel {
     async fn create_cache(
         &self,
         system_instruction: &str,
-        tools: &std::collections::HashMap<String, serde_json::Value>,
+        tools: &std::collections::HashMap<String, ToolContract>,
         ttl_seconds: u32,
     ) -> Result<String> {
         self.create_cached_content(system_instruction, tools, ttl_seconds).await

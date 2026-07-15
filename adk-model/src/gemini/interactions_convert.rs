@@ -27,7 +27,7 @@ use std::collections::HashMap;
 
 use adk_core::{
     AdkError, Content, ErrorCategory, ErrorComponent, FinishReason, GenerateContentConfig,
-    LlmRequest, LlmResponse, Part, UsageMetadata,
+    LlmRequest, LlmResponse, Part, ToolContract, UsageMetadata,
 };
 use adk_gemini::ThinkingLevel;
 use adk_gemini::interactions::{
@@ -564,9 +564,7 @@ fn is_builtin_declaration(decl: &Value) -> bool {
 /// Declarations are processed in name-sorted order so the produced request is
 /// deterministic (the source is a [`HashMap`], whose iteration order is
 /// unspecified).
-fn build_tools(
-    tools: &HashMap<String, adk_core::ToolContract>,
-) -> adk_core::Result<Vec<Tool>> {
+fn build_tools(tools: &HashMap<String, adk_core::ToolContract>) -> adk_core::Result<Vec<Tool>> {
     let mut entries: Vec<(&String, &adk_core::ToolContract)> = tools.iter().collect();
     entries.sort_by(|a, b| a.0.cmp(b.0));
 
@@ -602,11 +600,8 @@ fn map_tool(contract: &adk_core::ToolContract) -> Tool {
         return map_builtin_tool(builtin, &decl);
     }
     let name = contract.name.clone();
-    let description = if contract.description.is_empty() {
-        None
-    } else {
-        Some(contract.description.clone())
-    };
+    let description =
+        if contract.description.is_empty() { None } else { Some(contract.description.clone()) };
     let parameters = contract.schema.parameters.clone();
     Tool::Function { name, description, parameters }
 }
@@ -950,7 +945,7 @@ fn stream_error_to_adk(error: &InteractionStreamError) -> AdkError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use adk_core::FunctionResponseData;
+    use adk_core::{FunctionResponseData, ToolSchema};
 
     fn request_with(contents: Vec<Content>) -> LlmRequest {
         LlmRequest {
@@ -1199,21 +1194,21 @@ mod tests {
         let mut tools = HashMap::new();
         tools.insert(
             "get_weather".to_string(),
-            serde_json::json!({
-                "name": "get_weather",
-                "description": "Get the weather for a city",
-                "parameters": {
-                    "type": "object",
-                    "properties": { "city": { "type": "string" } }
-                }
-            }),
+            ToolContract::new(
+                "get_weather",
+                "Get the weather for a city",
+                ToolSchema::new(
+                    Some(serde_json::json!({
+                        "type": "object",
+                        "properties": { "city": { "type": "string" } }
+                    })),
+                    None,
+                ),
+            ),
         );
         tools.insert(
             "get_time".to_string(),
-            serde_json::json!({
-                "name": "get_time",
-                "description": "Get the current time"
-            }),
+            ToolContract::new("get_time", "Get the current time", ToolSchema::new(None, None)),
         );
 
         let mut request = request_with(vec![Content::new("user").with_text("Tools please")]);
@@ -1246,7 +1241,7 @@ mod tests {
         // Declaration with no explicit "name" field.
         tools.insert(
             "lookup".to_string(),
-            serde_json::json!({ "description": "Look something up" }),
+            ToolContract::new("lookup", "Look something up", ToolSchema::new(None, None)),
         );
 
         let mut request = request_with(vec![Content::new("user").with_text("Hi")]);
@@ -1263,24 +1258,32 @@ mod tests {
 
     /// A built-in declaration (carrying the `x-adk-gemini-tool` marker) is the
     /// shape produced by `GoogleSearchTool::declaration()`.
-    fn builtin_search_declaration() -> Value {
-        serde_json::json!({
-            "name": "google_search",
-            "description": "Performs a Google search to retrieve information from the web.",
-            "x-adk-gemini-tool": { "google_search": {} }
-        })
+    fn builtin_search_declaration() -> ToolContract {
+        let mut contract = ToolContract::new(
+            "google_search",
+            "Performs a Google search to retrieve information from the web.",
+            ToolSchema::new(None, None),
+        );
+        contract.insert_native_tool(
+            "x-adk-gemini-tool",
+            serde_json::json!({ "google_search": {} }),
+        );
+        contract
     }
 
     /// A custom function declaration (carrying `parameters`, no marker).
-    fn function_declaration(name: &str) -> Value {
-        serde_json::json!({
-            "name": name,
-            "description": format!("Custom tool {name}"),
-            "parameters": {
-                "type": "object",
-                "properties": { "value": { "type": "string" } }
-            }
-        })
+    fn function_declaration(name: &str) -> ToolContract {
+        ToolContract::new(
+            name,
+            format!("Custom tool {name}"),
+            ToolSchema::new(
+                Some(serde_json::json!({
+                    "type": "object",
+                    "properties": { "value": { "type": "string" } }
+                })),
+                None,
+            ),
+        )
     }
 
     #[test]
@@ -1316,15 +1319,18 @@ mod tests {
         // so it is indistinguishable from any other function tool.
         tools.insert(
             "google_search".to_string(),
-            serde_json::json!({
-                "name": "google_search",
-                "description": "Performs a Google search to retrieve information from the web.",
-                "parameters": {
-                    "type": "object",
-                    "properties": { "query": { "type": "string" } },
-                    "required": ["query"]
-                }
-            }),
+            ToolContract::new(
+                "google_search",
+                "Performs a Google search to retrieve information from the web.",
+                ToolSchema::new(
+                    Some(serde_json::json!({
+                        "type": "object",
+                        "properties": { "query": { "type": "string" } },
+                        "required": ["query"]
+                    })),
+                    None,
+                ),
+            ),
         );
         tools.insert("get_weather".to_string(), function_declaration("get_weather"));
 
@@ -1365,14 +1371,9 @@ mod tests {
     #[test]
     fn unrecognized_builtin_only_set_maps_to_other() {
         let mut tools = HashMap::new();
-        tools.insert(
-            "google_maps".to_string(),
-            serde_json::json!({
-                "name": "google_maps",
-                "description": "Maps grounding",
-                "x-adk-gemini-tool": { "google_maps": {} }
-            }),
-        );
+        let mut contract = ToolContract::new("google_maps", "Maps grounding", ToolSchema::new(None, None));
+        contract.insert_native_tool("x-adk-gemini-tool", serde_json::json!({ "google_maps": {} }));
+        tools.insert("google_maps".to_string(), contract);
 
         let mut request = request_with(vec![Content::new("user").with_text("Maps")]);
         request.tools = tools;

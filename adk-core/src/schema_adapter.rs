@@ -26,17 +26,34 @@ impl SchemaCompileError {
     }
 }
 
+/// A compiled JSON Schema and its associated diagnostics.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct CompiledSchema {
+    /// The compiled JSON Schema.
+    pub schema: Value,
+    /// Any diagnostics emitted during compilation.
+    pub diagnostics: Vec<String>,
+}
+
+impl CompiledSchema {
+    /// Create a new compiled schema.
+    pub fn new(schema: Value) -> Self {
+        Self { schema, diagnostics: Vec::new() }
+    }
+
+    /// Create a new compiled schema with diagnostics.
+    pub fn with_diagnostics(schema: Value, diagnostics: Vec<String>) -> Self {
+        Self { schema, diagnostics }
+    }
+}
+
 /// Normalizes JSON Schema for a specific LLM provider's function-calling API.
 pub trait SchemaAdapter: Send + Sync + std::fmt::Debug {
     /// Returns a unique identifier for this adapter (e.g., "gemini", "openai").
-    fn identifier(&self) -> &str {
-        "generic"
-    }
+    fn identifier(&self) -> &str;
 
     /// Returns the version of this adapter (e.g., "1.0.0").
-    fn version(&self) -> &str {
-        "1.0.0"
-    }
+    fn version(&self) -> &str;
 
     /// Returns the target surface (e.g., "studio", "vertex") if applicable.
     fn surface(&self) -> Option<&str> {
@@ -47,8 +64,8 @@ pub trait SchemaAdapter: Send + Sync + std::fmt::Debug {
     fn normalize_schema(&self, schema: Value) -> Value;
 
     /// Compiles a raw JSON Schema for this provider, returning an error if unsupported.
-    fn compile_schema(&self, schema: &Value) -> Result<Value, SchemaCompileError> {
-        Ok(self.normalize_schema(schema.clone()))
+    fn compile_schema(&self, schema: &Value) -> Result<CompiledSchema, SchemaCompileError> {
+        Ok(CompiledSchema::new(self.normalize_schema(schema.clone())))
     }
 
     /// Validates a tool name for this provider's limits.
@@ -87,6 +104,14 @@ const GENERIC_ALLOWED_FORMATS: &[&str] =
     &["date-time", "date", "time", "email", "uri", "uuid", "int32", "int64", "float", "double"];
 
 impl SchemaAdapter for GenericSchemaAdapter {
+    fn identifier(&self) -> &str {
+        "generic"
+    }
+
+    fn version(&self) -> &str {
+        "1.0.0"
+    }
+
     fn normalize_schema(&self, mut schema: Value) -> Value {
         schema_utils::strip_schema_keyword(&mut schema);
         schema_utils::strip_conditional_keywords(&mut schema);

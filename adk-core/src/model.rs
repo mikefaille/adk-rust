@@ -1,4 +1,5 @@
 use crate::schema_adapter::{GenericSchemaAdapter, SchemaAdapter};
+use crate::tool::ToolContract;
 use crate::{Result, types::Content};
 use async_trait::async_trait;
 use futures::stream::Stream;
@@ -58,7 +59,7 @@ pub struct LlmRequest {
     pub config: Option<GenerateContentConfig>,
     /// Tool declarations keyed by tool name.
     #[serde(skip)]
-    pub tools: HashMap<String, serde_json::Value>,
+    pub tools: HashMap<String, ToolContract>,
     /// Provider-neutral identifier of the previous response to continue from.
     /// The agent populates this from the most recent event's `interaction_id`.
     /// Maps to `previous_interaction_id` for the Gemini Interactions transport;
@@ -169,7 +170,7 @@ pub trait CacheCapable: Send + Sync {
     async fn create_cache(
         &self,
         system_instruction: &str,
-        tools: &HashMap<String, serde_json::Value>,
+        tools: &HashMap<String, ToolContract>,
         ttl_seconds: u32,
     ) -> Result<String>;
 

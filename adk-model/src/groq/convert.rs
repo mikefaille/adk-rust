@@ -214,7 +214,9 @@ pub fn content_to_message(content: &Content) -> Message {
 }
 
 /// Convert ADK tools to Groq tools.
-pub fn convert_tools(tools: &std::collections::HashMap<String, adk_core::ToolContract>) -> Vec<Tool> {
+pub fn convert_tools(
+    tools: &std::collections::HashMap<String, adk_core::ToolContract>,
+) -> Vec<Tool> {
     tools
         .values()
         .map(|contract| {

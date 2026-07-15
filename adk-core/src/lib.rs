@@ -148,7 +148,9 @@ pub use model::{
     GenerateContentConfig, Llm, LlmRequest, LlmResponse, LlmResponseStream, UsageMetadata,
 };
 pub use request_context::RequestContext;
-pub use schema_adapter::{GenericSchemaAdapter, SchemaAdapter, SchemaCompileError};
+pub use schema_adapter::{
+    CompiledSchema, GenericSchemaAdapter, SchemaAdapter, SchemaCompileError,
+};
 pub use schema_cache::SchemaCache;
 pub use shared_state::{SharedState, SharedStateError};
 pub use tool::{

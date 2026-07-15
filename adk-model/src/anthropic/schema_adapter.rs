@@ -44,7 +44,7 @@
 
 use std::borrow::Cow;
 
-use adk_core::{SchemaAdapter, schema_utils};
+use adk_core::{CompiledSchema, SchemaAdapter, SchemaCompileError, schema_utils};
 use serde_json::Value;
 
 /// Schema adapter for Anthropic's Claude models (near pass-through).
@@ -80,11 +80,29 @@ impl SchemaAdapter for AnthropicSchemaAdapter {
         "anthropic"
     }
 
+    fn version(&self) -> &str {
+        "1.0.0"
+    }
+
     fn normalize_schema(&self, mut schema: Value) -> Value {
         schema_utils::strip_schema_keyword(&mut schema);
         schema_utils::strip_conditional_keywords(&mut schema);
         schema_utils::add_implicit_object_type(&mut schema);
         schema
+    }
+
+    fn compile_schema(&self, schema: &Value) -> Result<CompiledSchema, SchemaCompileError> {
+        Ok(CompiledSchema::new(self.normalize_schema(schema.clone())))
+    }
+
+    fn validate_tool_name(&self, name: &str) -> Result<(), SchemaCompileError> {
+        if name.len() > 64 {
+            return Err(SchemaCompileError::new(format!(
+                "tool name '{}' exceeds Anthropic's 64-character limit",
+                name
+            )));
+        }
+        Ok(())
     }
 
     fn normalize_tool_name<'a>(&self, name: &'a str) -> Cow<'a, str> {

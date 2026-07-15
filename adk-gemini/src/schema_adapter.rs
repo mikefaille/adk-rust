@@ -44,8 +44,7 @@
 //! assert!(normalized["properties"]["name"].get("format").is_none());
 //! ```
 
-use adk_core::SchemaAdapter;
-use adk_core::schema_utils;
+use adk_core::{CompiledSchema, SchemaAdapter, SchemaCompileError, schema_utils};
 use serde_json::{Map, Value};
 use std::borrow::Cow;
 
@@ -198,6 +197,10 @@ impl SchemaAdapter for GeminiSchemaAdapter {
         "gemini"
     }
 
+    fn version(&self) -> &str {
+        "1.0.0"
+    }
+
     fn surface(&self) -> Option<&str> {
         if self.vertex_ai { Some("vertex") } else { Some("studio") }
     }
@@ -255,7 +258,7 @@ impl SchemaAdapter for GeminiSchemaAdapter {
         schema
     }
 
-    fn compile_schema(&self, schema: &Value) -> Result<Value, adk_core::SchemaCompileError> {
+    fn compile_schema(&self, schema: &Value) -> Result<CompiledSchema, SchemaCompileError> {
         // 1. Extract definitions for reference resolution.
         let definitions = extract_definitions(schema);
 
@@ -270,16 +273,28 @@ impl SchemaAdapter for GeminiSchemaAdapter {
         validate_schema_strict(&resolved_schema)?;
 
         // 5. Normalization is infallible but applies destructive transforms.
-        Ok(self.normalize_schema(schema.clone()))
+        Ok(CompiledSchema::new(self.normalize_schema(schema.clone())))
     }
 
-    fn validate_tool_name(&self, name: &str) -> Result<(), adk_core::SchemaCompileError> {
+    fn validate_tool_name(&self, name: &str) -> Result<(), SchemaCompileError> {
         if name.len() > 64 {
-            return Err(adk_core::SchemaCompileError::new(format!(
+            return Err(SchemaCompileError::new(format!(
                 "tool name '{}' exceeds Gemini's 64-byte limit",
                 name
             )));
         }
+
+        use std::sync::LazyLock;
+        static RE: LazyLock<regex::Regex> =
+            LazyLock::new(|| regex::Regex::new("^[a-zA-Z0-9_-]+$").unwrap());
+
+        if !RE.is_match(name) {
+            return Err(SchemaCompileError::new(format!(
+                "tool name '{}' contains invalid characters for Gemini; must match ^[a-zA-Z0-9_-]+$",
+                name
+            )));
+        }
+
         Ok(())
     }
 

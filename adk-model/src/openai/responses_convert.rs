@@ -30,7 +30,7 @@ pub fn contents_to_input_items(contents: &[Content]) -> Vec<InputItem> {
 
 /// Returns true when the request includes any OpenAI-native tool declarations.
 pub fn request_uses_native_tools(request: &LlmRequest) -> bool {
-    request.tools.values().any(|decl| decl.get("x-adk-openai-tool").is_some())
+    request.tools.values().any(|contract| contract.declaration().get("x-adk-openai-tool").is_some())
         || request
             .config
             .as_ref()
@@ -41,8 +41,10 @@ pub fn request_uses_native_tools(request: &LlmRequest) -> bool {
 }
 
 fn request_uses_computer_use_tool(request: &LlmRequest) -> bool {
-    request.tools.values().any(|decl| {
-        decl.get("x-adk-openai-tool")
+    request.tools.values().any(|contract| {
+        contract
+            .declaration()
+            .get("x-adk-openai-tool")
             .and_then(|tool| tool.get("type"))
             .and_then(serde_json::Value::as_str)
             == Some("computer_use_preview")

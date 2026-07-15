@@ -2,7 +2,8 @@
 
 use crate::attachment;
 use adk_core::{
-    Content, FinishReason, LlmResponse, Part, SchemaAdapter, SchemaCache, UsageMetadata,
+    Content, FinishReason, LlmResponse, Part, SchemaAdapter, SchemaCache, ToolContract,
+    UsageMetadata,
 };
 use async_openai::types::chat::{
     ChatCompletionMessageToolCall, ChatCompletionMessageToolCalls,
@@ -224,32 +225,33 @@ fn extract_tool_calls(parts: &[Part]) -> Vec<ChatCompletionMessageToolCalls> {
 
 /// Convert ADK tools to OpenAI ChatCompletionTools.
 pub fn convert_tools(
-    tools: &HashMap<String, serde_json::Value>,
+    tools: &HashMap<String, ToolContract>,
     adapter: &dyn SchemaAdapter,
     cache: &SchemaCache,
 ) -> Vec<ChatCompletionTools> {
     tools
         .iter()
-        .map(|(name, decl)| {
-            let description = decl.get("description").and_then(|d| d.as_str()).map(String::from);
+        .map(|(_name, contract)| {
+            let _decl = contract.declaration();
 
-            // Normalize tool name via the schema adapter
-            let normalized_name = adapter.normalize_tool_name(name);
+            // Validate tool name via the schema adapter
+            let _ = adapter.validate_tool_name(&contract.name);
 
-            // Get the parameters schema from the declaration, or use the
+            // Get the parameters schema from the contract, or use the
             // adapter's empty_schema fallback when none is provided.
-            let parameters = decl
-                .get("parameters")
-                .cloned()
-                .map(|schema| cache.get_or_normalize(&schema, adapter))
-                .or_else(|| Some(adapter.empty_schema()));
+            let empty = adapter.empty_schema();
+            let input_schema = contract.schema.parameters.as_ref().unwrap_or(&empty);
+            let compiled = cache.get_or_compile(input_schema, adapter).ok();
+            let parameters = compiled.map(|c| c.schema);
+
+            let strict = if adapter.identifier() == "openai-strict" { Some(true) } else { None };
 
             ChatCompletionTools::Function(ChatCompletionTool {
                 function: FunctionObject {
-                    name: normalized_name.into_owned(),
-                    description,
+                    name: contract.name.clone(),
+                    description: Some(contract.description.clone()),
                     parameters,
-                    strict: None,
+                    strict,
                 },
             })
         })

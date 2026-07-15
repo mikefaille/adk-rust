@@ -38,6 +38,8 @@ pub use config::{
 #[cfg(feature = "openai-conversations")]
 pub use conversations::ConversationsClient;
 pub use responses_client::OpenAIResponsesClient;
-pub use schema_adapter::{OpenAiSchemaAdapter, OpenAiStrictSchemaAdapter};
+pub use schema_adapter::{
+    OpenAiRealtimeSchemaAdapter, OpenAiSchemaAdapter, OpenAiStrictSchemaAdapter,
+};
 #[cfg(feature = "openai-ws")]
 pub use ws_transport::WsTransport;
