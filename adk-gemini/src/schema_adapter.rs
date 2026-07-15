@@ -6,7 +6,9 @@
 //! schemas that Gemini accepts.
 
 use adk_core::SchemaAdapter;
-use adk_core::schema_adapter::{CompiledSchema, ProjectionDiagnostic, ProjectionPolicy, SchemaCompileError};
+use adk_core::schema_adapter::{
+    CompiledSchema, ProjectionDiagnostic, ProjectionPolicy, SchemaCompileError,
+};
 use adk_core::schema_utils;
 use serde_json::{Map, Value};
 use std::borrow::Cow;
@@ -96,10 +98,7 @@ pub struct GeminiSchemaAdapter {
 impl GeminiSchemaAdapter {
     /// Creates a new `GeminiSchemaAdapter` for the standard Gemini API surface.
     pub fn new() -> Self {
-        Self {
-            vertex_ai: false,
-            policy: ProjectionPolicy::Exact,
-        }
+        Self { vertex_ai: false, policy: ProjectionPolicy::Exact }
     }
 
     /// Creates a new `GeminiSchemaAdapter` for the standard Gemini API surface with a specific policy.
@@ -109,10 +108,7 @@ impl GeminiSchemaAdapter {
 
     /// Creates a new `GeminiSchemaAdapter` for the Vertex AI surface.
     pub fn vertex_ai() -> Self {
-        Self {
-            vertex_ai: true,
-            policy: ProjectionPolicy::Exact,
-        }
+        Self { vertex_ai: true, policy: ProjectionPolicy::Exact }
     }
 
     /// Creates a new `GeminiSchemaAdapter` for the Vertex AI surface with a specific policy.
@@ -214,16 +210,15 @@ struct GeminiCompiler<'a> {
 
 impl<'a> GeminiCompiler<'a> {
     fn new(root: &'a Value, policy: ProjectionPolicy, vertex_ai: bool) -> Self {
-        Self {
-            root,
-            policy,
-            vertex_ai,
-            diagnostics: Vec::new(),
-            ref_stack: Vec::new(),
-        }
+        Self { root, policy, vertex_ai, diagnostics: Vec::new(), ref_stack: Vec::new() }
     }
 
-    fn compile(&mut self, schema: &Value, path: &str, depth: usize) -> Result<Value, SchemaCompileError> {
+    fn compile(
+        &mut self,
+        schema: &Value,
+        path: &str,
+        depth: usize,
+    ) -> Result<Value, SchemaCompileError> {
         if depth > 5 {
             return self.error(path, "depth", "Schema exceeds Gemini's maximum nesting depth of 5");
         }
@@ -234,20 +229,33 @@ impl<'a> GeminiCompiler<'a> {
                 if *b {
                     Ok(Value::Object(Map::new()))
                 } else {
-                    self.error(path, "boolean_schema", "Gemini does not support 'false' schemas (not)")
+                    self.error(
+                        path,
+                        "boolean_schema",
+                        "Gemini does not support 'false' schemas (not)",
+                    )
                 }
             }
             _ => Ok(schema.clone()),
         }
     }
 
-    fn compile_object(&mut self, obj: &Map<String, Value>, path: &str, depth: usize) -> Result<Value, SchemaCompileError> {
+    fn compile_object(
+        &mut self,
+        obj: &Map<String, Value>,
+        path: &str,
+        depth: usize,
+    ) -> Result<Value, SchemaCompileError> {
         let mut projected = Map::new();
 
         // 1. Handle $ref (Truthful pointer resolution)
         if let Some(ref_val) = obj.get("$ref").and_then(|v| v.as_str()) {
             if self.ref_stack.contains(&ref_val.to_string()) {
-                return self.error(path, "$ref", format!("Recursive reference detected: {}", ref_val));
+                return self.error(
+                    path,
+                    "$ref",
+                    format!("Recursive reference detected: {}", ref_val),
+                );
             }
 
             let resolved = if ref_val == "#" {
@@ -266,7 +274,11 @@ impl<'a> GeminiCompiler<'a> {
                     return result;
                 }
                 None => {
-                    return self.error(path, "$ref", format!("Unresolved or external $ref detected: '{}'", ref_val));
+                    return self.error(
+                        path,
+                        "$ref",
+                        format!("Unresolved or external $ref detected: '{}'", ref_val),
+                    );
                 }
             }
         }
@@ -281,7 +293,11 @@ impl<'a> GeminiCompiler<'a> {
                     for (k, v) in sub_obj {
                         if let Some(existing) = merged.get(k) {
                             if existing != v {
-                                return self.error(path, "allOf", format!("Conflicting allOf branches for keyword '{}'", k));
+                                return self.error(
+                                    path,
+                                    "allOf",
+                                    format!("Conflicting allOf branches for keyword '{}'", k),
+                                );
                             }
                         }
                         merged.insert(k.clone(), v.clone());
@@ -346,7 +362,15 @@ impl<'a> GeminiCompiler<'a> {
 
         // 5. Audit destructive transforms
         for (key, value) in obj {
-            if key == "$ref" || key == "allOf" || key == "anyOf" || key == "oneOf" || key == "type" || key == "definitions" || key == "$defs" || key == "$schema" {
+            if key == "$ref"
+                || key == "allOf"
+                || key == "anyOf"
+                || key == "oneOf"
+                || key == "type"
+                || key == "definitions"
+                || key == "$defs"
+                || key == "$schema"
+            {
                 continue;
             }
 
@@ -356,31 +380,47 @@ impl<'a> GeminiCompiler<'a> {
                     if let Some(props_obj) = value.as_object() {
                         for (pk, pv) in props_obj {
                             let prop_path = format!("{}/properties/{}", path, pk);
-                            compiled_props.insert(pk.clone(), self.compile(pv, &prop_path, depth + 1)?);
+                            compiled_props
+                                .insert(pk.clone(), self.compile(pv, &prop_path, depth + 1)?);
                         }
                     }
                     projected.insert("properties".to_string(), Value::Object(compiled_props));
                     if !projected.contains_key("type") {
-                         projected.insert("type".to_string(), Value::String("object".to_string()));
+                        projected.insert("type".to_string(), Value::String("object".to_string()));
                     }
                 }
                 "items" => {
                     if let Some(items_arr) = value.as_array() {
-                        self.diagnostic(path, "items", "Gemini does not support tuple validation; projecting to first schema")?;
+                        self.diagnostic(
+                            path,
+                            "items",
+                            "Gemini does not support tuple validation; projecting to first schema",
+                        )?;
                         if let Some(first) = items_arr.first() {
                             let items_path = format!("{}/items/0", path);
-                            projected.insert("items".to_string(), self.compile(first, &items_path, depth + 1)?);
+                            projected.insert(
+                                "items".to_string(),
+                                self.compile(first, &items_path, depth + 1)?,
+                            );
                         }
                     } else {
                         let items_path = format!("{}/items", path);
-                        projected.insert("items".to_string(), self.compile(value, &items_path, depth + 1)?);
+                        projected.insert(
+                            "items".to_string(),
+                            self.compile(value, &items_path, depth + 1)?,
+                        );
                     }
                 }
                 "enum" => {
                     if let Some(arr) = value.as_array() {
-                        let filtered: Vec<Value> = arr.iter().filter(|v| !v.is_null()).cloned().collect();
+                        let filtered: Vec<Value> =
+                            arr.iter().filter(|v| !v.is_null()).cloned().collect();
                         if filtered.len() != arr.len() {
-                            self.diagnostic(path, "enum", "Gemini does not support null in enum; stripping null values")?;
+                            self.diagnostic(
+                                path,
+                                "enum",
+                                "Gemini does not support null in enum; stripping null values",
+                            )?;
                         }
                         if !filtered.is_empty() {
                             projected.insert("enum".to_string(), Value::Array(filtered));
@@ -401,7 +441,11 @@ impl<'a> GeminiCompiler<'a> {
                         if GEMINI_ALLOWED_FORMATS.contains(&f) {
                             projected.insert("format".to_string(), value.clone());
                         } else {
-                            self.diagnostic(path, "format", format!("Gemini does not support format '{}'; stripping", f))?;
+                            self.diagnostic(
+                                path,
+                                "format",
+                                format!("Gemini does not support format '{}'; stripping", f),
+                            )?;
                         }
                     }
                 }
@@ -409,26 +453,50 @@ impl<'a> GeminiCompiler<'a> {
                     if self.vertex_ai {
                         projected.insert("additionalProperties".to_string(), Value::Bool(false));
                         if value != &Value::Bool(false) {
-                            self.diagnostic(path, "additionalProperties", "Vertex AI requires additionalProperties: false")?;
+                            self.diagnostic(
+                                path,
+                                "additionalProperties",
+                                "Vertex AI requires additionalProperties: false",
+                            )?;
                         }
                     } else {
-                        self.diagnostic(path, "additionalProperties", "Gemini Studio does not support additionalProperties; stripping")?;
+                        self.diagnostic(
+                            path,
+                            "additionalProperties",
+                            "Gemini Studio does not support additionalProperties; stripping",
+                        )?;
                     }
                 }
                 "required" => {
                     projected.insert("required".to_string(), value.clone());
                 }
                 // Destructive transforms for validation keywords
-                "minimum" | "maximum" | "exclusiveMinimum" | "exclusiveMaximum" |
-                "minLength" | "maxLength" | "pattern" |
-                "minItems" | "maxItems" | "uniqueItems" |
-                "minProperties" | "maxProperties" | "multipleOf" => {
-                    self.diagnostic(path, key, format!("Gemini does not support validation keyword '{}'; stripping", key))?;
+                "minimum" | "maximum" | "exclusiveMinimum" | "exclusiveMaximum" | "minLength"
+                | "maxLength" | "pattern" | "minItems" | "maxItems" | "uniqueItems"
+                | "minProperties" | "maxProperties" | "multipleOf" => {
+                    self.diagnostic(
+                        path,
+                        key,
+                        format!("Gemini does not support validation keyword '{}'; stripping", key),
+                    )?;
                 }
                 // Conditional and other complex keywords
-                "if" | "then" | "else" | "dependentRequired" | "dependentSchemas" | "contains" | "not" |
-                "patternProperties" | "propertyNames" | "unevaluatedProperties" | "prefixItems" => {
-                    self.diagnostic(path, key, format!("Gemini does not support complex keyword '{}'; stripping", key))?;
+                "if"
+                | "then"
+                | "else"
+                | "dependentRequired"
+                | "dependentSchemas"
+                | "contains"
+                | "not"
+                | "patternProperties"
+                | "propertyNames"
+                | "unevaluatedProperties"
+                | "prefixItems" => {
+                    self.diagnostic(
+                        path,
+                        key,
+                        format!("Gemini does not support complex keyword '{}'; stripping", key),
+                    )?;
                 }
                 _ => {
                     // Ignore unknown keywords or strip them? The request says audit every destructive transform.
@@ -437,15 +505,20 @@ impl<'a> GeminiCompiler<'a> {
         }
 
         if self.vertex_ai && !projected.contains_key("additionalProperties") {
-             if projected.get("type").and_then(|v| v.as_str()) == Some("object") {
-                 projected.insert("additionalProperties".to_string(), Value::Bool(false));
-             }
+            if projected.get("type").and_then(|v| v.as_str()) == Some("object") {
+                projected.insert("additionalProperties".to_string(), Value::Bool(false));
+            }
         }
 
         Ok(Value::Object(projected))
     }
 
-    fn diagnostic(&mut self, path: &str, keyword: &str, message: impl Into<String>) -> Result<(), SchemaCompileError> {
+    fn diagnostic(
+        &mut self,
+        path: &str,
+        keyword: &str,
+        message: impl Into<String>,
+    ) -> Result<(), SchemaCompileError> {
         let msg = message.into();
         if self.policy == ProjectionPolicy::Exact {
             return Err(SchemaCompileError::new(format!("Semantic loss at {}: {}", path, msg)));
@@ -458,13 +531,27 @@ impl<'a> GeminiCompiler<'a> {
         Ok(())
     }
 
-    fn error<T>(&mut self, path: &str, keyword: &str, message: impl Into<String>) -> Result<T, SchemaCompileError> {
-        Err(SchemaCompileError::new(format!("Compilation error at {} ({}): {}", path, keyword, message.into())))
+    fn error<T>(
+        &mut self,
+        path: &str,
+        keyword: &str,
+        message: impl Into<String>,
+    ) -> Result<T, SchemaCompileError> {
+        Err(SchemaCompileError::new(format!(
+            "Compilation error at {} ({}): {}",
+            path,
+            keyword,
+            message.into()
+        )))
     }
 }
 
 fn is_null_schema(schema: &Value) -> bool {
-    schema.as_object().and_then(|obj| obj.get("type")).and_then(|t| t.as_str()).is_some_and(|t| t == "null")
+    schema
+        .as_object()
+        .and_then(|obj| obj.get("type"))
+        .and_then(|t| t.as_str())
+        .is_some_and(|t| t == "null")
 }
 
 fn extract_definitions_legacy(schema: &Value) -> Map<String, Value> {
@@ -485,50 +572,87 @@ fn extract_definitions_legacy(schema: &Value) -> Map<String, Value> {
 }
 
 fn remove_unsupported_keywords_legacy(schema: &mut Value) {
-    let Some(obj) = schema.as_object_mut() else { return; };
-    for keyword in UNSUPPORTED_KEYWORDS { obj.remove(*keyword); }
+    let Some(obj) = schema.as_object_mut() else {
+        return;
+    };
+    for keyword in UNSUPPORTED_KEYWORDS {
+        obj.remove(*keyword);
+    }
     let is_array_type = obj.get("type").and_then(|t| t.as_str()).is_some_and(|t| t == "array");
     if !is_array_type {
         obj.remove("items");
     } else if obj.get("items").is_some_and(|v| v.is_array()) {
-        let first_schema = obj.get("items").and_then(|v| v.as_array()).and_then(|arr| arr.first()).cloned().unwrap_or_else(|| serde_json::json!({"type": "string"}));
+        let first_schema = obj
+            .get("items")
+            .and_then(|v| v.as_array())
+            .and_then(|arr| arr.first())
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({"type": "string"}));
         obj.insert("items".to_string(), first_schema);
     } else if !obj.contains_key("items") {
         obj.insert("items".to_string(), serde_json::json!({"type": "string"}));
     }
     if let Some(props) = obj.get_mut("properties").and_then(|v| v.as_object_mut()) {
-        for value in props.values_mut() { remove_unsupported_keywords_legacy(value); }
+        for value in props.values_mut() {
+            remove_unsupported_keywords_legacy(value);
+        }
     }
-    if let Some(items) = obj.get_mut("items") { if items.is_object() { remove_unsupported_keywords_legacy(items); } }
+    if let Some(items) = obj.get_mut("items") {
+        if items.is_object() {
+            remove_unsupported_keywords_legacy(items);
+        }
+    }
     for keyword in &["allOf", "anyOf", "oneOf"] {
         if let Some(arr) = obj.get_mut(*keyword).and_then(|v| v.as_array_mut()) {
-            for sub in arr { remove_unsupported_keywords_legacy(sub); }
+            for sub in arr {
+                remove_unsupported_keywords_legacy(sub);
+            }
         }
     }
 }
 
 fn remove_unsupported_keywords_vertex_legacy(schema: &mut Value) {
-    let Some(obj) = schema.as_object_mut() else { return; };
-    for keyword in UNSUPPORTED_KEYWORDS_VERTEX { obj.remove(*keyword); }
+    let Some(obj) = schema.as_object_mut() else {
+        return;
+    };
+    for keyword in UNSUPPORTED_KEYWORDS_VERTEX {
+        obj.remove(*keyword);
+    }
     let is_object_type = obj.get("type").and_then(|t| t.as_str()).is_some_and(|t| t == "object");
-    if is_object_type { obj.insert("additionalProperties".to_string(), Value::Bool(false)); }
-    else { obj.remove("additionalProperties"); }
+    if is_object_type {
+        obj.insert("additionalProperties".to_string(), Value::Bool(false));
+    } else {
+        obj.remove("additionalProperties");
+    }
     let is_array_type = obj.get("type").and_then(|t| t.as_str()).is_some_and(|t| t == "array");
     if !is_array_type {
         obj.remove("items");
     } else if obj.get("items").is_some_and(|v| v.is_array()) {
-        let first_schema = obj.get("items").and_then(|v| v.as_array()).and_then(|arr| arr.first()).cloned().unwrap_or_else(|| serde_json::json!({"type": "string"}));
+        let first_schema = obj
+            .get("items")
+            .and_then(|v| v.as_array())
+            .and_then(|arr| arr.first())
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({"type": "string"}));
         obj.insert("items".to_string(), first_schema);
     } else if !obj.contains_key("items") {
         obj.insert("items".to_string(), serde_json::json!({"type": "string"}));
     }
     if let Some(props) = obj.get_mut("properties").and_then(|v| v.as_object_mut()) {
-        for value in props.values_mut() { remove_unsupported_keywords_vertex_legacy(value); }
+        for value in props.values_mut() {
+            remove_unsupported_keywords_vertex_legacy(value);
+        }
     }
-    if let Some(items) = obj.get_mut("items") { if items.is_object() { remove_unsupported_keywords_vertex_legacy(items); } }
+    if let Some(items) = obj.get_mut("items") {
+        if items.is_object() {
+            remove_unsupported_keywords_vertex_legacy(items);
+        }
+    }
     for keyword in &["allOf", "anyOf", "oneOf"] {
         if let Some(arr) = obj.get_mut(*keyword).and_then(|v| v.as_array_mut()) {
-            for sub in arr { remove_unsupported_keywords_vertex_legacy(sub); }
+            for sub in arr {
+                remove_unsupported_keywords_vertex_legacy(sub);
+            }
         }
     }
 }
@@ -589,7 +713,12 @@ mod tests {
         });
         let result = adapter.compile_schema(&schema);
         assert!(result.is_err());
-        assert!(result.unwrap_err().message.contains("Gemini does not support validation keyword 'pattern'"));
+        assert!(
+            result
+                .unwrap_err()
+                .message
+                .contains("Gemini does not support validation keyword 'pattern'")
+        );
     }
 
     #[test]

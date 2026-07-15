@@ -33,10 +33,7 @@ pub struct SchemaCache {
 impl SchemaCache {
     /// Creates a new empty schema cache.
     pub fn new() -> Self {
-        Self {
-            entries: Mutex::new(HashMap::new()),
-            compiled: Mutex::new(HashMap::new()),
-        }
+        Self { entries: Mutex::new(HashMap::new()), compiled: Mutex::new(HashMap::new()) }
     }
 
     /// Returns the normalized schema for the given input, using the cache if available.
