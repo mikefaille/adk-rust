@@ -19,7 +19,7 @@ use std::collections::HashMap;
 pub(crate) fn build_request_body(
     model: &str,
     contents: &[Content],
-    tools: &HashMap<String, Value>,
+    tools: &HashMap<String, adk_core::ToolContract>,
     config: Option<&GenerateContentConfig>,
     stream: bool,
 ) -> Value {
@@ -34,10 +34,8 @@ pub(crate) fn build_request_body(
     if !tools.is_empty() {
         let tool_array: Vec<Value> = tools
             .iter()
-            .map(|(name, decl)| {
-                let description =
-                    decl.get("description").and_then(|d| d.as_str()).unwrap_or_default();
-                let parameters = decl.get("parameters").cloned().unwrap_or(serde_json::json!({
+            .map(|(name, contract)| {
+                let parameters = contract.schema.parameters.clone().unwrap_or(serde_json::json!({
                     "type": "object",
                     "properties": {}
                 }));
@@ -45,7 +43,7 @@ pub(crate) fn build_request_body(
                     "type": "function",
                     "function": {
                         "name": name,
-                        "description": description,
+                        "description": contract.description,
                         "parameters": parameters,
                     }
                 })

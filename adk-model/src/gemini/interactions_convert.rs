@@ -564,16 +564,18 @@ fn is_builtin_declaration(decl: &Value) -> bool {
 /// Declarations are processed in name-sorted order so the produced request is
 /// deterministic (the source is a [`HashMap`], whose iteration order is
 /// unspecified).
-fn build_tools(tools: &HashMap<String, Value>) -> adk_core::Result<Vec<Tool>> {
-    let mut entries: Vec<(&String, &Value)> = tools.iter().collect();
+fn build_tools(
+    tools: &HashMap<String, adk_core::ToolContract>,
+) -> adk_core::Result<Vec<Tool>> {
+    let mut entries: Vec<(&String, &adk_core::ToolContract)> = tools.iter().collect();
     entries.sort_by(|a, b| a.0.cmp(b.0));
 
     let mut builtin_names: Vec<String> = Vec::new();
     let mut function_present = false;
-    for (key, decl) in &entries {
-        if is_builtin_declaration(decl) {
-            let name = decl.get("name").and_then(Value::as_str).unwrap_or(key).to_string();
-            builtin_names.push(name);
+    for (_key, contract) in &entries {
+        let decl = (*contract).declaration();
+        if is_builtin_declaration(&decl) {
+            builtin_names.push(contract.name.clone());
         } else {
             function_present = true;
         }
@@ -585,7 +587,7 @@ fn build_tools(tools: &HashMap<String, Value>) -> adk_core::Result<Vec<Tool>> {
         return Err(mixed_tools_error(&builtin_names));
     }
 
-    let mapped = entries.into_iter().map(|(key, decl)| map_tool(key, decl)).collect();
+    let mapped = entries.into_iter().map(|(_key, contract)| map_tool(contract)).collect();
     Ok(mapped)
 }
 
@@ -594,13 +596,18 @@ fn build_tools(tools: &HashMap<String, Value>) -> adk_core::Result<Vec<Tool>> {
 /// Function declarations (no built-in marker) become [`Tool::Function`].
 /// Built-in declarations map to their dedicated variant when recognised, falling
 /// back to [`Tool::Other`] with the raw declaration for any other built-in.
-fn map_tool(key: &str, decl: &Value) -> Tool {
+fn map_tool(contract: &adk_core::ToolContract) -> Tool {
+    let decl = contract.declaration();
     if let Some(builtin) = decl.get(BUILTIN_TOOL_MARKER) {
-        return map_builtin_tool(builtin, decl);
+        return map_builtin_tool(builtin, &decl);
     }
-    let name = decl.get("name").and_then(Value::as_str).unwrap_or(key).to_string();
-    let description = decl.get("description").and_then(Value::as_str).map(ToString::to_string);
-    let parameters = decl.get("parameters").cloned();
+    let name = contract.name.clone();
+    let description = if contract.description.is_empty() {
+        None
+    } else {
+        Some(contract.description.clone())
+    };
+    let parameters = contract.schema.parameters.clone();
     Tool::Function { name, description, parameters }
 }
 

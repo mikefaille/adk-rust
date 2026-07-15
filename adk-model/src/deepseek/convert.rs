@@ -260,26 +260,27 @@ pub fn content_to_message(content: &Content) -> Message {
 ///
 /// When `strict` is `true`, each tool definition includes `"strict": true`
 /// for the beta strict tool mode.
-pub fn convert_tools(tools: &std::collections::HashMap<String, Value>, strict: bool) -> Vec<Tool> {
+pub fn convert_tools(
+    tools: &std::collections::HashMap<String, adk_core::ToolContract>,
+    strict: bool,
+) -> Vec<Tool> {
     tools
         .values()
-        .filter_map(|tool| {
-            let name = tool.get("name")?.as_str()?;
-            let description = tool.get("description").and_then(|d| d.as_str()).unwrap_or("");
-            let parameters = tool.get("parameters").cloned().unwrap_or(serde_json::json!({
+        .map(|contract| {
+            let parameters = contract.schema.parameters.clone().unwrap_or(serde_json::json!({
                 "type": "object",
                 "properties": {}
             }));
 
-            Some(Tool {
+            Tool {
                 tool_type: "function".to_string(),
                 function: FunctionDef {
-                    name: name.to_string(),
-                    description: description.to_string(),
+                    name: contract.name.clone(),
+                    description: contract.description.clone(),
                     parameters,
                     strict: if strict { Some(true) } else { None },
                 },
-            })
+            }
         })
         .collect()
 }

@@ -174,17 +174,25 @@ mod preservation {
         let mut request = make_request();
         request.tools.insert(
             "get_weather".to_string(),
-            serde_json::json!({
-                "description": "Get weather",
-                "parameters": { "type": "object", "properties": { "city": { "type": "string" } } }
-            }),
+            adk_core::ToolContract::new(
+                "get_weather",
+                "Get weather",
+                adk_core::ToolSchema::new(
+                    Some(serde_json::json!({ "type": "object", "properties": { "city": { "type": "string" } } })),
+                    None
+                )
+            )
         );
         request.tools.insert(
             "get_time".to_string(),
-            serde_json::json!({
-                "description": "Get time",
-                "parameters": { "type": "object", "properties": { "timezone": { "type": "string" } } }
-            }),
+            adk_core::ToolContract::new(
+                "get_time",
+                "Get time",
+                adk_core::ToolSchema::new(
+                    Some(serde_json::json!({ "type": "object", "properties": { "timezone": { "type": "string" } } })),
+                    None
+                )
+            )
         );
 
         let mut stream =
@@ -494,10 +502,14 @@ mod preservation {
         });
         request.tools.insert(
             "my_tool".to_string(),
-            serde_json::json!({
-                "description": "A test tool",
-                "parameters": { "type": "object", "properties": { "x": { "type": "string" } } }
-            }),
+            adk_core::ToolContract::new(
+                "my_tool",
+                "A test tool",
+                adk_core::ToolSchema::new(
+                    Some(serde_json::json!({ "type": "object", "properties": { "x": { "type": "string" } } })),
+                    None
+                )
+            )
         );
 
         // Call with stream=false

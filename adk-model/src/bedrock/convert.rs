@@ -42,7 +42,7 @@ pub(crate) struct BedrockConverseInput {
 /// system content and after tool definitions to enable Bedrock prompt caching.
 pub(crate) fn adk_request_to_bedrock(
     contents: &[Content],
-    tools: &HashMap<String, Value>,
+    tools: &HashMap<String, adk_core::ToolContract>,
     config: Option<&GenerateContentConfig>,
     prompt_caching: Option<&BedrockCacheConfig>,
 ) -> Result<BedrockConverseInput, String> {
@@ -247,15 +247,19 @@ fn mime_to_bedrock_document_format(mime_type: &str) -> Option<DocumentFormat> {
 /// When `prompt_caching` is provided, a `CachePoint` block is appended after
 /// the tool definitions.
 fn adk_tools_to_bedrock(
-    tools: &HashMap<String, Value>,
+    tools: &HashMap<String, adk_core::ToolContract>,
     prompt_caching: Option<&BedrockCacheConfig>,
 ) -> ToolConfiguration {
     let mut bedrock_tools: Vec<Tool> = tools
         .iter()
-        .filter_map(|(name, decl)| {
-            let description = decl.get("description").and_then(|d| d.as_str()).map(String::from);
+        .filter_map(|(name, contract)| {
+            let description = if contract.description.is_empty() {
+                None
+            } else {
+                Some(contract.description.clone())
+            };
 
-            let input_schema = decl.get("parameters").cloned().unwrap_or(serde_json::json!({
+            let input_schema = contract.schema.parameters.clone().unwrap_or(serde_json::json!({
                 "type": "object",
                 "properties": {}
             }));

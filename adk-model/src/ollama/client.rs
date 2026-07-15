@@ -82,21 +82,23 @@ impl OllamaModel {
     /// Convert ADK tool declarations to Ollama tools.
     fn convert_tools(
         &self,
-        tools: &std::collections::HashMap<String, serde_json::Value>,
+        tools: &std::collections::HashMap<String, adk_core::ToolContract>,
     ) -> Vec<ToolInfo> {
         tools
             .iter()
-            .map(|(name, decl)| {
-                let description =
-                    decl.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            .map(|(name, contract)| {
                 let parameters_json =
-                    decl.get("parameters").cloned().unwrap_or(serde_json::json!({}));
+                    contract.schema.parameters.clone().unwrap_or(serde_json::json!({}));
                 let parameters: Schema =
                     serde_json::from_value(parameters_json).unwrap_or_else(|_| Schema::from(false));
 
                 ToolInfo {
                     tool_type: ToolType::Function,
-                    function: ToolFunctionInfo { name: name.clone(), description, parameters },
+                    function: ToolFunctionInfo {
+                        name: name.clone(),
+                        description: contract.description.clone(),
+                        parameters,
+                    },
                 }
             })
             .collect()

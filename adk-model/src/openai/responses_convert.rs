@@ -190,16 +190,22 @@ fn content_to_input_items(content: &Content) -> Vec<InputItem> {
 /// (`image_generation`, `mcp`, `shell`, etc.), the extension value is deserialized directly.
 /// If the type is not recognized (e.g., `tool_search`, `skill`), the tool falls back to
 /// being treated as a regular function tool.
-pub fn convert_tools(tools: &HashMap<String, serde_json::Value>) -> Result<Vec<Tool>, AdkError> {
+pub fn convert_tools(
+    tools: &HashMap<String, adk_core::ToolContract>,
+) -> Result<Vec<Tool>, AdkError> {
     tools
         .iter()
-        .map(|(name, decl)| {
+        .map(|(name, contract)| {
+            let decl = contract.declaration();
             if let Some(provider_tool) = decl.get("x-adk-openai-tool") {
-                convert_native_tool(name, decl, provider_tool)
+                convert_native_tool(name, &decl, provider_tool)
             } else {
-                let description =
-                    decl.get("description").and_then(|d| d.as_str()).map(String::from);
-                let parameters = decl.get("parameters").cloned();
+                let description = if contract.description.is_empty() {
+                    None
+                } else {
+                    Some(contract.description.clone())
+                };
+                let parameters = contract.schema.parameters.clone();
 
                 Ok(Tool::Function(FunctionTool {
                     name: name.clone(),

@@ -597,19 +597,22 @@ fn effective_model_name(client: &OpenRouterClient, request: &LlmRequest) -> Stri
     if request.model.trim().is_empty() { client.model().to_string() } else { request.model.clone() }
 }
 
-fn chat_tools_from_llm_request(tools: &HashMap<String, Value>) -> Option<Vec<OpenRouterTool>> {
+fn chat_tools_from_llm_request(
+    tools: &HashMap<String, adk_core::ToolContract>,
+) -> Option<Vec<OpenRouterTool>> {
     (!tools.is_empty()).then_some(
         tools
             .iter()
-            .map(|(name, declaration)| OpenRouterTool {
+            .map(|(name, contract)| OpenRouterTool {
                 kind: "function".to_string(),
                 function: Some(OpenRouterFunctionDescription {
                     name: name.clone(),
-                    description: declaration
-                        .get("description")
-                        .and_then(Value::as_str)
-                        .map(ToString::to_string),
-                    parameters: declaration.get("parameters").cloned(),
+                    description: if contract.description.is_empty() {
+                        None
+                    } else {
+                        Some(contract.description.clone())
+                    },
+                    parameters: contract.schema.parameters.clone(),
                     ..Default::default()
                 }),
                 ..Default::default()
@@ -619,21 +622,25 @@ fn chat_tools_from_llm_request(tools: &HashMap<String, Value>) -> Option<Vec<Ope
 }
 
 fn responses_tools_from_llm_request(
-    tools: &HashMap<String, Value>,
+    tools: &HashMap<String, adk_core::ToolContract>,
     request_options: &OpenRouterRequestOptions,
 ) -> Option<Vec<OpenRouterResponseTool>> {
     let mut response_tools = tools
         .iter()
-        .map(|(name, declaration)| OpenRouterResponseTool {
-            kind: "function".to_string(),
-            name: Some(name.clone()),
-            description: declaration
-                .get("description")
-                .and_then(Value::as_str)
-                .map(ToString::to_string),
-            parameters: declaration.get("parameters").cloned(),
-            strict: declaration.get("strict").and_then(Value::as_bool),
-            ..Default::default()
+        .map(|(name, contract)| {
+            let decl = contract.declaration();
+            OpenRouterResponseTool {
+                kind: "function".to_string(),
+                name: Some(name.clone()),
+                description: if contract.description.is_empty() {
+                    None
+                } else {
+                    Some(contract.description.clone())
+                },
+                parameters: contract.schema.parameters.clone(),
+                strict: decl.get("strict").and_then(Value::as_bool),
+                ..Default::default()
+            }
         })
         .collect::<Vec<_>>();
 

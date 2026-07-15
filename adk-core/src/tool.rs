@@ -3,6 +3,8 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::Arc;
+
+/// Input and output schemas for a tool.
 ///
 /// This type establishes the provider-neutral boundary for tool contracts.
 /// It preserves the original JSON Schema documents before provider-specific
@@ -45,7 +47,41 @@ impl ToolContract {
         description: impl Into<String>,
         schema: ToolSchema,
     ) -> Self {
-        Self { name: name.into(), description: description.into(), schema }
+        Self {
+            name: name.into(),
+            description: description.into(),
+            schema,
+        }
+    }
+
+    /// Returns the tool declaration as a JSON object.
+    pub fn declaration(&self) -> Value {
+        let mut decl = serde_json::json!({
+            "name": self.name,
+            "description": self.description,
+        });
+
+        if let Some(params) = &self.schema.parameters {
+            // For provider-native tools (builtin), the parameters schema often
+            // contains the whole declaration including provider-specific keys.
+            if let Some(obj) = params.as_object()
+                && (obj.contains_key("x-adk-gemini-tool")
+                    || obj.contains_key("x-adk-openai-tool")
+                    || obj.contains_key("x-adk-anthropic-tool"))
+            {
+                for (k, v) in obj {
+                    decl.as_object_mut().unwrap().insert(k.clone(), v.clone());
+                }
+            } else {
+                decl["parameters"] = params.clone();
+            }
+        }
+
+        if let Some(response) = &self.schema.response {
+            decl["response"] = response.clone();
+        }
+
+        decl
     }
 }
 
@@ -78,35 +114,8 @@ pub trait Tool: Send + Sync {
     /// declaration (`name`, `description`, optional `parameters`, optional
     /// `response`). Provider-specific built-in tools may override this to attach
     /// additional metadata that the provider adapters understand.
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// fn declaration(&self) -> serde_json::Value {
-    ///     serde_json::json!({
-    ///         "name": self.name(),
-    ///         "description": self.description(),
-    ///         "x-adk-openai-tool": {
-    ///             "type": "web_search_2025_08_26"
-    ///         }
-    ///     })
-    /// }
-    /// ```
     fn declaration(&self) -> Value {
-        let mut decl = serde_json::json!({
-            "name": self.name(),
-            "description": self.enhanced_description(),
-        });
-
-        if let Some(params) = self.parameters_schema() {
-            decl["parameters"] = params;
-        }
-
-        if let Some(response) = self.response_schema() {
-            decl["response"] = response;
-        }
-
-        decl
+        self.contract().declaration()
     }
 
     /// Returns an enhanced description that may include additional notes.
@@ -146,14 +155,6 @@ pub trait Tool: Send + Sync {
     /// When non-empty, the framework can enforce that the calling user
     /// possesses **all** listed scopes before dispatching `execute()`.
     /// The default implementation returns an empty slice (no scopes required).
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// fn required_scopes(&self) -> &[&str] {
-    ///     &["finance:write", "verified"]
-    /// }
-    /// ```
     fn required_scopes(&self) -> &[&str] {
         &[]
     }
@@ -194,23 +195,6 @@ pub trait ToolContext: CallbackContext {
     /// Tools call this to push intermediate stdout/stderr to the UI layer
     /// as it arrives, rather than waiting for the tool to finish. This enables
     /// streaming terminal output for shell commands, build logs, etc.
-    ///
-    /// # Arguments
-    ///
-    /// * `stream` - The output stream: `"stdout"`, `"stderr"`, or a custom label
-    /// * `chunk` - The text chunk to emit
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// // Inside a tool's execute() method:
-    /// ctx.emit_progress("stdout", "Compiling project...\n").await;
-    /// ctx.emit_progress("stdout", "Build successful!\n").await;
-    /// ctx.emit_progress("stderr", "warning: unused variable\n").await;
-    /// ```
-    ///
-    /// The default implementation is a no-op. Runners and UI layers that support
-    /// streaming output override this to forward chunks to the client.
     async fn emit_progress(&self, _stream: &str, _chunk: &str) {
         // Default: discard. Override in runners that support streaming tool output.
     }
@@ -230,17 +214,6 @@ pub trait ToolContext: CallbackContext {
     /// Returns `Ok(Some(value))` if a secret provider is configured and the
     /// secret exists, `Ok(None)` if no secret provider is configured, or an
     /// error if the provider fails.
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// async fn use_secret(ctx: &dyn ToolContext) -> adk_core::Result<()> {
-    ///     if let Some(api_key) = ctx.get_secret("slack-bot-token").await? {
-    ///         // use the secret
-    ///     }
-    ///     Ok(())
-    /// }
-    /// ```
     async fn get_secret(&self, _name: &str) -> Result<Option<String>> {
         Ok(None)
     }
@@ -251,17 +224,6 @@ pub trait ToolContext: CallbackContext {
 /// Controls how many times a failed tool execution is retried before
 /// propagating the error. Applied as a flat delay between attempts
 /// (no exponential backoff in V1).
-///
-/// # Example
-///
-/// ```rust
-/// use std::time::Duration;
-/// use adk_core::RetryBudget;
-///
-/// // Retry up to 2 times with 500ms between attempts (3 total attempts)
-/// let budget = RetryBudget::new(2, Duration::from_millis(500));
-/// assert_eq!(budget.max_retries, 2);
-/// ```
 #[derive(Debug, Clone)]
 pub struct RetryBudget {
     /// Maximum number of retry attempts (not counting the initial attempt).
