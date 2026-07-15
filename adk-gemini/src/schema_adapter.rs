@@ -1,9 +1,87 @@
-//! Gemini-specific schema normalization adapter.
+//! Gemini-specific schema normalization and projection adapter.
 //!
-//! The [`GeminiSchemaAdapter`] applies all destructive transforms required by
-//! Gemini's function-calling API. It composes shared utilities from
-//! [`adk_core::schema_utils`] with Gemini-specific keyword removal to produce
-//! schemas that Gemini accepts.
+//! The [`GeminiSchemaAdapter`] handles the transformation of canonical JSON Schemas
+//! into the restricted subset supported by the Gemini function-calling API.
+//! It applies destructive transforms required by Gemini's function-calling API
+//! to produce schemas that Gemini accepts.
+//!
+//! # API Surface Support
+//!
+//! Per the official Gemini API documentation, the Schema proto for function
+//! declarations only supports a limited set of keywords: `type`, `description`,
+//! `enum`, `items`, `properties`, `required`, `nullable`, and `format`.
+//!
+//! This adapter provides two modes of operation:
+//! - **Standard (AI Studio)**: Removes `additionalProperties` entirely to avoid 400 errors.
+//! - **Vertex AI**: Sets `additionalProperties: false` on object schemas, as required by Vertex.
+//!
+//! Reference: https://cloud.google.com/vertex-ai/generative-ai/docs/model-reference/function-calling
+//!
+//! # Projection Policies
+//!
+//! The adapter supports two explicit policies via `adk_core::ProjectionPolicy`:
+//! - **Exact**: Rejects any schema that would result in semantic loss (e.g., stripping
+//!   numeric bounds like `minimum` or unsupported keywords like `pattern`).
+//! - **RuntimeValidated**: Allows stripping unsupported validation constraints
+//!   provided that the ADK runtime remains authoritative for validation.
+//!
+//! # Transform Pipeline (Single Pass)
+//!
+//! 1. **Reference Resolution**: Resolve `$ref` via local JSON Pointer resolution with exact cycle detection.
+//! 2. **AllOf Merging**: Merge `allOf` schemas, failing on conflicting constraints.
+//! 3. **Combiner Collapsing**: Project `anyOf`/`oneOf` to the first non-null branch.
+//! 4. **Type Normalization**: Collapse type arrays to the first non-null type.
+//! 5. **Keyword Auditing**: Explicitly handle supported keywords (`properties`, `items`, `enum`, etc.)
+//!    and audit/strip all others (`minLength`, `pattern`, `dependentRequired`, etc.)
+//!    based on the selected [`ProjectionPolicy`].
+//! 6. **Depth Enforcement**: Truncate schemas exceeding Gemini's nesting depth of 5.
+//!
+//! # Example (Normalization)
+//!
+//! ```rust
+//! use adk_gemini::schema_adapter::GeminiSchemaAdapter;
+//! use adk_core::SchemaAdapter;
+//! use serde_json::json;
+//!
+//! let adapter = GeminiSchemaAdapter::new();
+//! let schema = json!({
+//!     "$schema": "http://json-schema.org/draft-07/schema#",
+//!     "type": "object",
+//!     "properties": {
+//!         "name": { "type": "string", "format": "hostname" }
+//!     },
+//!     "additionalProperties": true
+//! });
+//!
+//! let normalized = adapter.normalize_schema(schema);
+//! assert!(normalized.get("$schema").is_none());
+//! assert!(normalized.get("additionalProperties").is_none());
+//! assert!(normalized["properties"]["name"].get("format").is_none());
+//! ```
+//!
+//! # Example (Compilation)
+//!
+//! ```rust
+//! use adk_gemini::schema_adapter::GeminiSchemaAdapter;
+//! use adk_core::{SchemaAdapter, ProjectionPolicy};
+//! use serde_json::json;
+//!
+//! let adapter = GeminiSchemaAdapter::new(); // Default policy: Exact
+//! let schema = json!({
+//!     "type": "string",
+//!     "pattern": "^[a-z]+$"
+//! });
+//!
+//! // Compilation fails because 'pattern' would be lost
+//! let result = adapter.compile_schema(&schema);
+//! assert!(result.is_err());
+//!
+//! // Using RuntimeValidated allows the loss
+//! let adapter_rv = GeminiSchemaAdapter::with_policy(ProjectionPolicy::RuntimeValidated);
+//! let compiled = adapter_rv.compile_schema(&schema).unwrap();
+//! assert!(compiled.value.get("pattern").is_none());
+//! assert!(!compiled.diagnostics.is_empty());
+//! ```
 
 use adk_core::SchemaAdapter;
 use adk_core::schema_adapter::{
@@ -17,75 +95,14 @@ use std::borrow::Cow;
 const GEMINI_ALLOWED_FORMATS: &[&str] =
     &["date-time", "date", "time", "email", "uri", "uuid", "int32", "int64", "float", "double"];
 
-/// Keywords that Gemini does not support and must be removed from all schema nodes.
-const UNSUPPORTED_KEYWORDS: &[&str] = &[
-    "$id",
-    "additionalProperties",
-    "contains",
-    "contentEncoding",
-    "contentMediaType",
-    "default",
-    "dependentRequired",
-    "dependentSchemas",
-    "deprecated",
-    "examples",
-    "exclusiveMaximum",
-    "exclusiveMinimum",
-    "maxItems",
-    "maxLength",
-    "maxProperties",
-    "maximum",
-    "minItems",
-    "minLength",
-    "minProperties",
-    "minimum",
-    "multipleOf",
-    "not",
-    "pattern",
-    "patternProperties",
-    "prefixItems",
-    "propertyNames",
-    "readOnly",
-    "title",
-    "unevaluatedProperties",
-    "uniqueItems",
-    "writeOnly",
-];
-
-const UNSUPPORTED_KEYWORDS_VERTEX: &[&str] = &[
-    "$id",
-    "contains",
-    "contentEncoding",
-    "contentMediaType",
-    "default",
-    "dependentRequired",
-    "dependentSchemas",
-    "deprecated",
-    "examples",
-    "exclusiveMaximum",
-    "exclusiveMinimum",
-    "maxItems",
-    "maxLength",
-    "maxProperties",
-    "maximum",
-    "minItems",
-    "minLength",
-    "minProperties",
-    "minimum",
-    "multipleOf",
-    "not",
-    "pattern",
-    "patternProperties",
-    "prefixItems",
-    "propertyNames",
-    "readOnly",
-    "title",
-    "unevaluatedProperties",
-    "uniqueItems",
-    "writeOnly",
-];
-
 /// Schema adapter for the Gemini API surface.
+///
+/// Applies all destructive transforms required by Gemini's function-calling API.
+///
+/// Two variants are supported:
+/// - **Standard** (`GeminiSchemaAdapter::new()`): Removes `additionalProperties` entirely.
+/// - **Vertex AI** (`GeminiSchemaAdapter::vertex_ai()`): Sets `additionalProperties: false`
+///   on object schemas instead of removing it.
 #[derive(Debug)]
 pub struct GeminiSchemaAdapter {
     /// When `true`, targets the Vertex AI surface which requires
@@ -140,31 +157,16 @@ impl SchemaAdapter for GeminiSchemaAdapter {
         self.policy
     }
 
-    fn normalize_schema(&self, mut schema: Value) -> Value {
-        // Fallback to legacy normalization for backward compatibility in non-compile paths.
-        // In the future, this could be replaced by a call to compile_schema().value.
-        let definitions = extract_definitions_legacy(&schema);
-        schema_utils::resolve_refs(&mut schema, &definitions, 0);
-        schema_utils::strip_schema_keyword(&mut schema);
-        schema_utils::collapse_combiners(&mut schema);
-        schema_utils::merge_all_of(&mut schema);
-        schema_utils::collapse_type_arrays(&mut schema);
-        schema_utils::strip_conditional_keywords(&mut schema);
-        schema_utils::convert_const_to_enum(&mut schema);
-        schema_utils::strip_null_from_enum(&mut schema);
-        schema_utils::add_implicit_object_type(&mut schema);
-        if self.vertex_ai {
-            remove_unsupported_keywords_vertex_legacy(&mut schema);
-        } else {
-            remove_unsupported_keywords_legacy(&mut schema);
+    fn normalize_schema(&self, schema: Value) -> Value {
+        let mut compiler =
+            GeminiCompiler::new(&schema, ProjectionPolicy::RuntimeValidated, self.vertex_ai);
+        match compiler.compile(&schema, "", 0) {
+            Ok(v) => v,
+            Err(_) => {
+                // If the new compiler fails (e.g. recursive ref), we fall back to a minimal safe object.
+                serde_json::json!({"type": "object"})
+            }
         }
-        schema_utils::strip_unsupported_formats(&mut schema, GEMINI_ALLOWED_FORMATS);
-        schema_utils::enforce_nesting_depth(&mut schema, 5, 0);
-        if let Some(obj) = schema.as_object_mut() {
-            obj.remove("definitions");
-            obj.remove("$defs");
-        }
-        schema
     }
 
     fn compile_schema(&self, schema: &Value) -> Result<CompiledSchema, SchemaCompileError> {
@@ -191,10 +193,17 @@ impl SchemaAdapter for GeminiSchemaAdapter {
         Ok(())
     }
 
+    /// Truncates tool names exceeding 64 bytes at a valid UTF-8 character boundary.
+    ///
+    /// Preserves the prefix of the name, truncating from the end.
     fn normalize_tool_name<'a>(&self, name: &'a str) -> Cow<'a, str> {
         schema_utils::truncate_tool_name(name, 64)
     }
 
+    /// Returns the fallback schema for tools with no `parameters_schema`.
+    ///
+    /// Gemini requires `{"type": "object", "properties": {}}` as the minimum
+    /// valid function declaration parameters.
     fn empty_schema(&self) -> Value {
         serde_json::json!({"type": "object", "properties": {}})
     }
@@ -556,109 +565,6 @@ fn is_null_schema(schema: &Value) -> bool {
         .and_then(|obj| obj.get("type"))
         .and_then(|t| t.as_str())
         .is_some_and(|t| t == "null")
-}
-
-fn extract_definitions_legacy(schema: &Value) -> Map<String, Value> {
-    let mut defs = Map::new();
-    if let Some(obj) = schema.as_object() {
-        if let Some(definitions) = obj.get("definitions").and_then(|v| v.as_object()) {
-            for (key, value) in definitions {
-                defs.insert(key.clone(), value.clone());
-            }
-        }
-        if let Some(dollar_defs) = obj.get("$defs").and_then(|v| v.as_object()) {
-            for (key, value) in dollar_defs {
-                defs.insert(key.clone(), value.clone());
-            }
-        }
-    }
-    defs
-}
-
-fn remove_unsupported_keywords_legacy(schema: &mut Value) {
-    let Some(obj) = schema.as_object_mut() else {
-        return;
-    };
-    for keyword in UNSUPPORTED_KEYWORDS {
-        obj.remove(*keyword);
-    }
-    let is_array_type = obj.get("type").and_then(|t| t.as_str()).is_some_and(|t| t == "array");
-    if !is_array_type {
-        obj.remove("items");
-    } else if obj.get("items").is_some_and(|v| v.is_array()) {
-        let first_schema = obj
-            .get("items")
-            .and_then(|v| v.as_array())
-            .and_then(|arr| arr.first())
-            .cloned()
-            .unwrap_or_else(|| serde_json::json!({"type": "string"}));
-        obj.insert("items".to_string(), first_schema);
-    } else if !obj.contains_key("items") {
-        obj.insert("items".to_string(), serde_json::json!({"type": "string"}));
-    }
-    if let Some(props) = obj.get_mut("properties").and_then(|v| v.as_object_mut()) {
-        for value in props.values_mut() {
-            remove_unsupported_keywords_legacy(value);
-        }
-    }
-    if let Some(items) = obj.get_mut("items") {
-        if items.is_object() {
-            remove_unsupported_keywords_legacy(items);
-        }
-    }
-    for keyword in &["allOf", "anyOf", "oneOf"] {
-        if let Some(arr) = obj.get_mut(*keyword).and_then(|v| v.as_array_mut()) {
-            for sub in arr {
-                remove_unsupported_keywords_legacy(sub);
-            }
-        }
-    }
-}
-
-fn remove_unsupported_keywords_vertex_legacy(schema: &mut Value) {
-    let Some(obj) = schema.as_object_mut() else {
-        return;
-    };
-    for keyword in UNSUPPORTED_KEYWORDS_VERTEX {
-        obj.remove(*keyword);
-    }
-    let is_object_type = obj.get("type").and_then(|t| t.as_str()).is_some_and(|t| t == "object");
-    if is_object_type {
-        obj.insert("additionalProperties".to_string(), Value::Bool(false));
-    } else {
-        obj.remove("additionalProperties");
-    }
-    let is_array_type = obj.get("type").and_then(|t| t.as_str()).is_some_and(|t| t == "array");
-    if !is_array_type {
-        obj.remove("items");
-    } else if obj.get("items").is_some_and(|v| v.is_array()) {
-        let first_schema = obj
-            .get("items")
-            .and_then(|v| v.as_array())
-            .and_then(|arr| arr.first())
-            .cloned()
-            .unwrap_or_else(|| serde_json::json!({"type": "string"}));
-        obj.insert("items".to_string(), first_schema);
-    } else if !obj.contains_key("items") {
-        obj.insert("items".to_string(), serde_json::json!({"type": "string"}));
-    }
-    if let Some(props) = obj.get_mut("properties").and_then(|v| v.as_object_mut()) {
-        for value in props.values_mut() {
-            remove_unsupported_keywords_vertex_legacy(value);
-        }
-    }
-    if let Some(items) = obj.get_mut("items") {
-        if items.is_object() {
-            remove_unsupported_keywords_vertex_legacy(items);
-        }
-    }
-    for keyword in &["allOf", "anyOf", "oneOf"] {
-        if let Some(arr) = obj.get_mut(*keyword).and_then(|v| v.as_array_mut()) {
-            for sub in arr {
-                remove_unsupported_keywords_vertex_legacy(sub);
-            }
-        }
-    }
 }
 
 #[cfg(test)]
