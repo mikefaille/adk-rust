@@ -246,7 +246,10 @@ async fn test_before_tool_callback_short_circuits_tool_execution() {
             Box::pin(async move {
                 Ok(Some(Content {
                     role: "function".to_string(),
-                    parts: vec![Part::Text { text: "blocked".to_string() }],
+                    parts: vec![Part::FunctionResponse {
+                        function_response: adk_core::FunctionResponseData::new("test_tool", json!("blocked")),
+                        id: None,
+                    }],
                 }))
             })
         }))
@@ -260,8 +263,8 @@ async fn test_before_tool_callback_short_circuits_tool_execution() {
         let event = result.unwrap();
         if let Some(content) = event.llm_response.content {
             for part in content.parts {
-                if let Part::Text { text } = part
-                    && text == "blocked"
+                if let Part::FunctionResponse { function_response, .. } = part
+                    && function_response.response == json!("blocked")
                 {
                     saw_blocked = true;
                 }
@@ -302,7 +305,10 @@ async fn test_after_tool_callback_overrides_result_and_order() {
                 after_order.lock().unwrap().push("after_tool".to_string());
                 Ok(Some(Content {
                     role: "function".to_string(),
-                    parts: vec![Part::Text { text: "after-override".to_string() }],
+                    parts: vec![Part::FunctionResponse {
+                        function_response: adk_core::FunctionResponseData::new("test_tool", json!("after-override")),
+                        id: None,
+                    }],
                 }))
             })
         }))
@@ -316,8 +322,8 @@ async fn test_after_tool_callback_overrides_result_and_order() {
         let event = result.unwrap();
         if let Some(content) = event.llm_response.content {
             for part in content.parts {
-                if let Part::Text { text } = part
-                    && text == "after-override"
+                if let Part::FunctionResponse { function_response, .. } = part
+                    && function_response.response == json!("after-override")
                 {
                     saw_override = true;
                 }

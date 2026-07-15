@@ -661,12 +661,15 @@ impl GeminiRealtimeSession {
                 .cloned()
                 .ok_or_else(|| RealtimeError::protocol("Gemini tool call missing 'args'"))?;
 
-            if !args.is_object() {
-                return Err(RealtimeError::protocol(format!(
-                    "Gemini tool call 'args' must be an object, got: {:?}",
-                    args
-                )));
+            if name.trim().is_empty() {
+                return Err(RealtimeError::protocol("Gemini tool call name is empty".to_string()));
             }
+            if id.trim().is_empty() {
+                return Err(RealtimeError::protocol("Gemini tool call id is empty".to_string()));
+            }
+
+            let normalized_args = adk_core::schema_utils::normalize_tool_arguments(args)
+                .map_err(|e| RealtimeError::protocol(format!("Gemini tool arguments error: {}", e)))?;
 
             return Ok(vec![ServerEvent::FunctionCallDone {
                 event_id: uuid::Uuid::new_v4().to_string(),
@@ -675,7 +678,7 @@ impl GeminiRealtimeSession {
                 output_index: 0,
                 call_id: id.to_string(),
                 name: name.to_string(),
-                arguments: args,
+                arguments: normalized_args,
             }]);
         }
 
