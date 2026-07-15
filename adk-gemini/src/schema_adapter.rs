@@ -194,6 +194,10 @@ impl Default for GeminiSchemaAdapter {
 }
 
 impl SchemaAdapter for GeminiSchemaAdapter {
+    fn identifier(&self) -> &str {
+        if self.vertex_ai { "gemini-vertex" } else { "gemini" }
+    }
+
     fn normalize_schema(&self, mut schema: Value) -> Value {
         // Step 1: Extract definitions and resolve $ref references.
         // Always resolve refs — even with empty definitions — so that
@@ -245,6 +249,13 @@ impl SchemaAdapter for GeminiSchemaAdapter {
         }
 
         schema
+    }
+
+    fn compile_schema(&self, schema: &Value) -> Result<Value, adk_core::SchemaCompileError> {
+        // Perform strict validation for semantic loss BEFORE applying destructive transforms.
+        validate_schema_strict(schema)?;
+
+        Ok(self.normalize_schema(schema.clone()))
     }
 
     /// Truncates tool names exceeding 64 bytes at a valid UTF-8 character boundary.
@@ -360,6 +371,66 @@ fn remove_unsupported_keywords(schema: &mut Value) {
             }
         }
     }
+}
+
+/// Performs strict validation of a JSON Schema for Gemini Live, returning
+/// `SchemaCompileError` if normalization would result in meaningful semantic loss.
+fn validate_schema_strict(schema: &Value) -> Result<(), adk_core::SchemaCompileError> {
+    validate_schema_node(schema, 0)
+}
+
+fn validate_schema_node(schema: &Value, depth: usize) -> Result<(), adk_core::SchemaCompileError> {
+    if depth > 5 {
+        return Err(adk_core::SchemaCompileError::new(
+            "Schema exceeds Gemini's maximum nesting depth of 5",
+        ));
+    }
+
+    let Some(obj) = schema.as_object() else {
+        return Ok(());
+    };
+
+    // 1. Reject unresolved references
+    if obj.contains_key("$ref") {
+        return Err(adk_core::SchemaCompileError::new(
+            "Unresolved $ref detected. All references must be local and resolvable within the schema's definitions block.",
+        ));
+    }
+
+    // 2. Reject polymorphic unions (anyOf/oneOf)
+    if obj.contains_key("anyOf") || obj.contains_key("oneOf") {
+        // Exception: allow if it's just a nullable type pattern that we can safely collapse.
+        // For now, following the fail-closed instruction: reject them.
+        return Err(adk_core::SchemaCompileError::new(
+            "Gemini does not support polymorphic unions (anyOf/oneOf). Use a single object schema or multiple tools.",
+        ));
+    }
+
+    // 3. Reject tuple validation (items as array)
+    if let Some(items) = obj.get("items") {
+        if items.is_array() {
+            return Err(adk_core::SchemaCompileError::new(
+                "Gemini does not support JSON Schema tuple validation (items as an array). Use a single schema for all array elements.",
+            ));
+        }
+        validate_schema_node(items, depth)?;
+    }
+
+    // Recurse into properties
+    if let Some(props) = obj.get("properties").and_then(|p| p.as_object()) {
+        for value in props.values() {
+            validate_schema_node(value, depth + 1)?;
+        }
+    }
+
+    // Recurse into allOf
+    if let Some(all_of) = obj.get("allOf").and_then(|a| a.as_array()) {
+        for sub in all_of {
+            validate_schema_node(sub, depth)?;
+        }
+    }
+
+    Ok(())
 }
 
 /// Recursively removes unsupported keywords for the Vertex AI surface.
@@ -1268,5 +1339,79 @@ mod tests {
         let result = adapter.normalize_schema(schema);
         assert!(result.get("contentMediaType").is_none());
         assert!(result.get("contentEncoding").is_none());
+    }
+
+    #[test]
+    fn test_compile_schema_rejects_any_of() {
+        let adapter = GeminiSchemaAdapter::new();
+        let schema = json!({
+            "anyOf": [{"type": "string"}, {"type": "number"}]
+        });
+        let result = adapter.compile_schema(&schema);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_compile_schema_rejects_unresolved_ref() {
+        let adapter = GeminiSchemaAdapter::new();
+        let schema = json!({
+            "type": "object",
+            "properties": { "x": { "$ref": "#/definitions/X" } }
+        });
+        // Note: normalize_schema would resolve this if it existed,
+        // but compile_schema's validate_schema_strict happens before normalization.
+        let result = adapter.compile_schema(&schema);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_compile_schema_rejects_tuple_items() {
+        let adapter = GeminiSchemaAdapter::new();
+        let schema = json!({
+            "type": "array",
+            "items": [{"type": "string"}, {"type": "number"}]
+        });
+        let result = adapter.compile_schema(&schema);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_compile_schema_rejects_excessive_depth() {
+        let adapter = GeminiSchemaAdapter::new();
+        let mut schema = json!({"type": "string"});
+        for _ in 0..10 {
+            schema = json!({
+                "type": "object",
+                "properties": { "inner": schema }
+            });
+        }
+        let result = adapter.compile_schema(&schema);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_studio_projection() {
+        let adapter = GeminiSchemaAdapter::new();
+        let schema = json!({
+            "type": "object",
+            "properties": { "x": { "type": "string" } },
+            "additionalProperties": true
+        });
+        let result = adapter.compile_schema(&schema).unwrap();
+        // Studio should remove additionalProperties
+        assert!(result.get("additionalProperties").is_none());
+    }
+
+    #[test]
+    fn test_vertex_projection() {
+        let adapter = GeminiSchemaAdapter::vertex_ai();
+        let schema = json!({
+            "type": "object",
+            "properties": { "x": { "type": "string" } },
+            "additionalProperties": true
+        });
+        let result = adapter.compile_schema(&schema).unwrap();
+        // Vertex should set additionalProperties: false
+        assert_eq!(result["additionalProperties"], json!(false));
     }
 }

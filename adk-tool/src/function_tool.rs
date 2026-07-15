@@ -4,7 +4,6 @@ use schemars::{
     JsonSchema,
     generate::{SchemaGenerator, SchemaSettings},
 };
-use serde::Serialize;
 use serde_json::Value;
 use std::future::Future;
 use std::pin::Pin;
@@ -74,18 +73,18 @@ impl FunctionTool {
     /// Derive the parameters JSON Schema from a type implementing `JsonSchema`.
     pub fn with_parameters_schema<T>(mut self) -> Self
     where
-        T: JsonSchema + Serialize,
+        T: JsonSchema,
     {
-        self.parameters_schema = Some(generate_schema::<T>());
+        self.parameters_schema = Some(schema_for::<T>());
         self
     }
 
     /// Derive the response JSON Schema from a type implementing `JsonSchema`.
     pub fn with_response_schema<T>(mut self) -> Self
     where
-        T: JsonSchema + Serialize,
+        T: JsonSchema,
     {
-        self.response_schema = Some(generate_schema::<T>());
+        self.response_schema = Some(schema_for::<T>());
         self
     }
 
@@ -182,9 +181,14 @@ impl Tool for FunctionTool {
     }
 }
 
-fn generate_schema<T>() -> Value
+/// Derive the JSON Schema from a type implementing `JsonSchema`.
+///
+/// This helper uses OpenAPI 3 settings with inlined subschemas and
+/// removes the "title" field from the root object to match standard
+/// ADK tool expectations.
+pub fn schema_for<T>() -> Value
 where
-    T: JsonSchema + Serialize,
+    T: JsonSchema,
 {
     let settings = SchemaSettings::openapi3().with(|s| {
         s.inline_subschemas = true;
@@ -195,5 +199,6 @@ where
     if let Some(object) = schema.as_object_mut() {
         object.remove("title");
     }
-    serde_json::to_value(schema).unwrap()
+    // Safe to unwrap here because root_schema is always serializable to Value
+    serde_json::to_value(schema).expect("failed to serialize JSON Schema")
 }

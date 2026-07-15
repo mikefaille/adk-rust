@@ -28,12 +28,31 @@ impl SchemaCompileError {
 
 /// Normalizes JSON Schema for a specific LLM provider's function-calling API.
 pub trait SchemaAdapter: Send + Sync + std::fmt::Debug {
+    /// Returns a unique identifier for this adapter (e.g., "gemini", "openai").
+    fn identifier(&self) -> &str;
+
+    /// Returns the version of this adapter (e.g., "1.0.0").
+    fn version(&self) -> &str {
+        "1.0.0"
+    }
+
     /// Normalize a raw JSON Schema for this provider (infallible).
     fn normalize_schema(&self, schema: Value) -> Value;
 
     /// Compiles a raw JSON Schema for this provider, returning an error if unsupported.
     fn compile_schema(&self, schema: &Value) -> Result<Value, SchemaCompileError> {
         Ok(self.normalize_schema(schema.clone()))
+    }
+
+    /// Validates a tool name for this provider's limits.
+    fn validate_tool_name(&self, name: &str) -> Result<(), SchemaCompileError> {
+        if name.len() > 64 {
+            return Err(SchemaCompileError::new(format!(
+                "tool name '{}' exceeds provider's 64-character limit",
+                name
+            )));
+        }
+        Ok(())
     }
 
     /// Normalize a tool name for this provider's limits.
@@ -63,6 +82,10 @@ const GENERIC_ALLOWED_FORMATS: &[&str] =
     &["date-time", "date", "time", "email", "uri", "uuid", "int32", "int64", "float", "double"];
 
 impl SchemaAdapter for GenericSchemaAdapter {
+    fn identifier(&self) -> &str {
+        "generic"
+    }
+
     fn normalize_schema(&self, mut schema: Value) -> Value {
         schema_utils::strip_schema_keyword(&mut schema);
         schema_utils::strip_conditional_keywords(&mut schema);
