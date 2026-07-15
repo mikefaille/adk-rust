@@ -38,9 +38,7 @@ mod openai_tests {
             // This mirrors the logic in OpenAIRealtimeSession::receive_raw
             match serde_json::from_str::<ServerEvent>(&text) {
                 Ok(mut event) => {
-                    if let ServerEvent::FunctionCallDone { arguments, name, call_id, .. } =
-                        &mut event
-                    {
+                    if let ServerEvent::FunctionCallDone { arguments, name, call_id, .. } = &mut event {
                         if call_id.trim().is_empty() {
                             return Some(Err(RealtimeError::protocol(format!(
                                 "OpenAI tool call {} missing or empty 'call_id'",
@@ -130,7 +128,7 @@ mod openai_tests {
 #[tokio::test]
 async fn test_transfer_to_agent_validation() {
     use adk_core::{
-        Agent, CallbackContext, Content, EventStream, InvocationContext, ReadonlyContext, RunConfig,
+        Agent, CallbackContext, Content, InvocationContext, ReadonlyContext, RunConfig,
     };
     use adk_realtime::session::BoxedSession;
     use adk_realtime::{RealtimeAgent, RealtimeConfig, audio::AudioFormat};
@@ -281,10 +279,11 @@ async fn test_transfer_to_agent_validation() {
             self.agent.clone()
         }
         fn session(&self) -> &dyn adk_core::Session {
-            todo!()
+            unimplemented!()
         }
         fn run_config(&self) -> &RunConfig {
-            todo!()
+            static R: once_cell::sync::Lazy<RunConfig> = once_cell::sync::Lazy::new(RunConfig::default);
+            &R
         }
         fn end_invocation(&self) {}
         fn ended(&self) -> bool {
@@ -315,9 +314,7 @@ async fn test_transfer_to_agent_validation() {
         for part in content.parts {
             if let adk_core::Part::FunctionResponse { function_response, .. } = part {
                 if let Some(err) = function_response.response.get("error") {
-                    assert!(
-                        err.as_str().unwrap().contains("Transfer target (agent_name) is missing")
-                    );
+                    assert!(err.as_str().unwrap().contains("Transfer target (agent_name) is missing"));
                     found_error = true;
                 }
             }

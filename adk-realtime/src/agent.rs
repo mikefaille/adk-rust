@@ -57,8 +57,8 @@ use crate::events::{ServerEvent, ToolResponse};
 use adk_core::{
     AdkError, AfterAgentCallback, AfterToolCallback, Agent, BeforeAgentCallback,
     BeforeToolCallback, CallbackContext, Content, Event, EventActions, EventStream,
-    GlobalInstructionProvider, InstructionProvider, InvocationContext, Part, ReadonlyContext,
-    Result, Tool, ToolCallExecutor, ToolExecutorOptions, Toolset,
+    GlobalInstructionProvider, InstructionProvider, InvocationContext, Part,
+    ReadonlyContext, Result, Tool, ToolCallExecutor, ToolExecutorOptions, Toolset,
 };
 use async_stream::stream;
 use async_trait::async_trait;
@@ -583,7 +583,7 @@ impl RealtimeAgent {
                 ..Default::default()
             };
 
-            let (result, actions, _) = ToolCallExecutor::execute(
+            let res = ToolCallExecutor::execute(
                 ctx.clone(),
                 tool.clone(),
                 call_id,
@@ -592,7 +592,7 @@ impl RealtimeAgent {
             )
             .await;
 
-            (result, actions)
+            (res.value, res.actions)
         } else {
             (
                 serde_json::json!({ "error": format!("Tool {} not found", name) }),
@@ -908,14 +908,14 @@ impl Agent for RealtimeAgent {
                                         ..Default::default()
                                     };
 
-                                    let (res, act, _) = ToolCallExecutor::execute(
+                                    let res = ToolCallExecutor::execute(
                                         ctx.clone(),
                                         tool.clone(),
                                         &call_id,
                                         arguments,
                                         options,
                                     ).await;
-                                    (res, act)
+                                    (res.value, res.actions)
                                 } else {
                                     (
                                         serde_json::json!({ "error": format!("Tool {} not found", name) }),

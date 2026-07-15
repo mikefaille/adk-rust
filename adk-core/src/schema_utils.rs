@@ -1992,7 +1992,7 @@ pub fn normalize_tool_arguments(value: Value) -> Result<Value, String> {
                 .map_err(|e| format!("Failed to parse tool arguments as JSON: {}", e))
         }
         Value::Object(obj) => Ok(Value::Object(obj)),
-        Value::Null => Ok(Value::Object(serde_json::Map::new())),
+        Value::Null => Err("Tool arguments must be an object, but got null".to_string()),
         _ => {
             if value.is_array() {
                 return Err("Tool arguments must be an object, but got an array".to_string());

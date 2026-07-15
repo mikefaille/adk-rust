@@ -125,37 +125,23 @@ impl OpenAITransportLink for OpenAIRealtimeSession {
                     }
                     Ok(mut event) => {
                         // Normalize FunctionCallDone arguments: OpenAI sends them as a JSON-encoded string.
-                        if let ServerEvent::FunctionCallDone { arguments, name, call_id, .. } =
-                            &mut event
-                        {
-                            if call_id.trim().is_empty() {
-                                return Some(Err(RealtimeError::protocol(format!(
-                                    "OpenAI tool call {} missing or empty 'call_id'",
-                                    name
-                                ))));
-                            }
-                            if name.trim().is_empty() {
-                                return Some(Err(RealtimeError::protocol(
-                                    "OpenAI tool call missing or empty 'name'".to_string(),
-                                )));
-                            }
-
-                            match adk_core::schema_utils::normalize_tool_arguments(
-                                arguments.clone(),
-                            ) {
-                                Ok(parsed) => {
-                                    *arguments = parsed;
-                                }
-                                Err(e) => {
-                                    tracing::error!(
-                                        name = %name,
-                                        error = %e,
-                                        "failed to normalize OpenAI tool arguments"
-                                    );
-                                    return Some(Err(RealtimeError::protocol(format!(
-                                        "malformed tool arguments for {}: {}",
-                                        name, e
-                                    ))));
+                        if let ServerEvent::FunctionCallDone { arguments, name, .. } = &mut event {
+                            if let serde_json::Value::String(s) = arguments {
+                                match serde_json::from_str::<serde_json::Value>(s) {
+                                    Ok(parsed) => {
+                                        *arguments = parsed;
+                                    }
+                                    Err(e) => {
+                                        tracing::error!(
+                                            name = %name,
+                                            error = %e,
+                                            "failed to parse OpenAI function arguments as JSON"
+                                        );
+                                        return Some(Err(RealtimeError::protocol(format!(
+                                            "malformed function arguments for {}: {}",
+                                            name, e
+                                        ))));
+                                    }
                                 }
                             }
                         }

@@ -2,10 +2,10 @@ use adk_core::{
     AfterAgentCallback, AfterModelCallback, AfterToolCallback, AfterToolCallbackFull, Agent,
     BeforeAgentCallback, BeforeModelCallback, BeforeModelResult, BeforeToolCallback,
     CallbackContext, Content, Event, EventActions, FunctionResponseData, GlobalInstructionProvider,
-    InstructionProvider, InvocationContext, Llm, LlmRequest, LlmResponse, OnToolErrorCallback,
-    Part, ReadonlyContext, Result, RetryBudget, Tool, ToolCallExecutor, ToolConfirmationDecision,
-    ToolConfirmationPolicy, ToolConfirmationRequest, ToolExecutionStrategy, ToolExecutorOptions,
-    ToolOutcome, Toolset,
+    InstructionProvider, InvocationContext, Llm, LlmRequest, LlmResponse,
+    OnToolErrorCallback, Part, ReadonlyContext, Result, RetryBudget, Tool, ToolCallExecutor,
+    ToolConfirmationDecision, ToolConfirmationPolicy, ToolConfirmationRequest,
+    ToolExecutionStrategy, ToolExecutorOptions, ToolOutcome, Toolset,
 };
 use async_stream::stream;
 use async_trait::async_trait;
@@ -273,7 +273,7 @@ pub fn extract_typed<T: serde::de::DeserializeOwned>(events: &[Event]) -> Result
         .map_err(|e| adk_core::AdkError::agent(format!("output deserialization failed: {e}")))
 }
 
-/// Builder for constructing an [`LlmAgent`] with all configuration options.
+/// Builder for constructing an [`LlmAgent\Standard] with all configuration options.
 pub struct LlmAgentBuilder {
     name: String,
     description: Option<String>,
@@ -880,10 +880,7 @@ impl LlmAgentBuilder {
                     adk_core::ErrorComponent::Agent,
                     adk_core::ErrorCategory::InvalidInput,
                     "code.gemini_interactions_conflict",
-                    "Cannot combine Gemini Interactions API (server-managed environment) \
-                     with client-side sandbox tools (Shell/Filesystem). These provide \
-                     competing filesystems and would produce nondeterministic behavior. \
-                     Either disable use_interactions_api or remove sandbox capabilities.",
+                    "Cannot combine Gemini Interactions API (server-managed environment)                      with client-side sandbox tools (Shell/Filesystem). These provide                      competing filesystems and would produce nondeterministic behavior.                      Either disable use_interactions_api or remove sandbox capabilities.",
                 ));
             }
         }
@@ -943,8 +940,14 @@ impl LlmAgentBuilder {
     }
 }
 
-// AgentToolContext wraps the parent InvocationContext and preserves all context
-// instead of throwing it away like SimpleToolContext did
+/// Per-invocation circuit breaker state.
+///
+/// Tracks consecutive failures per tool name within a single agent
+/// invocation. When a tool's consecutive failure count reaches the
+/// configured threshold the breaker "opens" and subsequent calls to
+/// that tool are short-circuited with an immediate error response.
+///
+/// The state is created fresh at the start of each `run()` call so
 /// it automatically resets between invocations.
 struct CircuitBreakerState {
     threshold: u32,
@@ -2073,7 +2076,8 @@ impl Agent for LlmAgent {
                             }
 
                             // 5. Prepare Executor Options
-                            let options = ToolExecutorOptions {
+                            #[allow(unused_mut)]
+                            let mut options = ToolExecutorOptions {
                                 retry_budget: tool_retry_budgets.get(&name).or(default_retry_budget.as_ref()).cloned(),
                                 timeout: tool_timeout,
                                 before_tool_callbacks: before_tool_callbacks.clone(),
@@ -2092,11 +2096,9 @@ impl Agent for LlmAgent {
                                     let epm = epm.clone();
                                     Box::pin(async move {
                                         match epm.run_before_tool_call(tool, args, ctx).await? {
-                                            adk_plugin::BeforeToolCallResult::Continue(args) => Ok(crate::tool_executor::ToolInterceptorResult::Continue(args)),
+                                            adk_plugin::BeforeToolCallResult::Continue(args) => Ok(adk_core::tool_executor::ToolInterceptorResult::Continue(args)),
                                             adk_plugin::BeforeToolCallResult::ShortCircuit(res) => {
-                                                // Convert tool result value to Content
-                                                // (The executor expects interceptor to return the final tool response Value)
-                                                Ok(crate::tool_executor::ToolInterceptorResult::ShortCircuit(res))
+                                                Ok(adk_core::tool_executor::ToolInterceptorResult::ShortCircuit(res))
                                             }
                                         }
                                     })
@@ -2104,7 +2106,7 @@ impl Agent for LlmAgent {
                             }
 
                             // 6. Execute via Centralized Executor
-                            let (result_value, executor_actions, outcome) = ToolCallExecutor::execute(
+                            let res = ToolCallExecutor::execute(
                                 ctx.clone(),
                                 tool.clone(),
                                 &function_call_id,
@@ -2112,7 +2114,9 @@ impl Agent for LlmAgent {
                                 options,
                             ).await;
 
-                            let result_value = result_value;
+                            let result_value = res.value;
+                            let executor_actions = res.actions;
+                            let outcome = res.outcome;
 
                             // Merge actions
                             let mut final_actions = executor_actions;
