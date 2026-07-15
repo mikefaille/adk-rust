@@ -113,7 +113,8 @@ impl SchemaDocument {
     /// Object keys are sorted, array order is preserved.
     pub fn to_canonical_bytes(&self) -> Vec<u8> {
         let canonical_value = make_canonical(self.document.clone());
-        serde_json::to_vec(&canonical_value).expect("canonicalization should never fail to serialize")
+        serde_json::to_vec(&canonical_value)
+            .expect("canonicalization should never fail to serialize")
     }
 
     /// Ingest a schema from a byte slice with bounds.
@@ -169,9 +170,7 @@ fn make_canonical(v: Value) -> Value {
             }
             Value::Object(sorted_map)
         }
-        Value::Array(arr) => {
-            Value::Array(arr.into_iter().map(make_canonical).collect())
-        }
+        Value::Array(arr) => Value::Array(arr.into_iter().map(make_canonical).collect()),
         _ => v,
     }
 }
@@ -258,7 +257,7 @@ impl ValidatedSchemaDocument {
     pub fn try_new(doc: SchemaDocument) -> Result<Self> {
         #[cfg(feature = "runtime-validation")]
         {
-            use jsonschema::{Validator, Draft};
+            use jsonschema::{Draft, Validator};
             let schema_node = doc.document();
 
             // Build validator with Draft 2020-12 specifically
@@ -288,7 +287,7 @@ impl ValidatedSchemaDocument {
     /// Validate a JSON value against this schema.
     #[cfg(feature = "runtime-validation")]
     pub fn validate(&self, instance: &Value) -> Result<()> {
-        use jsonschema::{Validator, Draft};
+        use jsonschema::{Draft, Validator};
         let validator = Validator::options()
             .with_draft(Draft::Draft202012)
             .build(self.document())
@@ -316,7 +315,10 @@ impl fmt::Display for SchemaDigest {
 #[cfg(feature = "schemars")]
 pub mod static_schema {
     use super::*;
-    use schemars::{JsonSchema, generate::{SchemaGenerator, SchemaSettings}};
+    use schemars::{
+        JsonSchema,
+        generate::{SchemaGenerator, SchemaSettings},
+    };
 
     /// Generate a schema document for deserialization (input).
     pub fn for_deserialize<T: JsonSchema>() -> Result<SchemaDocument> {
@@ -395,12 +397,13 @@ mod tests {
     #[test]
     fn test_ingestion_limits_depth() {
         let deep = json!({"a": {"a": {"a": {"a": 1}}}});
-        let limits = IngestionLimits {
-            max_bytes: 1000,
-            max_depth: 2,
-            max_nodes: 1000,
-        };
-        let res = SchemaDocument::try_from_value(deep, JsonSchemaDialect::Draft202012, SchemaDirection::Input, limits);
+        let limits = IngestionLimits { max_bytes: 1000, max_depth: 2, max_nodes: 1000 };
+        let res = SchemaDocument::try_from_value(
+            deep,
+            JsonSchemaDialect::Draft202012,
+            SchemaDirection::Input,
+            limits,
+        );
         assert!(res.is_err());
     }
 
@@ -412,7 +415,12 @@ mod tests {
             }
         });
         let limits = IngestionLimits::default();
-        let res = SchemaDocument::try_from_value(external_ref, JsonSchemaDialect::Draft202012, SchemaDirection::Input, limits);
+        let res = SchemaDocument::try_from_value(
+            external_ref,
+            JsonSchemaDialect::Draft202012,
+            SchemaDirection::Input,
+            limits,
+        );
         assert!(res.is_err());
     }
 
