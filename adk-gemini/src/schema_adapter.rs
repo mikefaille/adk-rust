@@ -370,7 +370,21 @@ impl<'a> GeminiCompiler<'a> {
         }
 
         // 5. Audit destructive transforms
-        for (key, value) in obj {
+        // Note: we collect keywords first so we can handle interactions (e.g. const overriding enum)
+        let mut keys: Vec<_> = obj.keys().collect();
+        // Ensure "const" is processed AFTER "enum" so it can override the enum array if both are present
+        keys.sort_by(|a, b| {
+            if *a == "const" {
+                std::cmp::Ordering::Greater
+            } else if *b == "const" {
+                std::cmp::Ordering::Less
+            } else {
+                a.cmp(b)
+            }
+        });
+
+        for key in keys {
+            let value = &obj[key];
             if key == "$ref"
                 || key == "allOf"
                 || key == "anyOf"
@@ -399,25 +413,32 @@ impl<'a> GeminiCompiler<'a> {
                     }
                 }
                 "items" => {
-                    if let Some(items_arr) = value.as_array() {
-                        self.diagnostic(
-                            path,
-                            "items",
-                            "Gemini does not support tuple validation; projecting to first schema",
-                        )?;
-                        if let Some(first) = items_arr.first() {
-                            let items_path = format!("{}/items/0", path);
+                    let is_array_type =
+                        projected.get("type").and_then(|v| v.as_str()) == Some("array");
+                    if is_array_type {
+                        if let Some(items_arr) = value.as_array() {
+                            self.diagnostic(
+                                path,
+                                "items",
+                                "Gemini does not support tuple validation; projecting to first schema",
+                            )?;
+                            if let Some(first) = items_arr.first() {
+                                let items_path = format!("{}/items/0", path);
+                                projected.insert(
+                                    "items".to_string(),
+                                    self.compile(first, &items_path, depth + 1)?,
+                                );
+                            }
+                        } else {
+                            let items_path = format!("{}/items", path);
                             projected.insert(
                                 "items".to_string(),
-                                self.compile(first, &items_path, depth + 1)?,
+                                self.compile(value, &items_path, depth + 1)?,
                             );
                         }
                     } else {
-                        let items_path = format!("{}/items", path);
-                        projected.insert(
-                            "items".to_string(),
-                            self.compile(value, &items_path, depth + 1)?,
-                        );
+                        // Stripping items from non-array type. No diagnostic needed as this is
+                        // a standard structural cleanup from the legacy implementation.
                     }
                 }
                 "enum" => {
@@ -437,7 +458,8 @@ impl<'a> GeminiCompiler<'a> {
                     }
                 }
                 "const" => {
-                    projected.insert("enum".to_string(), Value::Array(vec![value.clone()]));
+                    let enum_val = Value::Array(vec![value.clone()]);
+                    projected.insert("enum".to_string(), enum_val);
                 }
                 "description" => {
                     projected.insert("description".to_string(), value.clone());
