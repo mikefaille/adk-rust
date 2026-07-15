@@ -1038,7 +1038,7 @@ mod tests {
             serde_json::json!({
                 "built_in_tools": [
                     {
-                        "type": "web_fetch_20250910"
+                        "type": "not_a_real_tool"
                     }
                 ]
             }),

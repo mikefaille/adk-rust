@@ -917,6 +917,7 @@ pub mod v1_remote {
                 name: "my-agent".to_string(),
                 description: "My remote agent".to_string(),
                 agent_card: card,
+                streaming: None,
             });
             assert_eq!(agent.name(), "my-agent");
             assert_eq!(agent.description(), "My remote agent");
@@ -929,6 +930,7 @@ pub mod v1_remote {
                 name: "test".to_string(),
                 description: "test".to_string(),
                 agent_card: card,
+                streaming: None,
             });
             assert!(agent.sub_agents().is_empty());
         }

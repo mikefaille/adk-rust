@@ -293,7 +293,7 @@ mod tests {
         async fn create_cache(
             &self,
             _system_instruction: &str,
-            _tools: &std::collections::HashMap<String, serde_json::Value>,
+            _tools: &std::collections::HashMap<String, adk_core::ToolContract>,
             _ttl_seconds: u32,
         ) -> adk_core::Result<String> {
             Ok("cache".to_string())
