@@ -58,7 +58,7 @@ members = [
     "adk-enterprise",
 
     # Benchmarking framework
-    "adk-bench",
+    "adk-bench", "adk-schema",
 ]
 exclude = [
     # Extracted to standalone repo: https://github.com/zavora-ai/adk-studio
