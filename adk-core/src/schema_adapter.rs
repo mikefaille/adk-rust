@@ -1,8 +1,8 @@
 //! Schema normalization adapter for LLM provider function-calling APIs.
+use crate::schema_utils;
 use serde_json::Value;
 use std::borrow::Cow;
 use std::fmt;
-use crate::schema_utils;
 
 /// Error returned when a tool schema cannot be compiled for a specific provider.
 #[derive(Debug, Clone, PartialEq, Eq)]

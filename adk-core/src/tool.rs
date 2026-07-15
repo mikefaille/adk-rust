@@ -40,7 +40,11 @@ pub struct ToolContract {
 
 impl ToolContract {
     /// Create a new tool contract.
-    pub fn new(name: impl Into<String>, description: impl Into<String>, schema: ToolSchema) -> Self {
+    pub fn new(
+        name: impl Into<String>,
+        description: impl Into<String>,
+        schema: ToolSchema,
+    ) -> Self {
         Self { name: name.into(), description: description.into(), schema }
     }
 }

@@ -895,13 +895,20 @@ impl RealtimeRunner {
     }
 
     /// Execute a tool call and optionally send the response.
-    async fn execute_tool_call(&self, call_id: &str, name: &str, arguments: &serde_json::Value) -> Result<()> {
+    async fn execute_tool_call(
+        &self,
+        call_id: &str,
+        name: &str,
+        arguments: &serde_json::Value,
+    ) -> Result<()> {
         let handler = self.tools.get(name).map(|(_, h)| h.clone());
 
         let result = if let Some(handler) = handler {
-
-            let call =
-                ToolCall { call_id: call_id.to_string(), name: name.to_string(), arguments: arguments.clone() };
+            let call = ToolCall {
+                call_id: call_id.to_string(),
+                name: name.to_string(),
+                arguments: arguments.clone(),
+            };
 
             match handler.execute(&call).await {
                 Ok(value) => value,

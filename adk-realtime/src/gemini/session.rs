@@ -1109,7 +1109,10 @@ fn convert_tools(
         }
         if let Some(params) = &t.parameters {
             let compiled = cache.get_or_compile(params, adapter).map_err(|e| {
-                RealtimeError::protocol(format!("Failed to compile schema for tool {}: {}", t.name, e))
+                RealtimeError::protocol(format!(
+                    "Failed to compile schema for tool {}: {}",
+                    t.name, e
+                ))
             })?;
             decl["parameters"] = compiled;
         } else {

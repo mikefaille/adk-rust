@@ -1,10 +1,10 @@
 //! Schema normalization cache for LLM provider adapters.
+use crate::SchemaAdapter;
+use crate::schema_adapter::SchemaCompileError;
+use serde_json::Value;
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Mutex;
-use serde_json::Value;
-use crate::schema_adapter::SchemaCompileError;
-use crate::SchemaAdapter;
 
 /// A thread-safe cache for normalized and compiled JSON Schemas.
 #[derive(Debug, Default)]
