@@ -63,7 +63,8 @@
 //!
 //! ```rust
 //! use adk_gemini::schema_adapter::GeminiSchemaAdapter;
-//! use adk_core::{SchemaAdapter, ProjectionPolicy};
+//! use adk_core::SchemaAdapter;
+//! use adk_core::schema_adapter::ProjectionPolicy;
 //! use serde_json::json;
 //!
 //! let adapter = GeminiSchemaAdapter::new(); // Default policy: Exact
@@ -163,8 +164,9 @@ impl SchemaAdapter for GeminiSchemaAdapter {
         match compiler.compile(&schema, "", 0) {
             Ok(v) => v,
             Err(_) => {
-                // If the new compiler fails (e.g. recursive ref), we fall back to a minimal safe object.
-                serde_json::json!({"type": "object"})
+                // Return the original schema instead of manufacturing a fallback object.
+                // This ensures we never let a failure become a generic object schema.
+                schema
             }
         }
     }
@@ -292,7 +294,7 @@ impl<'a> GeminiCompiler<'a> {
             }
         }
 
-        // 2. Handle allOf (Conflict detection)
+        // 2. Handle allOf (Recursive merging and conflict detection)
         if let Some(all_of) = obj.get("allOf").and_then(|v| v.as_array()) {
             let mut merged = Map::new();
             for (i, sub) in all_of.iter().enumerate() {
@@ -300,20 +302,70 @@ impl<'a> GeminiCompiler<'a> {
                 let compiled_sub = self.compile(sub, &sub_path, depth)?;
                 if let Some(sub_obj) = compiled_sub.as_object() {
                     for (k, v) in sub_obj {
-                        if let Some(existing) = merged.get(k) {
-                            if existing != v {
-                                return self.error(
-                                    path,
-                                    "allOf",
-                                    format!("Conflicting allOf branches for keyword '{}'", k),
-                                );
+                        match k.as_str() {
+                            "properties" => {
+                                let existing_props = merged
+                                    .entry(k.clone())
+                                    .or_insert_with(|| Value::Object(Map::new()));
+                                if let (Some(existing_obj), Some(new_obj)) =
+                                    (existing_props.as_object_mut(), v.as_object())
+                                {
+                                    for (pk, pv) in new_obj {
+                                        if let Some(existing_v) = existing_obj.get(pk) {
+                                            // Deep merge properties recursively
+                                            let merged_prop =
+                                                recursive_merge(existing_v, pv).map_err(|e| {
+                                                    SchemaCompileError::new(format!(
+                                                        "Conflicting property '{}' in allOf at {}: {}",
+                                                        pk, path, e
+                                                    ))
+                                                })?;
+                                            existing_obj.insert(pk.clone(), merged_prop);
+                                        } else {
+                                            existing_obj.insert(pk.clone(), pv.clone());
+                                        }
+                                    }
+                                }
+                            }
+                            "required" => {
+                                let existing_req = merged
+                                    .entry(k.clone())
+                                    .or_insert_with(|| Value::Array(Vec::new()));
+                                if let (Some(existing_arr), Some(new_arr)) =
+                                    (existing_req.as_array_mut(), v.as_array())
+                                {
+                                    for item in new_arr {
+                                        if !existing_arr.contains(item) {
+                                            existing_arr.push(item.clone());
+                                        }
+                                    }
+                                    existing_arr.sort_by(|a, b| {
+                                        a.as_str().unwrap_or("").cmp(b.as_str().unwrap_or(""))
+                                    });
+                                }
+                            }
+                            _ => {
+                                if let Some(existing) = merged.get(k) {
+                                    if existing != v {
+                                        // Try to merge keyword values if they are objects
+                                        let merged_val =
+                                            recursive_merge(existing, v).map_err(|e| {
+                                                SchemaCompileError::new(format!(
+                                                "Conflicting allOf branches for keyword '{}' at {}: {}",
+                                                k, path, e
+                                            ))
+                                            })?;
+                                        merged.insert(k.clone(), merged_val);
+                                    }
+                                } else {
+                                    merged.insert(k.clone(), v.clone());
+                                }
                             }
                         }
-                        merged.insert(k.clone(), v.clone());
                     }
                 }
             }
-            // Merge merged into the current object logic
+            // Apply merged allOf fields to projected
             for (k, v) in merged {
                 projected.insert(k, v);
             }
@@ -407,7 +459,28 @@ impl<'a> GeminiCompiler<'a> {
                                 .insert(pk.clone(), self.compile(pv, &prop_path, depth + 1)?);
                         }
                     }
-                    projected.insert("properties".to_string(), Value::Object(compiled_props));
+
+                    // Merge sibling properties with composed properties from allOf/anyOf/oneOf
+                    if let Some(existing_props) =
+                        projected.get_mut("properties").and_then(|v| v.as_object_mut())
+                    {
+                        for (pk, pv) in compiled_props {
+                            if let Some(existing_v) = existing_props.get(&pk) {
+                                let merged = recursive_merge(existing_v, &pv).map_err(|e| {
+                                    SchemaCompileError::new(format!(
+                                        "Conflicting sibling property '{}' at {}: {}",
+                                        pk, path, e
+                                    ))
+                                })?;
+                                existing_props.insert(pk, merged);
+                            } else {
+                                existing_props.insert(pk, pv);
+                            }
+                        }
+                    } else {
+                        projected.insert("properties".to_string(), Value::Object(compiled_props));
+                    }
+
                     if !projected.contains_key("type") {
                         projected.insert("type".to_string(), Value::String("object".to_string()));
                     }
@@ -437,8 +510,11 @@ impl<'a> GeminiCompiler<'a> {
                             );
                         }
                     } else {
-                        // Stripping items from non-array type. No diagnostic needed as this is
-                        // a standard structural cleanup from the legacy implementation.
+                        self.diagnostic(
+                            path,
+                            "items",
+                            "Gemini ignores 'items' keyword on non-array types; stripping",
+                        )?;
                     }
                 }
                 "enum" => {
@@ -499,7 +575,23 @@ impl<'a> GeminiCompiler<'a> {
                     }
                 }
                 "required" => {
-                    projected.insert("required".to_string(), value.clone());
+                    // Merge sibling required with composed required
+                    if let Some(existing_req) =
+                        projected.get_mut("required").and_then(|v| v.as_array_mut())
+                    {
+                        if let Some(new_req) = value.as_array() {
+                            for item in new_req {
+                                if !existing_req.contains(item) {
+                                    existing_req.push(item.clone());
+                                }
+                            }
+                            existing_req.sort_by(|a, b| {
+                                a.as_str().unwrap_or("").cmp(b.as_str().unwrap_or(""))
+                            });
+                        }
+                    } else {
+                        projected.insert("required".to_string(), value.clone());
+                    }
                 }
                 // Destructive transforms for validation keywords
                 "minimum" | "maximum" | "exclusiveMinimum" | "exclusiveMaximum" | "minLength"
@@ -539,10 +631,11 @@ impl<'a> GeminiCompiler<'a> {
             }
         }
 
-        if self.vertex_ai && !projected.contains_key("additionalProperties") {
-            if projected.get("type").and_then(|v| v.as_str()) == Some("object") {
-                projected.insert("additionalProperties".to_string(), Value::Bool(false));
-            }
+        if self.vertex_ai
+            && !projected.contains_key("additionalProperties")
+            && projected.get("type").and_then(|v| v.as_str()) == Some("object")
+        {
+            projected.insert("additionalProperties".to_string(), Value::Bool(false));
         }
 
         Ok(Value::Object(projected))
@@ -587,6 +680,46 @@ fn is_null_schema(schema: &Value) -> bool {
         .and_then(|obj| obj.get("type"))
         .and_then(|t| t.as_str())
         .is_some_and(|t| t == "null")
+}
+
+/// Recursively merge two JSON values.
+///
+/// Returns an error if the values are incompatible (e.g., different types,
+/// or conflicting values for the same key that cannot be merged).
+fn recursive_merge(a: &Value, b: &Value) -> Result<Value, String> {
+    if a == b {
+        return Ok(a.clone());
+    }
+
+    match (a, b) {
+        (Value::Object(map_a), Value::Object(map_b)) => {
+            let mut merged = map_a.clone();
+            for (k, v_b) in map_b {
+                if let Some(v_a) = map_a.get(k) {
+                    merged.insert(k.clone(), recursive_merge(v_a, v_b)?);
+                } else {
+                    merged.insert(k.clone(), v_b.clone());
+                }
+            }
+            Ok(Value::Object(merged))
+        }
+        (Value::Array(arr_a), Value::Array(arr_b)) => {
+            // For arrays (like 'required'), we union and deduplicate
+            let mut merged = arr_a.clone();
+            for item in arr_b {
+                if !merged.contains(item) {
+                    merged.push(item.clone());
+                }
+            }
+            // Sort to maintain idempotency
+            merged.sort_by(|a, b| match (a, b) {
+                (Value::String(sa), Value::String(sb)) => sa.cmp(sb),
+                _ => std::cmp::Ordering::Equal,
+            });
+            Ok(Value::Array(merged))
+        }
+        _ => Err(format!("Incompatible values: {:?} and {:?}", a, b)),
+    }
 }
 
 #[cfg(test)]
@@ -785,6 +918,66 @@ mod tests {
         let result_rv = adapter_rv.compile_schema(&schema).unwrap();
         assert!(result_rv.value.get("title").is_none());
         assert!(result_rv.diagnostics.iter().any(|d| d.keyword == "title"));
+    }
+
+    #[test]
+    fn test_compile_schema_all_of_merging_disjoint() {
+        let adapter = GeminiSchemaAdapter::new();
+        let schema = json!({
+            "type": "object",
+            "allOf": [
+                { "properties": { "foo": { "type": "string" } } },
+                { "properties": { "bar": { "type": "number" } } }
+            ]
+        });
+        let result = adapter.compile_schema(&schema).unwrap();
+        assert_eq!(result.value["properties"]["foo"]["type"], "string");
+        assert_eq!(result.value["properties"]["bar"]["type"], "number");
+    }
+
+    #[test]
+    fn test_compile_schema_sibling_merging() {
+        let adapter = GeminiSchemaAdapter::new();
+        let schema = json!({
+            "type": "object",
+            "properties": { "foo": { "type": "string" } },
+            "required": ["foo"],
+            "allOf": [
+                { "properties": { "bar": { "type": "number" } }, "required": ["bar"] }
+            ]
+        });
+        let result = adapter.compile_schema(&schema).unwrap();
+        assert_eq!(result.value["properties"]["foo"]["type"], "string");
+        assert_eq!(result.value["properties"]["bar"]["type"], "number");
+        let req = result.value["required"].as_array().unwrap();
+        assert!(req.contains(&json!("foo")));
+        assert!(req.contains(&json!("bar")));
+    }
+
+    #[test]
+    fn test_compile_schema_conflicting_properties_fail() {
+        let adapter = GeminiSchemaAdapter::new();
+        let schema = json!({
+            "type": "object",
+            "allOf": [
+                { "properties": { "foo": { "type": "string" } } },
+                { "properties": { "foo": { "type": "number" } } }
+            ]
+        });
+        let result = adapter.compile_schema(&schema);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().message.contains("Conflicting property 'foo'"));
+    }
+
+    #[test]
+    fn test_compile_schema_items_non_array_diagnostic() {
+        let adapter = GeminiSchemaAdapter::with_policy(ProjectionPolicy::RuntimeValidated);
+        let schema = json!({
+            "type": "string",
+            "items": { "type": "number" }
+        });
+        let result = adapter.compile_schema(&schema).unwrap();
+        assert!(result.diagnostics.iter().any(|d| d.keyword == "items"));
     }
 
     #[test]

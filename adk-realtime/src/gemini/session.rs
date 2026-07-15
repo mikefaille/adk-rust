@@ -1157,7 +1157,19 @@ fn convert_tools(
                     t.name, e
                 ))
             })?;
-            decl["parameters"] = compiled;
+
+            // Report any diagnostics emitted during compilation
+            for diagnostic in &compiled.diagnostics {
+                tracing::warn!(
+                    path = %diagnostic.path,
+                    keyword = %diagnostic.keyword,
+                    "Gemini schema projection diagnostic for tool {}: {}",
+                    t.name,
+                    diagnostic.message
+                );
+            }
+
+            decl["parameters"] = compiled.value;
         } else {
             decl["parameters"] = adapter.empty_schema();
         }

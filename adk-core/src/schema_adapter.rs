@@ -5,20 +5,17 @@ use std::borrow::Cow;
 use std::fmt;
 
 /// Projection policy for schema compilation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Default, Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum ProjectionPolicy {
     /// Reject any semantic loss during projection.
+    #[default]
     Exact,
     /// Allow documented provider omissions only when the canonical runtime validator
     /// remains authoritative.
     RuntimeValidated,
-}
-
-impl Default for ProjectionPolicy {
-    fn default() -> Self {
-        Self::Exact
-    }
 }
 
 /// A diagnostic message emitted during schema projection.
