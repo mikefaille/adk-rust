@@ -125,24 +125,13 @@ impl OpenAITransportLink for OpenAIRealtimeSession {
                     }
                     Ok(mut event) => {
                         // Normalize FunctionCallDone arguments: OpenAI sends them as a JSON-encoded string.
+                        #[allow(clippy::collapsible_if)]
                         if let ServerEvent::FunctionCallDone { arguments, name, .. } = &mut event {
-                            if let serde_json::Value::String(s) = arguments {
-                                match serde_json::from_str::<serde_json::Value>(s) {
-                                    Ok(parsed) => {
-                                        *arguments = parsed;
-                                    }
-                                    Err(e) => {
-                                        tracing::error!(
-                                            name = %name,
-                                            error = %e,
-                                            "failed to parse OpenAI function arguments as JSON"
-                                        );
-                                        return Some(Err(RealtimeError::protocol(format!(
-                                            "malformed function arguments for {}: {}",
-                                            name, e
-                                        ))));
-                                    }
-                                }
+                            if let Err(e) = crate::openai::protocol::normalize_openai_function_args(
+                                name, arguments,
+                            ) {
+                                tracing::error!(name = %name, error = %e, "failed to normalize OpenAI function arguments");
+                                return Some(Err(e));
                             }
                         }
                         Some(Ok(event))

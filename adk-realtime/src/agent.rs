@@ -900,8 +900,7 @@ impl Agent for RealtimeAgent {
                                                 "transfer_to_agent called with missing or empty 'agent_name': {:?}",
                                                 args
                                             )));
-                                            let _ = session.close().await;
-                                            return;
+                                            continue;
                                         }
                                     };
 

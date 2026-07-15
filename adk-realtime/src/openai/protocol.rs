@@ -204,6 +204,33 @@ pub(crate) fn convert_config_to_openai(config: &crate::config::RealtimeConfig) -
     session_config
 }
 
+/// Normalize FunctionCallDone arguments: OpenAI sends them as a JSON-encoded string.
+///
+/// This is used by OpenAI transports to ensure downstream consumers always receive
+/// a structured JSON Object.
+pub fn normalize_openai_function_args(name: &str, arguments: &mut Value) -> Result<()> {
+    if let Value::String(s) = arguments {
+        let parsed = serde_json::from_str::<Value>(s).map_err(|e| {
+            RealtimeError::protocol(format!("malformed function arguments for {}: {}", name, e))
+        })?;
+
+        if !parsed.is_object() {
+            return Err(RealtimeError::protocol(format!(
+                "expected JSON object for {} arguments, got: {:?}",
+                name, parsed
+            )));
+        }
+
+        *arguments = parsed;
+    } else if !arguments.is_object() {
+        return Err(RealtimeError::protocol(format!(
+            "expected JSON object for {} arguments, got: {:?}",
+            name, arguments
+        )));
+    }
+    Ok(())
+}
+
 /// The universal Protocol Handler wrapping any transport layer.
 pub struct OpenAIProtocolHandler<T: OpenAITransportLink> {
     pub transport: T,

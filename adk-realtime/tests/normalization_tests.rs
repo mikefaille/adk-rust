@@ -1,4 +1,3 @@
-use adk_realtime::error::RealtimeError;
 use adk_realtime::events::ServerEvent;
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
@@ -6,7 +5,7 @@ use tokio::sync::Mutex;
 #[cfg(feature = "openai")]
 mod openai_tests {
     use super::*;
-    use adk_realtime::openai::protocol::OpenAITransportLink;
+    use adk_realtime::openai::protocol::{OpenAITransportLink, normalize_openai_function_args};
     use async_trait::async_trait;
 
     struct MockTransport {
@@ -34,22 +33,12 @@ mod openai_tests {
             }
             let text = events.remove(0);
 
-            // This mirrors the logic in OpenAIRealtimeSession::receive_raw
             match serde_json::from_str::<ServerEvent>(&text) {
                 Ok(mut event) => {
                     if let ServerEvent::FunctionCallDone { arguments, name, .. } = &mut event {
-                        if let Value::String(s) = arguments {
-                            match serde_json::from_str::<Value>(s) {
-                                Ok(parsed) => {
-                                    *arguments = parsed;
-                                }
-                                Err(e) => {
-                                    return Some(Err(RealtimeError::protocol(format!(
-                                        "malformed function arguments for {}: {}",
-                                        name, e
-                                    ))));
-                                }
-                            }
+                        // USE PRODUCTION HELPER
+                        if let Err(e) = normalize_openai_function_args(name, arguments) {
+                            return Some(Err(e));
                         }
                     }
                     Some(Ok(event))
@@ -104,12 +93,31 @@ mod openai_tests {
         };
 
         let result = transport.receive_raw().await.unwrap();
-        match result {
-            Err(RealtimeError::Protocol(msg)) => {
-                assert!(msg.contains("malformed function arguments"));
-            }
-            _ => panic!("Expected Protocol error, got {:?}", result),
-        }
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_openai_non_object_argument_normalization() {
+        let transport = MockTransport {
+            events: Mutex::new(vec![
+                json!({
+                    "type": "response.function_call_arguments.done",
+                    "event_id": "evt_1",
+                    "response_id": "resp_1",
+                    "item_id": "item_1",
+                    "output_index": 0,
+                    "call_id": "call_1",
+                    "name": "test_tool",
+                    "arguments": "\"not_an_object\""
+                })
+                .to_string(),
+            ]),
+        };
+
+        let result = transport.receive_raw().await.unwrap();
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("expected JSON object"));
     }
 }
 
@@ -117,7 +125,7 @@ mod openai_tests {
 #[tokio::test]
 async fn test_transfer_to_agent_validation() {
     use adk_core::{
-        Agent, CallbackContext, Content, EventStream, InvocationContext, ReadonlyContext, RunConfig,
+        Agent, CallbackContext, Content, InvocationContext, ReadonlyContext, RunConfig,
     };
     use adk_realtime::session::BoxedSession;
     use adk_realtime::{RealtimeAgent, RealtimeConfig, audio::AudioFormat};
@@ -197,6 +205,16 @@ async fn test_transfer_to_agent_validation() {
             Ok(())
         }
         async fn next_event(&self) -> Option<adk_realtime::error::Result<ServerEvent>> {
+            // First call returns malformed transfer
+            // Second call returns something else or None to end
+            static CALLED: std::sync::atomic::AtomicBool =
+                std::sync::atomic::AtomicBool::new(false);
+            if CALLED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                return Some(Ok(ServerEvent::ResponseDone {
+                    event_id: "evt_2".into(),
+                    response: json!({}),
+                }));
+            }
             Some(Ok(ServerEvent::FunctionCallDone {
                 event_id: "evt_1".into(),
                 response_id: "resp_1".into(),
@@ -304,4 +322,9 @@ async fn test_transfer_to_agent_validation() {
             .to_string()
             .contains("transfer_to_agent called with missing or empty 'agent_name'")
     );
+
+    // Third event should be ResponseDone, proving the session was NOT closed
+    let result = stream.next().await.unwrap();
+    assert!(result.is_ok());
+    assert!(result.unwrap().llm_response.content.is_none());
 }

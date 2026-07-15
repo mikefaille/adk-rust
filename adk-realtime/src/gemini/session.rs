@@ -632,11 +632,17 @@ impl GeminiRealtimeSession {
             let name = call
                 .get("name")
                 .and_then(|n| n.as_str())
-                .ok_or_else(|| RealtimeError::protocol("Gemini tool call missing 'name'"))?;
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| {
+                    RealtimeError::protocol("Gemini tool call missing or empty 'name'")
+                })?;
             let id = call
                 .get("id")
                 .and_then(|i| i.as_str())
-                .ok_or_else(|| RealtimeError::protocol("Gemini tool call missing 'id'"))?;
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| RealtimeError::protocol("Gemini tool call missing or empty 'id'"))?;
             let args = call
                 .get("args")
                 .cloned()
@@ -1269,7 +1275,9 @@ mod tests {
         .to_string();
         let result = GeminiRealtimeSession::translate_event_static(&raw);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Gemini tool call missing 'name'"));
+        assert!(
+            result.unwrap_err().to_string().contains("Gemini tool call missing or empty 'name'")
+        );
 
         // 2. Missing id
         let raw = json!({
@@ -1283,7 +1291,7 @@ mod tests {
         .to_string();
         let result = GeminiRealtimeSession::translate_event_static(&raw);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Gemini tool call missing 'id'"));
+        assert!(result.unwrap_err().to_string().contains("Gemini tool call missing or empty 'id'"));
 
         // 3. Missing args
         let raw = json!({
