@@ -499,7 +499,11 @@ impl<'a> GeminiCompiler<'a> {
                     )?;
                 }
                 _ => {
-                    // Ignore unknown keywords or strip them? The request says audit every destructive transform.
+                    self.diagnostic(
+                        path,
+                        key,
+                        format!("Gemini does not support keyword '{}'; stripping", key),
+                    )?;
                 }
             }
         }
@@ -839,6 +843,20 @@ mod tests {
             assert!(result.diagnostics.iter().any(|d| d.keyword == kw));
             assert!(result.value.get(kw).is_none());
         }
+    }
+
+    #[test]
+    fn test_compile_schema_unknown_keyword() {
+        let adapter = GeminiSchemaAdapter::new();
+        let schema = json!({ "type": "string", "title": "My String" });
+        let result = adapter.compile_schema(&schema);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().message.contains("Gemini does not support keyword 'title'"));
+
+        let adapter_rv = GeminiSchemaAdapter::with_policy(ProjectionPolicy::RuntimeValidated);
+        let result_rv = adapter_rv.compile_schema(&schema).unwrap();
+        assert!(result_rv.value.get("title").is_none());
+        assert!(result_rv.diagnostics.iter().any(|d| d.keyword == "title"));
     }
 
     #[test]
