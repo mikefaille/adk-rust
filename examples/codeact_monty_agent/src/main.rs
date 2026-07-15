@@ -185,7 +185,7 @@ impl adk_core::Tool for FetchCartTool {
         "Fetch the line items in a user's shopping cart by user id."
     }
 
-    fn parameters_schema(&self) -> Option<Value> {
+    fn parameters_schema(&self) -> Option<SchemaDocument> {
         Some(json!({
             "type": "object",
             "properties": { "user_id": { "type": "string" } },
@@ -225,7 +225,7 @@ impl adk_core::Tool for TaxRateTool {
         "Return the sales-tax rate (as a fraction) for a region code."
     }
 
-    fn parameters_schema(&self) -> Option<Value> {
+    fn parameters_schema(&self) -> Option<SchemaDocument> {
         Some(json!({
             "type": "object",
             "properties": { "region": { "type": "string" } },

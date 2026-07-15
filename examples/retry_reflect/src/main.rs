@@ -25,6 +25,7 @@ use std::time::Duration;
 
 use adk_agent::LlmAgentBuilder;
 use adk_core::{Agent, Content, Llm, Tool, ToolContext, async_trait};
+use adk_schema::SchemaDocument;
 use adk_model::GeminiModel;
 use adk_plugin::EnhancedPlugin;
 use adk_retry_reflect::RetryReflectPluginBuilder;
@@ -63,7 +64,7 @@ impl Tool for FlakySearchTool {
         "Search the web for information on a given query. Returns relevant results."
     }
 
-    fn parameters_schema(&self) -> Option<Value> {
+    fn parameters_schema(&self) -> Option<SchemaDocument> {
         Some(json!({
             "type": "object",
             "properties": {

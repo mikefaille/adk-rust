@@ -2,6 +2,7 @@
 
 use crate::session::BrowserSession;
 use adk_core::{Result, Tool, ToolContext};
+use adk_schema::SchemaDocument;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -28,7 +29,7 @@ impl Tool for EvaluateJsTool {
         "Execute JavaScript code in the browser and return the result. Use for complex interactions or data extraction."
     }
 
-    fn parameters_schema(&self) -> Option<Value> {
+    fn parameters_schema(&self) -> Option<SchemaDocument> {
         Some(json!({
             "type": "object",
             "properties": {
@@ -45,7 +46,7 @@ impl Tool for EvaluateJsTool {
         }))
     }
 
-    fn response_schema(&self) -> Option<Value> {
+    fn response_schema(&self) -> Option<SchemaDocument> {
         Some(json!({
             "type": "object",
             "properties": {
@@ -97,7 +98,7 @@ impl Tool for ScrollTool {
         "Scroll the page in a direction or to a specific element."
     }
 
-    fn parameters_schema(&self) -> Option<Value> {
+    fn parameters_schema(&self) -> Option<SchemaDocument> {
         Some(json!({
             "type": "object",
             "properties": {
@@ -179,7 +180,7 @@ impl Tool for HoverTool {
         "Hover over an element to trigger hover effects or tooltips."
     }
 
-    fn parameters_schema(&self) -> Option<Value> {
+    fn parameters_schema(&self) -> Option<SchemaDocument> {
         Some(json!({
             "type": "object",
             "properties": {
@@ -251,7 +252,7 @@ impl Tool for AlertTool {
         "Handle JavaScript alerts, confirms, and prompts. Accepts or dismisses the active dialog."
     }
 
-    fn parameters_schema(&self) -> Option<Value> {
+    fn parameters_schema(&self) -> Option<SchemaDocument> {
         Some(json!({
             "type": "object",
             "properties": {

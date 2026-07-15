@@ -14,6 +14,7 @@
 
 use adk_core::Tool;
 use adk_sandbox::workspace::SandboxSession;
+use adk_schema::SchemaDocument;
 use async_trait::async_trait;
 use serde_json::Value;
 use std::sync::Arc;
@@ -47,7 +48,7 @@ impl Tool for ExecCommandTool {
         "Execute a shell command in the sandbox workspace"
     }
 
-    fn parameters_schema(&self) -> Option<Value> {
+    fn parameters_schema(&self) -> Option<SchemaDocument> {
         Some(serde_json::json!({
             "type": "object",
             "properties": {
@@ -143,7 +144,7 @@ impl Tool for ReadFileTool {
         "Read a file from the sandbox workspace"
     }
 
-    fn parameters_schema(&self) -> Option<Value> {
+    fn parameters_schema(&self) -> Option<SchemaDocument> {
         Some(serde_json::json!({
             "type": "object",
             "properties": {
@@ -227,7 +228,7 @@ impl Tool for WriteFileTool {
         "Write content to a file in the sandbox workspace"
     }
 
-    fn parameters_schema(&self) -> Option<Value> {
+    fn parameters_schema(&self) -> Option<SchemaDocument> {
         Some(serde_json::json!({
             "type": "object",
             "properties": {
@@ -316,7 +317,7 @@ impl Tool for ListDirTool {
         "List entries in a directory within the sandbox workspace"
     }
 
-    fn parameters_schema(&self) -> Option<Value> {
+    fn parameters_schema(&self) -> Option<SchemaDocument> {
         Some(serde_json::json!({
             "type": "object",
             "properties": {
@@ -400,7 +401,7 @@ impl Tool for ApplyPatchTool {
         "Apply a unified diff patch to the sandbox workspace"
     }
 
-    fn parameters_schema(&self) -> Option<Value> {
+    fn parameters_schema(&self) -> Option<SchemaDocument> {
         Some(serde_json::json!({
             "type": "object",
             "properties": {

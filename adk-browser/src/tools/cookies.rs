@@ -2,6 +2,7 @@
 
 use crate::session::BrowserSession;
 use adk_core::{AdkError, Result, Tool, ToolContext};
+use adk_schema::SchemaDocument;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -27,11 +28,11 @@ impl Tool for GetCookiesTool {
         "Get all cookies for the current page domain."
     }
 
-    fn parameters_schema(&self) -> Option<Value> {
-        Some(json!({
+    fn parameters_schema(&self) -> Option<SchemaDocument> {
+        Some(SchemaDocument::for_input(json!({
             "type": "object",
             "properties": {}
-        }))
+        })))
     }
 
     async fn execute(&self, _ctx: Arc<dyn ToolContext>, _args: Value) -> Result<Value> {
@@ -65,7 +66,7 @@ impl Tool for GetCookieTool {
         "Get a specific cookie by name."
     }
 
-    fn parameters_schema(&self) -> Option<Value> {
+    fn parameters_schema(&self) -> Option<SchemaDocument> {
         Some(json!({
             "type": "object",
             "properties": {
@@ -113,7 +114,7 @@ impl Tool for AddCookieTool {
         "Add a cookie to the browser."
     }
 
-    fn parameters_schema(&self) -> Option<Value> {
+    fn parameters_schema(&self) -> Option<SchemaDocument> {
         Some(json!({
             "type": "object",
             "properties": {
@@ -192,7 +193,7 @@ impl Tool for DeleteCookieTool {
         "Delete a specific cookie by name."
     }
 
-    fn parameters_schema(&self) -> Option<Value> {
+    fn parameters_schema(&self) -> Option<SchemaDocument> {
         Some(json!({
             "type": "object",
             "properties": {
@@ -241,11 +242,11 @@ impl Tool for DeleteAllCookiesTool {
         "Delete all cookies for the current domain."
     }
 
-    fn parameters_schema(&self) -> Option<Value> {
-        Some(json!({
+    fn parameters_schema(&self) -> Option<SchemaDocument> {
+        Some(SchemaDocument::for_input(json!({
             "type": "object",
             "properties": {}
-        }))
+        })))
     }
 
     async fn execute(&self, _ctx: Arc<dyn ToolContext>, _args: Value) -> Result<Value> {

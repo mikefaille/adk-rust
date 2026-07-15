@@ -14,6 +14,7 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use adk_core::ToolContext;
+use adk_schema::SchemaDocument;
 
 use crate::backend::SandboxBackend;
 use crate::error::SandboxError;
@@ -163,7 +164,7 @@ impl adk_core::Tool for SandboxTool {
         REQUIRED_SCOPES
     }
 
-    fn parameters_schema(&self) -> Option<Value> {
+    fn parameters_schema(&self) -> Option<SchemaDocument> {
         Some(json!({
             "type": "object",
             "properties": {

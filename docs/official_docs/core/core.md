@@ -17,6 +17,7 @@ Every message in ADK flows through `Content` and `Part`. Understanding these typ
 
 ```rust
 use adk_core::Content;
+use adk_schema::SchemaDocument;
 
 // Simple text message from user
 let user_msg = Content::new("user")
@@ -82,6 +83,7 @@ pub enum Part {
 
 ```rust
 use adk_core::Part;
+use adk_schema::SchemaDocument;
 
 // Text part
 let text = Part::text_part("Hello, world!");
@@ -196,10 +198,10 @@ pub trait Tool: Send + Sync {
     fn description(&self) -> &str;
     
     /// JSON Schema defining the expected parameters
-    fn parameters_schema(&self) -> Option<Value> { None }
+    fn parameters_schema(&self) -> Option<SchemaDocument> { None }
     
     /// JSON Schema defining the response format
-    fn response_schema(&self) -> Option<Value> { None }
+    fn response_schema(&self) -> Option<SchemaDocument> { None }
     
     /// Whether this tool runs asynchronously (returns task ID immediately)
     fn is_long_running(&self) -> bool { false }
@@ -220,6 +222,7 @@ pub trait Tool: Send + Sync {
 
 ```rust
 use adk_core::{Tool, ToolContext, Result};
+use adk_schema::SchemaDocument;
 use async_trait::async_trait;
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -238,7 +241,7 @@ impl Tool for WeatherTool {
         "Get current weather for a city. Use this when the user asks about weather conditions."
     }
     
-    fn parameters_schema(&self) -> Option<Value> {
+    fn parameters_schema(&self) -> Option<SchemaDocument> {
         Some(json!({
             "type": "object",
             "properties": {
@@ -495,6 +498,7 @@ ADK uses a unified structured error type for all operations:
 
 ```rust
 use adk_core::{AdkError, ErrorComponent, ErrorCategory};
+use adk_schema::SchemaDocument;
 
 // AdkError is a struct with component, category, code, message, retry hint, and details
 let err = AdkError::new(
@@ -556,6 +560,7 @@ Session identity is the stable address of a conversation session. It is a compos
 
 ```rust
 use adk_core::{AdkIdentity, AppName, SessionId, UserId};
+use adk_schema::SchemaDocument;
 
 let identity = AdkIdentity::new(
     AppName::try_from("weather-app")?,
@@ -577,6 +582,7 @@ Execution identity extends session identity with per-invocation runtime coordina
 
 ```rust
 use adk_core::{ExecutionIdentity, InvocationId};
+use adk_schema::SchemaDocument;
 
 let exec = ExecutionIdentity {
     adk: identity.clone(),
@@ -603,6 +609,7 @@ All four use `#[serde(transparent)]`, so existing JSON and SSE payloads continue
 
 ```rust
 use adk_core::{AppName, SessionId, InvocationId};
+use adk_schema::SchemaDocument;
 
 // Parse at trust boundaries
 let app = AppName::try_from("my-app")?;
@@ -739,6 +746,7 @@ pub struct LlmRequest {
 
 ```rust
 use adk_core::{LlmRequest, Content, GenerateContentConfig};
+use adk_schema::SchemaDocument;
 use serde_json::json;
 
 // Basic request

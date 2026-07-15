@@ -28,6 +28,7 @@
 
 use crate::audit::{AuditEvent, AuditOutcome, AuditSink};
 use adk_core::{Result, Tool, ToolContext};
+use adk_schema::SchemaDocument;
 use async_trait::async_trait;
 use serde_json::Value;
 use std::collections::HashSet;
@@ -57,12 +58,12 @@ macro_rules! impl_scoped_tool {
                 ($inner).is_long_running()
             }
 
-            fn parameters_schema(&self) -> Option<Value> {
+            fn parameters_schema(&self) -> Option<SchemaDocument> {
                 let $self_ident = self;
                 ($inner).parameters_schema()
             }
 
-            fn response_schema(&self) -> Option<Value> {
+            fn response_schema(&self) -> Option<SchemaDocument> {
                 let $self_ident = self;
                 ($inner).response_schema()
             }
@@ -108,12 +109,12 @@ macro_rules! impl_scoped_tool {
                 ($inner).is_long_running()
             }
 
-            fn parameters_schema(&self) -> Option<Value> {
+            fn parameters_schema(&self) -> Option<SchemaDocument> {
                 let $self_ident = self;
                 ($inner).parameters_schema()
             }
 
-            fn response_schema(&self) -> Option<Value> {
+            fn response_schema(&self) -> Option<SchemaDocument> {
                 let $self_ident = self;
                 ($inner).response_schema()
             }

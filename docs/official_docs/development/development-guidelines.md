@@ -159,6 +159,7 @@ use tokio::sync::RwLock;
 
 // 3. Internal crates (adk-*)
 use adk_core::{Agent, Event, Result};
+use adk_schema::SchemaDocument;
 
 // 4. Local modules
 use crate::config::Config;
@@ -189,6 +190,7 @@ fn complex_builder(...) { }
 
 ```rust
 use adk_core::{AdkError, ErrorComponent, ErrorCategory, Result};
+use adk_schema::SchemaDocument;
 
 // Return Result<T> (aliased to Result<T, AdkError>)
 pub async fn my_function() -> Result<String> {
@@ -483,6 +485,7 @@ Use `EventStream` for streaming responses:
 
 ```rust
 use adk_core::EventStream;
+use adk_schema::SchemaDocument;
 use async_stream::stream;
 use futures::Stream;
 
@@ -575,6 +578,7 @@ Place in `tests/` directory:
 ```rust
 // tests/integration_test.rs
 use adk_core::*;
+use adk_schema::SchemaDocument;
 
 #[tokio::test]
 async fn test_full_workflow() {
@@ -773,6 +777,7 @@ The `--addon` flag is composable — combine any base template with any number o
 
 ```rust
 use adk_core::{Tool, ToolContext, Result};
+use adk_schema::SchemaDocument;
 use async_trait::async_trait;
 use serde_json::Value;
 
@@ -790,7 +795,7 @@ impl Tool for MyTool {
         "Does something useful"
     }
 
-    fn parameters_schema(&self) -> Option<Value> {
+    fn parameters_schema(&self) -> Option<SchemaDocument> {
         Some(serde_json::json!({
             "type": "object",
             "properties": {
@@ -830,6 +835,7 @@ pub use client::MyModelClient;
 
 ```rust
 use adk_core::{Llm, LlmRequest, LlmResponse, LlmResponseStream, Result};
+use adk_schema::SchemaDocument;
 
 pub struct MyModelClient {
     api_key: String,
@@ -874,6 +880,7 @@ pub use mymodel::MyModelClient;
 ```rust
 // adk-agent/src/my_agent.rs
 use adk_core::{Agent, EventStream, InvocationContext, Result};
+use adk_schema::SchemaDocument;
 use async_trait::async_trait;
 
 pub struct MyAgent {

@@ -47,6 +47,7 @@
 use std::sync::Arc;
 
 use adk_core::Tool;
+use adk_schema::SchemaDocument;
 use serde_json::{Map, Value};
 use thiserror::Error;
 
@@ -277,6 +278,7 @@ pub trait CodeRuntime: Send + Sync {
 /// use std::sync::Arc;
 /// use adk_agent::codeact::bind_call_args;
 /// # use adk_core::{Tool, ToolContext};
+use adk_schema::SchemaDocument;
 /// # use async_trait::async_trait;
 /// use serde_json::{json, Value};
 ///
@@ -285,7 +287,7 @@ pub trait CodeRuntime: Send + Sync {
 /// # impl Tool for Add {
 /// #     fn name(&self) -> &str { "add" }
 /// #     fn description(&self) -> &str { "add" }
-/// #     fn parameters_schema(&self) -> Option<Value> {
+/// #     fn parameters_schema(&self) -> Option<SchemaDocument> {
 /// #         Some(json!({"type": "object", "properties": {"a": {}, "b": {}}, "required": ["a", "b"]}))
 /// #     }
 /// #     async fn execute(&self, _c: Arc<dyn ToolContext>, _a: Value) -> adk_core::Result<Value> { Ok(Value::Null) }

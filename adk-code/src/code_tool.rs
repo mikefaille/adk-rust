@@ -15,6 +15,7 @@ use serde_json::{Value, json};
 use tracing::{debug, instrument};
 
 use adk_core::ToolContext;
+use adk_schema::SchemaDocument;
 
 use crate::error::CodeError;
 use crate::rust_executor::RustExecutor;
@@ -161,7 +162,7 @@ impl adk_core::Tool for CodeTool {
         REQUIRED_SCOPES
     }
 
-    fn parameters_schema(&self) -> Option<Value> {
+    fn parameters_schema(&self) -> Option<SchemaDocument> {
         Some(json!({
             "type": "object",
             "properties": {
@@ -415,13 +416,13 @@ mod tests {
     fn test_parameters_schema_is_valid() {
         let tool = make_tool();
         let schema = tool.parameters_schema().expect("schema should be Some");
-        assert_eq!(schema["type"], "object");
-        assert!(schema["properties"]["language"].is_object());
-        assert!(schema["properties"]["code"].is_object());
-        assert!(schema["properties"]["input"].is_object());
-        assert!(schema["properties"]["timeout_secs"].is_object());
+        assert_eq!(schema.document()["type"], "object");
+        assert!(schema.document()["properties"]["language"].is_object());
+        assert!(schema.document()["properties"]["code"].is_object());
+        assert!(schema.document()["properties"]["input"].is_object());
+        assert!(schema.document()["properties"]["timeout_secs"].is_object());
 
-        let required = schema["required"].as_array().unwrap();
+        let required = schema.document()["required"].as_array().unwrap();
         let required_strs: Vec<&str> = required.iter().map(|v| v.as_str().unwrap()).collect();
         assert!(required_strs.contains(&"code"));
         // language is optional (defaults to "rust")

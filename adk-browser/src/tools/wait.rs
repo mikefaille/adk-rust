@@ -2,6 +2,7 @@
 
 use crate::session::BrowserSession;
 use adk_core::{Result, Tool, ToolContext};
+use adk_schema::SchemaDocument;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -29,7 +30,7 @@ impl Tool for WaitForElementTool {
         "Wait for an element to appear on the page. Useful after navigation or dynamic content loading."
     }
 
-    fn parameters_schema(&self) -> Option<Value> {
+    fn parameters_schema(&self) -> Option<SchemaDocument> {
         Some(json!({
             "type": "object",
             "properties": {
@@ -50,7 +51,7 @@ impl Tool for WaitForElementTool {
         }))
     }
 
-    fn response_schema(&self) -> Option<Value> {
+    fn response_schema(&self) -> Option<SchemaDocument> {
         Some(json!({
             "type": "object",
             "properties": {
@@ -113,7 +114,7 @@ impl Tool for WaitTool {
         "Wait for a specified duration. Use sparingly - prefer waiting for specific elements."
     }
 
-    fn parameters_schema(&self) -> Option<Value> {
+    fn parameters_schema(&self) -> Option<SchemaDocument> {
         Some(json!({
             "type": "object",
             "properties": {
@@ -165,7 +166,7 @@ impl Tool for WaitForPageLoadTool {
         "Wait for the page to finish loading (document.readyState === 'complete')."
     }
 
-    fn parameters_schema(&self) -> Option<Value> {
+    fn parameters_schema(&self) -> Option<SchemaDocument> {
         Some(json!({
             "type": "object",
             "properties": {
@@ -232,7 +233,7 @@ impl Tool for WaitForTextTool {
         "Wait for specific text to appear anywhere on the page."
     }
 
-    fn parameters_schema(&self) -> Option<Value> {
+    fn parameters_schema(&self) -> Option<SchemaDocument> {
         Some(json!({
             "type": "object",
             "properties": {

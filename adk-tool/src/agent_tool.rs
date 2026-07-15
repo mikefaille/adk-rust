@@ -1,36 +1,38 @@
-//! AgentTool - Use agents as callable tools
-//!
-//! This module provides `AgentTool` which wraps an `Agent` instance to make it
-//! callable as a `Tool`. This enables powerful composition patterns where a
-//! coordinator agent can invoke specialized sub-agents.
-//!
-//! # Example
-//!
-//! ```rust,ignore
-//! use adk_tool::AgentTool;
-//! use adk_agent::LlmAgentBuilder;
-//!
-//! // Create a specialized agent
-//! let math_agent = LlmAgentBuilder::new("math_expert")
-//!     .description("Solves mathematical problems")
-//!     .instruction("You are a math expert. Solve problems step by step.")
-//!     .model(model.clone())
-//!     .build()?;
-//!
-//! // Wrap it as a tool
-//! let math_tool = AgentTool::new(Arc::new(math_agent));
-//!
-//! // Use in coordinator agent
-//! let coordinator = LlmAgentBuilder::new("coordinator")
-//!     .instruction("Help users by delegating to specialists")
-//!     .tools(vec![Arc::new(math_tool)])
-//!     .build()?;
-//! ```
-
 use adk_core::{
     Agent, Artifacts, CallbackContext, Content, Event, InvocationContext, Memory, Part,
     ReadonlyContext, Result, RunConfig, Session, State, Tool, ToolContext,
 };
+use adk_schema::SchemaDocument;
+/// AgentTool - Use agents as callable tools
+//
+/// This module provides `AgentTool` which wraps an `Agent` instance to make it
+/// callable as a `Tool`. This enables powerful composition patterns where a
+/// coordinator agent can invoke specialized sub-agents.
+//
+/// # Example
+//
+/// ```rust,ignore
+/// use adk_tool::AgentTool;
+/// use adk_agent::LlmAgentBuilder;
+//
+/// // Create a specialized agent
+/// let math_agent = LlmAgentBuilder::new("math_expert")
+///     .description("Solves mathematical problems")
+///     .instruction("You are a math expert. Solve problems step by step.")
+///     .model(model.clone())
+///     .build()?;
+//
+/// // Wrap it as a tool
+/// let math_tool = AgentTool::new(Arc::new(math_agent));
+//
+/// // Use in coordinator agent
+/// let coordinator = LlmAgentBuilder::new("coordinator")
+///     .instruction("Help users by delegating to specialists")
+///     .tools(vec![Arc::new(math_tool)])
+///     .build()?;
+/// ```
+use adk_schema::SchemaDocument;
+use adk_schema::SchemaDocument;
 use async_trait::async_trait;
 use futures::StreamExt;
 use serde_json::{Value, json};
@@ -211,12 +213,19 @@ impl Tool for AgentTool {
         self.agent.description()
     }
 
-    fn parameters_schema(&self) -> Option<Value> {
-        Some(self.config.input_schema.clone().unwrap_or_else(|| self.default_parameters_schema()))
+    fn parameters_schema(&self) -> Option<SchemaDocument> {
+        Some(SchemaDocument::for_input(
+            self.config.input_schema.clone().unwrap_or_else(|| self.default_parameters_schema()),
+        ))
     }
 
-    fn response_schema(&self) -> Option<Value> {
-        self.config.output_schema.clone()
+    fn response_schema(&self) -> Option<SchemaDocument> {
+        self.config
+            .output_schema
+            .clone()
+            .map(|v| SchemaDocument::for_output(v))
+            .map(|v| SchemaDocument::for_output(v))
+            .map(|v| SchemaDocument::for_output(v))
     }
 
     fn is_long_running(&self) -> bool {
@@ -558,8 +567,8 @@ mod tests {
         let tool = AgentTool::new(agent);
         let schema = tool.parameters_schema().unwrap();
 
-        assert_eq!(schema["type"], "object");
-        assert!(schema["properties"]["request"].is_object());
+        assert_eq!(schema.document()["type"], "object");
+        assert!(schema.document()["properties"]["request"].is_object());
     }
 
     #[test]

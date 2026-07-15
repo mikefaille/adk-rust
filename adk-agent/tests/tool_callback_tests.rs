@@ -103,11 +103,11 @@ impl Tool for CountingTool {
         "Test tool"
     }
 
-    fn parameters_schema(&self) -> Option<Value> {
+    fn parameters_schema(&self) -> Option<SchemaDocument> {
         None
     }
 
-    fn response_schema(&self) -> Option<Value> {
+    fn response_schema(&self) -> Option<SchemaDocument> {
         None
     }
 

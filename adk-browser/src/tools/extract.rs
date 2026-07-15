@@ -2,6 +2,7 @@
 
 use crate::session::BrowserSession;
 use adk_core::{Result, Tool, ToolContext};
+use adk_schema::SchemaDocument;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -28,7 +29,7 @@ impl Tool for ExtractTextTool {
         "Extract text content from one or more elements on the page."
     }
 
-    fn parameters_schema(&self) -> Option<Value> {
+    fn parameters_schema(&self) -> Option<SchemaDocument> {
         Some(json!({
             "type": "object",
             "properties": {
@@ -45,7 +46,7 @@ impl Tool for ExtractTextTool {
         }))
     }
 
-    fn response_schema(&self) -> Option<Value> {
+    fn response_schema(&self) -> Option<SchemaDocument> {
         Some(json!({
             "type": "object",
             "properties": {
@@ -115,7 +116,7 @@ impl Tool for ExtractAttributeTool {
         "Extract an attribute value from an element (e.g., href, src, value)."
     }
 
-    fn parameters_schema(&self) -> Option<Value> {
+    fn parameters_schema(&self) -> Option<SchemaDocument> {
         Some(json!({
             "type": "object",
             "properties": {
@@ -174,7 +175,7 @@ impl Tool for ExtractLinksTool {
         "Extract all links from the page or a specific container."
     }
 
-    fn parameters_schema(&self) -> Option<Value> {
+    fn parameters_schema(&self) -> Option<SchemaDocument> {
         Some(json!({
             "type": "object",
             "properties": {
@@ -244,11 +245,11 @@ impl Tool for PageInfoTool {
         "Get information about the current page (title, URL, etc.)."
     }
 
-    fn parameters_schema(&self) -> Option<Value> {
-        Some(json!({
+    fn parameters_schema(&self) -> Option<SchemaDocument> {
+        Some(SchemaDocument::for_input(json!({
             "type": "object",
             "properties": {}
-        }))
+        })))
     }
 
     async fn execute(&self, _ctx: Arc<dyn ToolContext>, _args: Value) -> Result<Value> {
@@ -284,7 +285,7 @@ impl Tool for PageSourceTool {
         "Get the HTML source of the current page. Warning: may be large."
     }
 
-    fn parameters_schema(&self) -> Option<Value> {
+    fn parameters_schema(&self) -> Option<SchemaDocument> {
         Some(json!({
             "type": "object",
             "properties": {

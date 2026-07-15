@@ -128,7 +128,7 @@ impl Tool for McpFileTool {
     fn description(&self) -> &str {
         "Read file content via MCP"
     }
-    fn parameters_schema(&self) -> Option<Value> {
+    fn parameters_schema(&self) -> Option<SchemaDocument> {
         Some(json!({
             "type": "object",
             "properties": {
@@ -140,7 +140,7 @@ impl Tool for McpFileTool {
             "required": ["path"]
         }))
     }
-    fn response_schema(&self) -> Option<Value> {
+    fn response_schema(&self) -> Option<SchemaDocument> {
         None
     }
 

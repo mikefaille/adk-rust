@@ -2,6 +2,7 @@
 
 use crate::session::BrowserSession;
 use adk_core::{Result, Tool, ToolContext};
+use adk_schema::SchemaDocument;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -28,7 +29,7 @@ impl Tool for TypeTool {
         "Type text into an input field or text area. Can optionally clear the field first."
     }
 
-    fn parameters_schema(&self) -> Option<Value> {
+    fn parameters_schema(&self) -> Option<SchemaDocument> {
         Some(json!({
             "type": "object",
             "properties": {
@@ -53,7 +54,7 @@ impl Tool for TypeTool {
         }))
     }
 
-    fn response_schema(&self) -> Option<Value> {
+    fn response_schema(&self) -> Option<SchemaDocument> {
         Some(json!({
             "type": "object",
             "properties": {
@@ -141,7 +142,7 @@ impl Tool for ClearTool {
         "Clear the contents of an input field or text area."
     }
 
-    fn parameters_schema(&self) -> Option<Value> {
+    fn parameters_schema(&self) -> Option<SchemaDocument> {
         Some(json!({
             "type": "object",
             "properties": {
@@ -193,7 +194,7 @@ impl Tool for SelectTool {
         "Select an option from a dropdown/select element by value, text, or index."
     }
 
-    fn parameters_schema(&self) -> Option<Value> {
+    fn parameters_schema(&self) -> Option<SchemaDocument> {
         Some(json!({
             "type": "object",
             "properties": {

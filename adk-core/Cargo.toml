@@ -13,6 +13,7 @@ categories = ["api-bindings", "asynchronous"]
 readme = "README.md"
 
 [dependencies]
+adk-schema = { workspace = true }
 async-trait = { workspace = true }
 futures = { workspace = true }
 serde = { workspace = true }

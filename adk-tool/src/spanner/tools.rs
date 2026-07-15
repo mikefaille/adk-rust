@@ -6,6 +6,7 @@
 
 use crate::spanner::toolset::CredentialSource;
 use adk_core::{AdkError, ErrorCategory, ErrorComponent, Result, Tool, ToolContext};
+use adk_schema::SchemaDocument;
 use async_trait::async_trait;
 use google_cloud_spanner::client::{Client, ClientConfig, Error as SpannerError};
 use google_cloud_spanner::statement::Statement;
@@ -206,7 +207,7 @@ impl Tool for SpannerExecuteSql {
         "Execute a SQL query against Google Cloud Spanner and return results as a JSON array of row objects."
     }
 
-    fn parameters_schema(&self) -> Option<Value> {
+    fn parameters_schema(&self) -> Option<SchemaDocument> {
         Some(json!({
             "type": "object",
             "properties": {
@@ -342,7 +343,7 @@ impl Tool for SpannerGetTableSchema {
         "Retrieve the schema (column definitions and key information) for a Cloud Spanner table."
     }
 
-    fn parameters_schema(&self) -> Option<Value> {
+    fn parameters_schema(&self) -> Option<SchemaDocument> {
         Some(json!({
             "type": "object",
             "properties": {
@@ -485,11 +486,11 @@ impl Tool for SpannerListTables {
         "List all tables in a Google Cloud Spanner database."
     }
 
-    fn parameters_schema(&self) -> Option<Value> {
-        Some(json!({
+    fn parameters_schema(&self) -> Option<SchemaDocument> {
+        Some(SchemaDocument::for_input(json!({
             "type": "object",
             "properties": {}
-        }))
+        })))
     }
 
     fn is_read_only(&self) -> bool {

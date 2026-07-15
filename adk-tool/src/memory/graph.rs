@@ -42,6 +42,7 @@ use std::sync::Arc;
 
 use adk_core::{AdkError, ReadonlyContext, Result, Tool, ToolContext, Toolset};
 use adk_memory::{CreateEntityInput, CreateRelationInput, GraphMemoryService};
+use adk_schema::SchemaDocument;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
@@ -80,7 +81,7 @@ impl Tool for RememberTool {
          name); `facts` is one or more short statements."
     }
 
-    fn parameters_schema(&self) -> Option<Value> {
+    fn parameters_schema(&self) -> Option<SchemaDocument> {
         Some(json!({
             "type": "object",
             "properties": {
@@ -194,7 +195,7 @@ impl Tool for RelateTool {
          relation type."
     }
 
-    fn parameters_schema(&self) -> Option<Value> {
+    fn parameters_schema(&self) -> Option<SchemaDocument> {
         Some(json!({
             "type": "object",
             "properties": {
@@ -290,6 +291,7 @@ impl Toolset for GraphMemoryToolset {
 mod tests {
     use super::*;
     use adk_core::{Content, EventActions, ReadonlyContext};
+    use adk_schema::SchemaDocument;
 
     struct MockToolContext;
 

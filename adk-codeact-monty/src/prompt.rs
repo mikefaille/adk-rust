@@ -7,6 +7,7 @@
 //! invocations — the single way a script calls a tool.
 
 use adk_core::Tool;
+use adk_schema::SchemaDocument;
 use serde_json::{Map, Value};
 
 /// The Monty language briefing injected verbatim into the system prompt.
@@ -163,7 +164,7 @@ mod tests {
         fn description(&self) -> &str {
             "Search the web\nfor a query."
         }
-        fn parameters_schema(&self) -> Option<Value> {
+        fn parameters_schema(&self) -> Option<SchemaDocument> {
             Some(serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -206,7 +207,7 @@ mod tests {
         fn description(&self) -> &str {
             "Fetch a cart."
         }
-        fn parameters_schema(&self) -> Option<Value> {
+        fn parameters_schema(&self) -> Option<SchemaDocument> {
             Some(serde_json::json!({
                 "type": "object",
                 "properties": { "user_id": {"type": "string"} },
@@ -271,7 +272,7 @@ mod tests {
         fn description(&self) -> &str {
             "Classify input."
         }
-        fn parameters_schema(&self) -> Option<Value> {
+        fn parameters_schema(&self) -> Option<SchemaDocument> {
             Some(serde_json::json!({
                 "type": "object",
                 "properties": { "class": {"type": "string"} },

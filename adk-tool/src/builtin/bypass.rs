@@ -1,25 +1,25 @@
-//! Bypass wrapper for built-in tools (`bypass_multi_tools_limit`).
-//!
-//! The Gemini Interactions API rejects mixing custom function tools with
-//! built-in (server-side) tools such as `google_search` in a single request.
-//! ADK-Python solves this with `bypass_multi_tools_limit=True`, which converts a
-//! built-in tool into a *function-calling* tool so every tool in the request is
-//! uniform.
-//!
-//! [`BypassBuiltinTool`] is the Rust equivalent. It reports
-//! `is_builtin() == false`, exposes a normal function-calling parameter schema,
-//! and routes execution through an internal single-turn agent (reusing
-//! [`AgentTool`](crate::AgentTool)). The supplied agent is expected to be an
-//! `LlmAgent` configured with the corresponding built-in tool and a Gemini
-//! model, so the grounded behaviour (e.g. Google Search) is performed
-//! server-side and its result is returned as a function response — exactly
-//! ADK-Python's `GoogleSearchAgentTool` pattern.
-//!
-//! Because `adk-tool` cannot depend on `adk-agent` (that would be circular), the
-//! internal agent is supplied by the caller rather than constructed here.
-
+/// Bypass wrapper for built-in tools (`bypass_multi_tools_limit`).
+//
+/// The Gemini Interactions API rejects mixing custom function tools with
+/// built-in (server-side) tools such as `google_search` in a single request.
+/// ADK-Python solves this with `bypass_multi_tools_limit=True`, which converts a
+/// built-in tool into a *function-calling* tool so every tool in the request is
+/// uniform.
+//
+/// [`BypassBuiltinTool`] is the Rust equivalent. It reports
+/// `is_builtin() == false`, exposes a normal function-calling parameter schema,
+/// and routes execution through an internal single-turn agent (reusing
+/// [`AgentTool`](crate::AgentTool)). The supplied agent is expected to be an
+/// `LlmAgent` configured with the corresponding built-in tool and a Gemini
+/// model, so the grounded behaviour (e.g. Google Search) is performed
+/// server-side and its result is returned as a function response — exactly
+/// ADK-Python's `GoogleSearchAgentTool` pattern.
+//
+/// Because `adk-tool` cannot depend on `adk-agent` (that would be circular), the
+/// internal agent is supplied by the caller rather than constructed here.
 use crate::AgentTool;
 use adk_core::{Agent, Result, Tool, ToolContext};
+use adk_schema::SchemaDocument;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -168,8 +168,8 @@ impl Tool for BypassBuiltinTool {
         false
     }
 
-    fn parameters_schema(&self) -> Option<Value> {
-        Some(self.parameters_schema.clone())
+    fn parameters_schema(&self) -> Option<SchemaDocument> {
+        Some(SchemaDocument::for_input(self.parameters_schema.clone()))
     }
 
     async fn execute(&self, ctx: Arc<dyn ToolContext>, args: Value) -> Result<Value> {

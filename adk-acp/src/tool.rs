@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use adk_core::{AdkError, Result, Tool, ToolContext};
+use adk_schema::SchemaDocument;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use tracing::{debug, info, warn};
@@ -138,7 +139,7 @@ impl Tool for AcpAgentTool {
         &self.description
     }
 
-    fn parameters_schema(&self) -> Option<Value> {
+    fn parameters_schema(&self) -> Option<SchemaDocument> {
         Some(json!({
             "type": "object",
             "properties": {

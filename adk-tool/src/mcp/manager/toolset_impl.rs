@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use adk_core::{ReadonlyContext, Result, Tool, Toolset};
+use adk_schema::SchemaDocument;
 use async_trait::async_trait;
 use serde_json::Value;
 
@@ -44,11 +45,11 @@ impl Tool for PrefixedTool {
         self.inner.is_long_running()
     }
 
-    fn parameters_schema(&self) -> Option<Value> {
+    fn parameters_schema(&self) -> Option<SchemaDocument> {
         self.inner.parameters_schema()
     }
 
-    fn response_schema(&self) -> Option<Value> {
+    fn response_schema(&self) -> Option<SchemaDocument> {
         self.inner.response_schema()
     }
 
@@ -163,6 +164,7 @@ impl Toolset for McpServerManager {
 mod tests {
     use super::*;
     use adk_core::ToolContext;
+    use adk_schema::SchemaDocument;
 
     /// A minimal test tool for verifying collision resolution.
     struct FakeTool {

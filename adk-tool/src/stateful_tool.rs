@@ -1,9 +1,7 @@
 use adk_core::{Result, Tool, ToolContext};
+use adk_schema::{SchemaDocument, static_schema};
 use async_trait::async_trait;
-use schemars::{
-    JsonSchema,
-    generate::{SchemaGenerator, SchemaSettings},
-};
+use schemars::JsonSchema;
 use serde::Serialize;
 use serde_json::Value;
 use std::future::Future;
@@ -20,37 +18,6 @@ type AsyncStatefulHandler<S> = Box<
         + Sync,
 >;
 
-/// A generic tool wrapper that manages shared state for stateful closures.
-///
-/// `StatefulTool<S>` accepts an `Arc<S>` and a handler closure that receives
-/// the state alongside the tool context and arguments. The `Arc<S>` is cloned
-/// (cheap reference count bump) on each invocation, so all executions share
-/// the same underlying state.
-///
-/// # Example
-///
-/// ```rust,ignore
-/// use adk_tool::StatefulTool;
-/// use adk_core::{ToolContext, Result};
-/// use serde_json::{json, Value};
-/// use std::sync::Arc;
-/// use tokio::sync::RwLock;
-///
-/// struct Counter { count: RwLock<u64> }
-///
-/// let state = Arc::new(Counter { count: RwLock::new(0) });
-///
-/// let tool = StatefulTool::new(
-///     "increment",
-///     "Increment a counter",
-///     state,
-///     |s, _ctx, _args| async move {
-///         let mut count = s.count.write().await;
-///         *count += 1;
-///         Ok(json!({ "count": *count }))
-///     },
-/// );
-/// ```
 pub struct StatefulTool<S: Send + Sync + 'static> {
     name: String,
     description: String,
@@ -59,20 +26,12 @@ pub struct StatefulTool<S: Send + Sync + 'static> {
     long_running: bool,
     read_only: bool,
     concurrency_safe: bool,
-    parameters_schema: Option<Value>,
-    response_schema: Option<Value>,
+    parameters_schema: Option<SchemaDocument>,
+    response_schema: Option<SchemaDocument>,
     scopes: Vec<&'static str>,
 }
 
 impl<S: Send + Sync + 'static> StatefulTool<S> {
-    /// Create a new stateful tool.
-    ///
-    /// # Arguments
-    ///
-    /// * `name` - Tool name exposed to the LLM
-    /// * `description` - Human-readable description of what the tool does
-    /// * `state` - Shared state wrapped in `Arc<S>`
-    /// * `handler` - Async closure receiving `(Arc<S>, Arc<dyn ToolContext>, Value)`
     pub fn new<F, Fut>(
         name: impl Into<String>,
         description: impl Into<String>,
@@ -97,63 +56,54 @@ impl<S: Send + Sync + 'static> StatefulTool<S> {
         }
     }
 
-    /// Mark this tool as long-running (prevents duplicate invocations).
     pub fn with_long_running(mut self, long_running: bool) -> Self {
         self.long_running = long_running;
         self
     }
 
-    /// Mark this tool as read-only (safe for parallel dispatch).
     pub fn with_read_only(mut self, read_only: bool) -> Self {
         self.read_only = read_only;
         self
     }
 
-    /// Mark this tool as concurrency-safe (can run in parallel with other tools).
     pub fn with_concurrency_safe(mut self, concurrency_safe: bool) -> Self {
         self.concurrency_safe = concurrency_safe;
         self
     }
 
-    /// Derive the parameters JSON Schema from a type implementing `JsonSchema`.
     pub fn with_parameters_schema<T>(mut self) -> Self
     where
         T: JsonSchema + Serialize,
     {
-        self.parameters_schema = Some(generate_schema::<T>());
+        self.parameters_schema = Some(
+            static_schema::for_deserialize::<T>().expect("failed to generate parameters schema"),
+        );
         self
     }
 
-    /// Derive the response JSON Schema from a type implementing `JsonSchema`.
     pub fn with_response_schema<T>(mut self) -> Self
     where
         T: JsonSchema + Serialize,
     {
-        self.response_schema = Some(generate_schema::<T>());
+        self.response_schema =
+            Some(static_schema::for_serialize::<T>().expect("failed to generate response schema"));
         self
     }
 
-    /// Declare the scopes required to execute this tool.
-    ///
-    /// When set, the framework will enforce that the calling user possesses
-    /// **all** listed scopes before dispatching `execute()`.
     pub fn with_scopes(mut self, scopes: &[&'static str]) -> Self {
         self.scopes = scopes.to_vec();
         self
     }
 
-    /// Get the parameters schema, if set.
-    pub fn parameters_schema(&self) -> Option<&Value> {
+    pub fn parameters_schema(&self) -> Option<&SchemaDocument> {
         self.parameters_schema.as_ref()
     }
 
-    /// Get the response schema, if set.
-    pub fn response_schema(&self) -> Option<&Value> {
+    pub fn response_schema(&self) -> Option<&SchemaDocument> {
         self.response_schema.as_ref()
     }
 }
 
-/// The note appended to long-running tool descriptions to prevent duplicate calls.
 const LONG_RUNNING_NOTE: &str = "NOTE: This is a long-running operation. Do not call this tool again if it has already returned some intermediate or pending status.";
 
 #[async_trait]
@@ -190,11 +140,11 @@ impl<S: Send + Sync + 'static> Tool for StatefulTool<S> {
         self.concurrency_safe
     }
 
-    fn parameters_schema(&self) -> Option<Value> {
+    fn parameters_schema(&self) -> Option<SchemaDocument> {
         self.parameters_schema.clone()
     }
 
-    fn response_schema(&self) -> Option<Value> {
+    fn response_schema(&self) -> Option<SchemaDocument> {
         self.response_schema.clone()
     }
 
@@ -216,20 +166,4 @@ impl<S: Send + Sync + 'static> Tool for StatefulTool<S> {
         let state = Arc::clone(&self.state);
         (self.handler)(state, ctx, args).await
     }
-}
-
-fn generate_schema<T>() -> Value
-where
-    T: JsonSchema + Serialize,
-{
-    let settings = SchemaSettings::openapi3().with(|s| {
-        s.inline_subschemas = true;
-        s.meta_schema = None;
-    });
-    let generator = SchemaGenerator::new(settings);
-    let mut schema = generator.into_root_schema_for::<T>();
-    if let Some(object) = schema.as_object_mut() {
-        object.remove("title");
-    }
-    serde_json::to_value(schema).unwrap()
 }

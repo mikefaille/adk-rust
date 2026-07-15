@@ -2,6 +2,7 @@
 
 use crate::session::BrowserSession;
 use adk_core::{AdkError, Result, Tool, ToolContext};
+use adk_schema::SchemaDocument;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -27,7 +28,7 @@ impl Tool for DragAndDropTool {
         "Drag an element and drop it onto another element."
     }
 
-    fn parameters_schema(&self) -> Option<Value> {
+    fn parameters_schema(&self) -> Option<SchemaDocument> {
         Some(json!({
             "type": "object",
             "properties": {
@@ -86,7 +87,7 @@ impl Tool for RightClickTool {
         "Right-click (context click) on an element to open context menu."
     }
 
-    fn parameters_schema(&self) -> Option<Value> {
+    fn parameters_schema(&self) -> Option<SchemaDocument> {
         Some(json!({
             "type": "object",
             "properties": {
@@ -135,7 +136,7 @@ impl Tool for FocusTool {
         "Focus on an element (useful for inputs before typing)."
     }
 
-    fn parameters_schema(&self) -> Option<Value> {
+    fn parameters_schema(&self) -> Option<SchemaDocument> {
         Some(json!({
             "type": "object",
             "properties": {
@@ -184,7 +185,7 @@ impl Tool for ElementStateTool {
         "Check the state of an element (displayed, enabled, selected, clickable)."
     }
 
-    fn parameters_schema(&self) -> Option<Value> {
+    fn parameters_schema(&self) -> Option<SchemaDocument> {
         Some(json!({
             "type": "object",
             "properties": {
@@ -237,7 +238,7 @@ impl Tool for PressKeyTool {
         "Press a keyboard key (Enter, Escape, Tab, etc.) optionally on a specific element."
     }
 
-    fn parameters_schema(&self) -> Option<Value> {
+    fn parameters_schema(&self) -> Option<SchemaDocument> {
         Some(json!({
             "type": "object",
             "properties": {
@@ -304,7 +305,7 @@ impl Tool for FileUploadTool {
         "Upload a file to a file input element."
     }
 
-    fn parameters_schema(&self) -> Option<Value> {
+    fn parameters_schema(&self) -> Option<SchemaDocument> {
         Some(json!({
             "type": "object",
             "properties": {
@@ -363,7 +364,7 @@ impl Tool for PrintToPdfTool {
         "Print the current page to PDF and return as base64."
     }
 
-    fn parameters_schema(&self) -> Option<Value> {
+    fn parameters_schema(&self) -> Option<SchemaDocument> {
         Some(json!({
             "type": "object",
             "properties": {

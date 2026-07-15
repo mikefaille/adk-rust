@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use adk_core::{AdkError, Result, Tool, ToolContext};
 use adk_memory::{MemoryService, SearchRequest};
+use adk_schema::SchemaDocument;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
@@ -56,7 +57,7 @@ impl Tool for LoadMemoryTool {
         true
     }
 
-    fn parameters_schema(&self) -> Option<Value> {
+    fn parameters_schema(&self) -> Option<SchemaDocument> {
         Some(json!({
             "type": "object",
             "properties": {
@@ -165,6 +166,7 @@ mod tests {
     use super::*;
     use adk_core::{Content, EventActions, ReadonlyContext};
     use adk_memory::{InMemoryMemoryService, MemoryEntry};
+    use adk_schema::SchemaDocument;
     use chrono::Utc;
     use std::sync::Mutex;
 

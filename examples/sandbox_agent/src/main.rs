@@ -36,6 +36,7 @@ use std::time::Duration;
 
 use adk_agent::LlmAgentBuilder;
 use adk_core::{Content, Event, Part, Tool, ToolContext};
+use adk_schema::SchemaDocument;
 use adk_model::gemini::GeminiModel;
 use adk_runner::Runner;
 use adk_sandbox::{
@@ -180,7 +181,7 @@ impl Tool for SandboxedCodeTool {
          stderr, and exit_code fields."
     }
 
-    fn parameters_schema(&self) -> Option<Value> {
+    fn parameters_schema(&self) -> Option<SchemaDocument> {
         Some(serde_json::json!({
             "type": "object",
             "properties": {

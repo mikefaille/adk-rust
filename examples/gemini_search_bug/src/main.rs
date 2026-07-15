@@ -4,6 +4,7 @@
 //! tool coexistence, with full ServerToolCall/ServerToolResponse tracing.
 
 use adk_core::{Part, SessionId, Tool, ToolContext, UserId};
+use adk_schema::SchemaDocument;
 use adk_model::GeminiModel;
 use adk_runner::Runner;
 use adk_session::{CreateRequest, InMemorySessionService, SessionService};
@@ -14,6 +15,7 @@ use std::sync::Arc;
 
 use adk_agent::LlmAgentBuilder;
 use adk_core::Agent;
+use adk_schema::SchemaDocument;
 
 const APP_NAME: &str = "gemini-search-bug";
 const MODEL_NAME: &str = "gemini-3-pro-preview";
@@ -69,7 +71,7 @@ fn note_tool() -> Arc<dyn Tool> {
         fn description(&self) -> &str {
             "Record that a tool was used. Call this after using any built-in tool."
         }
-        fn parameters_schema(&self) -> Option<Value> {
+        fn parameters_schema(&self) -> Option<SchemaDocument> {
             Some(json!({
                 "type": "object",
                 "properties": {

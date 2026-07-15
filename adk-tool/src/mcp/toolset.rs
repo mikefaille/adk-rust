@@ -9,6 +9,7 @@
 use super::task::{McpTaskConfig, TaskError, TaskStatus};
 use super::{ConnectionFactory, RefreshConfig, should_refresh_connection};
 use adk_core::{AdkError, ReadonlyContext, Result, Tool, ToolContext, Toolset};
+use adk_schema::SchemaDocument;
 use async_trait::async_trait;
 use rmcp::{
     RoleClient,
@@ -877,11 +878,11 @@ where
         self.is_long_running
     }
 
-    fn parameters_schema(&self) -> Option<Value> {
+    fn parameters_schema(&self) -> Option<SchemaDocument> {
         self.input_schema.clone()
     }
 
-    fn response_schema(&self) -> Option<Value> {
+    fn response_schema(&self) -> Option<SchemaDocument> {
         self.output_schema.clone()
     }
 

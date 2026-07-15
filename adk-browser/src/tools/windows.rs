@@ -2,6 +2,7 @@
 
 use crate::session::BrowserSession;
 use adk_core::{AdkError, Result, Tool, ToolContext};
+use adk_schema::SchemaDocument;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -27,11 +28,11 @@ impl Tool for ListWindowsTool {
         "List all open browser windows/tabs."
     }
 
-    fn parameters_schema(&self) -> Option<Value> {
-        Some(json!({
+    fn parameters_schema(&self) -> Option<SchemaDocument> {
+        Some(SchemaDocument::for_input(json!({
             "type": "object",
             "properties": {}
-        }))
+        })))
     }
 
     async fn execute(&self, _ctx: Arc<dyn ToolContext>, _args: Value) -> Result<Value> {
@@ -67,7 +68,7 @@ impl Tool for NewTabTool {
         "Open a new browser tab and switch to it."
     }
 
-    fn parameters_schema(&self) -> Option<Value> {
+    fn parameters_schema(&self) -> Option<SchemaDocument> {
         Some(json!({
             "type": "object",
             "properties": {
@@ -119,7 +120,7 @@ impl Tool for NewWindowTool {
         "Open a new browser window and switch to it."
     }
 
-    fn parameters_schema(&self) -> Option<Value> {
+    fn parameters_schema(&self) -> Option<SchemaDocument> {
         Some(json!({
             "type": "object",
             "properties": {
@@ -171,7 +172,7 @@ impl Tool for SwitchWindowTool {
         "Switch to a different browser window/tab by its handle."
     }
 
-    fn parameters_schema(&self) -> Option<Value> {
+    fn parameters_schema(&self) -> Option<SchemaDocument> {
         Some(json!({
             "type": "object",
             "properties": {
@@ -225,11 +226,11 @@ impl Tool for CloseWindowTool {
         "Close the current browser window/tab."
     }
 
-    fn parameters_schema(&self) -> Option<Value> {
-        Some(json!({
+    fn parameters_schema(&self) -> Option<SchemaDocument> {
+        Some(SchemaDocument::for_input(json!({
             "type": "object",
             "properties": {}
-        }))
+        })))
     }
 
     async fn execute(&self, _ctx: Arc<dyn ToolContext>, _args: Value) -> Result<Value> {
@@ -263,11 +264,11 @@ impl Tool for MaximizeWindowTool {
         "Maximize the browser window."
     }
 
-    fn parameters_schema(&self) -> Option<Value> {
-        Some(json!({
+    fn parameters_schema(&self) -> Option<SchemaDocument> {
+        Some(SchemaDocument::for_input(json!({
             "type": "object",
             "properties": {}
-        }))
+        })))
     }
 
     async fn execute(&self, _ctx: Arc<dyn ToolContext>, _args: Value) -> Result<Value> {
@@ -301,11 +302,11 @@ impl Tool for MinimizeWindowTool {
         "Minimize the browser window."
     }
 
-    fn parameters_schema(&self) -> Option<Value> {
-        Some(json!({
+    fn parameters_schema(&self) -> Option<SchemaDocument> {
+        Some(SchemaDocument::for_input(json!({
             "type": "object",
             "properties": {}
-        }))
+        })))
     }
 
     async fn execute(&self, _ctx: Arc<dyn ToolContext>, _args: Value) -> Result<Value> {
@@ -339,7 +340,7 @@ impl Tool for SetWindowSizeTool {
         "Set the browser window size and position."
     }
 
-    fn parameters_schema(&self) -> Option<Value> {
+    fn parameters_schema(&self) -> Option<SchemaDocument> {
         Some(json!({
             "type": "object",
             "properties": {

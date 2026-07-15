@@ -19,6 +19,7 @@
 use std::sync::Arc;
 
 use adk_core::{AdkError, Tool, ToolContext};
+use adk_schema::SchemaDocument;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use tracing::{error, info};
@@ -55,7 +56,7 @@ impl Tool for RagTool {
         "Search a knowledge base for relevant documents given a query"
     }
 
-    fn parameters_schema(&self) -> Option<Value> {
+    fn parameters_schema(&self) -> Option<SchemaDocument> {
         Some(json!({
             "type": "object",
             "properties": {

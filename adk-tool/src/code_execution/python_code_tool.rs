@@ -16,6 +16,7 @@ use adk_code::{
     ExecutionRequest, SandboxPolicy,
 };
 use adk_core::{Result, Tool, ToolContext};
+use adk_schema::SchemaDocument;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -85,7 +86,7 @@ impl Tool for PythonCodeTool {
         &["code:execute", "code:execute:container"]
     }
 
-    fn parameters_schema(&self) -> Option<Value> {
+    fn parameters_schema(&self) -> Option<SchemaDocument> {
         Some(json!({
             "type": "object",
             "properties": {

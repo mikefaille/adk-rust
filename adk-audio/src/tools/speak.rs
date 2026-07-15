@@ -1,5 +1,5 @@
-//! SpeakTool — synthesize text to speech via a configured TtsProvider.
-
+use adk_schema::SchemaDocument;
+/// SpeakTool — synthesize text to speech via a configured TtsProvider.
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -32,7 +32,7 @@ impl adk_core::Tool for SpeakTool {
         "Synthesize text to speech audio"
     }
 
-    fn parameters_schema(&self) -> Option<Value> {
+    fn parameters_schema(&self) -> Option<SchemaDocument> {
         Some(serde_json::json!({
             "type": "object",
             "properties": {

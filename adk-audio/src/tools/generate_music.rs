@@ -1,5 +1,5 @@
-//! GenerateMusicTool — generate music via a configured MusicProvider.
-
+use adk_schema::SchemaDocument;
+/// GenerateMusicTool — generate music via a configured MusicProvider.
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -31,7 +31,7 @@ impl adk_core::Tool for GenerateMusicTool {
         "Generate music or ambient audio from a text prompt"
     }
 
-    fn parameters_schema(&self) -> Option<Value> {
+    fn parameters_schema(&self) -> Option<SchemaDocument> {
         Some(serde_json::json!({
             "type": "object",
             "properties": {

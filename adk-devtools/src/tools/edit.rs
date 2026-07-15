@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use adk_core::{Result, Tool, ToolContext};
+use adk_schema::SchemaDocument;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
@@ -35,7 +36,7 @@ impl Tool for EditFileTool {
          to replace every occurrence."
     }
 
-    fn parameters_schema(&self) -> Option<Value> {
+    fn parameters_schema(&self) -> Option<SchemaDocument> {
         Some(json!({
             "type": "object",
             "properties": {

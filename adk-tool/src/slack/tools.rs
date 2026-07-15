@@ -5,6 +5,7 @@
 
 use crate::slack::toolset::TokenSource;
 use adk_core::{AdkError, ErrorCategory, ErrorComponent, Result, Tool, ToolContext};
+use adk_schema::SchemaDocument;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -90,7 +91,7 @@ impl Tool for SlackSendMessage {
         "Post a message to a Slack channel or thread. Returns the message timestamp on success."
     }
 
-    fn parameters_schema(&self) -> Option<Value> {
+    fn parameters_schema(&self) -> Option<SchemaDocument> {
         Some(json!({
             "type": "object",
             "properties": {
@@ -202,7 +203,7 @@ impl Tool for SlackReadChannel {
         "Retrieve recent messages from a Slack channel."
     }
 
-    fn parameters_schema(&self) -> Option<Value> {
+    fn parameters_schema(&self) -> Option<SchemaDocument> {
         Some(json!({
             "type": "object",
             "properties": {
@@ -298,7 +299,7 @@ impl Tool for SlackAddReaction {
         "Add an emoji reaction to a message in a Slack channel."
     }
 
-    fn parameters_schema(&self) -> Option<Value> {
+    fn parameters_schema(&self) -> Option<SchemaDocument> {
         Some(json!({
             "type": "object",
             "properties": {
@@ -413,7 +414,7 @@ impl Tool for SlackListThreads {
         "List active threads in a Slack channel. Returns messages that have thread replies."
     }
 
-    fn parameters_schema(&self) -> Option<Value> {
+    fn parameters_schema(&self) -> Option<SchemaDocument> {
         Some(json!({
             "type": "object",
             "properties": {

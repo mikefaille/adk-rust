@@ -34,6 +34,7 @@ use std::sync::Arc;
 use adk_acp::server::{AcpServer, AcpServerConfigBuilder, TransportConfig};
 use adk_agent::LlmAgentBuilder;
 use adk_core::{Agent, Llm, Tool, ToolContext, async_trait};
+use adk_schema::SchemaDocument;
 use adk_model::GeminiModel;
 use adk_session::{InMemorySessionService, SessionService};
 use serde_json::{Value, json};
@@ -59,7 +60,7 @@ impl Tool for ReadFileTool {
         "Read the contents of a file at the given path. Returns the file content as text."
     }
 
-    fn parameters_schema(&self) -> Option<Value> {
+    fn parameters_schema(&self) -> Option<SchemaDocument> {
         Some(json!({
             "type": "object",
             "properties": {
@@ -108,7 +109,7 @@ impl Tool for ListDirectoryTool {
         "List the files and subdirectories in a given directory path."
     }
 
-    fn parameters_schema(&self) -> Option<Value> {
+    fn parameters_schema(&self) -> Option<SchemaDocument> {
         Some(json!({
             "type": "object",
             "properties": {

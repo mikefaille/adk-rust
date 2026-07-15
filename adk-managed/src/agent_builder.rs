@@ -22,6 +22,7 @@ use adk_agent::LlmAgentBuilder;
 use adk_core::{Agent, Llm, Tool, ToolConfirmationPolicy, ToolContext};
 #[cfg(feature = "sandbox")]
 use adk_sandbox::{ExecRequest, Language, SandboxBackend};
+use adk_schema::SchemaDocument;
 
 use crate::types::{ManagedAgentDef, PermissionMode, PermissionPolicy, ToolConfig};
 
@@ -577,7 +578,7 @@ impl Tool for ManagedCustomTool {
         &self.description
     }
 
-    fn parameters_schema(&self) -> Option<Value> {
+    fn parameters_schema(&self) -> Option<SchemaDocument> {
         Some(self.input_schema.clone())
     }
 
@@ -606,6 +607,7 @@ mod tests {
     use super::*;
     use crate::types::{ManagedAgentDef, ModelRef, PermissionMode, PermissionPolicy, ToolConfig};
     use adk_core::{Content, FinishReason, Llm, LlmRequest, LlmResponse, LlmResponseStream};
+    use adk_schema::SchemaDocument;
     use async_stream::stream;
     use std::collections::HashMap;
 

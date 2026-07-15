@@ -1,4 +1,5 @@
 use adk_core::{AdkError, Result, Tool, ToolContext};
+use adk_schema::SchemaDocument;
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde_json::{Value, json};
@@ -40,8 +41,8 @@ impl Tool for LoadArtifactsTool {
         false
     }
 
-    fn parameters_schema(&self) -> Option<Value> {
-        Some(json!({
+    fn parameters_schema(&self) -> Option<SchemaDocument> {
+        Some(SchemaDocument::for_input(json!({
             "type": "object",
             "properties": {
                 "artifact_names": {
@@ -53,7 +54,7 @@ impl Tool for LoadArtifactsTool {
                 }
             },
             "required": ["artifact_names"]
-        }))
+        })))
     }
 
     async fn execute(&self, ctx: Arc<dyn ToolContext>, args: Value) -> Result<Value> {

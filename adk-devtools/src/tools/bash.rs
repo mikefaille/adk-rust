@@ -14,6 +14,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use adk_core::{Result, Tool, ToolContext};
+use adk_schema::SchemaDocument;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -49,7 +50,7 @@ impl Tool for BashTool {
          exit code. Streams output incrementally for live UI display. Has a timeout."
     }
 
-    fn parameters_schema(&self) -> Option<Value> {
+    fn parameters_schema(&self) -> Option<SchemaDocument> {
         Some(json!({
             "type": "object",
             "properties": {

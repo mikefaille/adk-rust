@@ -64,7 +64,7 @@ impl Tool for PreloadMemoryTool {
         true
     }
 
-    fn parameters_schema(&self) -> Option<Value> {
+    fn parameters_schema(&self) -> Option<SchemaDocument> {
         Some(json!({
             "type": "object",
             "properties": {
@@ -233,6 +233,7 @@ mod tests {
     use super::*;
     use adk_core::{Content, EventActions, ReadonlyContext};
     use adk_memory::{InMemoryMemoryService, MemoryEntry};
+    use adk_schema::SchemaDocument;
     use chrono::Utc;
     use std::collections::HashMap;
     use std::sync::Mutex;

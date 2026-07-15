@@ -1,8 +1,11 @@
 use crate::{CallbackContext, EventActions, MemoryEntry, Result};
+use adk_schema::SchemaDocument;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::Arc;
+
+/// Input and output schemas for a tool.
 ///
 /// This type establishes the provider-neutral boundary for tool contracts.
 /// It preserves the original JSON Schema documents before provider-specific
@@ -11,15 +14,15 @@ use std::sync::Arc;
 pub struct ToolSchema {
     /// JSON Schema for this tool's parameters.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub parameters: Option<Value>,
+    pub parameters: Option<SchemaDocument>,
     /// JSON Schema for this tool's response.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub response: Option<Value>,
+    pub response: Option<SchemaDocument>,
 }
 
 impl ToolSchema {
     /// Create a new tool schema with optional parameters and response.
-    pub fn new(parameters: Option<Value>, response: Option<Value>) -> Self {
+    pub fn new(parameters: Option<SchemaDocument>, response: Option<SchemaDocument>) -> Self {
         Self { parameters, response }
     }
 }
@@ -99,11 +102,11 @@ pub trait Tool: Send + Sync {
         });
 
         if let Some(params) = self.parameters_schema() {
-            decl["parameters"] = params;
+            decl["parameters"] = params.document().clone();
         }
 
         if let Some(response) = self.response_schema() {
-            decl["response"] = response;
+            decl["response"] = response.document().clone();
         }
 
         decl
@@ -133,11 +136,11 @@ pub trait Tool: Send + Sync {
     }
 
     /// Returns the JSON Schema for this tool's parameters, if any.
-    fn parameters_schema(&self) -> Option<Value> {
+    fn parameters_schema(&self) -> Option<SchemaDocument> {
         None
     }
     /// Returns the JSON Schema for this tool's response, if any.
-    fn response_schema(&self) -> Option<Value> {
+    fn response_schema(&self) -> Option<SchemaDocument> {
         None
     }
 

@@ -39,13 +39,14 @@ mcp-sampling = ["mcp"]
 
 [dependencies]
 adk-core.workspace = true
+adk-schema = { workspace = true, features = ["schemars"] }
 adk-rust-macros.workspace = true
 adk-telemetry.workspace = true
 async-trait.workspace = true
 tokio = { workspace = true, features = ["fs", "process", "sync", "time"] }
 serde.workspace = true
 serde_json.workspace = true
-schemars = "1.0"
+schemars = "1.2"
 rmcp = { version = "1.6", features = ["client", "transport-child-process"], optional = true }
 tracing.workspace = true
 base64 = "0.22"

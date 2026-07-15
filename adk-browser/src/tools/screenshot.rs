@@ -2,6 +2,7 @@
 
 use crate::session::BrowserSession;
 use adk_core::{Result, Tool, ToolContext};
+use adk_schema::SchemaDocument;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -28,7 +29,7 @@ impl Tool for ScreenshotTool {
         "Take a screenshot of the current page or a specific element. Returns base64-encoded PNG image."
     }
 
-    fn parameters_schema(&self) -> Option<Value> {
+    fn parameters_schema(&self) -> Option<SchemaDocument> {
         Some(json!({
             "type": "object",
             "properties": {
@@ -48,7 +49,7 @@ impl Tool for ScreenshotTool {
         }))
     }
 
-    fn response_schema(&self) -> Option<Value> {
+    fn response_schema(&self) -> Option<SchemaDocument> {
         Some(json!({
             "type": "object",
             "properties": {

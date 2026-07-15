@@ -1,5 +1,5 @@
-//! ApplyFxTool — apply an FX chain to audio.
-
+use adk_schema::SchemaDocument;
+/// ApplyFxTool — apply an FX chain to audio.
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -32,7 +32,7 @@ impl adk_core::Tool for ApplyFxTool {
         "Apply audio effects chain to audio data"
     }
 
-    fn parameters_schema(&self) -> Option<Value> {
+    fn parameters_schema(&self) -> Option<SchemaDocument> {
         let chain_names: Vec<&str> = self.chains.keys().map(|s| s.as_str()).collect();
         Some(serde_json::json!({
             "type": "object",

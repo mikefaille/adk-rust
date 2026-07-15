@@ -1,4 +1,5 @@
 use adk_core::{ReadonlyContext, Result, Tool, ToolContext, ToolPredicate, Toolset};
+use adk_schema::SchemaDocument;
 use async_trait::async_trait;
 use serde_json::Value;
 use std::sync::Arc;
@@ -198,11 +199,11 @@ impl Tool for PrefixedTool {
         self.inner.is_long_running()
     }
 
-    fn parameters_schema(&self) -> Option<Value> {
+    fn parameters_schema(&self) -> Option<SchemaDocument> {
         self.inner.parameters_schema()
     }
 
-    fn response_schema(&self) -> Option<Value> {
+    fn response_schema(&self) -> Option<SchemaDocument> {
         self.inner.response_schema()
     }
 

@@ -1,5 +1,5 @@
-//! TranscribeTool — transcribe audio via a configured SttProvider.
-
+use adk_schema::SchemaDocument;
+/// TranscribeTool — transcribe audio via a configured SttProvider.
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -31,7 +31,7 @@ impl adk_core::Tool for TranscribeTool {
         "Transcribe audio to text"
     }
 
-    fn parameters_schema(&self) -> Option<Value> {
+    fn parameters_schema(&self) -> Option<SchemaDocument> {
         Some(serde_json::json!({
             "type": "object",
             "properties": {

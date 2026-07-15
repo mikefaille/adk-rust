@@ -5,6 +5,7 @@
 
 use crate::bigquery::toolset::CredentialSource;
 use adk_core::{AdkError, ErrorCategory, ErrorComponent, Result, Tool, ToolContext};
+use adk_schema::SchemaDocument;
 use async_trait::async_trait;
 use gcp_bigquery_client::Client;
 use gcp_bigquery_client::model::query_request::QueryRequest;
@@ -194,7 +195,7 @@ impl Tool for BigQueryExecuteSql {
         "Execute a SQL query against Google BigQuery and return results as a JSON array of row objects."
     }
 
-    fn parameters_schema(&self) -> Option<Value> {
+    fn parameters_schema(&self) -> Option<SchemaDocument> {
         Some(json!({
             "type": "object",
             "properties": {
@@ -293,7 +294,7 @@ impl Tool for BigQueryGetTableSchema {
         "Retrieve the schema (column definitions) for a BigQuery table."
     }
 
-    fn parameters_schema(&self) -> Option<Value> {
+    fn parameters_schema(&self) -> Option<SchemaDocument> {
         Some(json!({
             "type": "object",
             "properties": {
@@ -398,7 +399,7 @@ impl Tool for BigQueryListDatasets {
         "List available datasets in a Google BigQuery project."
     }
 
-    fn parameters_schema(&self) -> Option<Value> {
+    fn parameters_schema(&self) -> Option<SchemaDocument> {
         Some(json!({
             "type": "object",
             "properties": {
@@ -471,7 +472,7 @@ impl Tool for BigQueryListTables {
         "List tables in a Google BigQuery dataset."
     }
 
-    fn parameters_schema(&self) -> Option<Value> {
+    fn parameters_schema(&self) -> Option<SchemaDocument> {
         Some(json!({
             "type": "object",
             "properties": {

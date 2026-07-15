@@ -57,7 +57,7 @@ pub trait Agent: Send + Sync {
 pub trait Tool: Send + Sync {
     fn name(&self) -> &str;
     fn description(&self) -> &str;
-    fn parameters_schema(&self) -> Option<Value>;
+    fn parameters_schema(&self) -> Option<SchemaDocument>;
     fn is_long_running(&self) -> bool;
     fn is_read_only(&self) -> bool;           // default: false
     fn is_concurrency_safe(&self) -> bool;    // default: false
@@ -268,6 +268,7 @@ InvocationContext (extends CallbackContext)
 
 ```rust
 use adk_core::context::validate_state_key;
+use adk_schema::SchemaDocument;
 
 assert!(validate_state_key("user_name").is_ok());
 assert!(validate_state_key("../etc/passwd").is_err());

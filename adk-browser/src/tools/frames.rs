@@ -2,6 +2,7 @@
 
 use crate::session::BrowserSession;
 use adk_core::{AdkError, Result, Tool, ToolContext};
+use adk_schema::SchemaDocument;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -27,7 +28,7 @@ impl Tool for SwitchToFrameTool {
         "Switch to an iframe by index number or CSS selector."
     }
 
-    fn parameters_schema(&self) -> Option<Value> {
+    fn parameters_schema(&self) -> Option<SchemaDocument> {
         Some(json!({
             "type": "object",
             "properties": {
@@ -86,11 +87,11 @@ impl Tool for SwitchToParentFrameTool {
         "Switch to the parent frame (exit current iframe)."
     }
 
-    fn parameters_schema(&self) -> Option<Value> {
-        Some(json!({
+    fn parameters_schema(&self) -> Option<SchemaDocument> {
+        Some(SchemaDocument::for_input(json!({
             "type": "object",
             "properties": {}
-        }))
+        })))
     }
 
     async fn execute(&self, _ctx: Arc<dyn ToolContext>, _args: Value) -> Result<Value> {
@@ -124,11 +125,11 @@ impl Tool for SwitchToDefaultContentTool {
         "Switch back to the main page content (exit all iframes)."
     }
 
-    fn parameters_schema(&self) -> Option<Value> {
-        Some(json!({
+    fn parameters_schema(&self) -> Option<SchemaDocument> {
+        Some(SchemaDocument::for_input(json!({
             "type": "object",
             "properties": {}
-        }))
+        })))
     }
 
     async fn execute(&self, _ctx: Arc<dyn ToolContext>, _args: Value) -> Result<Value> {
