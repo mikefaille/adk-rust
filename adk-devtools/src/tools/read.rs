@@ -42,7 +42,7 @@ impl Tool for ReadFileTool {
     }
 
     fn parameters_schema(&self) -> Option<SchemaDocument> {
-        Some(json!({
+        Some(SchemaDocument::for_input(json!({
             "type": "object",
             "properties": {
                 "path": { "type": "string", "description": "Path relative to the workspace root." },

@@ -46,7 +46,7 @@ impl Tool for GlobTool {
     }
 
     fn parameters_schema(&self) -> Option<SchemaDocument> {
-        Some(json!({
+        Some(SchemaDocument::for_input(json!({
             "type": "object",
             "properties": {
                 "pattern": { "type": "string", "description": "Glob pattern, e.g. '**/*.toml'." },
