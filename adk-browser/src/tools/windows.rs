@@ -69,7 +69,7 @@ impl Tool for NewTabTool {
     }
 
     fn parameters_schema(&self) -> Option<SchemaDocument> {
-        Some(SchemaDocument::for_input(json!({
+        Some(json!({
             "type": "object",
             "properties": {
                 "url": {
@@ -77,7 +77,7 @@ impl Tool for NewTabTool {
                     "description": "Optional URL to navigate to in the new tab"
                 }
             }
-        })))
+        }))
     }
 
     async fn execute(&self, _ctx: Arc<dyn ToolContext>, args: Value) -> Result<Value> {
@@ -121,7 +121,7 @@ impl Tool for NewWindowTool {
     }
 
     fn parameters_schema(&self) -> Option<SchemaDocument> {
-        Some(SchemaDocument::for_input(json!({
+        Some(json!({
             "type": "object",
             "properties": {
                 "url": {
@@ -129,7 +129,7 @@ impl Tool for NewWindowTool {
                     "description": "Optional URL to navigate to in the new window"
                 }
             }
-        })))
+        }))
     }
 
     async fn execute(&self, _ctx: Arc<dyn ToolContext>, args: Value) -> Result<Value> {
@@ -173,7 +173,7 @@ impl Tool for SwitchWindowTool {
     }
 
     fn parameters_schema(&self) -> Option<SchemaDocument> {
-        Some(SchemaDocument::for_input(json!({
+        Some(json!({
             "type": "object",
             "properties": {
                 "handle": {
@@ -182,7 +182,7 @@ impl Tool for SwitchWindowTool {
                 }
             },
             "required": ["handle"]
-        })))
+        }))
     }
 
     async fn execute(&self, _ctx: Arc<dyn ToolContext>, args: Value) -> Result<Value> {
@@ -341,7 +341,7 @@ impl Tool for SetWindowSizeTool {
     }
 
     fn parameters_schema(&self) -> Option<SchemaDocument> {
-        Some(SchemaDocument::for_input(json!({
+        Some(json!({
             "type": "object",
             "properties": {
                 "width": {
@@ -362,7 +362,7 @@ impl Tool for SetWindowSizeTool {
                 }
             },
             "required": ["width", "height"]
-        })))
+        }))
     }
 
     async fn execute(&self, _ctx: Arc<dyn ToolContext>, args: Value) -> Result<Value> {

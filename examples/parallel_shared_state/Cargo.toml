@@ -31,4 +31,3 @@ futures = "0.3"
 dotenvy = "0.15"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-adk-schema = { version = "2.0.0", path = "../../adk-schema" }

@@ -32,7 +32,7 @@ impl adk_core::Tool for GenerateMusicTool {
     }
 
     fn parameters_schema(&self) -> Option<SchemaDocument> {
-        Some(SchemaDocument::for_input(serde_json::json!({
+        Some(serde_json::json!({
             "type": "object",
             "properties": {
                 "prompt": { "type": "string", "description": "Text description of desired music" },
@@ -40,7 +40,7 @@ impl adk_core::Tool for GenerateMusicTool {
                 "genre": { "type": "string", "description": "Genre hint (optional)" }
             },
             "required": ["prompt", "duration_secs"]
-        })))
+        }))
     }
 
     async fn execute(

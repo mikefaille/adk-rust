@@ -30,7 +30,7 @@ impl Tool for ScreenshotTool {
     }
 
     fn parameters_schema(&self) -> Option<SchemaDocument> {
-        Some(SchemaDocument::for_input(json!({
+        Some(json!({
             "type": "object",
             "properties": {
                 "selector": {
@@ -46,11 +46,11 @@ impl Tool for ScreenshotTool {
                     "description": "Name for the artifact if saving (default: 'screenshot.png')"
                 }
             }
-        })))
+        }))
     }
 
     fn response_schema(&self) -> Option<SchemaDocument> {
-        Some(SchemaDocument::for_input(json!({
+        Some(json!({
             "type": "object",
             "properties": {
                 "success": { "type": "boolean" },
@@ -58,7 +58,7 @@ impl Tool for ScreenshotTool {
                 "saved_to_artifacts": { "type": "boolean" },
                 "artifact_name": { "type": "string" }
             }
-        })))
+        }))
     }
 
     async fn execute(&self, ctx: Arc<dyn ToolContext>, args: Value) -> Result<Value> {

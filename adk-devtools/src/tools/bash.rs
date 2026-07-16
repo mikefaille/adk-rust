@@ -51,14 +51,14 @@ impl Tool for BashTool {
     }
 
     fn parameters_schema(&self) -> Option<SchemaDocument> {
-        Some(SchemaDocument::for_input(json!({
+        Some(json!({
             "type": "object",
             "properties": {
                 "command": { "type": "string", "description": "The shell command to run." },
                 "timeout_secs": { "type": "integer", "description": "Optional timeout in seconds (default: workspace setting)." }
             },
             "required": ["command"]
-        })))
+        }))
     }
 
     async fn execute(&self, ctx: Arc<dyn ToolContext>, args: Value) -> Result<Value> {

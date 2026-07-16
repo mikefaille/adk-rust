@@ -30,7 +30,7 @@ impl Tool for ExtractTextTool {
     }
 
     fn parameters_schema(&self) -> Option<SchemaDocument> {
-        Some(SchemaDocument::for_input(json!({
+        Some(json!({
             "type": "object",
             "properties": {
                 "selector": {
@@ -43,11 +43,11 @@ impl Tool for ExtractTextTool {
                 }
             },
             "required": ["selector"]
-        })))
+        }))
     }
 
     fn response_schema(&self) -> Option<SchemaDocument> {
-        Some(SchemaDocument::for_input(json!({
+        Some(json!({
             "type": "object",
             "properties": {
                 "success": { "type": "boolean" },
@@ -58,7 +58,7 @@ impl Tool for ExtractTextTool {
                 },
                 "count": { "type": "integer" }
             }
-        })))
+        }))
     }
 
     async fn execute(&self, _ctx: Arc<dyn ToolContext>, args: Value) -> Result<Value> {
@@ -117,7 +117,7 @@ impl Tool for ExtractAttributeTool {
     }
 
     fn parameters_schema(&self) -> Option<SchemaDocument> {
-        Some(SchemaDocument::for_input(json!({
+        Some(json!({
             "type": "object",
             "properties": {
                 "selector": {
@@ -130,7 +130,7 @@ impl Tool for ExtractAttributeTool {
                 }
             },
             "required": ["selector", "attribute"]
-        })))
+        }))
     }
 
     async fn execute(&self, _ctx: Arc<dyn ToolContext>, args: Value) -> Result<Value> {
@@ -176,7 +176,7 @@ impl Tool for ExtractLinksTool {
     }
 
     fn parameters_schema(&self) -> Option<SchemaDocument> {
-        Some(SchemaDocument::for_input(json!({
+        Some(json!({
             "type": "object",
             "properties": {
                 "selector": {
@@ -188,7 +188,7 @@ impl Tool for ExtractLinksTool {
                     "description": "Include link text in results (default: true)"
                 }
             }
-        })))
+        }))
     }
 
     async fn execute(&self, _ctx: Arc<dyn ToolContext>, args: Value) -> Result<Value> {
@@ -286,7 +286,7 @@ impl Tool for PageSourceTool {
     }
 
     fn parameters_schema(&self) -> Option<SchemaDocument> {
-        Some(SchemaDocument::for_input(json!({
+        Some(json!({
             "type": "object",
             "properties": {
                 "max_length": {
@@ -294,7 +294,7 @@ impl Tool for PageSourceTool {
                     "description": "Maximum characters to return (default: 50000)"
                 }
             }
-        })))
+        }))
     }
 
     async fn execute(&self, _ctx: Arc<dyn ToolContext>, args: Value) -> Result<Value> {

@@ -22,7 +22,6 @@ serde_json.workspace = true
 tracing.workspace = true
 base64 = "0.22"
 url = "2.5"
-adk-schema.workspace = true
 
 [dev-dependencies]
 tokio-test = "0.4"

@@ -34,7 +34,6 @@ adk-session = { workspace = true, optional = true }
 tokio-util = { version = "0.7", features = ["rt"], optional = true }
 uuid = { workspace = true, optional = true }
 async-stream = { workspace = true, optional = true }
-adk-schema = { version = "2.0.0", path = "../adk-schema" }
 
 [dev-dependencies]
 # Internal dev-deps are path-only (no version) so cargo strips them from the

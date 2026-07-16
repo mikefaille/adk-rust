@@ -32,7 +32,7 @@ impl adk_core::Tool for TranscribeTool {
     }
 
     fn parameters_schema(&self) -> Option<SchemaDocument> {
-        Some(SchemaDocument::for_input(serde_json::json!({
+        Some(serde_json::json!({
             "type": "object",
             "properties": {
                 "audio_data": { "type": "string", "description": "Base64-encoded PCM16 audio data" },
@@ -40,7 +40,7 @@ impl adk_core::Tool for TranscribeTool {
                 "language": { "type": "string", "description": "BCP-47 language hint (optional)" }
             },
             "required": ["audio_data"]
-        })))
+        }))
     }
 
     async fn execute(

@@ -1,5 +1,4 @@
-use adk_schema::SchemaDocument;
-// LLM-Powered Parallel Shared State Example
+//! LLM-Powered Parallel Shared State Example
 //!
 //! Three LLM agents coordinate via SharedState to produce a document:
 //! - **WriterAgent** drafts content and publishes it to shared state
@@ -44,8 +43,8 @@ impl Tool for PublishTool {
         "Publish content to shared state so other agents can access it. Use this to share your work."
     }
 
-    fn parameters_schema(&self) -> Option<SchemaDocument> {
-        Some(adk_schema::SchemaDocument::for_input(serde_json::json!({
+    fn parameters_schema(&self) -> Option<serde_json::Value> {
+        Some(serde_json::json!({
             "type": "object",
             "properties": {
                 "key": {
@@ -58,7 +57,7 @@ impl Tool for PublishTool {
                 }
             },
             "required": ["key", "content"]
-        })))
+        }))
     }
 
     async fn execute(
@@ -107,8 +106,8 @@ impl Tool for WaitForTool {
         "Wait for content published by another agent. Blocks until the key is available (up to 60s)."
     }
 
-    fn parameters_schema(&self) -> Option<SchemaDocument> {
-        Some(adk_schema::SchemaDocument::for_input(serde_json::json!({
+    fn parameters_schema(&self) -> Option<serde_json::Value> {
+        Some(serde_json::json!({
             "type": "object",
             "properties": {
                 "key": {
@@ -117,7 +116,7 @@ impl Tool for WaitForTool {
                 }
             },
             "required": ["key"]
-        })))
+        }))
     }
 
     async fn execute(

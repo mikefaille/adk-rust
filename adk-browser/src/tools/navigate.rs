@@ -30,7 +30,7 @@ impl Tool for NavigateTool {
     }
 
     fn parameters_schema(&self) -> Option<SchemaDocument> {
-        Some(SchemaDocument::for_input(json!({
+        Some(json!({
             "type": "object",
             "properties": {
                 "url": {
@@ -39,18 +39,18 @@ impl Tool for NavigateTool {
                 }
             },
             "required": ["url"]
-        })))
+        }))
     }
 
     fn response_schema(&self) -> Option<SchemaDocument> {
-        Some(SchemaDocument::for_input(json!({
+        Some(json!({
             "type": "object",
             "properties": {
                 "success": { "type": "boolean" },
                 "url": { "type": "string" },
                 "title": { "type": "string" }
             }
-        })))
+        }))
     }
 
     async fn execute(&self, _ctx: Arc<dyn ToolContext>, args: Value) -> Result<Value> {

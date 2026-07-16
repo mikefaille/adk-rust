@@ -3,45 +3,42 @@ use adk_core::{
     ReadonlyContext, Result, RunConfig, Session, State, Tool, ToolContext,
 };
 use adk_schema::SchemaDocument;
-use async_trait::async_trait;
-use futures::StreamExt;
-use serde_json::{Value, json};
-use std::collections::HashMap;
-use std::sync::{Arc, atomic::AtomicBool};
-use std::time::Duration;
-
 /// AgentTool - Use agents as callable tools
-///
+//
 /// This module provides `AgentTool` which wraps an `Agent` instance to make it
 /// callable as a `Tool`. This enables powerful composition patterns where a
 /// coordinator agent can invoke specialized sub-agents.
-///
+//
 /// # Example
-///
+//
 /// ```rust,ignore
 /// use adk_tool::AgentTool;
 /// use adk_agent::LlmAgentBuilder;
-///
+//
 /// // Create a specialized agent
 /// let math_agent = LlmAgentBuilder::new("math_expert")
 ///     .description("Solves mathematical problems")
 ///     .instruction("You are a math expert. Solve problems step by step.")
 ///     .model(model.clone())
 ///     .build()?;
-///
+//
 /// // Wrap it as a tool
 /// let math_tool = AgentTool::new(Arc::new(math_agent));
-///
+//
 /// // Use in coordinator agent
 /// let coordinator = LlmAgentBuilder::new("coordinator")
 ///     .instruction("Help users by delegating to specialists")
 ///     .tools(vec![Arc::new(math_tool)])
 ///     .build()?;
 /// ```
-pub struct AgentTool {
-    agent: Arc<dyn Agent>,
-    config: AgentToolConfig,
-}
+use adk_schema::SchemaDocument;
+use adk_schema::SchemaDocument;
+use async_trait::async_trait;
+use futures::StreamExt;
+use serde_json::{Value, json};
+use std::collections::HashMap;
+use std::sync::{Arc, atomic::AtomicBool};
+use std::time::Duration;
 
 /// Configuration options for AgentTool behavior.
 #[derive(Debug, Clone)]
@@ -75,6 +72,16 @@ impl Default for AgentToolConfig {
             output_schema: None,
         }
     }
+}
+
+/// AgentTool wraps an Agent to make it callable as a Tool.
+///
+/// When the parent LLM generates a function call targeting this tool,
+/// the framework executes the wrapped agent, captures its final response,
+/// and returns it as the tool's result.
+pub struct AgentTool {
+    agent: Arc<dyn Agent>,
+    config: AgentToolConfig,
 }
 
 impl AgentTool {
@@ -180,12 +187,12 @@ impl AgentTool {
 
         if responses.is_empty() {
             // Try to get any text from the last event
-            if let Some(last_event) = events.last() {
-                 if let Some(content) = &last_event.llm_response.content {
-                    for part in &content.parts {
-                        if let Part::Text { text } = part {
-                            return json!({ "response": text });
-                        }
+            if let Some(last_event) = events.last()
+                && let Some(content) = &last_event.llm_response.content
+            {
+                for part in &content.parts {
+                    if let Part::Text { text } = part {
+                        return json!({ "response": text });
                     }
                 }
             }
@@ -216,9 +223,24 @@ impl Tool for AgentTool {
         self.config
             .output_schema
             .clone()
-            .map(SchemaDocument::for_output)
+            .map(|v| SchemaDocument::for_output(v))
+            .map(|v| SchemaDocument::for_output(v))
+            .map(|v| SchemaDocument::for_output(v))
     }
 
+    fn is_long_running(&self) -> bool {
+        // Agent execution could take time, but we wait for completion
+        false
+    }
+
+    #[adk_telemetry::instrument(
+        skip(self, ctx, args),
+        fields(
+            agent_tool.name = %self.agent.name(),
+            agent_tool.description = %self.agent.description(),
+            function_call.id = %ctx.function_call_id()
+        )
+    )]
     async fn execute(&self, ctx: Arc<dyn ToolContext>, args: Value) -> Result<Value> {
         adk_telemetry::debug!("Executing agent tool: {}", self.agent.name());
 
@@ -384,6 +406,8 @@ impl InvocationContext for AgentToolInvocationContext {
     }
 
     fn memory(&self) -> Option<Arc<dyn Memory>> {
+        // Sub-agents don't have direct memory access in this implementation
+        // Could be extended to forward memory if needed
         None
     }
 
@@ -392,6 +416,9 @@ impl InvocationContext for AgentToolInvocationContext {
     }
 
     fn run_config(&self) -> &RunConfig {
+        // Use None streaming mode for sub-agent so responses are fully accumulated
+        // before being returned. SSE mode yields partial chunks which makes
+        // extract_response unable to capture the complete text.
         static AGENT_TOOL_CONFIG: std::sync::OnceLock<RunConfig> = std::sync::OnceLock::new();
         AGENT_TOOL_CONFIG.get_or_init(|| {
             RunConfig::builder().streaming_mode(adk_core::StreamingMode::None).build()
@@ -407,6 +434,7 @@ impl InvocationContext for AgentToolInvocationContext {
     }
 }
 
+// Minimal session for sub-agent execution
 struct AgentToolSession {
     id: String,
     state: std::sync::RwLock<HashMap<String, Value>>,
@@ -439,6 +467,7 @@ impl Session for AgentToolSession {
     }
 
     fn conversation_history(&self) -> Vec<Content> {
+        // Sub-agent starts with empty history
         Vec::new()
     }
 }
@@ -549,9 +578,11 @@ mod tests {
 
         let tool = AgentTool::new(agent);
 
+        // Test with request field
         let args = json!({"request": "solve 2+2"});
         assert_eq!(tool.extract_request(&args), "solve 2+2");
 
+        // Test with string value
         let args = json!("direct request");
         assert_eq!(tool.extract_request(&args), "direct request");
     }

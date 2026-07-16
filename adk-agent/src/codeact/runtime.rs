@@ -278,7 +278,7 @@ pub trait CodeRuntime: Send + Sync {
 /// use std::sync::Arc;
 /// use adk_agent::codeact::bind_call_args;
 /// # use adk_core::{Tool, ToolContext};
-/// # use adk_schema::SchemaDocument;
+use adk_schema::SchemaDocument;
 /// # use async_trait::async_trait;
 /// use serde_json::{json, Value};
 ///
@@ -317,13 +317,13 @@ fn ordered_parameter_names(tool: &dyn Tool) -> Vec<String> {
     let Some(schema) = tool.parameters_schema() else {
         return Vec::new();
     };
-    let required: Vec<String> = schema
+    let required: Vec<String> = schema.document()
         .get("required")
         .and_then(Value::as_array)
         .map(|arr| arr.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
         .unwrap_or_default();
     let mut ordered = required.clone();
-    if let Some(props) = schema.get("properties").and_then(Value::as_object) {
+    if let Some(props) = schema.document().get("properties").and_then(Value::as_object) {
         for key in props.keys() {
             if !ordered.contains(key) {
                 ordered.push(key.clone());

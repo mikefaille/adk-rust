@@ -29,7 +29,7 @@ impl Tool for DragAndDropTool {
     }
 
     fn parameters_schema(&self) -> Option<SchemaDocument> {
-        Some(SchemaDocument::for_input(json!({
+        Some(json!({
             "type": "object",
             "properties": {
                 "source_selector": {
@@ -42,7 +42,7 @@ impl Tool for DragAndDropTool {
                 }
             },
             "required": ["source_selector", "target_selector"]
-        })))
+        }))
     }
 
     async fn execute(&self, _ctx: Arc<dyn ToolContext>, args: Value) -> Result<Value> {
@@ -88,7 +88,7 @@ impl Tool for RightClickTool {
     }
 
     fn parameters_schema(&self) -> Option<SchemaDocument> {
-        Some(SchemaDocument::for_input(json!({
+        Some(json!({
             "type": "object",
             "properties": {
                 "selector": {
@@ -97,7 +97,7 @@ impl Tool for RightClickTool {
                 }
             },
             "required": ["selector"]
-        })))
+        }))
     }
 
     async fn execute(&self, _ctx: Arc<dyn ToolContext>, args: Value) -> Result<Value> {
@@ -137,7 +137,7 @@ impl Tool for FocusTool {
     }
 
     fn parameters_schema(&self) -> Option<SchemaDocument> {
-        Some(SchemaDocument::for_input(json!({
+        Some(json!({
             "type": "object",
             "properties": {
                 "selector": {
@@ -146,7 +146,7 @@ impl Tool for FocusTool {
                 }
             },
             "required": ["selector"]
-        })))
+        }))
     }
 
     async fn execute(&self, _ctx: Arc<dyn ToolContext>, args: Value) -> Result<Value> {
@@ -186,7 +186,7 @@ impl Tool for ElementStateTool {
     }
 
     fn parameters_schema(&self) -> Option<SchemaDocument> {
-        Some(SchemaDocument::for_input(json!({
+        Some(json!({
             "type": "object",
             "properties": {
                 "selector": {
@@ -195,7 +195,7 @@ impl Tool for ElementStateTool {
                 }
             },
             "required": ["selector"]
-        })))
+        }))
     }
 
     async fn execute(&self, _ctx: Arc<dyn ToolContext>, args: Value) -> Result<Value> {
@@ -239,7 +239,7 @@ impl Tool for PressKeyTool {
     }
 
     fn parameters_schema(&self) -> Option<SchemaDocument> {
-        Some(SchemaDocument::for_input(json!({
+        Some(json!({
             "type": "object",
             "properties": {
                 "key": {
@@ -257,7 +257,7 @@ impl Tool for PressKeyTool {
                 }
             },
             "required": ["key"]
-        })))
+        }))
     }
 
     async fn execute(&self, _ctx: Arc<dyn ToolContext>, args: Value) -> Result<Value> {
@@ -306,7 +306,7 @@ impl Tool for FileUploadTool {
     }
 
     fn parameters_schema(&self) -> Option<SchemaDocument> {
-        Some(SchemaDocument::for_input(json!({
+        Some(json!({
             "type": "object",
             "properties": {
                 "selector": {
@@ -319,7 +319,7 @@ impl Tool for FileUploadTool {
                 }
             },
             "required": ["selector", "file_path"]
-        })))
+        }))
     }
 
     async fn execute(&self, _ctx: Arc<dyn ToolContext>, args: Value) -> Result<Value> {
@@ -365,7 +365,7 @@ impl Tool for PrintToPdfTool {
     }
 
     fn parameters_schema(&self) -> Option<SchemaDocument> {
-        Some(SchemaDocument::for_input(json!({
+        Some(json!({
             "type": "object",
             "properties": {
                 "landscape": {
@@ -377,7 +377,7 @@ impl Tool for PrintToPdfTool {
                     "description": "Scale factor (default: 1.0)"
                 }
             }
-        })))
+        }))
     }
 
     async fn execute(&self, _ctx: Arc<dyn ToolContext>, args: Value) -> Result<Value> {

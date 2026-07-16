@@ -31,7 +31,7 @@ impl Tool for WaitForElementTool {
     }
 
     fn parameters_schema(&self) -> Option<SchemaDocument> {
-        Some(SchemaDocument::for_input(json!({
+        Some(json!({
             "type": "object",
             "properties": {
                 "selector": {
@@ -48,18 +48,18 @@ impl Tool for WaitForElementTool {
                 }
             },
             "required": ["selector"]
-        })))
+        }))
     }
 
     fn response_schema(&self) -> Option<SchemaDocument> {
-        Some(SchemaDocument::for_input(json!({
+        Some(json!({
             "type": "object",
             "properties": {
                 "success": { "type": "boolean" },
                 "found": { "type": "boolean" },
                 "element_text": { "type": "string" }
             }
-        })))
+        }))
     }
 
     async fn execute(&self, _ctx: Arc<dyn ToolContext>, args: Value) -> Result<Value> {
@@ -115,7 +115,7 @@ impl Tool for WaitTool {
     }
 
     fn parameters_schema(&self) -> Option<SchemaDocument> {
-        Some(SchemaDocument::for_input(json!({
+        Some(json!({
             "type": "object",
             "properties": {
                 "seconds": {
@@ -124,7 +124,7 @@ impl Tool for WaitTool {
                 }
             },
             "required": ["seconds"]
-        })))
+        }))
     }
 
     async fn execute(&self, _ctx: Arc<dyn ToolContext>, args: Value) -> Result<Value> {
@@ -167,7 +167,7 @@ impl Tool for WaitForPageLoadTool {
     }
 
     fn parameters_schema(&self) -> Option<SchemaDocument> {
-        Some(SchemaDocument::for_input(json!({
+        Some(json!({
             "type": "object",
             "properties": {
                 "timeout": {
@@ -175,7 +175,7 @@ impl Tool for WaitForPageLoadTool {
                     "description": "Maximum wait time in seconds (default: 30)"
                 }
             }
-        })))
+        }))
     }
 
     async fn execute(&self, _ctx: Arc<dyn ToolContext>, args: Value) -> Result<Value> {
@@ -234,7 +234,7 @@ impl Tool for WaitForTextTool {
     }
 
     fn parameters_schema(&self) -> Option<SchemaDocument> {
-        Some(SchemaDocument::for_input(json!({
+        Some(json!({
             "type": "object",
             "properties": {
                 "text": {
@@ -247,7 +247,7 @@ impl Tool for WaitForTextTool {
                 }
             },
             "required": ["text"]
-        })))
+        }))
     }
 
     async fn execute(&self, _ctx: Arc<dyn ToolContext>, args: Value) -> Result<Value> {

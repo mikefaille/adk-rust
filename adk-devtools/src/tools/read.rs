@@ -50,7 +50,7 @@ impl Tool for ReadFileTool {
                 "limit": { "type": "integer", "description": "Maximum number of lines to return (optional)." }
             },
             "required": ["path"]
-        })))
+        }))
     }
 
     async fn execute(&self, _ctx: Arc<dyn ToolContext>, args: Value) -> Result<Value> {

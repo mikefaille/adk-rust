@@ -30,7 +30,7 @@ impl Tool for EvaluateJsTool {
     }
 
     fn parameters_schema(&self) -> Option<SchemaDocument> {
-        Some(SchemaDocument::for_input(json!({
+        Some(json!({
             "type": "object",
             "properties": {
                 "script": {
@@ -43,17 +43,17 @@ impl Tool for EvaluateJsTool {
                 }
             },
             "required": ["script"]
-        })))
+        }))
     }
 
     fn response_schema(&self) -> Option<SchemaDocument> {
-        Some(SchemaDocument::for_input(json!({
+        Some(json!({
             "type": "object",
             "properties": {
                 "success": { "type": "boolean" },
                 "result": {}
             }
-        })))
+        }))
     }
 
     async fn execute(&self, _ctx: Arc<dyn ToolContext>, args: Value) -> Result<Value> {
@@ -99,7 +99,7 @@ impl Tool for ScrollTool {
     }
 
     fn parameters_schema(&self) -> Option<SchemaDocument> {
-        Some(SchemaDocument::for_input(json!({
+        Some(json!({
             "type": "object",
             "properties": {
                 "direction": {
@@ -116,7 +116,7 @@ impl Tool for ScrollTool {
                     "description": "Pixels to scroll (for up/down). Default: 500"
                 }
             }
-        })))
+        }))
     }
 
     async fn execute(&self, _ctx: Arc<dyn ToolContext>, args: Value) -> Result<Value> {
@@ -181,7 +181,7 @@ impl Tool for HoverTool {
     }
 
     fn parameters_schema(&self) -> Option<SchemaDocument> {
-        Some(SchemaDocument::for_input(json!({
+        Some(json!({
             "type": "object",
             "properties": {
                 "selector": {
@@ -190,7 +190,7 @@ impl Tool for HoverTool {
                 }
             },
             "required": ["selector"]
-        })))
+        }))
     }
 
     async fn execute(&self, _ctx: Arc<dyn ToolContext>, args: Value) -> Result<Value> {
@@ -253,7 +253,7 @@ impl Tool for AlertTool {
     }
 
     fn parameters_schema(&self) -> Option<SchemaDocument> {
-        Some(SchemaDocument::for_input(json!({
+        Some(json!({
             "type": "object",
             "properties": {
                 "action": {
@@ -267,7 +267,7 @@ impl Tool for AlertTool {
                 }
             },
             "required": ["action"]
-        })))
+        }))
     }
 
     async fn execute(&self, _ctx: Arc<dyn ToolContext>, args: Value) -> Result<Value> {
