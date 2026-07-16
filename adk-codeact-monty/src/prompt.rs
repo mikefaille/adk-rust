@@ -165,14 +165,14 @@ mod tests {
             "Search the web\nfor a query."
         }
         fn parameters_schema(&self) -> Option<SchemaDocument> {
-            Some(serde_json::json!({
+            Some(adk_schema::SchemaDocument::for_input(serde_json::json!({
                 "type": "object",
                 "properties": {
                     "query": {"type": "string"},
                     "limit": {"type": "integer"}
                 },
                 "required": ["query"]
-            }))
+            })))
         }
         async fn execute(
             &self,
@@ -208,11 +208,11 @@ mod tests {
             "Fetch a cart."
         }
         fn parameters_schema(&self) -> Option<SchemaDocument> {
-            Some(serde_json::json!({
+            Some(adk_schema::SchemaDocument::for_input(serde_json::json!({
                 "type": "object",
                 "properties": { "user_id": {"type": "string"} },
                 "required": ["user_id"]
-            }))
+            })))
         }
         async fn execute(
             &self,
@@ -273,11 +273,11 @@ mod tests {
             "Classify input."
         }
         fn parameters_schema(&self) -> Option<SchemaDocument> {
-            Some(serde_json::json!({
+            Some(adk_schema::SchemaDocument::for_input(serde_json::json!({
                 "type": "object",
                 "properties": { "class": {"type": "string"} },
                 "required": ["class"]
-            }))
+            })))
         }
         async fn execute(
             &self,

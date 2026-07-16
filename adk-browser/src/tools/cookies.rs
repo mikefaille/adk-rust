@@ -67,7 +67,7 @@ impl Tool for GetCookieTool {
     }
 
     fn parameters_schema(&self) -> Option<SchemaDocument> {
-        Some(json!({
+        Some(SchemaDocument::for_input(json!({
             "type": "object",
             "properties": {
                 "name": {
@@ -76,7 +76,7 @@ impl Tool for GetCookieTool {
                 }
             },
             "required": ["name"]
-        }))
+        })))
     }
 
     async fn execute(&self, _ctx: Arc<dyn ToolContext>, args: Value) -> Result<Value> {
@@ -115,7 +115,7 @@ impl Tool for AddCookieTool {
     }
 
     fn parameters_schema(&self) -> Option<SchemaDocument> {
-        Some(json!({
+        Some(SchemaDocument::for_input(json!({
             "type": "object",
             "properties": {
                 "name": {
@@ -144,7 +144,7 @@ impl Tool for AddCookieTool {
                 }
             },
             "required": ["name", "value"]
-        }))
+        })))
     }
 
     async fn execute(&self, _ctx: Arc<dyn ToolContext>, args: Value) -> Result<Value> {
@@ -194,7 +194,7 @@ impl Tool for DeleteCookieTool {
     }
 
     fn parameters_schema(&self) -> Option<SchemaDocument> {
-        Some(json!({
+        Some(SchemaDocument::for_input(json!({
             "type": "object",
             "properties": {
                 "name": {
@@ -203,7 +203,7 @@ impl Tool for DeleteCookieTool {
                 }
             },
             "required": ["name"]
-        }))
+        })))
     }
 
     async fn execute(&self, _ctx: Arc<dyn ToolContext>, args: Value) -> Result<Value> {

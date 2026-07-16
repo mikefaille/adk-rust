@@ -18,6 +18,7 @@ type AsyncStatefulHandler<S> = Box<
         + Sync,
 >;
 
+/// A tool that maintains and uses an arbitrary state `S`.
 pub struct StatefulTool<S: Send + Sync + 'static> {
     name: String,
     description: String,
@@ -32,7 +33,8 @@ pub struct StatefulTool<S: Send + Sync + 'static> {
 }
 
 impl<S: Send + Sync + 'static> StatefulTool<S> {
-    pub fn new<F, Fut>(
+    /// Creates a new StatefulTool with the given name, description, state and handler.
+pub fn new<F, Fut>(
         name: impl Into<String>,
         description: impl Into<String>,
         state: Arc<S>,
@@ -56,22 +58,26 @@ impl<S: Send + Sync + 'static> StatefulTool<S> {
         }
     }
 
-    pub fn with_long_running(mut self, long_running: bool) -> Self {
+    /// Sets whether the tool is long-running.
+pub fn with_long_running(mut self, long_running: bool) -> Self {
         self.long_running = long_running;
         self
     }
 
-    pub fn with_read_only(mut self, read_only: bool) -> Self {
+    /// Sets whether the tool is read-only.
+pub fn with_read_only(mut self, read_only: bool) -> Self {
         self.read_only = read_only;
         self
     }
 
-    pub fn with_concurrency_safe(mut self, concurrency_safe: bool) -> Self {
+    /// Sets whether the tool is concurrency-safe.
+pub fn with_concurrency_safe(mut self, concurrency_safe: bool) -> Self {
         self.concurrency_safe = concurrency_safe;
         self
     }
 
-    pub fn with_parameters_schema<T>(mut self) -> Self
+    /// Sets the parameters schema for the tool.
+pub fn with_parameters_schema<T>(mut self) -> Self
     where
         T: JsonSchema + Serialize,
     {
@@ -81,7 +87,8 @@ impl<S: Send + Sync + 'static> StatefulTool<S> {
         self
     }
 
-    pub fn with_response_schema<T>(mut self) -> Self
+    /// Sets the response schema for the tool.
+pub fn with_response_schema<T>(mut self) -> Self
     where
         T: JsonSchema + Serialize,
     {
@@ -90,16 +97,19 @@ impl<S: Send + Sync + 'static> StatefulTool<S> {
         self
     }
 
-    pub fn with_scopes(mut self, scopes: &[&'static str]) -> Self {
+    /// Sets the required scopes for the tool.
+pub fn with_scopes(mut self, scopes: &[&'static str]) -> Self {
         self.scopes = scopes.to_vec();
         self
     }
 
-    pub fn parameters_schema(&self) -> Option<&SchemaDocument> {
+    /// Returns the parameters schema for the tool.
+pub fn parameters_schema(&self) -> Option<&SchemaDocument> {
         self.parameters_schema.as_ref()
     }
 
-    pub fn response_schema(&self) -> Option<&SchemaDocument> {
+    /// Returns the response schema for the tool.
+pub fn response_schema(&self) -> Option<&SchemaDocument> {
         self.response_schema.as_ref()
     }
 }

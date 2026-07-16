@@ -13,6 +13,7 @@ type AsyncHandler = Box<
         + Sync,
 >;
 
+/// A generic tool implementation that wraps an async function.
 pub struct FunctionTool {
     name: String,
     description: String,
@@ -26,7 +27,8 @@ pub struct FunctionTool {
 }
 
 impl FunctionTool {
-    pub fn new<F, Fut>(name: impl Into<String>, description: impl Into<String>, handler: F) -> Self
+    /// Creates a new FunctionTool with the given name and description.
+pub fn new<F, Fut>(name: impl Into<String>, description: impl Into<String>, handler: F) -> Self
     where
         F: Fn(Arc<dyn ToolContext>, Value) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<Value>> + Send + 'static,
@@ -44,22 +46,26 @@ impl FunctionTool {
         }
     }
 
-    pub fn with_long_running(mut self, long_running: bool) -> Self {
+    /// Sets whether the tool is long-running.
+pub fn with_long_running(mut self, long_running: bool) -> Self {
         self.long_running = long_running;
         self
     }
 
-    pub fn with_read_only(mut self, read_only: bool) -> Self {
+    /// Sets whether the tool is read-only.
+pub fn with_read_only(mut self, read_only: bool) -> Self {
         self.read_only = read_only;
         self
     }
 
-    pub fn with_concurrency_safe(mut self, concurrency_safe: bool) -> Self {
+    /// Sets whether the tool is concurrency-safe.
+pub fn with_concurrency_safe(mut self, concurrency_safe: bool) -> Self {
         self.concurrency_safe = concurrency_safe;
         self
     }
 
-    pub fn with_parameters_schema<T>(mut self) -> Self
+    /// Sets the parameters schema for the tool.
+pub fn with_parameters_schema<T>(mut self) -> Self
     where
         T: JsonSchema,
     {
@@ -69,7 +75,8 @@ impl FunctionTool {
         self
     }
 
-    pub fn try_with_parameters_schema<T>(mut self) -> adk_core::Result<Self>
+    /// Tries to set the parameters schema for the tool.
+pub fn try_with_parameters_schema<T>(mut self) -> adk_core::Result<Self>
     where
         T: JsonSchema,
     {
@@ -79,7 +86,8 @@ impl FunctionTool {
         Ok(self)
     }
 
-    pub fn with_response_schema<T>(mut self) -> Self
+    /// Sets the response schema for the tool.
+pub fn with_response_schema<T>(mut self) -> Self
     where
         T: JsonSchema,
     {
@@ -88,7 +96,8 @@ impl FunctionTool {
         self
     }
 
-    pub fn try_with_response_schema<T>(mut self) -> adk_core::Result<Self>
+    /// Tries to set the response schema for the tool.
+pub fn try_with_response_schema<T>(mut self) -> adk_core::Result<Self>
     where
         T: JsonSchema,
     {
@@ -98,16 +107,19 @@ impl FunctionTool {
         Ok(self)
     }
 
-    pub fn with_scopes(mut self, scopes: &[&'static str]) -> Self {
+    /// Sets the required scopes for the tool.
+pub fn with_scopes(mut self, scopes: &[&'static str]) -> Self {
         self.scopes = scopes.to_vec();
         self
     }
 
-    pub fn parameters_schema(&self) -> Option<&SchemaDocument> {
+    /// Returns the parameters schema for the tool.
+pub fn parameters_schema(&self) -> Option<&SchemaDocument> {
         self.parameters_schema.as_ref()
     }
 
-    pub fn response_schema(&self) -> Option<&SchemaDocument> {
+    /// Returns the response schema for the tool.
+pub fn response_schema(&self) -> Option<&SchemaDocument> {
         self.response_schema.as_ref()
     }
 }
@@ -175,6 +187,7 @@ impl Tool for FunctionTool {
     }
 }
 
+/// Generates a JSON Schema for the given type.
 pub fn schema_for<T>() -> adk_core::Result<Value>
 where
     T: JsonSchema,

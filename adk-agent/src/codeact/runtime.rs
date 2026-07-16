@@ -278,7 +278,7 @@ pub trait CodeRuntime: Send + Sync {
 /// use std::sync::Arc;
 /// use adk_agent::codeact::bind_call_args;
 /// # use adk_core::{Tool, ToolContext};
-use adk_schema::SchemaDocument;
+/// # use adk_schema::SchemaDocument;
 /// # use async_trait::async_trait;
 /// use serde_json::{json, Value};
 ///

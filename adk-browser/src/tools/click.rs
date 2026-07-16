@@ -30,7 +30,7 @@ impl Tool for ClickTool {
     }
 
     fn parameters_schema(&self) -> Option<SchemaDocument> {
-        Some(json!({
+        Some(SchemaDocument::for_input(json!({
             "type": "object",
             "properties": {
                 "selector": {
@@ -43,17 +43,17 @@ impl Tool for ClickTool {
                 }
             },
             "required": ["selector"]
-        }))
+        })))
     }
 
     fn response_schema(&self) -> Option<SchemaDocument> {
-        Some(json!({
+        Some(SchemaDocument::for_input(json!({
             "type": "object",
             "properties": {
                 "success": { "type": "boolean" },
                 "clicked_element": { "type": "string" }
             }
-        }))
+        })))
     }
 
     async fn execute(&self, _ctx: Arc<dyn ToolContext>, args: Value) -> Result<Value> {
@@ -115,7 +115,7 @@ impl Tool for DoubleClickTool {
     }
 
     fn parameters_schema(&self) -> Option<SchemaDocument> {
-        Some(json!({
+        Some(SchemaDocument::for_input(json!({
             "type": "object",
             "properties": {
                 "selector": {
@@ -124,7 +124,7 @@ impl Tool for DoubleClickTool {
                 }
             },
             "required": ["selector"]
-        }))
+        })))
     }
 
     async fn execute(&self, _ctx: Arc<dyn ToolContext>, args: Value) -> Result<Value> {

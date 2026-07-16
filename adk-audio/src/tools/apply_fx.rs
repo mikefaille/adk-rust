@@ -34,7 +34,7 @@ impl adk_core::Tool for ApplyFxTool {
 
     fn parameters_schema(&self) -> Option<SchemaDocument> {
         let chain_names: Vec<&str> = self.chains.keys().map(|s| s.as_str()).collect();
-        Some(serde_json::json!({
+        Some(SchemaDocument::for_input(serde_json::json!({
             "type": "object",
             "properties": {
                 "audio_data": { "type": "string", "description": "Base64-encoded PCM16 audio data" },
@@ -42,7 +42,7 @@ impl adk_core::Tool for ApplyFxTool {
                 "chain": { "type": "string", "description": "FX chain name", "enum": chain_names }
             },
             "required": ["audio_data", "chain"]
-        }))
+        })))
     }
 
     async fn execute(

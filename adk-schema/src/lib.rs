@@ -115,7 +115,7 @@ impl SchemaDocument {
         let mut hasher = Sha256::new();
         // Version 3 of the digest algorithm
         // Domain separation: version, dialect, direction, content
-        hasher.update([3u8]);
+        hasher.update([4u8]);
         hasher.update(self.dialect.to_string().as_bytes());
         hasher.update(self.direction.to_string().as_bytes());
         hasher.update(&canonical_bytes);

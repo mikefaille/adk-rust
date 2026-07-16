@@ -33,7 +33,7 @@ impl adk_core::Tool for SpeakTool {
     }
 
     fn parameters_schema(&self) -> Option<SchemaDocument> {
-        Some(serde_json::json!({
+        Some(SchemaDocument::for_input(serde_json::json!({
             "type": "object",
             "properties": {
                 "text": { "type": "string", "description": "Text to speak" },
@@ -41,7 +41,7 @@ impl adk_core::Tool for SpeakTool {
                 "emotion": { "type": "string", "enum": ["neutral","happy","sad","angry","whisper","excited","calm"] }
             },
             "required": ["text"]
-        }))
+        })))
     }
 
     async fn execute(

@@ -23,6 +23,7 @@ tokio = { workspace = true, features = ["fs", "process", "time", "io-util", "rt"
 regex.workspace = true
 walkdir = "2.5"
 glob = "0.3"
+adk-schema.workspace = true
 
 [dev-dependencies]
 tempfile = "3"

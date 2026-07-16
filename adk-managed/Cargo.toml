@@ -38,6 +38,7 @@ chrono.workspace = true
 uuid.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+adk-schema = { version = "2.0.0", path = "../adk-schema" }
 
 [features]
 default = []

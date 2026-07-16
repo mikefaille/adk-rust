@@ -61,6 +61,7 @@ version = "2.0.0"
 dependencies = [
  "adk-core",
  "adk-runner",
+ "adk-schema",
  "adk-session",
  "agent-client-protocol",
  "agent-client-protocol-tokio",
@@ -99,6 +100,7 @@ dependencies = [
  "adk-plugin",
  "adk-runner",
  "adk-sandbox",
+ "adk-schema",
  "adk-session",
  "adk-skill",
  "adk-telemetry",
@@ -161,6 +163,7 @@ version = "2.0.0"
 dependencies = [
  "adk-core",
  "adk-realtime",
+ "adk-schema",
  "async-stream",
  "async-trait",
  "base64 0.22.1",
@@ -197,6 +200,7 @@ name = "adk-auth"
 version = "2.0.0"
 dependencies = [
  "adk-core",
+ "adk-schema",
  "adk-server",
  "async-trait",
  "aws-config",
@@ -284,6 +288,7 @@ name = "adk-browser"
 version = "2.0.0"
 dependencies = [
  "adk-core",
+ "adk-schema",
  "async-trait",
  "base64 0.22.1",
  "serde",
@@ -396,6 +401,7 @@ name = "adk-devtools"
 version = "2.0.0"
 dependencies = [
  "adk-core",
+ "adk-schema",
  "async-trait",
  "glob",
  "regex",
@@ -538,6 +544,7 @@ dependencies = [
  "adk-model",
  "adk-runner",
  "adk-sandbox",
+ "adk-schema",
  "adk-session",
  "adk-skill",
  "adk-telemetry",
@@ -679,6 +686,7 @@ version = "2.0.0"
 dependencies = [
  "adk-core",
  "adk-gemini",
+ "adk-schema",
  "arrow-array 58.3.0",
  "arrow-schema 58.3.0",
  "async-trait",
@@ -763,6 +771,7 @@ dependencies = [
  "adk-core",
  "adk-plugin",
  "adk-sandbox",
+ "adk-schema",
  "adk-session",
  "adk-skill",
  "async-stream",

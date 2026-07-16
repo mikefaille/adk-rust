@@ -36,7 +36,7 @@ impl Tool for EditFileTool {
          to replace every occurrence."
     }
 
-    fn parameters_schema(&self) -> Option<SchemaDocument> {
+        fn parameters_schema(&self) -> Option<SchemaDocument> {
         Some(SchemaDocument::for_input(json!({
             "type": "object",
             "properties": {
@@ -46,7 +46,7 @@ impl Tool for EditFileTool {
                 "replace_all": { "type": "boolean", "description": "Replace all occurrences (default false)." }
             },
             "required": ["path", "old_string", "new_string"]
-        }))
+        })))
     }
 
     async fn execute(&self, _ctx: Arc<dyn ToolContext>, args: Value) -> Result<Value> {

@@ -53,7 +53,7 @@ impl Tool for GlobTool {
                 "path": { "type": "string", "description": "Optional sub-directory to search within." }
             },
             "required": ["pattern"]
-        }))
+        })))
     }
 
     async fn execute(&self, _ctx: Arc<dyn ToolContext>, args: Value) -> Result<Value> {

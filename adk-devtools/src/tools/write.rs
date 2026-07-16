@@ -42,7 +42,7 @@ impl Tool for WriteFileTool {
                 "content": { "type": "string", "description": "The full file content to write." }
             },
             "required": ["path", "content"]
-        }))
+        })))
     }
 
     async fn execute(&self, _ctx: Arc<dyn ToolContext>, args: Value) -> Result<Value> {

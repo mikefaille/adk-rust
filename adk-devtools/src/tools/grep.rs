@@ -59,7 +59,7 @@ impl Tool for GrepTool {
                 "case_insensitive": { "type": "boolean", "description": "Case-insensitive match (default false)." }
             },
             "required": ["pattern"]
-        }))
+        })))
     }
 
     async fn execute(&self, _ctx: Arc<dyn ToolContext>, args: Value) -> Result<Value> {

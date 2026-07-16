@@ -30,7 +30,7 @@ impl Tool for TypeTool {
     }
 
     fn parameters_schema(&self) -> Option<SchemaDocument> {
-        Some(json!({
+        Some(SchemaDocument::for_input(json!({
             "type": "object",
             "properties": {
                 "selector": {
@@ -51,18 +51,18 @@ impl Tool for TypeTool {
                 }
             },
             "required": ["selector", "text"]
-        }))
+        })))
     }
 
     fn response_schema(&self) -> Option<SchemaDocument> {
-        Some(json!({
+        Some(SchemaDocument::for_input(json!({
             "type": "object",
             "properties": {
                 "success": { "type": "boolean" },
                 "typed_text": { "type": "string" },
                 "field_value": { "type": "string" }
             }
-        }))
+        })))
     }
 
     async fn execute(&self, _ctx: Arc<dyn ToolContext>, args: Value) -> Result<Value> {
@@ -143,7 +143,7 @@ impl Tool for ClearTool {
     }
 
     fn parameters_schema(&self) -> Option<SchemaDocument> {
-        Some(json!({
+        Some(SchemaDocument::for_input(json!({
             "type": "object",
             "properties": {
                 "selector": {
@@ -152,7 +152,7 @@ impl Tool for ClearTool {
                 }
             },
             "required": ["selector"]
-        }))
+        })))
     }
 
     async fn execute(&self, _ctx: Arc<dyn ToolContext>, args: Value) -> Result<Value> {
@@ -195,7 +195,7 @@ impl Tool for SelectTool {
     }
 
     fn parameters_schema(&self) -> Option<SchemaDocument> {
-        Some(json!({
+        Some(SchemaDocument::for_input(json!({
             "type": "object",
             "properties": {
                 "selector": {
@@ -216,7 +216,7 @@ impl Tool for SelectTool {
                 }
             },
             "required": ["selector"]
-        }))
+        })))
     }
 
     async fn execute(&self, _ctx: Arc<dyn ToolContext>, args: Value) -> Result<Value> {

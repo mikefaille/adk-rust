@@ -4,9 +4,10 @@ version = 4
 
 [[package]]
 name = "adk-agent"
-version = "1.0.0"
+version = "2.0.0"
 dependencies = [
  "adk-core",
+ "adk-schema",
  "adk-skill",
  "adk-telemetry",
  "async-stream",
@@ -17,13 +18,14 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
+ "thiserror 2.0.18",
  "tokio",
  "tracing",
 ]
 
 [[package]]
 name = "adk-artifact"
-version = "1.0.0"
+version = "2.0.0"
 dependencies = [
  "adk-core",
  "async-trait",
@@ -33,8 +35,9 @@ dependencies = [
 
 [[package]]
 name = "adk-core"
-version = "1.0.0"
+version = "2.0.0"
 dependencies = [
+ "adk-schema",
  "async-trait",
  "chrono",
  "futures",
@@ -48,7 +51,7 @@ dependencies = [
 
 [[package]]
 name = "adk-gemini"
-version = "1.0.0"
+version = "2.0.0"
 dependencies = [
  "adk-core",
  "async-stream",
@@ -74,7 +77,7 @@ dependencies = [
 
 [[package]]
 name = "adk-model"
-version = "1.0.0"
+version = "2.0.0"
 dependencies = [
  "adk-core",
  "adk-gemini",
@@ -95,7 +98,7 @@ dependencies = [
 
 [[package]]
 name = "adk-plugin"
-version = "1.0.0"
+version = "2.0.0"
 dependencies = [
  "adk-core",
  "serde_json",
@@ -105,11 +108,12 @@ dependencies = [
 
 [[package]]
 name = "adk-runner"
-version = "1.0.0"
+version = "2.0.0"
 dependencies = [
  "adk-artifact",
  "adk-core",
  "adk-plugin",
+ "adk-schema",
  "adk-session",
  "adk-skill",
  "async-stream",
@@ -126,7 +130,7 @@ dependencies = [
 
 [[package]]
 name = "adk-rust-macros"
-version = "1.0.0"
+version = "2.0.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -134,8 +138,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "adk-schema"
+version = "2.0.0"
+dependencies = [
+ "hex",
+ "schemars",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "adk-session"
-version = "1.0.0"
+version = "2.0.0"
 dependencies = [
  "adk-core",
  "async-trait",
@@ -148,7 +164,7 @@ dependencies = [
 
 [[package]]
 name = "adk-skill"
-version = "1.0.0"
+version = "2.0.0"
 dependencies = [
  "adk-core",
  "adk-plugin",
@@ -162,7 +178,7 @@ dependencies = [
 
 [[package]]
 name = "adk-telemetry"
-version = "1.0.0"
+version = "2.0.0"
 dependencies = [
  "thiserror 2.0.18",
  "tracing",
@@ -171,10 +187,11 @@ dependencies = [
 
 [[package]]
 name = "adk-tool"
-version = "1.0.0"
+version = "2.0.0"
 dependencies = [
  "adk-core",
  "adk-rust-macros",
+ "adk-schema",
  "adk-telemetry",
  "async-trait",
  "base64",
@@ -854,6 +871,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
+name = "hex"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
+
+[[package]]
 name = "http"
 version = "1.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1394,6 +1417,7 @@ dependencies = [
  "adk-core",
  "adk-model",
  "adk-runner",
+ "adk-schema",
  "adk-session",
  "adk-tool",
  "async-stream",

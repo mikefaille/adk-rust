@@ -34,6 +34,7 @@ jsonschema = { version = "0.28", default-features = false }
 cron = { version = "0.15", optional = true }
 notify = { version = "8", optional = true }
 axum = { version = "0.8", optional = true }
+adk-schema = { version = "2.0.0", path = "../adk-schema" }
 
 [features]
 default = ["skills"]

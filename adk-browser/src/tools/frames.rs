@@ -29,7 +29,7 @@ impl Tool for SwitchToFrameTool {
     }
 
     fn parameters_schema(&self) -> Option<SchemaDocument> {
-        Some(json!({
+        Some(SchemaDocument::for_input(json!({
             "type": "object",
             "properties": {
                 "index": {
@@ -41,7 +41,7 @@ impl Tool for SwitchToFrameTool {
                     "description": "CSS selector for the iframe element"
                 }
             }
-        }))
+        })))
     }
 
     async fn execute(&self, _ctx: Arc<dyn ToolContext>, args: Value) -> Result<Value> {
