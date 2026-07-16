@@ -30,6 +30,12 @@ pub enum ReferenceRejection {
     UnsupportedDynamicRef,
     /// Malformed JSON pointer format or escape sequences.
     MalformedPointer,
+    /// Nested `$id` declarations below the root.
+    NestedId,
+    /// Nested `$schema` declarations below the root.
+    NestedSchema,
+    /// The resolved reference target is not a valid schema (must be object or boolean).
+    InvalidSchemaTarget,
 }
 
 /// Description of an invalid field location and message.
@@ -115,7 +121,4 @@ pub enum SchemaError {
     /// Serialization failed.
     #[error("serialization error: {0}")]
     Serialization(String),
-    /// Validation compiler failed.
-    #[error("validation error: {0}")]
-    Validation(String),
 }

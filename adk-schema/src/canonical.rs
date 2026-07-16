@@ -74,13 +74,7 @@ fn sort_value(v: Value) -> Value {
             let mut sorted = serde_json::Map::with_capacity(map.len());
             let mut entries: Vec<_> = map.into_iter().collect();
             entries.sort_unstable_by(|a, b| a.0.cmp(&b.0));
-            for (k, mut val) in entries {
-                if k == "$ref"
-                    && let Some(ref_str) = val.as_str()
-                    && let Ok(decoded_path) = crate::references::parse_local_ref(ref_str)
-                {
-                    val = Value::String(format!("#{}", decoded_path));
-                }
+            for (k, val) in entries {
                 sorted.insert(k, sort_value(val));
             }
             Value::Object(sorted)

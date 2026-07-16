@@ -1,6 +1,15 @@
 use crate::error::ReferenceRejection;
 use serde_json::Value;
 
+/// Error type for JSON Pointer resolution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PointerError {
+    /// The pointer syntax itself is invalid.
+    Syntax,
+    /// The pointer is syntactically valid but fails to evaluate to a value.
+    Unresolved,
+}
+
 pub(crate) fn parse_local_ref(ref_str: &str) -> Result<String, ReferenceRejection> {
     if !ref_str.starts_with('#') {
         return Err(ReferenceRejection::NonLocalReference);
@@ -45,29 +54,48 @@ fn percent_decode_pointer(s: &str) -> Result<String, ReferenceRejection> {
     Ok(decoded)
 }
 
+/// Checks if a string segment is a valid RFC 6901 array index (no leading zeros allowed unless exactly "0").
+fn is_valid_array_index(s: &str) -> bool {
+    if s.is_empty() {
+        return false;
+    }
+    if s == "0" {
+        return true;
+    }
+    let mut chars = s.chars();
+    if let Some(first) = chars.next()
+        && (!first.is_ascii_digit() || first == '0')
+    {
+        return false;
+    }
+    chars.all(|c| c.is_ascii_digit())
+}
+
 pub(crate) fn resolve_local_pointer<'a>(
     root: &'a Value,
     pointer_str: &str,
-) -> Result<&'a Value, ReferenceRejection> {
+) -> Result<&'a Value, PointerError> {
     if pointer_str.is_empty() {
         return Ok(root);
     }
     if !pointer_str.starts_with('/') {
-        return Err(ReferenceRejection::MalformedPointer);
+        return Err(PointerError::Syntax);
     }
     let mut current = root;
     for step in pointer_str[1..].split('/') {
         let unescaped = step.replace("~1", "/").replace("~0", "~");
         match current {
             Value::Object(map) => {
-                current = map.get(&unescaped).ok_or(ReferenceRejection::MalformedPointer)?;
+                current = map.get(&unescaped).ok_or(PointerError::Unresolved)?;
             }
             Value::Array(arr) => {
-                let idx =
-                    unescaped.parse::<usize>().map_err(|_| ReferenceRejection::MalformedPointer)?;
-                current = arr.get(idx).ok_or(ReferenceRejection::MalformedPointer)?;
+                if !is_valid_array_index(&unescaped) {
+                    return Err(PointerError::Unresolved);
+                }
+                let idx = unescaped.parse::<usize>().map_err(|_| PointerError::Unresolved)?;
+                current = arr.get(idx).ok_or(PointerError::Unresolved)?;
             }
-            _ => return Err(ReferenceRejection::MalformedPointer),
+            _ => return Err(PointerError::Unresolved),
         }
     }
     Ok(current)

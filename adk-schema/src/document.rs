@@ -48,7 +48,7 @@ pub struct SchemaDocument<R: SchemaRole> {
     _role: PhantomData<R>,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug)]
 pub(crate) struct SchemaInner {
     pub(crate) dialect: JsonSchemaDialect,
     pub(crate) canonical_value: Value,
@@ -71,9 +71,13 @@ impl<R: SchemaRole> std::fmt::Debug for SchemaDocument<R> {
 
 impl<R: SchemaRole> PartialEq for SchemaDocument<R> {
     fn eq(&self, other: &Self) -> bool {
-        self.inner == other.inner
+        self.inner.dialect == other.inner.dialect
+            && self.inner.digest == other.inner.digest
+            && self.inner.canonical_bytes == other.inner.canonical_bytes
     }
 }
+
+impl<R: SchemaRole> Eq for SchemaDocument<R> {}
 
 impl<R: SchemaRole> SchemaDocument<R> {
     pub(crate) fn from_parts(
@@ -112,15 +116,31 @@ impl<R: SchemaRole> SchemaDocument<R> {
 
     /// Ingest and validate a pre-parsed JSON schema document under the specified policy.
     pub fn from_value(value: Value, policy: &IngestionPolicy) -> Result<Self> {
-        let scan = crate::ingest::scan_structure(&value, policy)?;
-        crate::ingest::validate_reference_graph(&value, &scan.references, policy)?;
+        let structural_metrics = crate::ingest::scan_all_nodes_iteratively(&value, policy)?;
+        let scan = crate::ingest::scan_schema_locations_iteratively(&value, policy)?;
+        match policy.references {
+            crate::policy::ReferencePolicy::LocalJsonPointerAcyclic => {
+                crate::ingest::validate_reference_graph(
+                    &value,
+                    &scan.references,
+                    &scan.schema_locations,
+                    policy,
+                )?;
+            }
+        }
 
         let canonical_value = crate::canonical::canonicalize(value, policy.dialect)?;
         let canonical_bytes =
             crate::canonical::serialize_bounded(&canonical_value, policy.max_canonical_bytes)?;
         let digest = calculate_digest::<R>(policy.dialect, &canonical_bytes);
 
-        Ok(Self::from_parts(canonical_value, canonical_bytes, digest, scan.metrics, policy.dialect))
+        let metrics = SchemaMetrics {
+            depth: structural_metrics.depth,
+            node_count: structural_metrics.node_count,
+            reference_count: scan.references.len(),
+        };
+
+        Ok(Self::from_parts(canonical_value, canonical_bytes, digest, metrics, policy.dialect))
     }
 
     /// Borrow the canonical JSON Value.

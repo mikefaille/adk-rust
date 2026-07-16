@@ -84,3 +84,26 @@ impl<R: SchemaRole> SchemaDocument<R> {
         Ok(ValidatedSchemaDocument { document: self, validator: Arc::new(validator) })
     }
 }
+
+#[cfg(all(test, feature = "runtime-validation"))]
+mod tests {
+    use super::*;
+    use crate::IngestionPolicy;
+    use crate::InputSchema;
+    use serde_json::json;
+
+    #[test]
+    fn test_validator_sharing_on_clone() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "foo": { "type": "string" }
+            }
+        });
+        let policy = IngestionPolicy::default();
+        let doc = InputSchema::from_value(schema, &policy).unwrap();
+        let validated = doc.compile().unwrap();
+        let cloned = validated.clone();
+        assert!(Arc::ptr_eq(&validated.validator, &cloned.validator));
+    }
+}
