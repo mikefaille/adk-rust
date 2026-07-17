@@ -10,17 +10,17 @@ use crate::error::{RealtimeError, Result};
 use crate::runner::EventHandler;
 
 #[derive(Default)]
-pub(crate) struct RemainderState {
-    pub(crate) pending_byte: Option<u8>,
-    pub(crate) item_id: Option<String>,
+struct RemainderState {
+    pending_byte: Option<u8>,
+    item_id: Option<String>,
 }
 
 impl RemainderState {
-    pub(crate) fn new() -> Self {
+    fn new() -> Self {
         Self { pending_byte: None, item_id: None }
     }
 
-    pub(crate) fn clear_pending_state(&mut self, boundary: &str) {
+    fn clear_pending_state(&mut self, boundary: &str) {
         if let Some(discarded) = self.pending_byte.take() {
             let item_id = self.item_id.take().unwrap_or_else(|| "unknown".to_string());
             tracing::warn!(
@@ -33,20 +33,20 @@ impl RemainderState {
         self.item_id = None;
     }
 
-    pub(crate) fn assemble<'a>(&mut self, audio: &'a [u8], item_id: &str) -> Cow<'a, [i16]> {
+    fn assemble<'a>(&mut self, audio: &'a [u8], item_id: &str) -> Cow<'a, [i16]> {
         // 1. Handle item_id transition / boundary
-        if let Some(ref old_id) = self.item_id {
-            if old_id != item_id {
-                if let Some(discarded) = self.pending_byte.take() {
-                    tracing::warn!(
-                        item_id = old_id,
-                        next_item_id = item_id,
-                        discarded_byte = discarded,
-                        "Discarding incomplete PCM16 sample trailing byte on item boundary transition"
-                    );
-                }
-                self.item_id = None;
+        if let Some(ref old_id) = self.item_id
+            && old_id != item_id
+        {
+            if let Some(discarded) = self.pending_byte.take() {
+                tracing::warn!(
+                    item_id = old_id,
+                    next_item_id = item_id,
+                    discarded_byte = discarded,
+                    "Discarding incomplete PCM16 sample trailing byte on item boundary transition"
+                );
             }
+            self.item_id = None;
         }
 
         // 2. Process bytes
@@ -69,20 +69,18 @@ impl RemainderState {
 
                 if !rem.is_empty() {
                     self.pending_byte = Some(rem[0]);
-                    self.item_id = Some(item_id.to_string());
                 } else {
                     self.item_id = None;
                 }
             } else {
                 self.pending_byte = Some(p_byte);
-                self.item_id = Some(item_id.to_string());
             }
 
             Cow::Owned(fallback)
         } else {
             // No pending byte.
             let len = audio.len();
-            if len % 2 == 0 {
+            if len.is_multiple_of(2) {
                 #[cfg(target_endian = "little")]
                 if let Ok(aligned_slice) = bytemuck::try_cast_slice::<u8, i16>(audio) {
                     Cow::Borrowed(aligned_slice)
@@ -114,6 +112,10 @@ impl RemainderState {
             }
         }
     }
+}
+
+fn is_complete_channel_frame(samples_len: usize, num_channels: u32) -> bool {
+    num_channels != 0 && samples_len.is_multiple_of(num_channels as usize)
 }
 
 /// Wraps an inner [`EventHandler`] and intercepts `on_audio` to push PCM16 data
@@ -176,7 +178,7 @@ impl<H: EventHandler> EventHandler for LiveKitEventHandler<H> {
             ));
         }
 
-        if samples_cow.len() % (self.num_channels as usize) != 0 {
+        if !is_complete_channel_frame(samples_cow.len(), self.num_channels) {
             tracing::warn!(
                 samples_len = samples_cow.len(),
                 num_channels = self.num_channels,
@@ -233,9 +235,11 @@ mod tests {
     #[test]
     fn test_aligned_even_length() {
         let mut state = RemainderState::new();
-        let input = vec![0x01, 0x02, 0x03, 0x04];
-        let samples = state.assemble(&input, "item_a");
+        let input = [0x0201_i16, 0x0403];
+        let samples = state.assemble(bytemuck::cast_slice(&input), "item_a");
         assert_eq!(samples.as_ref(), &[0x0201, 0x0403]);
+        #[cfg(target_endian = "little")]
+        assert!(matches!(samples, Cow::Borrowed(_)));
         assert_eq!(state.pending_byte, None);
         assert_eq!(state.item_id, None);
     }
@@ -244,10 +248,11 @@ mod tests {
     fn test_unaligned_even_length() {
         let mut state = RemainderState::new();
         // Create an unaligned slice by offsetting
-        let input_vec = vec![0x00, 0x01, 0x02, 0x03, 0x04, 0x00];
+        let input_vec = [0x00, 0x01, 0x02, 0x03, 0x04, 0x00];
         let input = &input_vec[1..5]; // [0x01, 0x02, 0x03, 0x04]
         let samples = state.assemble(input, "item_a");
         assert_eq!(samples.as_ref(), &[0x0201, 0x0403]);
+        assert!(matches!(samples, Cow::Owned(_)));
         assert_eq!(state.pending_byte, None);
         assert_eq!(state.item_id, None);
     }
@@ -309,5 +314,12 @@ mod tests {
         state.clear_pending_state("error");
         assert_eq!(state.pending_byte, None);
         assert_eq!(state.item_id, None);
+    }
+
+    #[test]
+    fn test_stereo_incomplete_frame_is_rejected_before_capture() {
+        assert!(is_complete_channel_frame(2, 2));
+        assert!(!is_complete_channel_frame(1, 2));
+        assert!(!is_complete_channel_frame(3, 2));
     }
 }
