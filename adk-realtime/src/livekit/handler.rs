@@ -91,6 +91,7 @@ impl RemainderState {
         }
 
         self.pending_bytes.extend_from_slice(remainder);
+        // Same-item carry already owns this identity; set it only for a new remainder.
         if self.item_id.is_none() {
             self.item_id = Some(item_id.to_string());
         }
@@ -310,6 +311,18 @@ mod tests {
         let mut state = RemainderState::new();
 
         state.assemble(&[0x01, 0x02, 0x03], "item_a", MONO_FRAME_BYTES);
+        state.clear_pending_state("response_done");
+
+        assert!(state.pending_bytes.is_empty());
+        assert_eq!(state.item_id, None);
+    }
+
+    #[test]
+    fn clearing_pending_state_twice_is_a_no_op() {
+        let mut state = RemainderState::new();
+
+        state.assemble(&[0x01], "item_a", MONO_FRAME_BYTES);
+        state.clear_pending_state("response_done");
         state.clear_pending_state("response_done");
 
         assert!(state.pending_bytes.is_empty());
