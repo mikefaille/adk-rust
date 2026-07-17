@@ -18,7 +18,7 @@ const DEFAULT_NUM_CHANNELS: i32 = 1;
 const BUFFER_DURATION_MS: u32 = 40;
 
 /// Reads audio frames from a LiveKit [`RemoteAudioTrack`] and sends them as
-/// base64-encoded PCM16 audio (24kHz) to the given [`RealtimeRunner`].
+/// typed PCM16 audio (24kHz) to the given [`RealtimeRunner`].
 ///
 /// This function runs continuously until the remote track stream ends, at which
 /// point it returns `Ok(())`. If sending audio to the runner fails, the error

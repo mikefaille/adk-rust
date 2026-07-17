@@ -646,37 +646,41 @@ impl GeminiRealtimeSession {
         // Check for tool calls
         if let Some(tool_call) = value.get("toolCall")
             && let Some(calls) = tool_call.get("functionCalls").and_then(|c| c.as_array())
-            && let Some(call) = calls.first()
+            && !calls.is_empty()
         {
-            let name = call
-                .get("name")
-                .and_then(|n| n.as_str())
-                .ok_or_else(|| RealtimeError::protocol("Gemini tool call missing 'name'"))?;
-            let id = call
-                .get("id")
-                .and_then(|i| i.as_str())
-                .ok_or_else(|| RealtimeError::protocol("Gemini tool call missing 'id'"))?;
-            let args = call
-                .get("args")
-                .cloned()
-                .ok_or_else(|| RealtimeError::protocol("Gemini tool call missing 'args'"))?;
+            let mut events = Vec::with_capacity(calls.len());
+            for (idx, call) in calls.iter().enumerate() {
+                let name = call
+                    .get("name")
+                    .and_then(|n| n.as_str())
+                    .ok_or_else(|| RealtimeError::protocol("Gemini tool call missing 'name'"))?;
+                let id = call
+                    .get("id")
+                    .and_then(|i| i.as_str())
+                    .ok_or_else(|| RealtimeError::protocol("Gemini tool call missing 'id'"))?;
+                let args = call
+                    .get("args")
+                    .cloned()
+                    .ok_or_else(|| RealtimeError::protocol("Gemini tool call missing 'args'"))?;
 
-            if !args.is_object() {
-                return Err(RealtimeError::protocol(format!(
-                    "Gemini tool call 'args' must be an object, got: {:?}",
-                    args
-                )));
+                if !args.is_object() {
+                    return Err(RealtimeError::protocol(format!(
+                        "Gemini tool call 'args' must be an object, got: {:?}",
+                        args
+                    )));
+                }
+
+                events.push(ServerEvent::FunctionCallDone {
+                    event_id: uuid::Uuid::new_v4().to_string(),
+                    response_id: String::new(),
+                    item_id: String::new(),
+                    output_index: idx as u32,
+                    call_id: id.to_string(),
+                    name: name.to_string(),
+                    arguments: args,
+                });
             }
-
-            return Ok(vec![ServerEvent::FunctionCallDone {
-                event_id: uuid::Uuid::new_v4().to_string(),
-                response_id: String::new(),
-                item_id: String::new(),
-                output_index: 0,
-                call_id: id.to_string(),
-                name: name.to_string(),
-                arguments: args,
-            }]);
+            return Ok(events);
         }
 
         Ok(vec![ServerEvent::Unknown])

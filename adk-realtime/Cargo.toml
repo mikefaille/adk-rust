@@ -68,6 +68,9 @@ google-cloud-auth = { version = "1.4", optional = true, default-features = false
 # LiveKit bridge (optional)
 livekit = { workspace = true, optional = true, features = ["rustls-tls-native-roots"] }
 livekit-api = { workspace = true, optional = true, features = ["rustls-tls-native-roots"] }
+livekit-datatrack = { workspace = true, optional = true }
+libwebrtc = { workspace = true, optional = true }
+webrtc-sys = { workspace = true, optional = true }
 
 # OpenAI WebRTC (optional)
 # NOTE: `audiopus` builds the Opus C library from source and requires `cmake`.
@@ -91,6 +94,8 @@ proptest = "1.5"
 url = "2.5"
 anyhow = "1.0"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+criterion = "0.5"
+stats_alloc = "0.1.10"
 
 [[example]]
 name = "openai_session_update"
@@ -135,7 +140,15 @@ name = "livekit_pcm_bench"
 harness = false
 
 [[bench]]
-name = "audio_boundary_bench"
+name = "audio_payload_ownership"
+harness = false
+
+[[bench]]
+name = "audio_payload_tail_latency"
+harness = false
+
+[[bench]]
+name = "audio_payload_allocations"
 harness = false
 
 [features]
@@ -152,7 +165,7 @@ vertex-live = ["gemini", "dep:google-cloud-auth"]
 twilio = ["dep:reqwest", "tokio/sync", "tokio-stream/sync"]
 
 # Enable LiveKit WebRTC bridge
-livekit = ["dep:livekit", "dep:livekit-api", "dep:tokio-tungstenite"]
+livekit = ["dep:livekit", "dep:livekit-api", "dep:tokio-tungstenite", "dep:libwebrtc", "dep:webrtc-sys", "dep:livekit-datatrack"]
 # Enable OpenAI WebRTC transport (requires openai + Sans-IO WebRTC + Opus codec)
 openai-webrtc = ["openai", "dep:str0m", "dep:audiopus", "dep:reqwest"]
 # Enable video avatar support for realtime sessions
