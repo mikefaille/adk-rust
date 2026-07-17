@@ -17,8 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **adk-realtime: preserve split PCM16 samples in the LiveKit audio bridge.**
-  A trailing byte is retained only for the matching response item and is cleared at response
-  and error boundaries, preventing malformed samples and cross-item audio contamination.
+  Incomplete channel frames are retained only for the matching response item and cleared at
+  response and error boundaries, preventing malformed samples, stereo channel-phase shifts,
+  data loss, and cross-item audio contamination.
 
 - **adk-core: Event serialization no longer produces duplicate `"provider_metadata"` keys.**
   `Event.provider_metadata` is now serialized as `"event_metadata"` to avoid collision
