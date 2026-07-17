@@ -1,6 +1,10 @@
+#[cfg(feature = "openai")]
 use adk_realtime::error::RealtimeError;
+#[cfg(feature = "openai")]
 use adk_realtime::events::ServerEvent;
+#[cfg(feature = "openai")]
 use serde_json::{Value, json};
+#[cfg(feature = "openai")]
 use tokio::sync::Mutex;
 
 #[cfg(feature = "openai")]
