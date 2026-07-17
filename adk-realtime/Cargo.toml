@@ -91,6 +91,7 @@ proptest = "1.5"
 url = "2.5"
 anyhow = "1.0"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+console-subscriber = "0.3"
 
 [[example]]
 name = "openai_session_update"

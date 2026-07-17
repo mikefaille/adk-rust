@@ -371,3 +371,17 @@ mod tests {
         assert_eq!(buffer.capacity(), 0);
     }
 }
+
+/// Activates Flush-to-Zero (FTZ) and Denormals-Are-Zero (DAZ) on x86_64 architectures.
+pub fn shield_denormals() {
+    #[cfg(target_arch = "x86_64")]
+    {
+        use std::arch::x86_64::*;
+        unsafe {
+            #[allow(deprecated)]
+            let csr = _mm_getcsr();
+            #[allow(deprecated)]
+            _mm_setcsr(csr | 0x8040);
+        }
+    }
+}

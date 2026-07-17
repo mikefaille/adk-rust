@@ -27,6 +27,18 @@ pub(crate) async fn voice_agent_loop(
     metrics: Arc<RwLock<PipelineMetrics>>,
     mut shutdown_rx: oneshot::Receiver<()>,
 ) {
+    // Prevent denormal hardware traps for DSP operations
+    #[cfg(target_arch = "x86_64")]
+    {
+        use std::arch::x86_64::*;
+        unsafe {
+            #[allow(deprecated)]
+            let csr = _mm_getcsr();
+            #[allow(deprecated)]
+            _mm_setcsr(csr | 0x8040);
+        }
+    }
+
     let mut speech_buffer: Vec<AudioFrame> = Vec::new();
     let mut silence_count = 0u32;
     let silence_threshold = 5; // consecutive silent frames before flush
