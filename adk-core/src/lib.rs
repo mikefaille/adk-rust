@@ -115,6 +115,8 @@ pub mod shared_state;
 pub mod tool;
 /// Semaphore-based tool concurrency management.
 pub mod tool_concurrency;
+/// Centralized tool execution logic.
+pub mod tool_executor;
 /// Content, Part, and multimodal data types.
 pub mod types;
 
@@ -156,6 +158,7 @@ pub use tool::{
     ToolRegistry, ToolSchema, Toolset, ValidationMode,
 };
 pub use tool_concurrency::{ConcurrencyPermit, ToolConcurrencyManager};
+pub use tool_executor::{ToolCallExecutor, ToolExecutorOptions};
 pub use types::{
     Content, FileDataPart, FunctionResponseData, InlineDataPart, MAX_INLINE_DATA_SIZE, Part,
 };

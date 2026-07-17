@@ -2,15 +2,14 @@ use adk_core::{
     AfterAgentCallback, AfterModelCallback, AfterToolCallback, AfterToolCallbackFull, Agent,
     BeforeAgentCallback, BeforeModelCallback, BeforeModelResult, BeforeToolCallback,
     CallbackContext, Content, Event, EventActions, FunctionResponseData, GlobalInstructionProvider,
-    InstructionProvider, InvocationContext, Llm, LlmRequest, LlmResponse, MemoryEntry,
-    OnToolErrorCallback, Part, ReadonlyContext, Result, RetryBudget, Tool, ToolCallbackContext,
-    ToolConfirmationDecision, ToolConfirmationPolicy, ToolConfirmationRequest, ToolContext,
-    ToolExecutionStrategy, ToolOutcome, Toolset,
+    InstructionProvider, InvocationContext, Llm, LlmRequest, LlmResponse, OnToolErrorCallback,
+    Part, ReadonlyContext, Result, RetryBudget, Tool, ToolCallExecutor, ToolConfirmationDecision,
+    ToolConfirmationPolicy, ToolConfirmationRequest, ToolExecutionStrategy, ToolExecutorOptions,
+    ToolOutcome, Toolset,
 };
 use async_stream::stream;
 use async_trait::async_trait;
-use std::sync::{Arc, Mutex};
-use tracing::Instrument;
+use std::sync::Arc;
 
 #[cfg(feature = "enhanced-plugins")]
 use adk_plugin::{
@@ -881,10 +880,7 @@ impl LlmAgentBuilder {
                     adk_core::ErrorComponent::Agent,
                     adk_core::ErrorCategory::InvalidInput,
                     "code.gemini_interactions_conflict",
-                    "Cannot combine Gemini Interactions API (server-managed environment) \
-                     with client-side sandbox tools (Shell/Filesystem). These provide \
-                     competing filesystems and would produce nondeterministic behavior. \
-                     Either disable use_interactions_api or remove sandbox capabilities.",
+                    "Cannot combine Gemini Interactions API (server-managed environment)                      with client-side sandbox tools (Shell/Filesystem). These provide                      competing filesystems and would produce nondeterministic behavior.                      Either disable use_interactions_api or remove sandbox capabilities.",
                 ));
             }
         }
@@ -941,188 +937,6 @@ impl LlmAgentBuilder {
             #[cfg(feature = "sandbox")]
             sandbox_config: self.sandbox_config,
         })
-    }
-}
-
-// AgentToolContext wraps the parent InvocationContext and preserves all context
-// instead of throwing it away like SimpleToolContext did
-struct AgentToolContext {
-    parent_ctx: Arc<dyn InvocationContext>,
-    function_call_id: String,
-    actions: Mutex<EventActions>,
-    progress_tx: Option<tokio::sync::mpsc::UnboundedSender<Event>>,
-}
-
-impl AgentToolContext {
-    fn new(parent_ctx: Arc<dyn InvocationContext>, function_call_id: String) -> Self {
-        Self {
-            parent_ctx,
-            function_call_id,
-            actions: Mutex::new(EventActions::default()),
-            progress_tx: None,
-        }
-    }
-
-    /// Attach a progress sink so [`ToolContext::emit_progress`] forwards chunks
-    /// as partial [`Event`]s onto the agent's `EventStream`.
-    fn with_progress(mut self, tx: tokio::sync::mpsc::UnboundedSender<Event>) -> Self {
-        self.progress_tx = Some(tx);
-        self
-    }
-
-    fn actions_guard(&self) -> std::sync::MutexGuard<'_, EventActions> {
-        self.actions.lock().unwrap_or_else(|e| e.into_inner())
-    }
-}
-
-#[async_trait]
-impl ReadonlyContext for AgentToolContext {
-    fn invocation_id(&self) -> &str {
-        self.parent_ctx.invocation_id()
-    }
-
-    fn agent_name(&self) -> &str {
-        self.parent_ctx.agent_name()
-    }
-
-    fn user_id(&self) -> &str {
-        // ✅ Delegate to parent - now tools get the real user_id!
-        self.parent_ctx.user_id()
-    }
-
-    fn app_name(&self) -> &str {
-        // ✅ Delegate to parent - now tools get the real app_name!
-        self.parent_ctx.app_name()
-    }
-
-    fn session_id(&self) -> &str {
-        // ✅ Delegate to parent - now tools get the real session_id!
-        self.parent_ctx.session_id()
-    }
-
-    fn branch(&self) -> &str {
-        self.parent_ctx.branch()
-    }
-
-    fn user_content(&self) -> &Content {
-        self.parent_ctx.user_content()
-    }
-}
-
-#[async_trait]
-impl CallbackContext for AgentToolContext {
-    fn artifacts(&self) -> Option<Arc<dyn adk_core::Artifacts>> {
-        // ✅ Delegate to parent - tools can now access artifacts!
-        self.parent_ctx.artifacts()
-    }
-
-    fn shared_state(&self) -> Option<Arc<adk_core::SharedState>> {
-        self.parent_ctx.shared_state()
-    }
-}
-
-#[async_trait]
-impl ToolContext for AgentToolContext {
-    fn function_call_id(&self) -> &str {
-        &self.function_call_id
-    }
-
-    fn actions(&self) -> EventActions {
-        self.actions_guard().clone()
-    }
-
-    fn set_actions(&self, actions: EventActions) {
-        *self.actions_guard() = actions;
-    }
-
-    async fn search_memory(&self, query: &str) -> Result<Vec<MemoryEntry>> {
-        // ✅ Delegate to parent's memory if available
-        if let Some(memory) = self.parent_ctx.memory() {
-            memory.search(query).await
-        } else {
-            Ok(vec![])
-        }
-    }
-
-    fn user_scopes(&self) -> Vec<String> {
-        self.parent_ctx.user_scopes()
-    }
-
-    async fn get_secret(&self, name: &str) -> Result<Option<String>> {
-        self.parent_ctx.get_secret(name).await
-    }
-
-    async fn emit_progress(&self, stream: &str, chunk: &str) {
-        // Primary path: forward as a partial Event on the agent's EventStream so
-        // UIs consume tool progress through the same channel as everything else.
-        if let Some(tx) = &self.progress_tx {
-            let event = Event::tool_progress(
-                self.parent_ctx.invocation_id(),
-                self.parent_ctx.agent_name(),
-                &self.function_call_id,
-                stream,
-                chunk,
-            );
-            // Best-effort: a closed receiver just means nobody is listening.
-            let _ = tx.send(event);
-        }
-        // Secondary path: structured trace for log-based observability.
-        tracing::debug!(
-            target: "adk_agent::tool_progress",
-            tool_call_id = %self.function_call_id,
-            stream = %stream,
-            "{chunk}",
-        );
-    }
-}
-
-/// Wrapper that adds ToolOutcome to an existing CallbackContext.
-/// Used only during after-tool callback invocation so callbacks
-/// can inspect structured metadata about the completed tool execution.
-struct ToolOutcomeCallbackContext {
-    inner: Arc<dyn CallbackContext>,
-    outcome: ToolOutcome,
-}
-
-#[async_trait]
-impl ReadonlyContext for ToolOutcomeCallbackContext {
-    fn invocation_id(&self) -> &str {
-        self.inner.invocation_id()
-    }
-
-    fn agent_name(&self) -> &str {
-        self.inner.agent_name()
-    }
-
-    fn user_id(&self) -> &str {
-        self.inner.user_id()
-    }
-
-    fn app_name(&self) -> &str {
-        self.inner.app_name()
-    }
-
-    fn session_id(&self) -> &str {
-        self.inner.session_id()
-    }
-
-    fn branch(&self) -> &str {
-        self.inner.branch()
-    }
-
-    fn user_content(&self) -> &Content {
-        self.inner.user_content()
-    }
-}
-
-#[async_trait]
-impl CallbackContext for ToolOutcomeCallbackContext {
-    fn artifacts(&self) -> Option<Arc<dyn adk_core::Artifacts>> {
-        self.inner.artifacts()
-    }
-
-    fn tool_outcome(&self) -> Option<ToolOutcome> {
-        Some(self.outcome.clone())
     }
 }
 
@@ -2145,15 +1959,12 @@ impl Agent for LlmAgent {
 
                     // Channel for streaming tool progress (stdout/stderr) onto the
                     // agent's EventStream while tools are still executing. Each
-                    // AgentToolContext gets a clone; the dispatch loop below drains
-                    // it concurrently and yields progress events to the client.
+                    // tool execution gets access to this via ToolCallExecutor.
                     let (progress_tx, mut progress_rx) =
                         tokio::sync::mpsc::unbounded_channel::<Event>();
 
                     // Per-tool execution async block. Returns (index, Content, EventActions, escalate_or_skip).
-                    // Each tool retains its own retry budget, circuit breaker, tracing span,
-                    // before/after callbacks, and error handling. Errors are captured as
-                    // { "error": "..." } JSON — failed tools do not abort the batch.
+                    // This closure now wraps the centralized ToolCallExecutor.
                     let execute_one_tool = |idx: usize, name: String, args: serde_json::Value,
                                             id: Option<String>, function_call_id: String| {
                         let ctx = ctx.clone();
@@ -2166,26 +1977,33 @@ impl Agent for LlmAgent {
                         let on_tool_error_callbacks = &on_tool_error_callbacks;
                         let tool_confirmation_policy = &tool_confirmation_policy;
                         let cb_mutex = &cb_mutex;
-                        let invocation_id = &invocation_id;
                         let concurrency_manager = &concurrency_manager;
                         let progress_tx = progress_tx.clone();
                         #[cfg(feature = "enhanced-plugins")]
                         let enhanced_plugin_manager = &enhanced_plugin_manager;
+
                         async move {
                             let mut tool_actions = EventActions::default();
-                            let mut response_content: Option<Content> = None;
-                            let mut run_after_tool_callbacks = true;
-                            let mut tool_outcome_for_callback: Option<ToolOutcome> = None;
-                            let mut executed_tool: Option<Arc<dyn Tool>> = None;
-                            let mut executed_tool_response: Option<serde_json::Value> = None;
 
-                            // Acquire concurrency permit before tool execution.
-                            // The permit is held for the entire duration of this tool call
-                            // and released on drop when this async block completes.
+                            // 1. Resolve Tool
+                            let Some(tool) = tool_map.get(&name) else {
+                                let error_content = Content {
+                                    role: "function".to_string(),
+                                    parts: vec![Part::FunctionResponse {
+                                        function_response: FunctionResponseData::new(
+                                            name.clone(),
+                                            serde_json::json!({ "error": format!("Tool {} not found", name) }),
+                                        ),
+                                        id: id.clone(),
+                                    }],
+                                };
+                                return (idx, error_content, tool_actions, false);
+                            };
+
+                            // 2. Concurrency Control
                             let _concurrency_permit = match concurrency_manager.acquire(&name).await {
                                 Ok(permit) => Some(permit),
                                 Err(e) => {
-                                    // Concurrency limit reached with Fail policy — return error
                                     let error_content = Content {
                                         role: "function".to_string(),
                                         parts: vec![Part::FunctionResponse {
@@ -2200,136 +2018,50 @@ impl Agent for LlmAgent {
                                 }
                             };
 
-                            // Tool confirmation (deny case; None handled by pre-check)
+                            // 3. Confirmation Logic (Keep per-agent implementation for now)
                             if tool_confirmation_policy.requires_confirmation(&name) {
                                 match ctx.run_config().tool_confirmation_decisions.get(&name).copied() {
                                     Some(ToolConfirmationDecision::Approve) => {
-                                        tool_actions.tool_confirmation_decision =
-                                            Some(ToolConfirmationDecision::Approve);
+                                        tool_actions.tool_confirmation_decision = Some(ToolConfirmationDecision::Approve);
                                     }
                                     Some(ToolConfirmationDecision::Deny) => {
-                                        tool_actions.tool_confirmation_decision =
-                                            Some(ToolConfirmationDecision::Deny);
-                                        response_content = Some(Content {
+                                        tool_actions.tool_confirmation_decision = Some(ToolConfirmationDecision::Deny);
+                                        let error_content = Content {
                                             role: "function".to_string(),
                                             parts: vec![Part::FunctionResponse {
                                                 function_response: FunctionResponseData::new(
                                                     name.clone(),
-                                                    serde_json::json!({
-                                                        "error": format!("Tool '{}' execution denied by confirmation policy", name)
-                                                    }),
+                                                    serde_json::json!({ "error": format!("Tool '{}' execution denied by confirmation policy", name) }),
                                                 ),
                                                 id: id.clone(),
                                             }],
-                                        });
-                                        run_after_tool_callbacks = false;
+                                        };
+                                        return (idx, error_content, tool_actions, false);
                                     }
                                     None => {
-                                        response_content = Some(Content {
+                                        // Should be caught by pre-check
+                                        let error_content = Content {
                                             role: "function".to_string(),
                                             parts: vec![Part::FunctionResponse {
                                                 function_response: FunctionResponseData::new(
                                                     name.clone(),
-                                                    serde_json::json!({
-                                                        "error": format!("Tool '{}' requires confirmation", name)
-                                                    }),
+                                                    serde_json::json!({ "error": format!("Tool '{}' requires confirmation", name) }),
                                                 ),
                                                 id: id.clone(),
                                             }],
-                                        });
-                                        run_after_tool_callbacks = false;
+                                        };
+                                        return (idx, error_content, tool_actions, false);
                                     }
                                 }
                             }
 
-                            // Before-tool callbacks
-                            // Track potentially modified args for enhanced plugin after-hook
-                            #[allow(unused_mut)]
-                            let mut final_args = args.clone();
-
-                            // ===== ENHANCED PLUGIN: BEFORE TOOL CALL =====
-                            #[cfg(feature = "enhanced-plugins")]
-                            if response_content.is_none()
-                                && let Some(epm) = &enhanced_plugin_manager
-                                    && let Some(tool_ref) = tool_map.get(&name) {
-                                        match epm.run_before_tool_call(
-                                            tool_ref.clone(),
-                                            final_args.clone(),
-                                            ctx.clone() as Arc<dyn CallbackContext>,
-                                        ).await {
-                                            Ok(BeforeToolCallResult::Continue(modified_args)) => {
-                                                final_args = modified_args;
-                                            }
-                                            Ok(BeforeToolCallResult::ShortCircuit(synthetic_result)) => {
-                                                // Short-circuit: use synthetic result, skip tool execution
-                                                response_content = Some(Content {
-                                                    role: "function".to_string(),
-                                                    parts: vec![Part::FunctionResponse {
-                                                        function_response: FunctionResponseData::from_tool_result(
-                                                            name.clone(),
-                                                            synthetic_result,
-                                                        ),
-                                                        id: id.clone(),
-                                                    }],
-                                                });
-                                                executed_tool = Some(tool_ref.clone());
-                                            }
-                                            Err(e) => {
-                                                response_content = Some(Content {
-                                                    role: "function".to_string(),
-                                                    parts: vec![Part::FunctionResponse {
-                                                        function_response: FunctionResponseData::new(
-                                                            name.clone(),
-                                                            serde_json::json!({ "error": e.to_string() }),
-                                                        ),
-                                                        id: id.clone(),
-                                                    }],
-                                                });
-                                                run_after_tool_callbacks = false;
-                                            }
-                                        }
-                                    }
-
-                            if response_content.is_none() {
-                                let tool_ctx = Arc::new(ToolCallbackContext::new(
-                                    ctx.clone(),
-                                    name.clone(),
-                                    final_args.clone(),
-                                ));
-                                for callback in before_tool_callbacks.as_ref() {
-                                    match callback(tool_ctx.clone() as Arc<dyn CallbackContext>).await {
-                                        Ok(Some(c)) => { response_content = Some(c); break; }
-                                        Ok(None) => continue,
-                                        Err(e) => {
-                                            response_content = Some(Content {
-                                                role: "function".to_string(),
-                                                parts: vec![Part::FunctionResponse {
-                                                    function_response: FunctionResponseData::new(
-                                                        name.clone(),
-                                                        serde_json::json!({ "error": e.to_string() }),
-                                                    ),
-                                                    id: id.clone(),
-                                                }],
-                                            });
-                                            run_after_tool_callbacks = false;
-                                            break;
-                                        }
-                                    }
-                                }
-                            }
-
-                            // Circuit breaker check
-                            if response_content.is_none() {
+                            // 4. Circuit Breaker Check
+                            {
                                 let guard = cb_mutex.lock().unwrap_or_else(|e| e.into_inner());
-                                if let Some(ref cb_state) = *guard
-                                    && cb_state.is_open(&name)
-                                {
-                                    let msg = format!(
-                                        "Tool '{}' is temporarily disabled after {} consecutive failures",
-                                        name, cb_state.threshold
-                                    );
+                                if let Some(ref cb_state) = *guard && cb_state.is_open(&name) {
+                                    let msg = format!("Tool '{}' is temporarily disabled after {} consecutive failures", name, cb_state.threshold);
                                     tracing::warn!(tool.name = %name, "circuit breaker open, skipping tool execution");
-                                    response_content = Some(Content {
+                                    let error_content = Content {
                                         role: "function".to_string(),
                                         parts: vec![Part::FunctionResponse {
                                             function_response: FunctionResponseData::new(
@@ -2338,296 +2070,97 @@ impl Agent for LlmAgent {
                                             ),
                                             id: id.clone(),
                                         }],
-                                    });
-                                    run_after_tool_callbacks = false;
-                                }
-                                drop(guard);
-                            }
-
-                            // Execute tool with retry budget and tracing
-                            if response_content.is_none() {
-                                if let Some(tool) = tool_map.get(&name) {
-                                    let tool_ctx: Arc<dyn ToolContext> = Arc::new(
-                                        AgentToolContext::new(ctx.clone(), function_call_id.clone())
-                                            .with_progress(progress_tx.clone()),
-                                    );
-                                    let span_name = format!("execute_tool {name}");
-                                    let tool_span = tracing::info_span!(
-                                        "",
-                                        otel.name = %span_name,
-                                        tool.name = %name,
-                                        "gcp.vertex.agent.event_id" = %format!("{}_{}", invocation_id, name),
-                                        "gcp.vertex.agent.invocation_id" = %invocation_id,
-                                        "gcp.vertex.agent.session_id" = %ctx.session_id(),
-                                        "gen_ai.conversation.id" = %ctx.session_id()
-                                    );
-
-                                    let budget = tool_retry_budgets.get(&name)
-                                        .or(default_retry_budget.as_ref());
-                                    let max_attempts = budget.map(|b| b.max_retries + 1).unwrap_or(1);
-                                    let retry_delay = budget.map(|b| b.delay).unwrap_or_default();
-
-                                    let tool_clone = tool.clone();
-                                    let tool_start = std::time::Instant::now();
-                                    let mut last_error = String::new();
-                                    let mut final_attempt: u32 = 0;
-                                    let mut retry_result: Option<serde_json::Value> = None;
-
-                                    for attempt in 0..max_attempts {
-                                        final_attempt = attempt;
-                                        if attempt > 0 {
-                                            tokio::time::sleep(retry_delay).await;
-                                        }
-                                        match async {
-                                            let args_payload = trace_json_payload(
-                                                &final_args,
-                                                ctx.run_config().record_payloads,
-                                                ctx.run_config().trace_payload_max_bytes,
-                                            );
-                                            tracing::debug!(tool.name = %name, tool.args = %args_payload, attempt = attempt, "tool_call");
-                                            let exec_future = tool_clone.execute(tool_ctx.clone(), final_args.clone());
-                                            let unwind_safe_future = std::panic::AssertUnwindSafe(
-                                                tokio::time::timeout(tool_timeout, exec_future)
-                                            );
-                                            match futures::FutureExt::catch_unwind(unwind_safe_future).await {
-                                                Ok(result) => result,
-                                                Err(_panic) => Ok(Err(adk_core::AdkError::tool(
-                                                    format!("tool '{}' panicked during execution", name),
-                                                ))),
-                                            }
-                                        }.instrument(tool_span.clone()).await {
-                                            Ok(Ok(value)) => {
-                                                let result_payload = trace_json_payload(
-                                                    &value,
-                                                    ctx.run_config().record_payloads,
-                                                    ctx.run_config().trace_payload_max_bytes,
-                                                );
-                                                tracing::debug!(tool.name = %name, tool.result = %result_payload, "tool_result");
-                                                retry_result = Some(value);
-                                                break;
-                                            }
-                                            Ok(Err(e)) => {
-                                                last_error = e.to_string();
-                                                if attempt + 1 < max_attempts {
-                                                    tracing::warn!(tool.name = %name, attempt = attempt, error = %last_error, "tool execution failed, retrying");
-                                                } else {
-                                                    tracing::warn!(tool.name = %name, error = %last_error, "tool_error");
-                                                }
-                                            }
-                                            Err(_) => {
-                                                last_error = format!(
-                                                    "Tool '{}' timed out after {} seconds",
-                                                    name, tool_timeout.as_secs()
-                                                );
-                                                if attempt + 1 < max_attempts {
-                                                    tracing::warn!(tool.name = %name, attempt = attempt, timeout_secs = tool_timeout.as_secs(), "tool timed out, retrying");
-                                                } else {
-                                                    tracing::warn!(tool.name = %name, timeout_secs = tool_timeout.as_secs(), "tool_timeout");
-                                                }
-                                            }
-                                        }
-                                    }
-
-                                    let tool_duration = tool_start.elapsed();
-                                    let (tool_success, tool_error_message, function_response) = match retry_result {
-                                        Some(value) => (true, None, value),
-                                        None => (false, Some(last_error.clone()), serde_json::json!({ "error": last_error })),
                                     };
-
-                                    let outcome = ToolOutcome {
-                                        tool_name: name.clone(),
-                                        tool_args: final_args.clone(),
-                                        success: tool_success,
-                                        duration: tool_duration,
-                                        error_message: tool_error_message.clone(),
-                                        attempt: final_attempt,
-                                    };
-                                    tool_outcome_for_callback = Some(outcome);
-
-                                    // Circuit breaker recording
-                                    {
-                                        let mut guard = cb_mutex.lock().unwrap_or_else(|e| e.into_inner());
-                                        if let Some(ref mut cb_state) = *guard {
-                                            cb_state.record(tool_outcome_for_callback.as_ref().unwrap());
-                                        }
-                                    }
-
-                                    // On-tool-error callbacks
-                                    let final_function_response = if !tool_success {
-                                        let mut fallback_result = None;
-                                        let error_msg = tool_error_message.clone().unwrap_or_default();
-                                        for callback in on_tool_error_callbacks.as_ref() {
-                                            match callback(
-                                                ctx.clone() as Arc<dyn CallbackContext>,
-                                                tool.clone(),
-                                                final_args.clone(),
-                                                error_msg.clone(),
-                                            ).await {
-                                                Ok(Some(result)) => { fallback_result = Some(result); break; }
-                                                Ok(None) => continue,
-                                                Err(e) => { tracing::warn!(error = %e, "on_tool_error callback failed"); break; }
-                                            }
-                                        }
-                                        fallback_result.unwrap_or(function_response)
-                                    } else {
-                                        function_response
-                                    };
-
-                                    let confirmation_decision = tool_actions.tool_confirmation_decision;
-                                    tool_actions = tool_ctx.actions();
-                                    if tool_actions.tool_confirmation_decision.is_none() {
-                                        tool_actions.tool_confirmation_decision = confirmation_decision;
-                                    }
-                                    executed_tool = Some(tool.clone());
-                                    executed_tool_response = Some(final_function_response.clone());
-                                    response_content = Some(Content {
-                                        role: "function".to_string(),
-                                        parts: vec![Part::FunctionResponse {
-                                            function_response: FunctionResponseData::from_tool_result(
-                                                name.clone(),
-                                                final_function_response,
-                                            ),
-                                            id: id.clone(),
-                                        }],
-                                    });
-                                } else {
-                                    response_content = Some(Content {
-                                        role: "function".to_string(),
-                                        parts: vec![Part::FunctionResponse {
-                                            function_response: FunctionResponseData::new(
-                                                name.clone(),
-                                                serde_json::json!({
-                                                    "error": format!("Tool {} not found", name)
-                                                }),
-                                            ),
-                                            id: id.clone(),
-                                        }],
-                                    });
+                                    return (idx, error_content, tool_actions, false);
                                 }
                             }
 
-                            // After-tool callbacks
-                            let mut response_content = response_content.expect("tool response content is set");
-                            if run_after_tool_callbacks {
-                                let outcome_ctx: Arc<dyn CallbackContext> = match tool_outcome_for_callback {
-                                    Some(outcome) => Arc::new(ToolOutcomeCallbackContext {
-                                        inner: ctx.clone() as Arc<dyn CallbackContext>,
-                                        outcome,
-                                    }),
-                                    None => ctx.clone() as Arc<dyn CallbackContext>,
-                                };
-                                let cb_ctx: Arc<dyn CallbackContext> = Arc::new(ToolCallbackContext::new(
-                                    outcome_ctx,
-                                    name.clone(),
-                                    final_args.clone(),
-                                ));
-                                for callback in after_tool_callbacks.as_ref() {
-                                    match callback(cb_ctx.clone()).await {
-                                        Ok(Some(modified)) => { response_content = modified; break; }
-                                        Ok(None) => continue,
-                                        Err(e) => {
-                                            response_content = Content {
-                                                role: "function".to_string(),
-                                                parts: vec![Part::FunctionResponse {
-                                                    function_response: FunctionResponseData::new(
-                                                        name.clone(),
-                                                        serde_json::json!({ "error": e.to_string() }),
-                                                    ),
-                                                    id: id.clone(),
-                                                }],
-                                            };
-                                            break;
-                                        }
-                                    }
-                                }
-                                if let (Some(tool_ref), Some(tool_resp)) = (&executed_tool, executed_tool_response) {
-                                    for callback in after_tool_callbacks_full.as_ref() {
-                                        match callback(
-                                            cb_ctx.clone(), tool_ref.clone(), final_args.clone(), tool_resp.clone(),
-                                        ).await {
-                                            Ok(Some(modified_value)) => {
-                                                response_content = Content {
-                                                    role: "function".to_string(),
-                                                    parts: vec![Part::FunctionResponse {
-                                                        function_response: FunctionResponseData::from_tool_result(
-                                                            name.clone(),
-                                                            modified_value,
-                                                        ),
-                                                        id: id.clone(),
-                                                    }],
-                                                };
-                                                break;
-                                            }
-                                            Ok(None) => continue,
-                                            Err(e) => {
-                                                response_content = Content {
-                                                    role: "function".to_string(),
-                                                    parts: vec![Part::FunctionResponse {
-                                                        function_response: FunctionResponseData::new(
-                                                            name.clone(),
-                                                            serde_json::json!({ "error": e.to_string() }),
-                                                        ),
-                                                        id: id.clone(),
-                                                    }],
-                                                };
-                                                break;
-                                            }
-                                        }
-                                    }
-                                }
+                            // 5. Prepare Executor Options
+                            #[allow(unused_mut)]
+                            let mut options = ToolExecutorOptions {
+                                retry_budget: tool_retry_budgets.get(&name).or(default_retry_budget.as_ref()).cloned(),
+                                timeout: tool_timeout,
+                                before_tool_callbacks: before_tool_callbacks.clone(),
+                                after_tool_callbacks: after_tool_callbacks.clone(),
+                                after_tool_callbacks_full: after_tool_callbacks_full.clone(),
+                                on_tool_error_callbacks: on_tool_error_callbacks.clone(),
+                                progress_tx: Some(progress_tx),
+                                ..Default::default()
+                            };
 
-                                // ===== ENHANCED PLUGIN: AFTER TOOL CALL =====
-                                // Enhanced plugins can modify the tool result after legacy callbacks.
-                                #[cfg(feature = "enhanced-plugins")]
-                                if let Some(epm) = &enhanced_plugin_manager
-                                    && let Some(tool_ref) = &executed_tool {
-                                        // Extract the result value from the response content
-                                        let result_value = response_content.parts.iter()
-                                            .find_map(|p| {
-                                                if let Part::FunctionResponse { function_response, .. } = p {
-                                                    Some(function_response.response.clone())
-                                                } else {
-                                                    None
-                                                }
-                                            })
-                                            .unwrap_or(serde_json::json!(null));
-
-                                        match epm.run_after_tool_call(
-                                            tool_ref.clone(),
-                                            &final_args,
-                                            result_value,
-                                            ctx.clone() as Arc<dyn CallbackContext>,
-                                        ).await {
-                                            Ok(adk_plugin::AfterToolCallResult::Continue(modified_result)) => {
-                                                response_content = Content {
-                                                    role: "function".to_string(),
-                                                    parts: vec![Part::FunctionResponse {
-                                                        function_response: FunctionResponseData::from_tool_result(
-                                                            name.clone(),
-                                                            modified_result,
-                                                        ),
-                                                        id: id.clone(),
-                                                    }],
-                                                };
-                                            }
-                                            Err(e) => {
-                                                response_content = Content {
-                                                    role: "function".to_string(),
-                                                    parts: vec![Part::FunctionResponse {
-                                                        function_response: FunctionResponseData::new(
-                                                            name.clone(),
-                                                            serde_json::json!({ "error": e.to_string() }),
-                                                        ),
-                                                        id: id.clone(),
-                                                    }],
-                                                };
+                            // Add enhanced plugins as interceptors
+                            #[cfg(feature = "enhanced-plugins")]
+                            if let Some(epm) = &enhanced_plugin_manager {
+                                let epm = epm.clone();
+                                options.interceptors = Arc::new(vec![Box::new(move |tool, args, ctx| {
+                                    let epm = epm.clone();
+                                    Box::pin(async move {
+                                        match epm.run_before_tool_call(tool, args, ctx).await? {
+                                            adk_plugin::BeforeToolCallResult::Continue(args) => Ok(adk_core::tool_executor::ToolInterceptorResult::Continue(args)),
+                                            adk_plugin::BeforeToolCallResult::ShortCircuit(res) => {
+                                                Ok(adk_core::tool_executor::ToolInterceptorResult::ShortCircuit(res))
                                             }
                                         }
-                                    }
+                                    })
+                                })]);
                             }
 
-                            let escalate_or_skip = tool_actions.escalate || tool_actions.skip_summarization;
-                            (idx, response_content, tool_actions, escalate_or_skip)
+                            // 6. Execute via Centralized Executor
+                            let res = ToolCallExecutor::execute(
+                                ctx.clone(),
+                                tool.clone(),
+                                &function_call_id,
+                                args,
+                                options,
+                            ).await;
+
+                            let result_value = res.value;
+                            let executor_actions = res.actions;
+                            let outcome = res.outcome;
+
+                            // Merge actions
+                            let mut final_actions = executor_actions;
+                            if final_actions.tool_confirmation_decision.is_none() {
+                                final_actions.tool_confirmation_decision = tool_actions.tool_confirmation_decision;
+                            }
+
+                            // 7. Enhanced Plugin: After Tool Call
+                            #[cfg(feature = "enhanced-plugins")]
+                            if let Some(epm) = &enhanced_plugin_manager {
+                                match epm.run_after_tool_call(
+                                    tool.clone(),
+                                    outcome.as_ref().map(|o| &o.tool_args).unwrap_or(&serde_json::json!({})),
+                                    result_value.clone(),
+                                    ctx.clone() as Arc<dyn CallbackContext>,
+                                ).await {
+                                    Ok(adk_plugin::AfterToolCallResult::Continue(modified)) => {
+                                        result_value = modified;
+                                    }
+                                    Err(e) => {
+                                        result_value = serde_json::json!({ "error": e.to_string() });
+                                    }
+                                }
+                            }
+
+                            // 8. Record outcome in Circuit Breaker
+                            if let Some(ref outcome) = outcome {
+                                let mut guard = cb_mutex.lock().unwrap_or_else(|e| e.into_inner());
+                                if let Some(ref mut cb_state) = *guard {
+                                    cb_state.record(outcome);
+                                }
+                            }
+
+                            // 9. Construct Response Content
+                            let response_content = Content {
+                                role: "function".to_string(),
+                                parts: vec![Part::FunctionResponse {
+                                    function_response: FunctionResponseData::from_tool_result(name.clone(), result_value),
+                                    id: id.clone(),
+                                }],
+                            };
+
+                            let escalate_or_skip = final_actions.escalate || final_actions.skip_summarization;
+                            (idx, response_content, final_actions, escalate_or_skip)
                         }
                     };
 

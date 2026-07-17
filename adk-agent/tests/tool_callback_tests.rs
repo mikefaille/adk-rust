@@ -246,7 +246,15 @@ async fn test_before_tool_callback_short_circuits_tool_execution() {
             Box::pin(async move {
                 Ok(Some(Content {
                     role: "function".to_string(),
-                    parts: vec![Part::Text { text: "blocked".to_string() }],
+                    parts: vec![Part::FunctionResponse {
+                        function_response: adk_core::FunctionResponseData {
+                            name: "test_tool".into(),
+                            response: json!({"status": "blocked"}),
+                            inline_data: vec![],
+                            file_data: vec![],
+                        },
+                        id: Some("call-1".into()),
+                    }],
                 }))
             })
         }))
@@ -260,10 +268,12 @@ async fn test_before_tool_callback_short_circuits_tool_execution() {
         let event = result.unwrap();
         if let Some(content) = event.llm_response.content {
             for part in content.parts {
-                if let Part::Text { text } = part
-                    && text == "blocked"
-                {
-                    saw_blocked = true;
+                if let Part::FunctionResponse { function_response, .. } = part {
+                    if function_response.response.get("status").and_then(|v| v.as_str())
+                        == Some("blocked")
+                    {
+                        saw_blocked = true;
+                    }
                 }
             }
         }
@@ -302,7 +312,15 @@ async fn test_after_tool_callback_overrides_result_and_order() {
                 after_order.lock().unwrap().push("after_tool".to_string());
                 Ok(Some(Content {
                     role: "function".to_string(),
-                    parts: vec![Part::Text { text: "after-override".to_string() }],
+                    parts: vec![Part::FunctionResponse {
+                        function_response: adk_core::FunctionResponseData {
+                            name: "test_tool".into(),
+                            response: json!({"status": "after-override"}),
+                            inline_data: vec![],
+                            file_data: vec![],
+                        },
+                        id: Some("call-2".into()),
+                    }],
                 }))
             })
         }))
@@ -316,10 +334,12 @@ async fn test_after_tool_callback_overrides_result_and_order() {
         let event = result.unwrap();
         if let Some(content) = event.llm_response.content {
             for part in content.parts {
-                if let Part::Text { text } = part
-                    && text == "after-override"
-                {
-                    saw_override = true;
+                if let Part::FunctionResponse { function_response, .. } = part {
+                    if function_response.response.get("status").and_then(|v| v.as_str())
+                        == Some("after-override")
+                    {
+                        saw_override = true;
+                    }
                 }
             }
         }

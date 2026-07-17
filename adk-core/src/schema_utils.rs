@@ -1977,3 +1977,42 @@ mod tests {
         assert!(!is_null_schema(&Value::Null));
     }
 }
+
+/// Normalizes a provider wire value into a canonical `serde_json::Value`.
+///
+/// For OpenAI, if the value is a string, it is parsed as JSON.
+/// For Gemini and others that already provide objects, it is preserved.
+pub fn normalize_tool_arguments(value: Value) -> Result<Value, String> {
+    let parsed = match value {
+        Value::String(s) => {
+            if s.trim().is_empty() {
+                return Err("Tool arguments string is empty or whitespace".to_string());
+            }
+            serde_json::from_str(&s)
+                .map_err(|e| format!("Failed to parse tool arguments as JSON: {}", e))?
+        }
+        Value::Object(obj) => Value::Object(obj),
+        Value::Null => return Err("Tool arguments must be an object, but got null".to_string()),
+        _ => {
+            if value.is_array() {
+                return Err("Tool arguments must be an object, but got an array".to_string());
+            }
+            return Err(format!("Unsupported tool arguments type: {}", value));
+        }
+    };
+
+    if !parsed.is_object() {
+        return Err(format!("Tool arguments must be an object, but got: {}", parsed));
+    }
+    Ok(parsed)
+}
+
+/// Validates a transfer target name.
+///
+/// Rejects missing, empty, or whitespace-only names.
+pub fn validate_transfer_target(name: Option<&str>) -> Result<String, String> {
+    match name {
+        Some(s) if !s.trim().is_empty() => Ok(s.to_string()),
+        _ => Err("Transfer target (agent_name) is missing, empty, or whitespace-only".to_string()),
+    }
+}

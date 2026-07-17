@@ -30,7 +30,7 @@
 
 mod model;
 pub mod protocol;
-mod session;
+pub(crate) mod session;
 #[cfg(feature = "openai-webrtc")]
 pub mod webrtc;
 

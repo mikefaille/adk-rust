@@ -57,8 +57,8 @@ use crate::events::{ServerEvent, ToolResponse};
 use adk_core::{
     AdkError, AfterAgentCallback, AfterToolCallback, Agent, BeforeAgentCallback,
     BeforeToolCallback, CallbackContext, Content, Event, EventActions, EventStream,
-    GlobalInstructionProvider, InstructionProvider, InvocationContext, MemoryEntry, Part,
-    ReadonlyContext, Result, Tool, ToolCallbackContext, ToolContext, Toolset,
+    GlobalInstructionProvider, InstructionProvider, InvocationContext, Part, ReadonlyContext,
+    Result, Tool, ToolCallExecutor, ToolExecutorOptions, Toolset,
 };
 use async_stream::stream;
 use async_trait::async_trait;
@@ -577,41 +577,22 @@ impl RealtimeAgent {
         let tool = self.tools.iter().find(|t| t.name() == name);
 
         if let Some(tool) = tool {
-            let args = arguments;
-            // Create tool context
-            let tool_ctx: Arc<dyn ToolContext> =
-                Arc::new(RealtimeToolContext::new(ctx.clone(), call_id.to_string()));
-
-            // Execute before_tool callbacks
-            let tool_cb_ctx =
-                Arc::new(ToolCallbackContext::new(ctx.clone(), name.to_string(), args.clone()));
-            for callback in self.before_tool_callbacks.as_ref() {
-                if let Err(e) = callback(tool_cb_ctx.clone() as Arc<dyn CallbackContext>).await {
-                    return (
-                        serde_json::json!({ "error": e.to_string() }),
-                        EventActions::default(),
-                    );
-                }
-            }
-
-            // Execute the tool
-            let result = match tool.execute(tool_ctx.clone(), args.clone()).await {
-                Ok(result) => result,
-                Err(e) => serde_json::json!({ "error": e.to_string() }),
+            let options = ToolExecutorOptions {
+                before_tool_callbacks: self.before_tool_callbacks.clone(),
+                after_tool_callbacks: self.after_tool_callbacks.clone(),
+                ..Default::default()
             };
 
-            let actions = tool_ctx.actions();
+            let res = ToolCallExecutor::execute(
+                ctx.clone(),
+                tool.clone(),
+                call_id,
+                arguments.clone(),
+                options,
+            )
+            .await;
 
-            // Execute after_tool callbacks
-            let tool_cb_ctx =
-                Arc::new(ToolCallbackContext::new(ctx.clone(), name.to_string(), args.clone()));
-            for callback in self.after_tool_callbacks.as_ref() {
-                if let Err(e) = callback(tool_cb_ctx.clone() as Arc<dyn CallbackContext>).await {
-                    return (serde_json::json!({ "error": e.to_string() }), actions);
-                }
-            }
-
-            (result, actions)
+            (res.value, res.actions)
         } else {
             (
                 serde_json::json!({ "error": format!("Tool {} not found", name) }),
@@ -878,79 +859,63 @@ impl Agent for RealtimeAgent {
                                 arguments,
                                 ..
                             } => {
-                                // Handle transfer_to_agent
+                                // 1. Handle transfer_to_agent
                                 if name == "transfer_to_agent" {
-                                    let args = arguments;
-                                    let target = args
-                                        .get("agent_name")
-                                        .and_then(|v| v.as_str())
-                                        .filter(|s| !s.is_empty())
-                                        .map(|s| s.to_string());
+                                    let target = arguments.get("agent_name").and_then(|v| v.as_str());
 
-                                    let target = match target {
-                                        Some(t) => t,
-                                        None => {
-                                            yield Err(adk_core::AdkError::agent(format!(
-                                                "transfer_to_agent called with missing or empty 'agent_name': {:?}",
-                                                args
-                                            )));
+                                    match adk_core::schema_utils::validate_transfer_target(target) {
+                                        Ok(target_agent) => {
+                                            let mut transfer_event = Event::new(&invocation_id);
+                                            transfer_event.author = agent_name.clone();
+                                            transfer_event.actions.transfer_to_agent = Some(target_agent);
+                                            yield Ok(transfer_event);
+
                                             let _ = session.close().await;
                                             return;
                                         }
-                                    };
+                                        Err(e) => {
+                                            // Malformed transfer - return tool error and keep session alive
+                                            let result = serde_json::json!({ "error": e });
+                                            let mut tool_event = Event::new(&invocation_id);
+                                            tool_event.author = agent_name.clone();
+                                            tool_event.llm_response.content = Some(Content {
+                                                role: "function".to_string(),
+                                                parts: vec![Part::FunctionResponse {
+                                                    function_response: adk_core::FunctionResponseData::new(name.clone(), result.clone()),
+                                                    id: Some(call_id.clone()),
+                                                }],
+                                            });
+                                            yield Ok(tool_event);
 
-                                    let mut transfer_event = Event::new(&invocation_id);
-                                    transfer_event.author = agent_name.clone();
-                                    transfer_event.actions.transfer_to_agent = Some(target);
-                                    yield Ok(transfer_event);
-
-                                    let _ = session.close().await;
-                                    return;
+                                            let response = ToolResponse { call_id, output: result };
+                                            if let Err(e) = session.send_tool_response(response).await {
+                                                yield Err(AdkError::model(format!("Failed to send tool response: {}", e)));
+                                                let _ = session.close().await;
+                                                return;
+                                            }
+                                            continue;
+                                        }
+                                    }
                                 }
 
-                                // Execute tool
+                                // 2. Execute via Centralized Executor
                                 let tool = resolved_tools.iter().find(|t| t.name() == name);
 
                                 let (result, actions) = if let Some(tool) = tool {
-                                    let args = arguments;
-
-                                    let tool_ctx: Arc<dyn ToolContext> = Arc::new(
-                                        RealtimeToolContext::new(ctx.clone(), call_id.clone())
-                                    );
-
-                                    // Execute before_tool callbacks
-                                    let tool_cb_ctx = Arc::new(ToolCallbackContext::new(
-                                        ctx.clone(),
-                                        name.clone(),
-                                        args.clone(),
-                                    ));
-                                    for callback in before_tool_callbacks.as_ref() {
-                                        if let Err(e) = callback(tool_cb_ctx.clone() as Arc<dyn CallbackContext>).await {
-                                            let error_result = serde_json::json!({ "error": e.to_string() });
-                                            (error_result, EventActions::default())
-                                        } else {
-                                            continue;
-                                        };
-                                    }
-
-                                    let result = match tool.execute(tool_ctx.clone(), args.clone()).await {
-                                        Ok(r) => r,
-                                        Err(e) => serde_json::json!({ "error": e.to_string() }),
+                                    let options = ToolExecutorOptions {
+                                        before_tool_callbacks: before_tool_callbacks.clone(),
+                                        after_tool_callbacks: after_tool_callbacks.clone(),
+                                        ..Default::default()
                                     };
 
-                                    let actions = tool_ctx.actions();
-
-                                    // Execute after_tool callbacks
-                                    let tool_cb_ctx = Arc::new(ToolCallbackContext::new(
+                                    let res = ToolCallExecutor::execute(
                                         ctx.clone(),
-                                        name.clone(),
-                                        args.clone(),
-                                    ));
-                                    for callback in after_tool_callbacks.as_ref() {
-                                        let _ = callback(tool_cb_ctx.clone() as Arc<dyn CallbackContext>).await;
-                                    }
-
-                                    (result, actions)
+                                        tool.clone(),
+                                        &call_id,
+                                        arguments,
+                                        options,
+                                    ).await;
+                                    (res.value, res.actions)
                                 } else {
                                     (
                                         serde_json::json!({ "error": format!("Tool {} not found", name) }),
@@ -958,7 +923,7 @@ impl Agent for RealtimeAgent {
                                     )
                                 };
 
-                                // Yield tool event
+                                // 3. Yield tool event
                                 let mut tool_event = Event::new(&invocation_id);
                                 tool_event.author = agent_name.clone();
                                 tool_event.actions = actions.clone();
@@ -971,13 +936,13 @@ impl Agent for RealtimeAgent {
                                 });
                                 yield Ok(tool_event);
 
-                                // Check for escalation
+                                // 4. Check for escalation
                                 if actions.escalate || actions.skip_summarization {
                                     let _ = session.close().await;
                                     return;
                                 }
 
-                                // Send tool response back to session
+                                // 5. Send tool response back to session
                                 let response = ToolResponse {
                                     call_id,
                                     output: result,
@@ -1054,83 +1019,5 @@ impl Agent for RealtimeAgent {
         };
 
         Ok(Box::pin(s))
-    }
-}
-
-/// Tool context for realtime agent tool execution.
-struct RealtimeToolContext {
-    parent_ctx: Arc<dyn InvocationContext>,
-    function_call_id: String,
-    actions: std::sync::RwLock<EventActions>,
-}
-
-impl RealtimeToolContext {
-    fn new(parent_ctx: Arc<dyn InvocationContext>, function_call_id: String) -> Self {
-        Self {
-            parent_ctx,
-            function_call_id,
-            actions: std::sync::RwLock::new(EventActions::default()),
-        }
-    }
-}
-
-#[async_trait]
-impl ReadonlyContext for RealtimeToolContext {
-    fn invocation_id(&self) -> &str {
-        self.parent_ctx.invocation_id()
-    }
-
-    fn agent_name(&self) -> &str {
-        self.parent_ctx.agent_name()
-    }
-
-    fn user_id(&self) -> &str {
-        self.parent_ctx.user_id()
-    }
-
-    fn app_name(&self) -> &str {
-        self.parent_ctx.app_name()
-    }
-
-    fn session_id(&self) -> &str {
-        self.parent_ctx.session_id()
-    }
-
-    fn branch(&self) -> &str {
-        self.parent_ctx.branch()
-    }
-
-    fn user_content(&self) -> &Content {
-        self.parent_ctx.user_content()
-    }
-}
-
-#[async_trait]
-impl CallbackContext for RealtimeToolContext {
-    fn artifacts(&self) -> Option<Arc<dyn adk_core::Artifacts>> {
-        self.parent_ctx.artifacts()
-    }
-}
-
-#[async_trait]
-impl ToolContext for RealtimeToolContext {
-    fn function_call_id(&self) -> &str {
-        &self.function_call_id
-    }
-
-    fn actions(&self) -> EventActions {
-        self.actions.read().unwrap().clone()
-    }
-
-    fn set_actions(&self, actions: EventActions) {
-        *self.actions.write().unwrap() = actions;
-    }
-
-    async fn search_memory(&self, query: &str) -> Result<Vec<MemoryEntry>> {
-        if let Some(memory) = self.parent_ctx.memory() {
-            memory.search(query).await
-        } else {
-            Ok(vec![])
-        }
     }
 }

@@ -104,62 +104,7 @@ impl OpenAITransportLink for OpenAIRealtimeSession {
         let mut receiver = self.receiver.lock().await;
 
         match receiver.next().await {
-            Some(Ok(Message::Text(text))) => {
-                // Extract the event type for logging
-                let event_type = serde_json::from_str::<serde_json::Value>(&text)
-                    .ok()
-                    .and_then(|v| v.get("type").and_then(|t| t.as_str()).map(String::from))
-                    .unwrap_or_else(|| "unknown".to_string());
-
-                match serde_json::from_str::<ServerEvent>(&text) {
-                    Ok(ServerEvent::Unknown) => {
-                        // An event type we don't model. This is expected — the GA
-                        // API emits many lifecycle events (conversation.item.*,
-                        // response.content_part.*, rate_limits, …) that consumers
-                        // don't need. Forward-compat by design, so debug-level.
-                        tracing::debug!(
-                            event_type = %event_type,
-                            "unmodeled realtime event, ignored"
-                        );
-                        Some(Ok(ServerEvent::Unknown))
-                    }
-                    Ok(mut event) => {
-                        // Normalize FunctionCallDone arguments: OpenAI sends them as a JSON-encoded string.
-                        if let ServerEvent::FunctionCallDone { arguments, name, .. } = &mut event {
-                            if let serde_json::Value::String(s) = arguments {
-                                match serde_json::from_str::<serde_json::Value>(s) {
-                                    Ok(parsed) => {
-                                        *arguments = parsed;
-                                    }
-                                    Err(e) => {
-                                        tracing::error!(
-                                            name = %name,
-                                            error = %e,
-                                            "failed to parse OpenAI function arguments as JSON"
-                                        );
-                                        return Some(Err(RealtimeError::protocol(format!(
-                                            "malformed function arguments for {}: {}",
-                                            name, e
-                                        ))));
-                                    }
-                                }
-                            }
-                        }
-                        Some(Ok(event))
-                    }
-                    Err(e) => {
-                        // The type IS one we model but the fields didn't match —
-                        // genuine schema drift worth surfacing.
-                        tracing::warn!(
-                            event_type = %event_type,
-                            error = %e,
-                            raw = &text[..text.len().min(300)],
-                            "recognized realtime event failed to parse (schema drift?)"
-                        );
-                        Some(Ok(ServerEvent::Unknown))
-                    }
-                }
-            }
+            Some(Ok(Message::Text(text))) => Some(Self::translate_event(&text)),
             Some(Ok(Message::Close(_))) => {
                 self.connected.store(false, Ordering::SeqCst);
                 None
@@ -189,6 +134,63 @@ impl OpenAITransportLink for OpenAIRealtimeSession {
             .map_err(|e| RealtimeError::connection(format!("Close error: {}", e)))?;
 
         Ok(())
+    }
+}
+
+impl OpenAIRealtimeSession {
+    pub fn translate_event(text: &str) -> Result<ServerEvent> {
+        // Extract the event type for logging
+        let event_type = serde_json::from_str::<serde_json::Value>(text)
+            .ok()
+            .and_then(|v| v.get("type").and_then(|t| t.as_str()).map(String::from))
+            .unwrap_or_else(|| "unknown".to_string());
+
+        match serde_json::from_str::<ServerEvent>(text) {
+            Ok(ServerEvent::Unknown) => {
+                // An event type we don't model. This is expected — the GA
+                // API emits many lifecycle events (conversation.item.*,
+                // response.content_part.*, rate_limits, …) that consumers
+                // don't need. Forward-compat by design, so debug-level.
+                tracing::debug!(
+                    event_type = %event_type,
+                    "unmodeled realtime event, ignored"
+                );
+                Ok(ServerEvent::Unknown)
+            }
+            Ok(mut event) => {
+                // Normalize FunctionCallDone arguments: OpenAI sends them as a JSON-encoded string.
+                if let ServerEvent::FunctionCallDone { arguments, name, .. } = &mut event {
+                    match adk_core::schema_utils::normalize_tool_arguments(arguments.clone()) {
+                        Ok(parsed) => {
+                            *arguments = parsed;
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                name = %name,
+                                error = %e,
+                                "failed to normalize OpenAI function arguments"
+                            );
+                            return Err(RealtimeError::protocol(format!(
+                                "malformed function arguments for {}: {}",
+                                name, e
+                            )));
+                        }
+                    }
+                }
+                Ok(event)
+            }
+            Err(e) => {
+                // The type IS one we model but the fields didn't match —
+                // genuine schema drift worth surfacing.
+                tracing::warn!(
+                    event_type = %event_type,
+                    error = %e,
+                    raw = &text[..text.len().min(300)],
+                    "recognized realtime event failed to parse (schema drift?)"
+                );
+                Ok(ServerEvent::Unknown)
+            }
+        }
     }
 }
 
