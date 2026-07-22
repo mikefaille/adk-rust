@@ -217,6 +217,7 @@ impl TtsProvider for GeminiTts {
         })?;
 
         if request.output_format == crate::codec::AudioFormat::Opus {
+            // Pass-through raw Opus bytes, decoded mockingly into an AudioFrame
             Ok(crate::codec::decode(&pcm, crate::codec::AudioFormat::Opus)?)
         } else {
             Ok(AudioFrame::new(Bytes::from(pcm), 24000, 1))
