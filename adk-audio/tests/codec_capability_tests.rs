@@ -120,11 +120,11 @@ fn test_all_variants_have_capability_answer() {
 
         // Verify expected capabilities
         match format {
-            AudioFormat::Pcm16 | AudioFormat::Wav => {
+            AudioFormat::Pcm16 | AudioFormat::Wav | AudioFormat::Opus => {
                 assert!(can_encode, "{format:?} should support encoding");
                 assert!(can_decode, "{format:?} should support decoding");
             }
-            AudioFormat::Opus | AudioFormat::Mp3 | AudioFormat::Flac | AudioFormat::Ogg => {
+            AudioFormat::Mp3 | AudioFormat::Flac | AudioFormat::Ogg => {
                 assert!(!can_encode, "{format:?} should NOT support encoding");
                 assert!(!can_decode, "{format:?} should NOT support decoding");
             }

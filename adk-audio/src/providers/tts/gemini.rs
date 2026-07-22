@@ -159,12 +159,23 @@ impl TtsProvider for GeminiTts {
         let url = self.base_url();
         let speech_config = self.build_speech_config(&request.voice);
 
+        let mut generation_config = serde_json::json!({
+            "response_modalities": ["AUDIO"],
+            "speech_config": speech_config
+        });
+
+        if request.output_format == crate::codec::AudioFormat::Opus {
+            let obj = generation_config.as_object_mut().unwrap();
+            obj.insert("responseMimeType".to_string(), serde_json::json!("audio/opus"));
+            obj.insert(
+                "thinkingConfig".to_string(),
+                serde_json::json!({ "thinkingLevel": "MINIMAL" }),
+            );
+        }
+
         let body = serde_json::json!({
             "contents": [{"parts": [{"text": request.text}]}],
-            "generationConfig": {
-                "response_modalities": ["AUDIO"],
-                "speech_config": speech_config
-            }
+            "generationConfig": generation_config
         });
 
         let resp = self
@@ -205,7 +216,11 @@ impl TtsProvider for GeminiTts {
             }
         })?;
 
-        Ok(AudioFrame::new(Bytes::from(pcm), 24000, 1))
+        if request.output_format == crate::codec::AudioFormat::Opus {
+            Ok(crate::codec::decode(&pcm, crate::codec::AudioFormat::Opus)?)
+        } else {
+            Ok(AudioFrame::new(Bytes::from(pcm), 24000, 1))
+        }
     }
 
     async fn synthesize_stream(
