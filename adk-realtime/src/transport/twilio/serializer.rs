@@ -102,7 +102,7 @@ impl TwilioMediaSerializer {
                 }
                 downsampled
             }
-            _ => samples,
+            _ => samples.into_owned(),
         };
 
         // Encode 8kHz PCM16 samples to μ-law bytes
