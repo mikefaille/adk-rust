@@ -10,7 +10,7 @@ use crate::events::{ClientEvent, ServerEvent, ToolResponse};
 use crate::session::{ContextMutationOutcome, RealtimeSession};
 use async_trait::async_trait;
 use base64::Engine;
-use bytes::{BufMut, BytesMut};
+use bytes::{BufMut, Bytes, BytesMut};
 use futures::stream::Stream;
 use futures::{SinkExt, StreamExt};
 use parking_lot::Mutex as ParkingMutex;
