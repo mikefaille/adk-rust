@@ -188,7 +188,7 @@ impl AudioChunk {
         }
 
         // bytemuck::cast_slice requires the slice to be aligned
-        if (self.data.as_ptr() as usize) % std::mem::align_of::<i16>() == 0 {
+        if (self.data.as_ptr() as usize).is_multiple_of(std::mem::align_of::<i16>()) {
             let samples: &[i16] = bytemuck::cast_slice(self.data.as_ref());
             Ok(std::borrow::Cow::Borrowed(samples))
         } else {
