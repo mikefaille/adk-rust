@@ -117,12 +117,47 @@ fn main() {
     println!("------------------------------------------------------------");
     println!(" Metric                │ Old (Vec<i16>)    │ New (Zero-Copy Cow) │ Improvement");
     println!("───────────────────────┼───────────────────┼─────────────────────┼──────────────");
-    println!(" Total Allocations     │ {:>17} │ {:>19} │ -{:.1}%", allocs_old, allocs_new, alloc_reduction);
-    println!(" Total Memory Allocated│ {:>14} B │ {:>16} B │ -{:.1}%", bytes_old, bytes_new, if bytes_old > 0 { ((bytes_old - bytes_new) as f64 / bytes_old as f64) * 100.0 } else { 0.0 });
-    println!(" Mean Latency          │ {:>14.2} ns│ {:>16.2} ns│ {:.2}x faster", mean_ns_old, mean_ns_new, speedup_mean);
-    println!(" Median (P50) Latency  │ {:>14} ns│ {:>16} ns│ {:.2}x faster", p50_old, p50_new, p50_old as f64 / p50_new.max(1) as f64);
-    println!(" P95 Latency           │ {:>14} ns│ {:>16} ns│ {:.2}x faster", p95_old, p95_new, p95_old as f64 / p95_new.max(1) as f64);
-    println!(" P99 Latency           │ {:>14} ns│ {:>16} ns│ {:.2}x faster", p99_old, p99_new, p99_old as f64 / p99_new.max(1) as f64);
-    println!(" Total Wall-Clock Time │ {:>14.2} ms│ {:>16.2} ms│ {:.2}x faster", total_time_old.as_secs_f64() * 1000.0, total_time_new.as_secs_f64() * 1000.0, total_time_old.as_secs_f64() / total_time_new.as_secs_f64());
+    println!(
+        " Total Allocations     │ {:>17} │ {:>19} │ -{:.1}%",
+        allocs_old, allocs_new, alloc_reduction
+    );
+    println!(
+        " Total Memory Allocated│ {:>14} B │ {:>16} B │ -{:.1}%",
+        bytes_old,
+        bytes_new,
+        if bytes_old > 0 {
+            ((bytes_old - bytes_new) as f64 / bytes_old as f64) * 100.0
+        } else {
+            0.0
+        }
+    );
+    println!(
+        " Mean Latency          │ {:>14.2} ns│ {:>16.2} ns│ {:.2}x faster",
+        mean_ns_old, mean_ns_new, speedup_mean
+    );
+    println!(
+        " Median (P50) Latency  │ {:>14} ns│ {:>16} ns│ {:.2}x faster",
+        p50_old,
+        p50_new,
+        p50_old as f64 / p50_new.max(1) as f64
+    );
+    println!(
+        " P95 Latency           │ {:>14} ns│ {:>16} ns│ {:.2}x faster",
+        p95_old,
+        p95_new,
+        p95_old as f64 / p95_new.max(1) as f64
+    );
+    println!(
+        " P99 Latency           │ {:>14} ns│ {:>16} ns│ {:.2}x faster",
+        p99_old,
+        p99_new,
+        p99_old as f64 / p99_new.max(1) as f64
+    );
+    println!(
+        " Total Wall-Clock Time │ {:>14.2} ms│ {:>16.2} ms│ {:.2}x faster",
+        total_time_old.as_secs_f64() * 1000.0,
+        total_time_new.as_secs_f64() * 1000.0,
+        total_time_old.as_secs_f64() / total_time_new.as_secs_f64()
+    );
     println!("------------------------------------------------------------\n");
 }
