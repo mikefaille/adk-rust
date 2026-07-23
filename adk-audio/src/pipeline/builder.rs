@@ -156,10 +156,14 @@ impl AudioPipelineBuilder {
                             continue;
                         };
                         let request = TtsRequest { text, ..Default::default() };
-                        if let Ok(frame) = tts.synthesize(&request).await {
+                        if let Ok(payload) = tts.synthesize(&request).await {
                             let mut metrics = m.write().await;
-                            metrics.total_audio_ms += frame.duration_ms as u64;
-                            let _ = output_tx.send(PipelineOutput::Audio(frame)).await;
+                            metrics.total_audio_ms += payload.duration_ms() as u64;
+                            if let Some(frame) = payload.into_pcm_frame() {
+                                let _ = output_tx.send(PipelineOutput::Audio(frame)).await;
+                            } else {
+                                tracing::warn!("Encoded audio not supported in pipeline yet");
+                            }
                         }
                     }
                 }

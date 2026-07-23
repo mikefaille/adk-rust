@@ -52,14 +52,14 @@ impl adk_core::Tool for SpeakTool {
         let text = args["text"].as_str().unwrap_or_default();
         let voice = args["voice"].as_str().unwrap_or(&self.default_voice).to_string();
         let request = TtsRequest { text: text.into(), voice, ..Default::default() };
-        let frame = self
+        let payload = self
             .tts
             .synthesize(&request)
             .await
             .map_err(|e| adk_core::AdkError::tool(format!("speak: {e}")))?;
         Ok(serde_json::json!({
-            "duration_ms": frame.duration_ms,
-            "sample_rate": frame.sample_rate
+            "duration_ms": payload.duration_ms(),
+            "sample_rate": payload.sample_rate()
         }))
     }
 }

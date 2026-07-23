@@ -1,14 +1,11 @@
 //! OpenAI TTS provider.
 
-use std::pin::Pin;
-
 use async_trait::async_trait;
-use futures::Stream;
 
 use crate::error::{AudioError, AudioResult};
 use crate::frame::AudioFrame;
 use crate::providers::tts::CloudTtsConfig;
-use crate::traits::{TtsProvider, TtsRequest, Voice};
+use crate::traits::{AudioPayload, TtsProvider, TtsRequest, Voice};
 
 /// OpenAI TTS provider using the `/v1/audio/speech` endpoint.
 pub struct OpenAiTts {
@@ -74,7 +71,7 @@ impl OpenAiTts {
 
 #[async_trait]
 impl TtsProvider for OpenAiTts {
-    async fn synthesize(&self, request: &TtsRequest) -> AudioResult<AudioFrame> {
+    async fn synthesize(&self, request: &TtsRequest) -> AudioResult<AudioPayload> {
         let voice = if request.voice.is_empty() { "alloy" } else { &request.voice };
         let url = format!("{}/v1/audio/speech", self.base_url());
 
@@ -107,17 +104,7 @@ impl TtsProvider for OpenAiTts {
             .await
             .map_err(|e| AudioError::Tts { provider: "openai".into(), message: e.to_string() })?;
 
-        Ok(AudioFrame::new(pcm, 24000, 1))
-    }
-
-    async fn synthesize_stream(
-        &self,
-        request: &TtsRequest,
-    ) -> AudioResult<Pin<Box<dyn Stream<Item = AudioResult<AudioFrame>> + Send>>> {
-        // OpenAI TTS doesn't have a native streaming endpoint for PCM,
-        // so we fetch the full response and yield it as a single frame.
-        let frame = self.synthesize(request).await?;
-        Ok(Box::pin(futures::stream::once(async { Ok(frame) })))
+        Ok(AudioPayload::Pcm(AudioFrame::new(pcm, 24000, 1)))
     }
 
     fn voice_catalog(&self) -> &[Voice] {

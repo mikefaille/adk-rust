@@ -110,14 +110,18 @@ async fn process_text_to_speech(
 
         let tts_start = std::time::Instant::now();
         let request = TtsRequest { text: sentence, ..Default::default() };
-        if let Ok(frame) = tts.synthesize(&request).await {
+        if let Ok(payload) = tts.synthesize(&request).await {
             let tts_elapsed = tts_start.elapsed().as_millis() as f64;
             {
                 let mut m = metrics.write().await;
                 m.tts_latency_ms = tts_elapsed;
-                m.total_audio_ms += frame.duration_ms as u64;
+                m.total_audio_ms += payload.duration_ms() as u64;
             }
-            let _ = output_tx.send(PipelineOutput::Audio(frame)).await;
+            if let Some(frame) = payload.into_pcm_frame() {
+                let _ = output_tx.send(PipelineOutput::Audio(frame)).await;
+            } else {
+                tracing::warn!("Encoded audio not supported in pipeline yet");
+            }
         }
     }
 }

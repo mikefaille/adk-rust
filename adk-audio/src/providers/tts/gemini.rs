@@ -5,16 +5,16 @@
 //! - `gemini-2.5-flash-preview-tts` — fast, multi-speaker
 //! - `gemini-2.5-pro-preview-tts` — high-fidelity, multi-speaker
 
-use std::pin::Pin;
-
 use async_trait::async_trait;
 use bytes::Bytes;
-use futures::Stream;
 
 use crate::error::{AudioError, AudioResult};
 use crate::frame::AudioFrame;
 use crate::providers::tts::CloudTtsConfig;
-use crate::traits::{TtsProvider, TtsRequest, Voice};
+use crate::traits::{
+    AudioPayload, EncodedAudioChunk, EncodedAudioFormat, TtsOutputMode, TtsProvider, TtsRequest,
+    Voice,
+};
 
 /// Available Gemini TTS model IDs.
 #[allow(dead_code)]
@@ -155,7 +155,7 @@ impl GeminiTts {
 
 #[async_trait]
 impl TtsProvider for GeminiTts {
-    async fn synthesize(&self, request: &TtsRequest) -> AudioResult<AudioFrame> {
+    async fn synthesize(&self, request: &TtsRequest) -> AudioResult<AudioPayload> {
         let url = self.base_url();
         let speech_config = self.build_speech_config(&request.voice);
 
@@ -164,7 +164,7 @@ impl TtsProvider for GeminiTts {
             "speech_config": speech_config
         });
 
-        if request.output_format == crate::codec::AudioFormat::Opus {
+        if let TtsOutputMode::PreserveEncoding(EncodedAudioFormat::OggOpus) = request.output_mode {
             let obj = generation_config.as_object_mut().unwrap();
             obj.insert("responseMimeType".to_string(), serde_json::json!("audio/opus"));
             obj.insert(
@@ -209,28 +209,24 @@ impl TtsProvider for GeminiTts {
             })?;
 
         use base64::Engine;
-        let pcm = base64::engine::general_purpose::STANDARD.decode(audio_b64).map_err(|e| {
-            AudioError::Tts {
-                provider: "gemini".into(),
-                message: format!("base64 decode failed: {e}"),
-            }
-        })?;
+        let audio_bytes =
+            base64::engine::general_purpose::STANDARD.decode(audio_b64).map_err(|e| {
+                AudioError::Tts {
+                    provider: "gemini".into(),
+                    message: format!("base64 decode failed: {e}"),
+                }
+            })?;
 
-        if request.output_format == crate::codec::AudioFormat::Opus {
-            // Pass-through raw Opus bytes, decoded mockingly into an AudioFrame
-            Ok(crate::codec::decode(&pcm, crate::codec::AudioFormat::Opus)?)
+        if let TtsOutputMode::PreserveEncoding(EncodedAudioFormat::OggOpus) = request.output_mode {
+            Ok(AudioPayload::Encoded(EncodedAudioChunk {
+                data: Bytes::from(audio_bytes),
+                encoding: EncodedAudioFormat::OggOpus,
+                sequence: 0,
+                end_of_stream: true,
+            }))
         } else {
-            Ok(AudioFrame::new(Bytes::from(pcm), 24000, 1))
+            Ok(AudioPayload::Pcm(AudioFrame::new(Bytes::from(audio_bytes), 24000, 1)))
         }
-    }
-
-    async fn synthesize_stream(
-        &self,
-        request: &TtsRequest,
-    ) -> AudioResult<Pin<Box<dyn Stream<Item = AudioResult<AudioFrame>> + Send>>> {
-        // Gemini TTS does not support streaming — return single frame
-        let frame = self.synthesize(request).await?;
-        Ok(Box::pin(futures::stream::once(async { Ok(frame) })))
     }
 
     fn voice_catalog(&self) -> &[Voice] {

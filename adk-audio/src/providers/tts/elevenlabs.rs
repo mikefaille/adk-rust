@@ -8,7 +8,7 @@ use futures::Stream;
 use crate::error::{AudioError, AudioResult};
 use crate::frame::AudioFrame;
 use crate::providers::tts::CloudTtsConfig;
-use crate::traits::{Emotion, TtsProvider, TtsRequest, Voice};
+use crate::traits::{AudioPayload, Emotion, TtsProvider, TtsRequest, Voice};
 
 /// ElevenLabs TTS provider.
 ///
@@ -87,7 +87,7 @@ impl ElevenLabsTts {
 
 #[async_trait]
 impl TtsProvider for ElevenLabsTts {
-    async fn synthesize(&self, request: &TtsRequest) -> AudioResult<AudioFrame> {
+    async fn synthesize(&self, request: &TtsRequest) -> AudioResult<AudioPayload> {
         let voice_id = if request.voice.is_empty() { &self.voices[0].id } else { &request.voice };
         let url =
             format!("{}/v1/text-to-speech/{voice_id}?output_format=pcm_24000", self.base_url());
@@ -123,13 +123,13 @@ impl TtsProvider for ElevenLabsTts {
             message: e.to_string(),
         })?;
 
-        Ok(AudioFrame::new(pcm, 24000, 1))
+        Ok(AudioPayload::Pcm(AudioFrame::new(pcm, 24000, 1)))
     }
 
     async fn synthesize_stream(
         &self,
         request: &TtsRequest,
-    ) -> AudioResult<Pin<Box<dyn Stream<Item = AudioResult<AudioFrame>> + Send>>> {
+    ) -> AudioResult<Pin<Box<dyn Stream<Item = AudioResult<AudioPayload>> + Send>>> {
         let voice_id = if request.voice.is_empty() {
             self.voices[0].id.clone()
         } else {
@@ -173,7 +173,7 @@ impl TtsProvider for ElevenLabsTts {
                 match chunk {
                     Ok(data) => {
                         if data.len() >= 2 {
-                            yield Ok(AudioFrame::new(data, 24000, 1));
+                            yield Ok(AudioPayload::Pcm(AudioFrame::new(data, 24000, 1)));
                         }
                     }
                     Err(e) => {

@@ -22,15 +22,10 @@ use proptest::prelude::*;
 struct MockTts;
 #[async_trait]
 impl TtsProvider for MockTts {
-    async fn synthesize(&self, _req: &TtsRequest) -> AudioResult<AudioFrame> {
-        Ok(AudioFrame::silence(16000, 1, 100))
+    async fn synthesize(&self, _req: &TtsRequest) -> AudioResult<adk_audio::traits::AudioPayload> {
+        Ok(adk_audio::traits::AudioPayload::Pcm(adk_audio::AudioFrame::silence(16000, 1, 100)))
     }
-    async fn synthesize_stream(
-        &self,
-        _req: &TtsRequest,
-    ) -> AudioResult<Pin<Box<dyn Stream<Item = AudioResult<AudioFrame>> + Send>>> {
-        Ok(Box::pin(futures::stream::empty()))
-    }
+
     fn voice_catalog(&self) -> &[Voice] {
         &[]
     }

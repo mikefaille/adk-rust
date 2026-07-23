@@ -31,7 +31,7 @@ impl AudioFormat {
         match self {
             AudioFormat::Pcm16 => true,
             AudioFormat::Wav => true,
-            AudioFormat::Opus => true,
+            AudioFormat::Opus => false,
             AudioFormat::Mp3 => false,
             AudioFormat::Flac => false,
             AudioFormat::Ogg => false,
@@ -45,7 +45,7 @@ impl AudioFormat {
         match self {
             AudioFormat::Pcm16 => true,
             AudioFormat::Wav => true,
-            AudioFormat::Opus => true,
+            AudioFormat::Opus => false,
             AudioFormat::Mp3 => false,
             AudioFormat::Flac => false,
             AudioFormat::Ogg => false,
@@ -64,10 +64,6 @@ pub fn decode(data: &[u8], format: AudioFormat) -> AudioResult<AudioFrame> {
             Ok(AudioFrame::new(Bytes::copy_from_slice(data), 16000, 1))
         }
         AudioFormat::Wav => decode_wav(data),
-        AudioFormat::Opus => {
-            // Opus mock decoding for now (pass-through raw)
-            Ok(AudioFrame::new(Bytes::copy_from_slice(data), 24000, 1))
-        }
         _ => Err(AudioError::Codec(format!("decoding {format:?} is not yet supported"))),
     }
 }
@@ -80,10 +76,6 @@ pub fn encode(frame: &AudioFrame, format: AudioFormat) -> AudioResult<Bytes> {
     match format {
         AudioFormat::Pcm16 => Ok(frame.data.clone()),
         AudioFormat::Wav => encode_wav(frame),
-        AudioFormat::Opus => {
-            // Opus mock encoding for now (pass-through raw)
-            Ok(frame.data.clone())
-        }
         _ => Err(AudioError::Codec(format!("encoding {format:?} is not yet supported"))),
     }
 }

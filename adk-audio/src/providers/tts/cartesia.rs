@@ -1,23 +1,18 @@
 //! Cartesia Sonic TTS provider.
 
-use std::pin::Pin;
-
 use async_trait::async_trait;
-use futures::Stream;
 
 use crate::error::{AudioError, AudioResult};
 use crate::frame::AudioFrame;
 use crate::providers::tts::CloudTtsConfig;
-use crate::traits::{TtsProvider, TtsRequest, Voice};
+use crate::traits::{AudioPayload, Emotion, TtsProvider, TtsRequest, Voice};
 
 /// Cartesia Sonic TTS provider.
 ///
-/// Uses the Cartesia API for ultra-low-latency voice synthesis.
-/// Configure via `CARTESIA_API_KEY` environment variable or builder.
+/// Configurable via `CARTESIA_API_KEY` environment variable.
 pub struct CartesiaTts {
     config: CloudTtsConfig,
     client: reqwest::Client,
-    model: String,
     voices: Vec<Voice>,
 }
 
@@ -36,19 +31,18 @@ impl CartesiaTts {
         Self {
             config,
             client: reqwest::Client::new(),
-            model: "sonic-2".into(),
             voices: vec![
                 Voice {
-                    id: "a0e99841-438c-4a64-b679-ae501e7d6091".into(),
-                    name: "Barbershop Man".into(),
-                    language: "en".into(),
-                    gender: Some("male".into()),
-                },
-                Voice {
-                    id: "156fb8d2-335b-4950-9cb3-a2d33befec77".into(),
-                    name: "Friendly Woman".into(),
+                    id: "694f9389-aac1-45b6-b726-9d9369183238".into(),
+                    name: "Friendly Female".into(),
                     language: "en".into(),
                     gender: Some("female".into()),
+                },
+                Voice {
+                    id: "a0e99841-438c-4a64-b6a9-62f2c68f5a4a".into(),
+                    name: "News Male".into(),
+                    language: "en".into(),
+                    gender: Some("male".into()),
                 },
             ],
         }
@@ -57,24 +51,49 @@ impl CartesiaTts {
     fn base_url(&self) -> &str {
         self.config.base_url.as_deref().unwrap_or("https://api.cartesia.ai")
     }
+
+    fn map_emotion(&self, emotion: Option<&Emotion>) -> Option<&str> {
+        match emotion {
+            Some(Emotion::Happy) => Some("happy"),
+            Some(Emotion::Sad) => Some("sad"),
+            Some(Emotion::Angry) => Some("angry"),
+            _ => None,
+        }
+    }
 }
 
 #[async_trait]
 impl TtsProvider for CartesiaTts {
-    async fn synthesize(&self, request: &TtsRequest) -> AudioResult<AudioFrame> {
+    async fn synthesize(&self, request: &TtsRequest) -> AudioResult<AudioPayload> {
         let voice_id = if request.voice.is_empty() { &self.voices[0].id } else { &request.voice };
         let url = format!("{}/tts/bytes", self.base_url());
 
+        let mut voice_config = serde_json::json!({
+            "mode": "id",
+            "id": voice_id,
+        });
+
+        if let Some(emotion) = self.map_emotion(request.emotion.as_ref()) {
+            if let Some(obj) = voice_config.as_object_mut() {
+                obj.insert(
+                    "__experimental_controls".to_string(),
+                    serde_json::json!({
+                        "emotion": [emotion, "highest"]
+                    }),
+                );
+            }
+        }
+
         let body = serde_json::json!({
-            "model_id": self.model,
+            "model_id": "sonic-english",
             "transcript": request.text,
-            "voice": {"mode": "id", "id": voice_id},
+            "voice": voice_config,
             "output_format": {
                 "container": "raw",
                 "encoding": "pcm_s16le",
                 "sample_rate": 24000
             },
-            "language": request.language.as_deref().unwrap_or("en"),
+            "language": request.language.as_deref().unwrap_or("en")
         });
 
         let resp = self
@@ -88,9 +107,11 @@ impl TtsProvider for CartesiaTts {
             .map_err(|e| AudioError::Tts { provider: "cartesia".into(), message: e.to_string() })?;
 
         if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
             return Err(AudioError::Tts {
                 provider: "cartesia".into(),
-                message: format!("HTTP {}", resp.status()),
+                message: format!("HTTP {status}: {body}"),
             });
         }
 
@@ -99,16 +120,7 @@ impl TtsProvider for CartesiaTts {
             .await
             .map_err(|e| AudioError::Tts { provider: "cartesia".into(), message: e.to_string() })?;
 
-        Ok(AudioFrame::new(pcm, 24000, 1))
-    }
-
-    async fn synthesize_stream(
-        &self,
-        request: &TtsRequest,
-    ) -> AudioResult<Pin<Box<dyn Stream<Item = AudioResult<AudioFrame>> + Send>>> {
-        // Cartesia supports WebSocket streaming, but for now use batch
-        let frame = self.synthesize(request).await?;
-        Ok(Box::pin(futures::stream::once(async { Ok(frame) })))
+        Ok(AudioPayload::Pcm(AudioFrame::new(pcm, 24000, 1)))
     }
 
     fn voice_catalog(&self) -> &[Voice] {
