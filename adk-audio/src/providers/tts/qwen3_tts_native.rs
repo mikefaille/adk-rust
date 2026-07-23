@@ -21,7 +21,7 @@ use tokio::sync::Mutex;
 use crate::error::{AudioError, AudioResult};
 use crate::frame::AudioFrame;
 use crate::registry::LocalModelRegistry;
-use crate::traits::{TtsProvider, TtsRequest, Voice};
+use crate::traits::{AudioPayload, TtsProvider, TtsRequest, Voice};
 
 /// Qwen3-TTS model size variant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -260,7 +260,7 @@ impl TtsProvider for Qwen3TtsNativeProvider {
             message: format!("blocking task failed: {e}"),
         })??;
 
-        Ok(AudioFrame::new(pcm_bytes, sample_rate, 1))
+        Ok(AudioPayload::Pcm(AudioFrame::new(pcm_bytes, sample_rate, 1)))
     }
 
     async fn synthesize_stream(
@@ -268,15 +268,16 @@ impl TtsProvider for Qwen3TtsNativeProvider {
         request: &TtsRequest,
     ) -> AudioResult<Pin<Box<dyn Stream<Item = AudioResult<AudioPayload>> + Send>>> {
         let full_frame = self.synthesize(request).await?;
-        let chunk_bytes = (full_frame.sample_rate as usize * 100 / 1000) * 2; // 100ms of PCM16
+        let chunk_bytes = (full_frame.sample_rate() as usize * 100 / 1000) * 2; // 100ms of PCM16
 
         let stream = async_stream::stream! {
-            let data = full_frame.data.clone();
+            let frame = full_frame.into_pcm_frame().unwrap();
+            let data = frame.data.clone();
             let mut offset = 0;
             while offset < data.len() {
                 let end = (offset + chunk_bytes).min(data.len());
                 let chunk = data.slice(offset..end);
-                yield Ok(AudioFrame::new(chunk, full_frame.sample_rate, full_frame.channels));
+                yield Ok(AudioPayload::Pcm(AudioFrame::new(chunk, frame.sample_rate, frame.channels)));
                 offset = end;
             }
         };

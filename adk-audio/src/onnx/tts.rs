@@ -15,7 +15,7 @@ use futures::Stream;
 use crate::error::{AudioError, AudioResult};
 use crate::frame::AudioFrame;
 use crate::registry::LocalModelRegistry;
-use crate::traits::{TtsProvider, TtsRequest, Voice};
+use crate::traits::{AudioPayload, TtsProvider, TtsRequest, Voice};
 
 use super::execution_provider::OnnxExecutionProvider;
 use super::preprocessor::{Preprocessor, PreprocessorOutput, TokenizerPreprocessor};
@@ -261,7 +261,7 @@ impl OnnxTtsProvider {
 
 #[async_trait]
 impl TtsProvider for OnnxTtsProvider {
-    async fn synthesize(&self, request: &TtsRequest) -> AudioResult<AudioFrame> {
+    async fn synthesize(&self, request: &TtsRequest) -> AudioResult<AudioPayload> {
         // Run preprocessor
         let preprocessed = self.preprocessor.preprocess(
             &request.text,
@@ -291,23 +291,24 @@ impl TtsProvider for OnnxTtsProvider {
             })
             .collect();
 
-        Ok(AudioFrame::new(sample_bytes, self.config.sample_rate, 1))
+        Ok(AudioPayload::Pcm(AudioFrame::new(sample_bytes, self.config.sample_rate, 1)))
     }
 
     async fn synthesize_stream(
         &self,
         request: &TtsRequest,
-    ) -> AudioResult<Pin<Box<dyn Stream<Item = AudioResult<AudioFrame>> + Send>>> {
+    ) -> AudioResult<Pin<Box<dyn Stream<Item = AudioResult<AudioPayload>> + Send>>> {
         let full_frame = self.synthesize(request).await?;
         let chunk_bytes = (self.config.sample_rate as usize * 100 / 1000) * 2;
 
         let stream = async_stream::stream! {
-            let data = full_frame.data.clone();
+            let frame = full_frame.into_pcm_frame().unwrap();
+            let data = frame.data.clone();
             let mut offset = 0;
             while offset < data.len() {
                 let end = (offset + chunk_bytes).min(data.len());
                 let chunk = data.slice(offset..end);
-                yield Ok(AudioFrame::new(chunk, full_frame.sample_rate, full_frame.channels));
+                yield Ok(AudioPayload::Pcm(AudioFrame::new(chunk, frame.sample_rate, frame.channels)));
                 offset = end;
             }
         };
