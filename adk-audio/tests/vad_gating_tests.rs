@@ -64,9 +64,8 @@ struct StubTts;
 #[async_trait]
 impl TtsProvider for StubTts {
     async fn synthesize(&self, _: &TtsRequest) -> AudioResult<adk_audio::traits::AudioPayload> {
-        Ok(adk_audio::traits::AudioPayload::Pcm(adk_audio::AudioFrame::silence(16000, 1, 100)))
+        Ok(adk_audio::traits::AudioPayload::Pcm(AudioFrame::silence(16000, 1, 100)))
     }
-
     fn voice_catalog(&self) -> &[Voice] {
         &[]
     }
@@ -117,7 +116,7 @@ proptest! {
 
             // Send silence frames
             for _ in 0..n_frames {
-                let frame = adk_audio::AudioFrame::silence(16000, 1, 100);
+                let frame = AudioFrame::silence(16000, 1, 100);
                 let _ = handle.input_tx.send(adk_audio::PipelineInput::Audio(frame)).await;
             }
 

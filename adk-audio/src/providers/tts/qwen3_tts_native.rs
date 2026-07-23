@@ -215,7 +215,7 @@ impl Qwen3TtsNativeProvider {
 
 #[async_trait]
 impl TtsProvider for Qwen3TtsNativeProvider {
-    async fn synthesize(&self, request: &TtsRequest) -> AudioResult<AudioFrame> {
+    async fn synthesize(&self, request: &TtsRequest) -> AudioResult<AudioPayload> {
         let text = request.text.clone();
         let voice = request.voice.clone();
         let model = self.model.clone();
@@ -266,7 +266,7 @@ impl TtsProvider for Qwen3TtsNativeProvider {
     async fn synthesize_stream(
         &self,
         request: &TtsRequest,
-    ) -> AudioResult<Pin<Box<dyn Stream<Item = AudioResult<AudioFrame>> + Send>>> {
+    ) -> AudioResult<Pin<Box<dyn Stream<Item = AudioResult<AudioPayload>> + Send>>> {
         let full_frame = self.synthesize(request).await?;
         let chunk_bytes = (full_frame.sample_rate as usize * 100 / 1000) * 2; // 100ms of PCM16
 

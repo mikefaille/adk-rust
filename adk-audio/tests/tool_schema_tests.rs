@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use adk_audio::{
     ApplyFxTool, AudioFrame, AudioResult, FxChain, GenerateMusicTool, MusicProvider, MusicRequest,
-    SpeakTool, SttOptions, SttProvider, TranscribeTool, Transcript, TtsProvider, TtsRequest, Voice,
+    SpeakTool, SttOptions, SttProvider, TranscribeTool, Transcript, TtsProvider, TtsRequest,
 };
 use adk_core::Tool;
 use async_trait::async_trait;
@@ -23,8 +23,7 @@ impl TtsProvider for StubTts {
     async fn synthesize(&self, _: &TtsRequest) -> AudioResult<adk_audio::traits::AudioPayload> {
         Ok(adk_audio::traits::AudioPayload::Pcm(AudioFrame::silence(16000, 1, 100)))
     }
-
-    fn voice_catalog(&self) -> &[Voice] {
+    fn voice_catalog(&self) -> &[adk_audio::traits::Voice] {
         &[]
     }
 }

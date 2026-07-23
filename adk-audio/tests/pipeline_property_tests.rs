@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use adk_audio::{
     AudioFrame, AudioPipelineBuilder, AudioResult, SpeechSegment, SttOptions, SttProvider,
-    Transcript, TtsProvider, TtsRequest, VadProcessor, Voice,
+    Transcript, TtsProvider, TtsRequest, VadProcessor,
 };
 use async_trait::async_trait;
 use futures::Stream;
@@ -23,10 +23,9 @@ struct MockTts;
 #[async_trait]
 impl TtsProvider for MockTts {
     async fn synthesize(&self, _req: &TtsRequest) -> AudioResult<adk_audio::traits::AudioPayload> {
-        Ok(adk_audio::traits::AudioPayload::Pcm(adk_audio::AudioFrame::silence(16000, 1, 100)))
+        Ok(adk_audio::traits::AudioPayload::Pcm(AudioFrame::silence(16000, 1, 100)))
     }
-
-    fn voice_catalog(&self) -> &[Voice] {
+    fn voice_catalog(&self) -> &[adk_audio::traits::Voice] {
         &[]
     }
 }
