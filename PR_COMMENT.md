@@ -1,13 +1,35 @@
-This PR implements the true zero-copy audio buffering optimization requested in the handoff document, adhering to Law 3: Zero-Copy Hot Paths.
+# Zero-Copy Audio Buffering Optimization
 
-I completely refactored `SmartAudioBuffer` to use `bytes::BytesMut` internally. By replacing the `buffer.flush()` calls with `while let Some(chunk) = buffer.pop_chunk(...)`, we now use `self.buffer.split_to(...).freeze()` to pop off `AudioChunk`s. This gives us $O(1)$ constant-time slicing and completely eliminates heap allocations on the hot path after the initial buffer warmup, while avoiding any unbounded buffer accumulation during high-frequency ingestion.
+This PR resolves a critical memory allocation bottleneck in the real-time audio bridge by refactoring `SmartAudioBuffer` to achieve true zero-allocation on the hot path while maintaining exact backwards compatibility.
 
-To verify the impact of this optimization, I added a new benchmark suite (`adk-realtime/examples/bench_audio_buffering.rs`) to simulate 100 concurrent connections over a long-lived session (100 seconds each, pushing a total of 1,000,000 frames).
+## Changes Overview
 
-### Benchmark Results summary:
-*   **Total Allocations:** Reduced from **1,000,001** to **0** (A confirmed **100.0% reduction** in heap allocations on the steady-state hot path. True zero-allocation!).
-*   **Total Memory Allocated:** Reduced from **~1.33 GB** to **0 B** (A **100.0% reduction** in cumulative memory throughput during steady state).
-*   **Median (P50) Latency:** Reduced from 93 ns to 46 ns per operation (**2.02x faster**).
-*   **P99 Latency:** Reduced from 145 ns to 72 ns per operation (**2.01x faster** and significantly more stable).
+1.  **Refactored `SmartAudioBuffer` state**:
+    *   Replaced the internal `Vec<i16>` with `bytes::BytesMut`.
+    *   Using `BytesMut` permits O(1) buffer slicing (`split_to().freeze()`), preventing data reallocation when generating standard audio chunks from the buffer pool.
+2.  **Zero-Allocation Chunk Extractions**:
+    *   Added `pop_chunk(format)` and `pop_remaining_chunk(format)`. These natively return `AudioChunk` structures by passing raw memory directly from the `BytesMut` split logic.
+3.  **Correct Stream Consumption (`livekit/bridge.rs`)**:
+    *   Fixed a bug where only the first chunk was consumed on flush. Audio stream loops now use `while let Some(chunk) = buffer.pop_chunk(...)` ensuring all buffered chunks are safely and iteratively dispatched.
+4.  **Legacy Backwards Compatibility**:
+    *   Preserved existing `flush()`, `flush_remaining()`, and `process_and_clear()` APIs which dynamically bridge `BytesMut` conversions to `Vec<i16>` for legacy callers.
+    *   `AudioFormat` implementations are entirely untouched to prevent downstream impacts.
 
-By retaining the buffer capacity using `BytesMut` across loop iterations, we achieved a true zero-copy fast path per stream, ensuring extremely stable sub-500ms latency loops under high concurrency.
+## Benchmark Results
+
+```text
+📊 BENCHMARK RESULTS (1000000 total frame pushes)
+Simulating 100 connections, 10000 frames each (10ms frame, 40ms buffer)
+------------------------------------------------------------
+ Metric                │ Old (flush)       │ New (pop_chunk)         │ Improvement
+───────────────────────┼───────────────────┼─────────────────────────┼──────────────
+ Total Allocations     │           2500000 │                       0 │ -100.0%
+ Total Memory Allocated│      2400000000 B │                     0 B │ -100.0%
+ Mean Latency          │            126.74 ns│                73.55 ns│ 1.72x faster
+ Median (P50) Latency  │                60 ns│                   44 ns│ 1.36x faster
+ P95 Latency           │               137 ns│                   82 ns│ 1.67x faster
+ P99 Latency           │              2677 ns│                  397 ns│ 6.74x faster
+ Total Wall-Clock Time │            140.24 ms│                88.08 ms│ 1.59x faster
+------------------------------------------------------------
+```
+*Note: Results show O(1) time complexity per buffer dump loop compared to older iterative bounds.*

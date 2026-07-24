@@ -20,7 +20,7 @@ pub struct FrameCase {
 impl FrameCase {
     pub fn format(self) -> AudioFormat {
         match self.kind {
-            FrameKind::G711Ulaw => AudioFormat::g711_ulaw_8khz(),
+            FrameKind::G711Ulaw => AudioFormat::g711_ulaw(),
             FrameKind::Pcm16_16Khz => AudioFormat::pcm16_16khz(),
             FrameKind::Pcm16_24Khz => AudioFormat::pcm16_24khz(),
         }

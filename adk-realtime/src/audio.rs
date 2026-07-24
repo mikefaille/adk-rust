@@ -2,8 +2,8 @@
 
 pub mod g711;
 
-use bytes::BytesMut;
 use serde::{Deserialize, Serialize};
+use bytes::BytesMut;
 
 /// Audio encoding formats supported by realtime APIs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -83,11 +83,16 @@ impl AudioFormat {
 
     /// PCM16 format at 8kHz (often used in telephony).
     pub fn pcm16_8khz() -> Self {
-        Self { sample_rate: 8000, channels: 1, bits_per_sample: 16, encoding: AudioEncoding::Pcm16 }
+        Self {
+            sample_rate: 8000,
+            channels: 1,
+            bits_per_sample: 16,
+            encoding: AudioEncoding::Pcm16,
+        }
     }
 
     /// G.711 μ-law format at 8kHz (Telephony standard).
-    pub fn g711_ulaw_8khz() -> Self {
+    pub fn g711_ulaw() -> Self {
         Self {
             sample_rate: 8000,
             channels: 1,
@@ -97,7 +102,7 @@ impl AudioFormat {
     }
 
     /// G.711 A-law format at 8kHz (Telephony standard).
-    pub fn g711_alaw_8khz() -> Self {
+    pub fn g711_alaw() -> Self {
         Self {
             sample_rate: 8000,
             channels: 1,
@@ -260,9 +265,32 @@ impl SmartAudioBuffer {
     }
 
     fn should_flush(&self) -> bool {
-        self.buffer.len() >= self.target_bytes_len()
-            && self.target_duration_ms > 0
-            && self.sample_rate > 0
+        self.buffer.len() >= self.target_bytes_len() && self.target_duration_ms > 0 && self.sample_rate > 0
+    }
+
+    /// Flush the buffer if the target duration has been reached.
+    ///
+    /// Note: This copies the bytes to a new `Vec<i16>` to maintain backward compatibility.
+    /// For zero-copy, use `pop_chunk()`.
+    pub fn flush(&mut self) -> Option<Vec<i16>> {
+        if self.should_flush() {
+            let bytes = self.buffer.split().freeze();
+            let samples = bytemuck::cast_slice(&bytes).to_vec();
+            Some(samples)
+        } else {
+            None
+        }
+    }
+
+    /// Flush any remaining samples in the buffer.
+    pub fn flush_remaining(&mut self) -> Option<Vec<i16>> {
+        if self.buffer.is_empty() {
+            None
+        } else {
+            let bytes = self.buffer.split().freeze();
+            let samples = bytemuck::cast_slice(&bytes).to_vec();
+            Some(samples)
+        }
     }
 
     /// Returns the current capacity of the underlying buffer in bytes.
@@ -270,8 +298,27 @@ impl SmartAudioBuffer {
         self.buffer.capacity()
     }
 
+    /// Process the buffered samples with a closure and then clear the buffer while retaining capacity.
+    ///
+    /// This is a more efficient alternative to `flush()` when the samples don't need
+    /// to be owned by the caller after the closure returns (e.g., they are immediately
+    /// encoded to base64 or copied).
+    pub fn process_and_clear<F, R>(&mut self, f: F) -> Option<R>
+    where
+        F: FnOnce(&[i16]) -> R,
+    {
+        if self.should_flush() {
+            let samples: &[i16] = bytemuck::cast_slice(&self.buffer);
+            let result = f(samples);
+            self.buffer.clear();
+            Some(result)
+        } else {
+            None
+        }
+    }
+
     fn calculate_target_bytes(sample_rate: u32, target_duration_ms: u32) -> usize {
-        (((sample_rate as u64 * target_duration_ms as u64) + 999) / 1000) as usize * 2
+        (sample_rate as u64 * target_duration_ms as u64).div_ceil(1000) as usize * 2
     }
 
     fn target_bytes_len(&self) -> usize {
@@ -305,6 +352,53 @@ impl SmartAudioBuffer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_smart_audio_buffer_flush_threshold() {
+        let sample_rate = 1000;
+        let target_ms = 100;
+        // 1000 samples/sec -> 1 sample = 1ms.
+        // target 100ms -> 100 samples.
+
+        let mut buffer = SmartAudioBuffer::new(sample_rate, target_ms);
+
+        // Push 50 samples (50ms)
+        buffer.push(&[0; 50]);
+        assert!(buffer.flush().is_none());
+
+        // Push 49 samples (total 99ms)
+        buffer.push(&[0; 49]);
+        assert!(buffer.flush().is_none());
+
+        // Push 1 sample (total 100ms)
+        buffer.push(&[0; 1]);
+        let flushed = buffer.flush();
+        assert!(flushed.is_some());
+        assert_eq!(flushed.unwrap().len(), 100);
+        assert!(buffer.buffer.is_empty());
+    }
+
+    #[test]
+    fn test_smart_audio_buffer_flush_remaining() {
+        let sample_rate = 1000;
+        let target_ms = 100;
+        let mut buffer = SmartAudioBuffer::new(sample_rate, target_ms);
+
+        buffer.push(&[0; 50]);
+        assert!(buffer.flush().is_none());
+
+        let remaining = buffer.flush_remaining();
+        assert!(remaining.is_some());
+        assert_eq!(remaining.unwrap().len(), 50);
+        assert!(buffer.buffer.is_empty());
+    }
+
+    #[test]
+    fn test_smart_audio_buffer_empty_flush() {
+        let mut buffer = SmartAudioBuffer::new(1000, 100);
+        assert!(buffer.flush().is_none());
+        assert!(buffer.flush_remaining().is_none());
+    }
 
     #[test]
     fn test_smart_audio_buffer_pop_threshold() {

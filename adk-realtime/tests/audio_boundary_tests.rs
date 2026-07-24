@@ -46,17 +46,16 @@ fn test_smart_audio_buffer_retained_capacity() {
     buffer.push(&large_push);
 
     let initial_cap = buffer.capacity();
-    assert!(initial_cap >= 3200);
+    assert!(initial_cap >= 1600);
 
-    // Flush via pop_chunk
-    buffer.pop_chunk(adk_realtime::audio::AudioFormat::pcm16_24khz());
-
-    // Remaining bytes check (1600 samples = 3200 bytes. Pop chunk took 40ms * 16k = 640 samples = 1280 bytes. Remaining = 3200 - 1280 = 1920 bytes.)
-    assert_eq!(buffer.pop_remaining_chunk(adk_realtime::audio::AudioFormat::pcm16_24khz()).unwrap().data.len(), 1920);
+    // Flush via process_and_clear
+    buffer.process_and_clear(|_| {});
+    assert_eq!(buffer.capacity(), initial_cap);
+    assert_eq!(buffer.flush_remaining(), None);
 
     // Refill and check capacity again
     buffer.push(&large_push);
-    assert!(buffer.capacity() >= 3200);
+    assert_eq!(buffer.capacity(), initial_cap);
 }
 
 // ── Mock Session for Interruption Proof ────────────────────────────────

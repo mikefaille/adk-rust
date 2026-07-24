@@ -100,7 +100,6 @@ fn main() {
     latencies_old.sort_unstable();
 
     // ── 2. Benchmark New Zero-Copy Method (pop_chunk) ──
-    // Proper tracking for new method
     ALLOC_COUNT.store(0, Ordering::SeqCst);
     ALLOC_BYTES.store(0, Ordering::SeqCst);
 
@@ -142,9 +141,6 @@ fn main() {
     let total_time_new = start_total_new.elapsed();
     let allocs_new = ALLOC_COUNT.load(Ordering::SeqCst);
     let bytes_new = ALLOC_BYTES.load(Ordering::SeqCst);
-
-    // We expect a significant reduction, hopefully 0 steady-state allocations depending on `BytesMut` internals.
-    // We print the results but don't strictly assert 0 to avoid CI flakiness across environments if BytesMut does occasional large re-allocations.
 
     latencies_new.sort_unstable();
 

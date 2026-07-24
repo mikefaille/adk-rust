@@ -19,7 +19,7 @@ fn test_audio_format_constructors() {
     let pcm16_16k = AudioFormat::pcm16_16khz();
     assert_eq!(pcm16_16k.sample_rate, 16000);
 
-    let g711_ulaw = AudioFormat::g711_ulaw_8khz();
+    let g711_ulaw = AudioFormat::g711_ulaw();
     assert_eq!(g711_ulaw.encoding, AudioEncoding::G711Ulaw);
     assert_eq!(g711_ulaw.sample_rate, 8000);
 }
