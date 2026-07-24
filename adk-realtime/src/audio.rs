@@ -2,8 +2,8 @@
 
 pub mod g711;
 
-use serde::{Deserialize, Serialize};
 use bytes::BytesMut;
+use serde::{Deserialize, Serialize};
 
 /// Audio encoding formats supported by realtime APIs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -83,12 +83,7 @@ impl AudioFormat {
 
     /// PCM16 format at 8kHz (often used in telephony).
     pub fn pcm16_8khz() -> Self {
-        Self {
-            sample_rate: 8000,
-            channels: 1,
-            bits_per_sample: 16,
-            encoding: AudioEncoding::Pcm16,
-        }
+        Self { sample_rate: 8000, channels: 1, bits_per_sample: 16, encoding: AudioEncoding::Pcm16 }
     }
 
     /// G.711 μ-law format at 8kHz (Telephony standard).
@@ -265,7 +260,9 @@ impl SmartAudioBuffer {
     }
 
     fn should_flush(&self) -> bool {
-        self.buffer.len() >= self.target_bytes_len() && self.target_duration_ms > 0 && self.sample_rate > 0
+        self.buffer.len() >= self.target_bytes_len()
+            && self.target_duration_ms > 0
+            && self.sample_rate > 0
     }
 
     /// Flush the buffer if the target duration has been reached.
