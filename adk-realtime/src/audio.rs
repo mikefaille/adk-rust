@@ -52,6 +52,12 @@ impl Default for AudioFormat {
 
 impl AudioFormat {
     /// Create a new audio format specification.
+        /// Create a new AudioFormat.
+    /// # Example
+    /// ```rust
+    /// use adk_realtime::audio::{AudioFormat, AudioEncoding};
+    /// let format = AudioFormat::new(48000, 2, 16, AudioEncoding::Pcm16);
+    /// ```
     pub fn new(
         sample_rate: u32,
         channels: u8,
@@ -82,6 +88,12 @@ impl AudioFormat {
     }
 
     /// PCM16 format at 8kHz (often used in telephony).
+        /// PCM16 format at 8kHz (often used in telephony).
+    /// # Example
+    /// ```rust
+    /// use adk_realtime::audio::AudioFormat;
+    /// let format = AudioFormat::pcm16_8khz();
+    /// ```
     pub fn pcm16_8khz() -> Self {
         Self { sample_rate: 8000, channels: 1, bits_per_sample: 16, encoding: AudioEncoding::Pcm16 }
     }
@@ -112,6 +124,13 @@ impl AudioFormat {
     }
 
     /// Calculates the duration of an audio buffer in milliseconds based on this format.
+        /// Calculate the duration in milliseconds for a given number of bytes.
+    /// # Example
+    /// ```rust
+    /// use adk_realtime::audio::AudioFormat;
+    /// let format = AudioFormat::pcm16_8khz();
+    /// assert_eq!(format.duration_ms(16000), 1000.0);
+    /// ```
     pub fn duration_ms(&self, byte_count: usize) -> f64 {
         (byte_count as f64 / self.bytes_per_second() as f64) * 1000.0
     }
@@ -128,6 +147,12 @@ pub struct AudioChunk {
 
 impl AudioChunk {
     /// Create a new audio chunk.
+        /// Create a new AudioFormat.
+    /// # Example
+    /// ```rust
+    /// use adk_realtime::audio::{AudioFormat, AudioEncoding};
+    /// let format = AudioFormat::new(48000, 2, 16, AudioEncoding::Pcm16);
+    /// ```
     pub fn new(data: impl Into<bytes::Bytes>, format: AudioFormat) -> Self {
         Self { data: data.into(), format }
     }
@@ -240,6 +265,12 @@ pub struct SmartAudioBuffer {
 
 impl SmartAudioBuffer {
     /// Create a new smart audio buffer.
+        /// Create a new AudioFormat.
+    /// # Example
+    /// ```rust
+    /// use adk_realtime::audio::{AudioFormat, AudioEncoding};
+    /// let format = AudioFormat::new(48000, 2, 16, AudioEncoding::Pcm16);
+    /// ```
     pub fn new(sample_rate: u32, target_duration_ms: u32) -> Self {
         let target_bytes = Self::calculate_target_bytes(sample_rate, target_duration_ms);
         Self { buffer: BytesMut::with_capacity(target_bytes), sample_rate, target_duration_ms }
@@ -325,6 +356,15 @@ impl SmartAudioBuffer {
     /// Pops an AudioChunk with zero heap allocations on steady-state hot paths.
     /// This method extracts exactly `target_duration_ms` of audio and returns it,
     /// leaving any excess in the buffer.
+        /// Pop a chunk of audio from the buffer.
+    /// # Example
+    /// ```rust
+    /// use adk_realtime::audio::{SmartAudioBuffer, AudioFormat};
+    /// let mut buffer = SmartAudioBuffer::new(24000, 40);
+    /// buffer.push(&[0; 960]);
+    /// let chunk = buffer.pop_chunk(AudioFormat::pcm16_24khz());
+    /// assert!(chunk.is_some());
+    /// ```
     pub fn pop_chunk(&mut self, format: AudioFormat) -> Option<AudioChunk> {
         if self.should_flush() {
             let target_bytes = self.target_bytes_len();
@@ -336,6 +376,15 @@ impl SmartAudioBuffer {
     }
 
     /// Pops any remaining samples in the buffer as an AudioChunk.
+        /// Pop any remaining audio from the buffer, regardless of whether it meets the target duration.
+    /// # Example
+    /// ```rust
+    /// use adk_realtime::audio::{SmartAudioBuffer, AudioFormat};
+    /// let mut buffer = SmartAudioBuffer::new(24000, 40);
+    /// buffer.push(&[0; 100]);
+    /// let chunk = buffer.pop_remaining_chunk(AudioFormat::pcm16_24khz());
+    /// assert!(chunk.is_some());
+    /// ```
     pub fn pop_remaining_chunk(&mut self, format: AudioFormat) -> Option<AudioChunk> {
         if self.buffer.is_empty() {
             None

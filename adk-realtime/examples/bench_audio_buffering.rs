@@ -119,6 +119,7 @@ fn main() {
         let _ = buffer.pop_chunk(AudioFormat::pcm16_24khz());
 
         // Reset tracking after warmup for this specific connection
+        let prev_allocs = ALLOC_COUNT.load(Ordering::SeqCst);
 
         for _ in 0..frames_per_conn {
             let t0 = Instant::now();
@@ -132,6 +133,8 @@ fn main() {
         }
 
         // We assert inside the connection loop after warmup
+        let current_allocs = ALLOC_COUNT.load(Ordering::SeqCst);
+        assert_eq!(current_allocs - prev_allocs, 0, "Expected 0 steady state allocations, got {}", current_allocs - prev_allocs);
     }
 
     let total_time_new = start_total_new.elapsed();
