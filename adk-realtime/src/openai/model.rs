@@ -97,11 +97,11 @@ impl RealtimeModel for OpenAIRealtimeModel {
     }
 
     fn supported_input_formats(&self) -> Vec<AudioFormat> {
-        vec![AudioFormat::pcm16_24khz(), AudioFormat::g711_ulaw(), AudioFormat::g711_alaw()]
+        vec![AudioFormat::pcm16_24khz(), AudioFormat::g711_ulaw_8khz(), AudioFormat::g711_alaw_8khz()]
     }
 
     fn supported_output_formats(&self) -> Vec<AudioFormat> {
-        vec![AudioFormat::pcm16_24khz(), AudioFormat::g711_ulaw(), AudioFormat::g711_alaw()]
+        vec![AudioFormat::pcm16_24khz(), AudioFormat::g711_ulaw_8khz(), AudioFormat::g711_alaw_8khz()]
     }
 
     fn available_voices(&self) -> Vec<&str> {
