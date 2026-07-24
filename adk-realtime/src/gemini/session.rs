@@ -213,7 +213,7 @@ pub struct GeminiRealtimeSession {
 
 impl GeminiRealtimeSession {
     fn flush_threshold_bytes(format: &AudioFormat) -> usize {
-        let bytes_per_second = format.bytes_per_second() as usize;
+        let bytes_per_second = format.bytes_per_second();
         // Compute target bytes for a 40ms chunk and round up so we don't under-buffer.
         // `max(1)` keeps the threshold valid even for pathological/invalid formats.
         bytes_per_second.saturating_mul(AUDIO_FLUSH_TARGET_MS).div_ceil(1000).max(1)

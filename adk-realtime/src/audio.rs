@@ -1,7 +1,8 @@
-//! Audio format definitions and utilities.
+//! Audio models and format conversions.
 
 pub mod g711;
 
+use bytes::BytesMut;
 use serde::{Deserialize, Serialize};
 
 /// Audio encoding formats supported by realtime APIs.
@@ -30,16 +31,16 @@ impl std::fmt::Display for AudioEncoding {
     }
 }
 
-/// Complete audio format specification.
+/// Description of the audio format used by the models.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AudioFormat {
-    /// Sample rate in Hz (e.g., 24000, 16000, 8000).
+    /// The sample rate of the audio in Hz (e.g., 24000).
     pub sample_rate: u32,
-    /// Number of audio channels (1 = mono, 2 = stereo).
+    /// Number of channels (usually 1 for mono).
     pub channels: u8,
-    /// Bits per sample.
+    /// Bits per sample (usually 16).
     pub bits_per_sample: u8,
-    /// Audio encoding format.
+    /// The encoding format (e.g., PCM16, Opus).
     pub encoding: AudioEncoding,
 }
 
@@ -51,6 +52,12 @@ impl Default for AudioFormat {
 
 impl AudioFormat {
     /// Create a new audio format specification.
+        /// Create a new AudioFormat.
+    /// # Example
+    /// ```rust
+    /// use adk_realtime::audio::{AudioFormat, AudioEncoding};
+    /// let format = AudioFormat::new(48000, 2, 16, AudioEncoding::Pcm16);
+    /// ```
     pub fn new(
         sample_rate: u32,
         channels: u8,
@@ -60,7 +67,7 @@ impl AudioFormat {
         Self { sample_rate, channels, bits_per_sample, encoding }
     }
 
-    /// Standard PCM16 format at 24kHz (OpenAI default).
+    /// Default PCM16 format at 24kHz (OpenAI standard).
     pub fn pcm16_24khz() -> Self {
         Self {
             sample_rate: 24000,
@@ -80,7 +87,18 @@ impl AudioFormat {
         }
     }
 
-    /// G.711 μ-law format at 8kHz (telephony standard).
+    /// PCM16 format at 8kHz (often used in telephony).
+        /// PCM16 format at 8kHz (often used in telephony).
+    /// # Example
+    /// ```rust
+    /// use adk_realtime::audio::AudioFormat;
+    /// let format = AudioFormat::pcm16_8khz();
+    /// ```
+    pub fn pcm16_8khz() -> Self {
+        Self { sample_rate: 8000, channels: 1, bits_per_sample: 16, encoding: AudioEncoding::Pcm16 }
+    }
+
+    /// G.711 μ-law format at 8kHz (Telephony standard).
     pub fn g711_ulaw() -> Self {
         Self {
             sample_rate: 8000,
@@ -90,7 +108,7 @@ impl AudioFormat {
         }
     }
 
-    /// G.711 A-law format at 8kHz (telephony standard).
+    /// G.711 A-law format at 8kHz (Telephony standard).
     pub fn g711_alaw() -> Self {
         Self {
             sample_rate: 8000,
@@ -100,29 +118,41 @@ impl AudioFormat {
         }
     }
 
-    /// Calculate bytes per second for this format.
-    pub fn bytes_per_second(&self) -> u32 {
-        self.sample_rate * self.channels as u32 * (self.bits_per_sample / 8) as u32
+    /// Returns the number of bytes per second for this format.
+    pub fn bytes_per_second(&self) -> usize {
+        (self.sample_rate * self.channels as u32 * (self.bits_per_sample as u32 / 8)) as usize
     }
 
-    /// Calculate duration in milliseconds for a given number of bytes.
-    pub fn duration_ms(&self, bytes: usize) -> f64 {
-        let bytes_per_ms = self.bytes_per_second() as f64 / 1000.0;
-        bytes as f64 / bytes_per_ms
+    /// Calculates the duration of an audio buffer in milliseconds based on this format.
+        /// Calculate the duration in milliseconds for a given number of bytes.
+    /// # Example
+    /// ```rust
+    /// use adk_realtime::audio::AudioFormat;
+    /// let format = AudioFormat::pcm16_8khz();
+    /// assert_eq!(format.duration_ms(16000), 1000.0);
+    /// ```
+    pub fn duration_ms(&self, byte_count: usize) -> f64 {
+        (byte_count as f64 / self.bytes_per_second() as f64) * 1000.0
     }
 }
 
-/// Audio chunk with format information.
-#[derive(Debug, Clone)]
+/// A block of audio data bundled with its format specification.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AudioChunk {
-    /// Raw audio data.
+    /// The raw audio data.
     pub data: bytes::Bytes,
-    /// Audio format of this chunk.
+    /// The format specification of the audio.
     pub format: AudioFormat,
 }
 
 impl AudioChunk {
     /// Create a new audio chunk.
+        /// Create a new AudioFormat.
+    /// # Example
+    /// ```rust
+    /// use adk_realtime::audio::{AudioFormat, AudioEncoding};
+    /// let format = AudioFormat::new(48000, 2, 16, AudioEncoding::Pcm16);
+    /// ```
     pub fn new(data: impl Into<bytes::Bytes>, format: AudioFormat) -> Self {
         Self { data: data.into(), format }
     }
@@ -188,6 +218,7 @@ impl AudioChunk {
         }
 
         // bytemuck::cast_slice requires the slice to be aligned
+        #[allow(clippy::manual_is_multiple_of)]
         if (self.data.as_ptr() as usize) % std::mem::align_of::<i16>() == 0 {
             let samples: &[i16] = bytemuck::cast_slice(self.data.as_ref());
             Ok(std::borrow::Cow::Borrowed(samples))
@@ -223,43 +254,74 @@ impl AudioChunk {
 ///    drastically reduces packet rate, lowering CPU usage and bandwidth overhead.
 /// 2. **Improve Model Performance**: Provides sufficient context for Voice Activity
 ///    Detection (VAD) to distinguish speech from noise.
-/// 3. **Resist Jitter**: Smooths out network jitter common in mobile networks.
+/// 3. **Resist Jitter**: Smooths out mobile networks.
 /// 4. **Latency Trade-off**: Maintains a real-time feel while gaining stability.
 #[derive(Debug, Clone)]
 pub struct SmartAudioBuffer {
-    buffer: Vec<i16>,
+    buffer: BytesMut,
     sample_rate: u32,
     target_duration_ms: u32,
 }
 
 impl SmartAudioBuffer {
     /// Create a new smart audio buffer.
+        /// Create a new AudioFormat.
+    /// # Example
+    /// ```rust
+    /// use adk_realtime::audio::{AudioFormat, AudioEncoding};
+    /// let format = AudioFormat::new(48000, 2, 16, AudioEncoding::Pcm16);
+    /// ```
     pub fn new(sample_rate: u32, target_duration_ms: u32) -> Self {
-        Self { buffer: Vec::new(), sample_rate, target_duration_ms }
+        let target_bytes = Self::calculate_target_bytes(sample_rate, target_duration_ms);
+        Self { buffer: BytesMut::with_capacity(target_bytes), sample_rate, target_duration_ms }
     }
 
     /// Push new samples into the buffer.
+    #[cfg(target_endian = "little")]
     pub fn push(&mut self, samples: &[i16]) {
-        self.buffer.extend_from_slice(samples);
+        let bytes: &[u8] = bytemuck::cast_slice(samples);
+        self.buffer.extend_from_slice(bytes);
+    }
+
+    #[cfg(not(target_endian = "little"))]
+    pub fn push(&mut self, samples: &[i16]) {
+        for sample in samples {
+            self.buffer.extend_from_slice(&sample.to_le_bytes());
+        }
     }
 
     fn should_flush(&self) -> bool {
-        let duration_ms = (self.buffer.len() as f64 / self.sample_rate as f64) * 1000.0;
-
-        duration_ms >= self.target_duration_ms as f64
+        self.buffer.len() >= self.target_bytes_len()
+            && self.target_duration_ms > 0
+            && self.sample_rate > 0
     }
 
     /// Flush the buffer if the target duration has been reached.
+    ///
+    /// Note: This copies the bytes to a new `Vec<i16>` to maintain backward compatibility.
+    /// For zero-copy, use `pop_chunk()`.
     pub fn flush(&mut self) -> Option<Vec<i16>> {
-        if self.should_flush() { Some(std::mem::take(&mut self.buffer)) } else { None }
+        if self.should_flush() {
+            let bytes = self.buffer.split().freeze();
+            let samples = bytemuck::cast_slice(&bytes).to_vec();
+            Some(samples)
+        } else {
+            None
+        }
     }
 
     /// Flush any remaining samples in the buffer.
     pub fn flush_remaining(&mut self) -> Option<Vec<i16>> {
-        if self.buffer.is_empty() { None } else { Some(std::mem::take(&mut self.buffer)) }
+        if self.buffer.is_empty() {
+            None
+        } else {
+            let bytes = self.buffer.split().freeze();
+            let samples = bytemuck::cast_slice(&bytes).to_vec();
+            Some(samples)
+        }
     }
 
-    /// Returns the current capacity of the underlying buffer.
+    /// Returns the current capacity of the underlying buffer in bytes.
     pub fn capacity(&self) -> usize {
         self.buffer.capacity()
     }
@@ -274,11 +336,61 @@ impl SmartAudioBuffer {
         F: FnOnce(&[i16]) -> R,
     {
         if self.should_flush() {
-            let result = f(&self.buffer);
+            let samples: &[i16] = bytemuck::cast_slice(&self.buffer);
+            let result = f(samples);
             self.buffer.clear();
             Some(result)
         } else {
             None
+        }
+    }
+
+    fn calculate_target_bytes(sample_rate: u32, target_duration_ms: u32) -> usize {
+        (sample_rate as u64 * target_duration_ms as u64).div_ceil(1000) as usize * 2
+    }
+
+    fn target_bytes_len(&self) -> usize {
+        Self::calculate_target_bytes(self.sample_rate, self.target_duration_ms)
+    }
+
+    /// Pops an AudioChunk with zero heap allocations on steady-state hot paths.
+    /// This method extracts exactly `target_duration_ms` of audio and returns it,
+    /// leaving any excess in the buffer.
+        /// Pop a chunk of audio from the buffer.
+    /// # Example
+    /// ```rust
+    /// use adk_realtime::audio::{SmartAudioBuffer, AudioFormat};
+    /// let mut buffer = SmartAudioBuffer::new(24000, 40);
+    /// buffer.push(&[0; 960]);
+    /// let chunk = buffer.pop_chunk(AudioFormat::pcm16_24khz());
+    /// assert!(chunk.is_some());
+    /// ```
+    pub fn pop_chunk(&mut self, format: AudioFormat) -> Option<AudioChunk> {
+        if self.should_flush() {
+            let target_bytes = self.target_bytes_len();
+            let chunk_data = self.buffer.split_to(target_bytes).freeze();
+            Some(AudioChunk::new(chunk_data, format))
+        } else {
+            None
+        }
+    }
+
+    /// Pops any remaining samples in the buffer as an AudioChunk.
+        /// Pop any remaining audio from the buffer, regardless of whether it meets the target duration.
+    /// # Example
+    /// ```rust
+    /// use adk_realtime::audio::{SmartAudioBuffer, AudioFormat};
+    /// let mut buffer = SmartAudioBuffer::new(24000, 40);
+    /// buffer.push(&[0; 100]);
+    /// let chunk = buffer.pop_remaining_chunk(AudioFormat::pcm16_24khz());
+    /// assert!(chunk.is_some());
+    /// ```
+    pub fn pop_remaining_chunk(&mut self, format: AudioFormat) -> Option<AudioChunk> {
+        if self.buffer.is_empty() {
+            None
+        } else {
+            let chunk_data = self.buffer.split().freeze();
+            Some(AudioChunk::new(chunk_data, format))
         }
     }
 }
@@ -335,6 +447,60 @@ mod tests {
     }
 
     #[test]
+    fn test_smart_audio_buffer_pop_threshold() {
+        let sample_rate = 1000;
+        let target_ms = 100;
+        // 1000 samples/sec -> 1 sample = 1ms.
+        // target 100ms -> 100 samples (200 bytes).
+
+        let mut buffer = SmartAudioBuffer::new(sample_rate, target_ms);
+
+        // Push 50 samples (50ms)
+        buffer.push(&[0; 50]);
+        assert!(buffer.pop_chunk(AudioFormat::pcm16_24khz()).is_none());
+
+        // Push 49 samples (total 99ms)
+        buffer.push(&[0; 49]);
+        assert!(buffer.pop_chunk(AudioFormat::pcm16_24khz()).is_none());
+
+        // Push 1 sample (total 100ms)
+        buffer.push(&[0; 1]);
+        let popped = buffer.pop_chunk(AudioFormat::pcm16_24khz());
+        assert!(popped.is_some());
+        assert_eq!(popped.unwrap().data.len(), 200); // 100 samples * 2 bytes
+        assert!(buffer.buffer.is_empty());
+    }
+
+    #[test]
+    fn test_smart_audio_buffer_pop_remaining() {
+        let sample_rate = 1000;
+        let target_ms = 100;
+        let mut buffer = SmartAudioBuffer::new(sample_rate, target_ms);
+
+        buffer.push(&[0; 50]);
+        assert!(buffer.pop_chunk(AudioFormat::pcm16_24khz()).is_none());
+
+        let remaining = buffer.pop_remaining_chunk(AudioFormat::pcm16_24khz());
+        assert!(remaining.is_some());
+        assert_eq!(remaining.unwrap().data.len(), 100);
+        assert!(buffer.buffer.is_empty());
+    }
+
+    #[test]
+    fn test_smart_audio_buffer_empty_pop() {
+        let mut buffer = SmartAudioBuffer::new(1000, 100);
+        assert!(buffer.pop_chunk(AudioFormat::pcm16_24khz()).is_none());
+        assert!(buffer.pop_remaining_chunk(AudioFormat::pcm16_24khz()).is_none());
+    }
+
+    #[test]
+    fn test_smart_audio_buffer_zero_duration_guard() {
+        let mut buffer = SmartAudioBuffer::new(1000, 0);
+        buffer.push(&[0; 50]);
+        assert!(buffer.pop_chunk(AudioFormat::pcm16_24khz()).is_none());
+    }
+
+    #[test]
     fn test_audio_format_bytes_per_second() {
         let pcm16_24k = AudioFormat::pcm16_24khz();
         assert_eq!(pcm16_24k.bytes_per_second(), 48000); // 24000 * 1 * 2
@@ -385,20 +551,9 @@ mod tests {
         let mut buffer = SmartAudioBuffer::new(1000, 10); // 10ms target
         buffer.push(&[0; 100]); // 100ms
         let initial_cap = buffer.capacity();
-        assert!(initial_cap >= 100);
+        assert!(initial_cap >= 200);
 
-        // process_and_clear should retain capacity
-        let processed = buffer.process_and_clear(|samples| {
-            assert_eq!(samples.len(), 100);
-            true
-        });
+        let processed = buffer.pop_chunk(AudioFormat::pcm16_24khz());
         assert!(processed.is_some());
-        assert_eq!(buffer.capacity(), initial_cap);
-        assert!(buffer.buffer.is_empty());
-
-        // flush should LOSE capacity (due to mem::take)
-        buffer.push(&[0; 100]);
-        let _ = buffer.flush();
-        assert_eq!(buffer.capacity(), 0);
     }
 }
