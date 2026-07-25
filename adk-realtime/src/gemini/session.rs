@@ -85,11 +85,11 @@ impl GeminiLiveBackend {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct GeminiClientMessage {
+pub(crate) struct GeminiClientMessage<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     setup: Option<GeminiSetup>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    realtime_input: Option<GeminiRealtimeInput>,
+    realtime_input: Option<GeminiRealtimeInput<'a>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_response: Option<GeminiToolResponse>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -151,20 +151,29 @@ struct GeminiInlineData {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct GeminiRealtimeInput {
+struct GeminiRealtimeInput<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
-    audio: Option<GeminiMediaChunk>,
+    audio: Option<GeminiMediaChunk<'a>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    media_chunks: Option<Vec<GeminiMediaChunk>>,
+    media_chunks: Option<Vec<GeminiMediaChunk<'a>>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     text: Option<String>,
 }
 
+/// Borrows both fields: this is the hot path.
+///
+/// Audio ingress sends one of these every 20 ms (~50/sec), so owning the
+/// fields meant a fresh `String` for a *constant* mime type plus a full copy
+/// of the ~856-byte base64 payload on every frame — roughly 30k allocations
+/// and 12 MB copied over a five-minute call, all discarded immediately after
+/// `serde_json` wrote them into the outbound buffer. `send_raw` only needs
+/// `&impl Serialize`, so borrowing costs nothing (repo Law 3: zero-copy hot
+/// paths).
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct GeminiMediaChunk {
-    mime_type: String,
-    data: String,
+struct GeminiMediaChunk<'a> {
+    mime_type: &'a str,
+    data: &'a str,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -242,10 +251,13 @@ impl GeminiRealtimeSession {
 
         let ws_stream = match &backend {
             GeminiLiveBackend::Studio { api_key } => {
-                let url = format!(
-                    "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key={}",
-                    api_key
-                );
+                // `GEMINI_LIVE_URL` is v1beta. On the Studio surface the
+                // endpoint version is coupled to the auth method, not the
+                // model: API-key auth is served on v1beta, and v1alpha is for
+                // ephemeral-token auth. This was hardcoded to v1alpha while
+                // the constant went unused — see the Gemini surface table in
+                // `zenith/data_plane/AGENTS.md`.
+                let url = format!("{}?key={}", super::GEMINI_LIVE_URL, api_key);
                 let request = url.into_client_request().map_err(|e| {
                     RealtimeError::connection(format!("Failed to create request: {}", e))
                 })?;
@@ -381,7 +393,7 @@ impl GeminiRealtimeSession {
         compiled_tools: Option<Vec<Value>>,
     ) -> Result<()> {
         let mut generation_config = json!({
-            "responseModalities": config.modalities.unwrap_or_else(|| vec!["AUDIO".to_string()]),
+            "responseModalities": gemini_response_modalities(config.modalities.as_deref()),
         });
 
         if let Some(voice) = &config.voice {
@@ -762,8 +774,8 @@ impl RealtimeSession for GeminiRealtimeSession {
                 audio: Some(GeminiMediaChunk {
                     // Gemini Live requires raw 16-bit PCM little-endian at 16 kHz;
                     // declaring the rate removes any server-side ambiguity.
-                    mime_type: "audio/pcm;rate=16000".to_string(),
-                    data: audio_base64.to_string(),
+                    mime_type: "audio/pcm;rate=16000",
+                    data: audio_base64,
                 }),
                 media_chunks: None,
                 text: None,
@@ -780,10 +792,7 @@ impl RealtimeSession for GeminiRealtimeSession {
             setup: None,
             realtime_input: Some(GeminiRealtimeInput {
                 audio: None,
-                media_chunks: Some(vec![GeminiMediaChunk {
-                    mime_type: mime_type.to_string(),
-                    data: data_base64.to_string(),
-                }]),
+                media_chunks: Some(vec![GeminiMediaChunk { mime_type, data: data_base64 }]),
                 text: None,
             }),
             tool_response: None,
@@ -904,8 +913,9 @@ impl RealtimeSession for GeminiRealtimeSession {
                 })?;
 
                 let mut generation_config = json!({});
-                if let Some(modalities) = &config.modalities {
-                    generation_config["responseModalities"] = json!(modalities);
+                if config.modalities.is_some() {
+                    generation_config["responseModalities"] =
+                        json!(gemini_response_modalities(config.modalities.as_deref()));
                 }
 
                 if let Some(voice) = &config.voice {
@@ -1016,6 +1026,27 @@ impl std::fmt::Debug for GeminiRealtimeSession {
             .field("session_id", &self.session_id)
             .field("connected", &self.connected.load(Ordering::SeqCst))
             .finish()
+    }
+}
+
+/// Maps provider-neutral modality names onto Gemini's `Modality` enum.
+///
+/// `RealtimeConfig::modalities` is provider-neutral and documented lowercase
+/// (`["text"]`, `["audio"]`) — which is also what OpenAI's realtime API takes.
+/// Gemini's `responseModalities` is a protobuf enum whose only valid JSON names
+/// are `TEXT`, `AUDIO` and `IMAGE`, so the casing conversion belongs here at the
+/// provider boundary rather than in the shared config.
+///
+/// This matters more than a cosmetic detail: sending lowercase `"audio"` was
+/// accepted at setup (`setupComplete` came back) but the model then produced no
+/// `serverContent` at all, so callers heard silence for the whole call.
+/// Anything unrecognised is passed through uppercased rather than dropped, so a
+/// new modality fails loudly at the API instead of silently degrading here.
+fn gemini_response_modalities(modalities: Option<&[String]>) -> Vec<String> {
+    match modalities {
+        Some(values) if !values.is_empty() => values.iter().map(|m| m.to_uppercase()).collect(),
+        // Audio-only is the live-call default for this crate.
+        _ => vec!["AUDIO".to_string()],
     }
 }
 
