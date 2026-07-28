@@ -181,7 +181,7 @@ impl EventHandler for NoOpEventHandler {}
 struct PendingToolCall {
     call_id: String,
     name: String,
-    arguments: String,
+    arguments: serde_json::Value,
 }
 
 /// Configuration for the RealtimeRunner.
