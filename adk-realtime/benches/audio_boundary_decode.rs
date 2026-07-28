@@ -88,7 +88,7 @@ fn audio_boundary_decode(criterion: &mut Criterion) {
 
     group.bench_function("owned_decode", |bencher| {
         bencher.iter(|| {
-            let samples = decode_owned(black_box(chunk.data.as_slice()));
+            let samples = decode_owned(black_box(chunk.data.as_ref()));
             black_box(consume(samples.as_ref()))
         });
     });

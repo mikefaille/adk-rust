@@ -131,7 +131,7 @@ fn pcm16_decode_allocation_invariants() {
     assert_arms_agree(&chunk);
 
     let owned = measure_allocations(|| {
-        let samples = decode_owned(black_box(chunk.data.as_slice()));
+        let samples = decode_owned(black_box(chunk.data.as_ref()));
         consume(samples.as_ref())
     });
     let borrowed = measure_allocations(|| {

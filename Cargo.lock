@@ -11090,9 +11090,9 @@ dependencies = [
 
 [[package]]
 name = "libwebrtc"
-version = "0.3.40"
+version = "0.3.43"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e9265d8a465a1e59a06ca04b264a8b97b26ceed9098b1ca90afea65bb35183fa"
+checksum = "69e6f1851a15d193e5416411fde4d371204f298c5126ee8a4ad68aedd7b22993"
 dependencies = [
  "cxx",
  "jni 0.21.1",
@@ -11218,9 +11218,9 @@ checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
 
 [[package]]
 name = "livekit"
-version = "0.7.51"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "68db4cdb8d8de80f4297b4b152d827c0690933e703f86bbf4789c5f010a0a8f7"
+checksum = "4deb846377d935e313e8a9ae630d8d0ce25cece6b53addd3a2821202088257ec"
 dependencies = [
  "base64 0.22.1",
  "bmrng",
@@ -11231,6 +11231,8 @@ dependencies = [
  "libloading 0.8.9",
  "libwebrtc",
  "livekit-api",
+ "livekit-common",
+ "livekit-data-stream",
  "livekit-datatrack",
  "livekit-protocol",
  "livekit-runtime",
@@ -11247,19 +11249,19 @@ dependencies = [
 
 [[package]]
 name = "livekit-api"
-version = "0.5.5"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1006f7c009369fe5f16f2eb6e93d6d0dcb2b427306a2f61b26ff5d2e440ec282"
+checksum = "537991d07fe4e7b70051bb70ef1057bf2097c71e2f9f746ff11dbf953510d491"
 dependencies = [
- "async-tungstenite",
  "base64 0.21.7",
  "bytes",
  "device-info",
  "flate2",
- "futures-util",
  "hmac 0.12.1",
  "http 1.4.1",
  "jsonwebtoken 10.4.0",
+ "livekit-common",
+ "livekit-net",
  "livekit-protocol",
  "livekit-runtime",
  "log",
@@ -11276,15 +11278,44 @@ dependencies = [
  "signature",
  "thiserror 2.0.18",
  "tokio",
- "tokio-tungstenite 0.29.0",
  "url",
 ]
 
 [[package]]
-name = "livekit-datatrack"
-version = "0.1.10"
+name = "livekit-common"
+version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "96b5f3fd5cc6f6f05bf96d233ad23f8a6ec48517598bed8c566a643e888b278e"
+checksum = "42a76cd816c062654d105b697ebab136da87d14126ee77b2f13280cb895bcb58"
+dependencies = [
+ "livekit-protocol",
+]
+
+[[package]]
+name = "livekit-data-stream"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "69ad1cca8f05fbe29026d99931884641199df544c33777d1f1b321df6f1031dd"
+dependencies = [
+ "bmrng",
+ "bytes",
+ "chrono",
+ "flate2",
+ "futures-util",
+ "livekit-common",
+ "livekit-protocol",
+ "log",
+ "parking_lot",
+ "prost 0.12.6",
+ "thiserror 2.0.18",
+ "tokio",
+ "uuid 1.23.2",
+]
+
+[[package]]
+name = "livekit-datatrack"
+version = "0.1.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "510124db800f1a492e6cb02d57c53028181fdb7a6fa75053d41ea5a361440998"
 dependencies = [
  "anyhow",
  "bytes",
@@ -11302,10 +11333,30 @@ dependencies = [
 ]
 
 [[package]]
-name = "livekit-protocol"
-version = "0.7.10"
+name = "livekit-net"
+version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4d26880e94e2f9bab298445e7d86a3794453d211a12ddbd051bd9991a343f9ff"
+checksum = "bb54564a8fef20690f397c8f1626032840dc840a5289ded2204296c8427a048e"
+dependencies = [
+ "async-trait",
+ "async-tungstenite",
+ "base64 0.21.7",
+ "bytes",
+ "futures-util",
+ "http 1.4.1",
+ "livekit-runtime",
+ "log",
+ "reqwest 0.12.28",
+ "tokio",
+ "tokio-tungstenite 0.29.0",
+ "url",
+]
+
+[[package]]
+name = "livekit-protocol"
+version = "0.7.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "735a237deeff60124edd7831fcabce32b4b9f667d5c4c5688c9d18a2808422c4"
 dependencies = [
  "pbjson",
  "pbjson-types",
@@ -20267,9 +20318,9 @@ dependencies = [
 
 [[package]]
 name = "webrtc-sys"
-version = "0.3.37"
+version = "0.3.40"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a2c1d27e825bb62ff2ceb97b2726a849de43cf7cf9bc5dc83204b43161286912"
+checksum = "6b9ff39cb40280566a5c53e1ca93a79f2bf5839a2ef8b7792972a330f967d1e1"
 dependencies = [
  "cc",
  "cxx",

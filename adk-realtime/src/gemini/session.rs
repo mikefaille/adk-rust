@@ -10,7 +10,7 @@ use crate::events::{ClientEvent, ServerEvent, ToolResponse};
 use crate::session::{ContextMutationOutcome, RealtimeSession};
 use async_trait::async_trait;
 use base64::Engine;
-use bytes::{BufMut, Bytes, BytesMut};
+use bytes::{BufMut, BytesMut};
 use futures::stream::Stream;
 use futures::{SinkExt, StreamExt};
 use parking_lot::Mutex as ParkingMutex;
@@ -1071,7 +1071,7 @@ pub fn build_vertex_live_url(region: &str, project_id: &str) -> Result<String> {
 pub(crate) fn translate_client_message(
     role: &str,
     parts: Vec<adk_core::types::Part>,
-) -> GeminiClientMessage {
+) -> GeminiClientMessage<'_> {
     // 1. Translate the polymorphic `adk_core::types::Part` elements into strictly-typed `GeminiPart` structures.
     let mut gemini_parts: Vec<GeminiPart> = Vec::new();
     for p in parts {
