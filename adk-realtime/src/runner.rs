@@ -119,6 +119,15 @@ pub trait EventHandler: Send + Sync {
         Ok(())
     }
 
+    /// Called when the provider has finalized one caller-input transcript item.
+    ///
+    /// Consumers that only need a turn boundary should use `item_id` and avoid
+    /// retaining `transcript`; the callback includes both so applications that
+    /// explicitly own transcript persistence do not need a parallel event loop.
+    async fn on_input_transcript_completed(&self, _transcript: &str, _item_id: &str) -> Result<()> {
+        Ok(())
+    }
+
     /// Called when speech is detected.
     async fn on_speech_started(&self, _audio_start_ms: u64) -> Result<()> {
         Ok(())
@@ -928,6 +937,9 @@ impl RealtimeRunner {
             ServerEvent::TranscriptDelta { delta, item_id, .. } => {
                 self.event_handler.on_transcript(&delta, &item_id).await?;
             }
+            ServerEvent::InputTranscriptCompleted { transcript, item_id, .. } => {
+                self.event_handler.on_input_transcript_completed(&transcript, &item_id).await?;
+            }
             ServerEvent::SpeechStarted { audio_start_ms, .. } => {
                 self.event_handler.on_speech_started(audio_start_ms).await?;
             }
@@ -1599,6 +1611,50 @@ mod runner_tests {
             self.audio_seen.notify_waiters();
             Ok(())
         }
+    }
+
+    struct InputTurnSignaller {
+        completed: Arc<AtomicUsize>,
+        item_id: Arc<parking_lot::Mutex<Option<String>>>,
+    }
+
+    #[async_trait]
+    impl EventHandler for InputTurnSignaller {
+        async fn on_input_transcript_completed(
+            &self,
+            _transcript: &str,
+            item_id: &str,
+        ) -> Result<()> {
+            self.completed.fetch_add(1, Ordering::SeqCst);
+            *self.item_id.lock() = Some(item_id.to_string());
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn completed_input_transcript_reaches_the_event_handler() {
+        let completed = Arc::new(AtomicUsize::new(0));
+        let item_id = Arc::new(parking_lot::Mutex::new(None));
+        let runner = RealtimeRunner::builder()
+            .model(Arc::new(MockModel) as BoxedModel)
+            .event_handler(InputTurnSignaller {
+                completed: completed.clone(),
+                item_id: item_id.clone(),
+            })
+            .build()
+            .unwrap();
+
+        runner
+            .handle_event(ServerEvent::InputTranscriptCompleted {
+                item_id: "caller-turn-7".to_string(),
+                content_index: 0,
+                transcript: "sensitive caller content".to_string(),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(completed.load(Ordering::SeqCst), 1);
+        assert_eq!(item_id.lock().as_deref(), Some("caller-turn-7"));
     }
 
     #[tokio::test]

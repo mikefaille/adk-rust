@@ -1235,6 +1235,7 @@ mod tool_safety_tests {
     use super::*;
     use adk_core::{RunConfig, SharedState, State};
     use std::collections::HashMap;
+    use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// Counts how many times it is executed.
