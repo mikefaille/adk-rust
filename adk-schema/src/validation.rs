@@ -106,4 +106,19 @@ mod tests {
         let cloned = validated.clone();
         assert!(Arc::ptr_eq(&validated.validator, &cloned.validator));
     }
+
+    #[test]
+    fn test_validate_object_properties() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "intent": { "type": "string" }
+            },
+            "required": ["intent"]
+        });
+        let policy = IngestionPolicy::default();
+        let doc = InputSchema::from_value(schema, &policy).unwrap();
+        let validated = doc.compile().unwrap();
+        assert!(validated.validate(&json!({"intent": "emergency"})).is_ok());
+    }
 }

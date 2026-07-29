@@ -52,7 +52,7 @@ pub async fn get_trace_by_event_id(
 
         // If not found, search through all spans for matching session event ID
         let trace_dict = exporter.get_trace_dict();
-        for (_, attributes) in trace_dict.iter() {
+        for attributes in trace_dict.values() {
             // Check if any span has this event_id in its attributes
             if attributes.values().any(|v| v == &event_id) {
                 return Ok(Json(attributes.clone()));
