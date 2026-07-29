@@ -1188,11 +1188,11 @@ impl ToolContext for RealtimeToolContext {
     }
 
     fn actions(&self) -> EventActions {
-        self.actions.read().unwrap().clone()
+        self.actions.read().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     fn set_actions(&self, actions: EventActions) {
-        *self.actions.write().unwrap() = actions;
+        *self.actions.write().unwrap_or_else(|e| e.into_inner()) = actions;
     }
 
     async fn search_memory(&self, query: &str) -> Result<Vec<MemoryEntry>> {
@@ -1311,10 +1311,10 @@ mod tool_safety_tests {
             "call-1"
         }
         fn actions(&self) -> EventActions {
-            self.actions.lock().unwrap().clone()
+            self.actions.lock().unwrap_or_else(|e| e.into_inner()).clone()
         }
         fn set_actions(&self, actions: EventActions) {
-            *self.actions.lock().unwrap() = actions;
+            *self.actions.lock().unwrap_or_else(|e| e.into_inner()) = actions;
         }
         async fn search_memory(&self, _query: &str) -> Result<Vec<MemoryEntry>> {
             Ok(vec![])
