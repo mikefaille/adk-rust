@@ -1166,10 +1166,37 @@ fn gemini_realtime_input_config(config: &RealtimeConfig) -> Option<Value> {
         // Automatic detection off means the caller drives turns explicitly.
         detection.insert("disabled".to_string(), json!(true));
     }
-    if let Some(ms) = vad.silence_duration_ms {
+
+    // Only forward timings the caller actually chose.
+    //
+    // `VadConfig` is OpenAI-shaped — it carries `threshold` and `eagerness`,
+    // which Gemini has no equivalent for — and `VadConfig::server_vad()` is
+    // literally `VadConfig::default()`. So "use server VAD" carries a
+    // `silence_duration_ms` of 500 that nobody selected, and forwarding it
+    // would install OpenAI-oriented tuning as Gemini turn-taking policy.
+    //
+    // That is not a neutral default here. Gemini's own server default is
+    // roughly 800 ms; 500 ms is the *minimum* Google recommends, and it warns
+    // that lower thresholds "often cause fragmented audio that degrades
+    // transcription and model response quality". On a phone line, where
+    // callers pause mid-sentence, adopting the floor by accident would end
+    // turns early and talk over people — and fragmenting input transcription
+    // is doubly costly for consumers that derive a caller-turn boundary from
+    // it.
+    //
+    // A value equal to the crate default is therefore treated as "not
+    // chosen". The real fix is to make "set" distinguishable from "defaulted"
+    // in the type; that is a breaking change to a shared config struct and is
+    // deliberately not done here.
+    let defaults = crate::config::VadConfig::default();
+    if let Some(ms) = vad.silence_duration_ms
+        && Some(ms) != defaults.silence_duration_ms
+    {
         detection.insert("silenceDurationMs".to_string(), json!(ms));
     }
-    if let Some(ms) = vad.prefix_padding_ms {
+    if let Some(ms) = vad.prefix_padding_ms
+        && Some(ms) != defaults.prefix_padding_ms
+    {
         detection.insert("prefixPaddingMs".to_string(), json!(ms));
     }
 
@@ -1187,7 +1214,12 @@ fn gemini_realtime_input_config(config: &RealtimeConfig) -> Option<Value> {
     if !detection.is_empty() {
         input_config.insert("automaticActivityDetection".to_string(), Value::Object(detection));
     }
-    if let Some(interrupt) = vad.interrupt_response {
+    // Same rule: the default `true` matches Gemini's documented behaviour
+    // (a caller may interrupt at any time), so sending it states a policy the
+    // caller never expressed and pins something Google may tune.
+    if let Some(interrupt) = vad.interrupt_response
+        && Some(interrupt) != defaults.interrupt_response
+    {
         input_config.insert(
             "activityHandling".to_string(),
             json!(if interrupt { "START_OF_ACTIVITY_INTERRUPTS" } else { "NO_INTERRUPTION" }),
@@ -1635,19 +1667,39 @@ mod tests {
     }
 
     #[test]
-    fn server_vad_reaches_the_wire_instead_of_being_discarded() {
-        // `.with_server_vad()` is set on every production session in the
-        // consuming data plane; before this projection existed the setup
-        // message carried no `realtimeInputConfig` at all and the whole
-        // configuration was silently dropped.
-        let config = RealtimeConfig::default().with_server_vad();
-        let projected =
-            gemini_realtime_input_config(&config).expect("a configured VAD must reach the wire");
+    fn server_vad_defaults_do_not_reach_the_wire() {
+        // `.with_server_vad()` is `VadConfig::default()`, so every field in it
+        // is a library default rather than a choice. The data plane sets this
+        // on every production session; forwarding it would install a 500 ms
+        // end-of-speech threshold — the *minimum* Google recommends, against
+        // its own ~800 ms server default — as live turn-taking policy on a
+        // phone line, purely because a struct had to initialise somehow.
+        assert!(
+            gemini_realtime_input_config(&RealtimeConfig::default().with_server_vad()).is_none(),
+            "asking for server VAD must not silently pin OpenAI-shaped timings"
+        );
+    }
 
-        assert_eq!(
-            projected.get("activityHandling").and_then(|v| v.as_str()),
-            Some("START_OF_ACTIVITY_INTERRUPTS"),
-            "server VAD interrupts the model by default, got {projected}"
+    #[test]
+    fn explicitly_chosen_timings_do_reach_the_wire() {
+        use crate::config::{VadConfig, VadMode};
+
+        let config = RealtimeConfig::default().with_vad(VadConfig {
+            mode: VadMode::ServerVad,
+            silence_duration_ms: Some(900),
+            prefix_padding_ms: Some(300),
+            threshold: None,
+            interrupt_response: None,
+            eagerness: None,
+        });
+        let projected = gemini_realtime_input_config(&config).expect("projection");
+        let detection = projected.get("automaticActivityDetection").expect("detection");
+
+        assert_eq!(detection.get("silenceDurationMs").and_then(|v| v.as_u64()), Some(900));
+        assert_eq!(detection.get("prefixPaddingMs").and_then(|v| v.as_u64()), Some(300));
+        assert!(
+            projected.get("activityHandling").is_none(),
+            "an unset interrupt policy must not be invented"
         );
     }
 
