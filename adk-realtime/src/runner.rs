@@ -974,6 +974,22 @@ impl RealtimeRunner {
                 self.event_handler.on_tool_calls_cancelled(&call_ids).await?;
             }
             ServerEvent::ResponseCancelled { .. } => {
+                // An abandoned generation must not leave the state machine
+                // mid-turn: `Generating` blocks queued resumptions and teardown,
+                // and only `ResponseDone` clears it — which a cancelled turn
+                // never reaches.
+                //
+                // Latent rather than live today: this event is produced only by
+                // the Gemini translator, and Gemini never emits
+                // `ResponseCreated`, so that path's state never leaves `Idle`.
+                // It becomes reachable the moment another provider emits a
+                // cancellation, or Gemini starts reporting response starts.
+                {
+                    let mut state = self.state.write().await;
+                    if let RunnerState::Generating = *state {
+                        *state = RunnerState::Idle;
+                    }
+                }
                 // Until now nothing constructed this event, so
                 // `on_response_cancelled` was an orphan: declared on the trait,
                 // implemented by consumers, never called. Barge-in therefore
