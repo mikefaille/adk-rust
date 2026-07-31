@@ -143,6 +143,30 @@ pub trait EventHandler: Send + Sync {
         Ok(())
     }
 
+    /// Called when the provider withdraws function calls it already issued,
+    /// normally because the caller interrupted the turn that produced them.
+    ///
+    /// The ids match `call_id` values from earlier tool calls. A handler that
+    /// has not yet performed the effect should drop it; one that already has
+    /// must decide whether to compensate, because the provider considers the
+    /// call to have never been authorized.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// async fn on_tool_calls_cancelled(&self, call_ids: &[String]) -> Result<()> {
+    ///     for id in call_ids {
+    ///         if !self.pending.lock().remove(id) {
+    ///             tracing::warn!(call_id = %id, "cancelled after the effect landed");
+    ///         }
+    ///     }
+    ///     Ok(())
+    /// }
+    /// ```
+    async fn on_tool_calls_cancelled(&self, _call_ids: &[String]) -> Result<()> {
+        Ok(())
+    }
+
     /// Called when a response is cancelled or interrupted before completion
     /// (e.g. caller barge-in). Distinct from [`EventHandler::on_error`]:
     /// cancellation is a normal lifecycle boundary, not a failure, but like
@@ -945,6 +969,9 @@ impl RealtimeRunner {
             }
             ServerEvent::SpeechStopped { audio_end_ms, .. } => {
                 self.event_handler.on_speech_stopped(audio_end_ms).await?;
+            }
+            ServerEvent::ToolCallCancelled { call_ids } => {
+                self.event_handler.on_tool_calls_cancelled(&call_ids).await?;
             }
             ServerEvent::ResponseCancelled { .. } => {
                 // Until now nothing constructed this event, so

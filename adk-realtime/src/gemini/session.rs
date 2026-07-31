@@ -674,6 +674,22 @@ impl GeminiRealtimeSession {
             }]);
         }
 
+        // Gemini withdraws function calls it already issued, normally because
+        // the caller interrupted the turn that produced them. Google's wording
+        // is that they "should not have been executed and should be cancelled",
+        // and that a client which already caused side effects may need to undo
+        // them — so dropping this frame means a request the caller withdrew can
+        // still take effect.
+        if let Some(cancellation) = value.get("toolCallCancellation")
+            && let Some(ids) = cancellation.get("ids").and_then(|i| i.as_array())
+        {
+            let call_ids: Vec<String> =
+                ids.iter().filter_map(|id| id.as_str().map(str::to_string)).collect();
+            if !call_ids.is_empty() {
+                return Ok(vec![ServerEvent::ToolCallCancelled { call_ids }]);
+            }
+        }
+
         // Check for tool calls
         if let Some(tool_call) = value.get("toolCall")
             && let Some(calls) = tool_call.get("functionCalls").and_then(|c| c.as_array())
@@ -1568,6 +1584,35 @@ mod tests {
             !events.iter().any(|e| matches!(e, ServerEvent::AudioDelta { .. })),
             "abandoned model audio must not survive, got {events:?}"
         );
+    }
+
+    #[test]
+    fn tool_call_cancellation_is_translated() {
+        let raw = json!({ "toolCallCancellation": { "ids": ["call_1", "call_2"] } }).to_string();
+        let events = GeminiRealtimeSession::translate_event_static(&raw).unwrap();
+
+        match events.as_slice() {
+            [ServerEvent::ToolCallCancelled { call_ids }] => {
+                assert_eq!(call_ids, &["call_1".to_string(), "call_2".to_string()]);
+            }
+            other => panic!("expected one ToolCallCancelled, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn empty_tool_call_cancellation_is_not_an_event() {
+        // An empty id list withdraws nothing. Emitting for it would make a
+        // consumer that logs or alarms on cancellation fire on a no-op.
+        for raw in [
+            json!({ "toolCallCancellation": { "ids": [] } }).to_string(),
+            json!({ "toolCallCancellation": {} }).to_string(),
+        ] {
+            let events = GeminiRealtimeSession::translate_event_static(&raw).unwrap();
+            assert!(
+                !events.iter().any(|e| matches!(e, ServerEvent::ToolCallCancelled { .. })),
+                "no ids means nothing was withdrawn, got {events:?}"
+            );
+        }
     }
 
     #[test]

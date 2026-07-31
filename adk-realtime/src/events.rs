@@ -300,6 +300,28 @@ pub enum ServerEvent {
         event_id: String,
     },
 
+    /// The provider withdrew function calls it had already issued, normally
+    /// because the caller interrupted the turn that produced them.
+    ///
+    /// The ids correspond to `call_id` values previously delivered by
+    /// [`ServerEvent::FunctionCallDone`]. Per Google's Live API, a cancelled
+    /// call "should not have been executed"; a client that already performed a
+    /// side effect may have to undo it. Ignoring this event means a request the
+    /// caller withdrew can still take effect.
+    ///
+    /// The runner surfaces this but does not itself abort work already
+    /// dispatched — whether an in-flight effect can be cancelled or must be
+    /// compensated is the application's decision, not the transport's.
+    ///
+    /// `call_ids` are plain `String` to match `call_id` on the rest of this
+    /// enum; a typed `ToolCallId` is worth having, but only when the whole set
+    /// moves together, since these values are compared against those.
+    #[serde(rename = "tool_call.cancelled")]
+    ToolCallCancelled {
+        /// Ids of the function calls being withdrawn.
+        call_ids: Vec<String>,
+    },
+
     /// Response output item added.
     #[serde(rename = "response.output_item.added")]
     OutputItemAdded {
