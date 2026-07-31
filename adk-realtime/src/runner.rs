@@ -143,6 +143,30 @@ pub trait EventHandler: Send + Sync {
         Ok(())
     }
 
+    /// Called when the provider withdraws function calls it already issued,
+    /// normally because the caller interrupted the turn that produced them.
+    ///
+    /// The ids match `call_id` values from earlier tool calls. A handler that
+    /// has not yet performed the effect should drop it; one that already has
+    /// must decide whether to compensate, because the provider considers the
+    /// call to have never been authorized.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// async fn on_tool_calls_cancelled(&self, call_ids: &[ToolCallId]) -> Result<()> {
+    ///     for id in call_ids {
+    ///         if !self.pending.lock().remove(id.as_str()) {
+    ///             tracing::warn!(call_id = %id, "cancelled after the effect landed");
+    ///         }
+    ///     }
+    ///     Ok(())
+    /// }
+    /// ```
+    async fn on_tool_calls_cancelled(&self, _call_ids: &[crate::events::ToolCallId]) -> Result<()> {
+        Ok(())
+    }
+
     /// Called when a response is cancelled or interrupted before completion
     /// (e.g. caller barge-in). Distinct from [`EventHandler::on_error`]:
     /// cancellation is a normal lifecycle boundary, not a failure, but like
@@ -945,6 +969,32 @@ impl RealtimeRunner {
             }
             ServerEvent::SpeechStopped { audio_end_ms, .. } => {
                 self.event_handler.on_speech_stopped(audio_end_ms).await?;
+            }
+            ServerEvent::ToolCallCancelled { call_ids } => {
+                self.event_handler.on_tool_calls_cancelled(&call_ids).await?;
+            }
+            ServerEvent::ResponseCancelled { .. } => {
+                // An abandoned generation must not leave the state machine
+                // mid-turn: `Generating` blocks queued resumptions and teardown,
+                // and only `ResponseDone` clears it — which a cancelled turn
+                // never reaches.
+                //
+                // Latent rather than live today: this event is produced only by
+                // the Gemini translator, and Gemini never emits
+                // `ResponseCreated`, so that path's state never leaves `Idle`.
+                // It becomes reachable the moment another provider emits a
+                // cancellation, or Gemini starts reporting response starts.
+                {
+                    let mut state = self.state.write().await;
+                    if let RunnerState::Generating = *state {
+                        *state = RunnerState::Idle;
+                    }
+                }
+                // Until now nothing constructed this event, so
+                // `on_response_cancelled` was an orphan: declared on the trait,
+                // implemented by consumers, never called. Barge-in therefore
+                // never reached an audio sink on the Gemini backend.
+                self.event_handler.on_response_cancelled().await?;
             }
             ServerEvent::ResponseDone { .. } => {
                 self.event_handler.on_response_done().await?;

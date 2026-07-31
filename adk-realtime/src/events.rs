@@ -186,6 +186,85 @@ impl ConversationItem {
 
 // ── Server Events ───────────────────────────────────────────────────────
 
+/// Identifier of a provider-issued function call.
+///
+/// A newtype rather than a bare `String` because these are matched against
+/// each other to decide whether a side effect may proceed, and a
+/// provider-supplied identity that is empty is not an identity. An adapter
+/// that filled such a field with `String::new()` once let an empty value
+/// compare equal to another empty value across three layers before anything
+/// failed; [`ToolCallId::parse`] makes that unrepresentable at the boundary
+/// instead of surprising at the comparison.
+///
+/// Deserialization goes through the same check, which is safe here because
+/// only providers that emit a cancellation frame construct one — the OpenAI
+/// wire format, which is deserialized directly into [`ServerEvent`], has no
+/// `tool_call.cancelled` message.
+///
+/// # Example
+///
+/// ```
+/// use adk_realtime::events::ToolCallId;
+///
+/// let id = ToolCallId::parse("call_1").expect("non-empty");
+/// assert_eq!(id.as_str(), "call_1");
+/// assert!(ToolCallId::parse("   ").is_err());
+/// // Padding is stripped, so a padded id still matches a clean one.
+/// assert_eq!(ToolCallId::parse("  call_1  ").unwrap().as_str(), "call_1");
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+#[serde(transparent)]
+pub struct ToolCallId(String);
+
+impl ToolCallId {
+    /// Accept a provider-supplied call id, rejecting one that carries no
+    /// identity.
+    pub fn parse(value: impl Into<String>) -> std::result::Result<Self, EmptyToolCallId> {
+        let value = value.into();
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            return Err(EmptyToolCallId);
+        }
+        // Store the trimmed form. Validating on `trim()` while keeping the
+        // original let `"  call_1  "` through, and these ids are compared
+        // against the raw `call_id` of an earlier `FunctionCallDone` to decide
+        // whether a side effect may proceed — so a padded id would compare
+        // unequal to the same id delivered clean, and the withdrawal would
+        // silently match nothing. Avoids reallocating in the common case.
+        if trimmed.len() == value.len() {
+            return Ok(Self(value));
+        }
+        Ok(Self(trimmed.to_string()))
+    }
+
+    /// Borrow the underlying identifier, for comparison against a `call_id`
+    /// carried by the not-yet-typed variants of this enum.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for ToolCallId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// A tool call id was empty or whitespace-only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("tool call id is empty")]
+pub struct EmptyToolCallId;
+
+impl<'de> Deserialize<'de> for ToolCallId {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::parse(value).map_err(serde::de::Error::custom)
+    }
+}
+
 /// Events received from the realtime server.
 ///
 /// This is a unified event type that abstracts over provider-specific formats.
@@ -281,6 +360,42 @@ pub enum ServerEvent {
         event_id: String,
         /// Final response details.
         response: Value,
+    },
+
+    /// The in-flight response was cancelled before completion, normally
+    /// because the caller began speaking over it (barge-in).
+    ///
+    /// This is a normal lifecycle boundary, not an error. Consumers owning an
+    /// audio sink must discard anything already queued for playback: the
+    /// provider has abandoned that turn, and continuing to play it means
+    /// talking over the caller.
+    ///
+    /// Gemini signals this as `serverContent.interrupted`; the field was
+    /// previously parsed and dropped, so `EventHandler::on_response_cancelled`
+    /// could never fire on that backend.
+    #[serde(rename = "response.cancelled")]
+    ResponseCancelled {
+        /// Unique event ID.
+        event_id: String,
+    },
+
+    /// The provider withdrew function calls it had already issued, normally
+    /// because the caller interrupted the turn that produced them.
+    ///
+    /// The ids correspond to `call_id` values previously delivered by
+    /// [`ServerEvent::FunctionCallDone`]. Per Google's Live API, a cancelled
+    /// call "should not have been executed"; a client that already performed a
+    /// side effect may have to undo it. Ignoring this event means a request the
+    /// caller withdrew can still take effect.
+    ///
+    /// The runner surfaces this but does not itself abort work already
+    /// dispatched — whether an in-flight effect can be cancelled or must be
+    /// compensated is the application's decision, not the transport's.
+    ///
+    #[serde(rename = "tool_call.cancelled")]
+    ToolCallCancelled {
+        /// Ids of the function calls being withdrawn.
+        call_ids: Vec<ToolCallId>,
     },
 
     /// Response output item added.
@@ -552,5 +667,38 @@ impl ToolResponse {
     /// Create a tool response from a string output.
     pub fn from_string(call_id: impl Into<String>, output: impl Into<String>) -> Self {
         Self { call_id: call_id.into(), output: Value::String(output.into()) }
+    }
+}
+
+#[cfg(test)]
+mod tool_call_id_tests {
+    use super::*;
+
+    #[test]
+    fn empty_and_whitespace_are_not_identities() {
+        assert!(ToolCallId::parse("").is_err());
+        assert!(ToolCallId::parse("   ").is_err());
+        assert!(ToolCallId::parse("\t\n").is_err());
+    }
+
+    #[test]
+    fn padding_is_stripped_so_a_padded_id_still_matches_a_clean_one() {
+        // These are compared against the raw `call_id` of an earlier
+        // `FunctionCallDone` to decide whether a side effect may proceed.
+        // Validating on `trim()` while storing the original would let a padded
+        // id compare unequal to the same id delivered clean, and the
+        // withdrawal would silently match nothing.
+        let padded = ToolCallId::parse("  call_1  ").expect("non-empty");
+        let clean = ToolCallId::parse("call_1").expect("non-empty");
+
+        assert_eq!(padded.as_str(), "call_1");
+        assert_eq!(padded, clean);
+    }
+
+    #[test]
+    fn deserialization_rejects_an_empty_id() {
+        // Strict at the boundary rather than surprising at the comparison.
+        assert!(serde_json::from_str::<ToolCallId>("\"\"").is_err());
+        assert!(serde_json::from_str::<ToolCallId>("\"call_1\"").is_ok());
     }
 }
