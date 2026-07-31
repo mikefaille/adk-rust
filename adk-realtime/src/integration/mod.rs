@@ -611,7 +611,12 @@ impl IntegratedRealtimeRunner {
     ///
     /// A name that is not a registered ADK tool is a native handler, and falls through to the
     /// runner's own dispatch. That bypass is now explicit rather than the default.
-    async fn dispatch_with_policy(&self, call_id: &str, name: &str, arguments: &str) -> Result<()> {
+    async fn dispatch_with_policy(
+        &self,
+        call_id: &str,
+        name: &str,
+        arguments: &serde_json::Value,
+    ) -> Result<()> {
         let Some(tool) = self.adk_tools.get(name).cloned() else {
             tracing::debug!(
                 tool = %name,
@@ -623,8 +628,7 @@ impl IntegratedRealtimeRunner {
         let call = crate::events::ToolCall {
             call_id: call_id.to_string(),
             name: name.to_string(),
-            arguments: serde_json::from_str(arguments)
-                .unwrap_or(serde_json::Value::Object(Default::default())),
+            arguments: arguments.clone(),
         };
 
         let result = self.execute_tool_with_plugins(&tool, &call).await?;
