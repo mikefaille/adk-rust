@@ -127,6 +127,10 @@ struct GeminiSetup {
     /// Enable transcription of the model's spoken output (empty object = on).
     #[serde(skip_serializing_if = "Option::is_none")]
     output_audio_transcription: Option<Value>,
+    /// Voice-activity detection and interruption policy. Absent until now, so
+    /// every `VadConfig` the caller set was accepted and discarded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    realtime_input_config: Option<Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -450,6 +454,8 @@ impl GeminiRealtimeSession {
             obj.insert("thinkingConfig".to_string(), json!({ "thinkingLevel": thinking_level }));
         }
 
+        // Computed before anything moves out of `config`.
+        let realtime_input_config = gemini_realtime_input_config(&config);
         let system_instruction = config.instruction.map(|text| GeminiContent {
             parts: vec![GeminiPart { text: Some(text), inline_data: None }],
         });
@@ -478,6 +484,7 @@ impl GeminiRealtimeSession {
                 cached_content: config.cached_content,
                 session_resumption,
                 input_audio_transcription: transcription.clone(),
+                realtime_input_config,
                 output_audio_transcription: transcription,
             }),
             realtime_input: None,
@@ -1009,6 +1016,11 @@ impl RealtimeSession for GeminiRealtimeSession {
                     generation_config["temperature"] = json!(temp);
                 }
 
+                // Computed before anything moves out of `config`. Session
+                // updates rebuild setup from the live config, so the VAD
+                // projection has to come along or a mid-call update would
+                // silently reset it to Google's defaults.
+                let realtime_input_config = gemini_realtime_input_config(&config);
                 let system_instruction = config.instruction.map(|text| GeminiContent {
                     parts: vec![GeminiPart { text: Some(text), inline_data: None }],
                 });
@@ -1040,6 +1052,7 @@ impl RealtimeSession for GeminiRealtimeSession {
                         session_resumption,
                         input_audio_transcription: None,
                         output_audio_transcription: None,
+                        realtime_input_config,
                     }),
                     realtime_input: None,
                     tool_response: None,
@@ -1125,6 +1138,63 @@ fn gemini_response_modalities(modalities: Option<&[String]>) -> Vec<String> {
         // Audio-only is the live-call default for this crate.
         _ => vec!["AUDIO".to_string()],
     }
+}
+
+/// Project the crate's `VadConfig` onto Gemini's `realtimeInputConfig`.
+///
+/// Until this existed the setup message carried no `realtimeInputConfig` at
+/// all, so every VAD setting a caller configured — including the
+/// `.with_server_vad()` the data plane sets on every production session — was
+/// accepted and silently discarded. A configuration API that implies control
+/// it does not exert is worse than one that refuses: the caller believes the
+/// line is tuned.
+///
+/// Returns `None` when there is nothing to say, so a default session keeps
+/// sending no `realtimeInputConfig` and inherits Google's defaults.
+///
+/// Two fields deliberately do not map, and are warned about rather than
+/// dropped in silence:
+/// - `threshold` is a 0.0-1.0 probability; Gemini exposes only coarse
+///   `START_SENSITIVITY_*` / `END_SENSITIVITY_*` enums, and inventing a
+///   cutoff would be this adapter making up policy.
+/// - `eagerness` is documented OpenAI-specific.
+fn gemini_realtime_input_config(config: &RealtimeConfig) -> Option<Value> {
+    let vad = config.turn_detection.as_ref()?;
+    let mut detection = serde_json::Map::new();
+
+    if vad.mode == crate::config::VadMode::None {
+        // Automatic detection off means the caller drives turns explicitly.
+        detection.insert("disabled".to_string(), json!(true));
+    }
+    if let Some(ms) = vad.silence_duration_ms {
+        detection.insert("silenceDurationMs".to_string(), json!(ms));
+    }
+    if let Some(ms) = vad.prefix_padding_ms {
+        detection.insert("prefixPaddingMs".to_string(), json!(ms));
+    }
+
+    if vad.threshold.is_some() {
+        tracing::warn!(
+            "VadConfig.threshold is not representable on Gemini Live, which exposes only \
+             coarse sensitivity levels; the configured value is not applied"
+        );
+    }
+    if vad.eagerness.is_some() {
+        tracing::debug!("VadConfig.eagerness is OpenAI-specific and does not apply to Gemini");
+    }
+
+    let mut input_config = serde_json::Map::new();
+    if !detection.is_empty() {
+        input_config.insert("automaticActivityDetection".to_string(), Value::Object(detection));
+    }
+    if let Some(interrupt) = vad.interrupt_response {
+        input_config.insert(
+            "activityHandling".to_string(),
+            json!(if interrupt { "START_OF_ACTIVITY_INTERRUPTS" } else { "NO_INTERRUPTION" }),
+        );
+    }
+
+    (!input_config.is_empty()).then_some(Value::Object(input_config))
 }
 
 /// Construct the Vertex AI Live WebSocket URL from region and project ID.
@@ -1491,6 +1561,7 @@ mod tests {
             cached_content: None,
             session_resumption: None,
             input_audio_transcription: None,
+            realtime_input_config: None,
             output_audio_transcription: None,
         };
         let wrapper = GeminiClientMessage {
@@ -1561,6 +1632,54 @@ mod tests {
                 other
             ),
         }
+    }
+
+    #[test]
+    fn server_vad_reaches_the_wire_instead_of_being_discarded() {
+        // `.with_server_vad()` is set on every production session in the
+        // consuming data plane; before this projection existed the setup
+        // message carried no `realtimeInputConfig` at all and the whole
+        // configuration was silently dropped.
+        let config = RealtimeConfig::default().with_server_vad();
+        let projected =
+            gemini_realtime_input_config(&config).expect("a configured VAD must reach the wire");
+
+        assert_eq!(
+            projected.get("activityHandling").and_then(|v| v.as_str()),
+            Some("START_OF_ACTIVITY_INTERRUPTS"),
+            "server VAD interrupts the model by default, got {projected}"
+        );
+    }
+
+    #[test]
+    fn vad_timings_and_disable_map_to_googles_names() {
+        use crate::config::{VadConfig, VadMode};
+
+        let config = RealtimeConfig::default().with_vad(VadConfig {
+            mode: VadMode::None,
+            silence_duration_ms: Some(700),
+            prefix_padding_ms: Some(300),
+            threshold: None,
+            interrupt_response: Some(false),
+            eagerness: None,
+        });
+        let projected = gemini_realtime_input_config(&config).expect("projection");
+        let detection = projected.get("automaticActivityDetection").expect("detection block");
+
+        assert_eq!(detection.get("disabled").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(detection.get("silenceDurationMs").and_then(|v| v.as_u64()), Some(700));
+        assert_eq!(detection.get("prefixPaddingMs").and_then(|v| v.as_u64()), Some(300));
+        assert_eq!(
+            projected.get("activityHandling").and_then(|v| v.as_str()),
+            Some("NO_INTERRUPTION")
+        );
+    }
+
+    #[test]
+    fn no_vad_configured_sends_no_input_config() {
+        // A default session must keep inheriting Google's defaults rather than
+        // being pinned by an empty object this adapter invented.
+        assert!(gemini_realtime_input_config(&RealtimeConfig::default()).is_none());
     }
 
     #[test]
