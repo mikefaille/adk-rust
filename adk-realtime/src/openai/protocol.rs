@@ -119,10 +119,13 @@ pub(crate) fn convert_config_to_openai(config: &crate::config::RealtimeConfig) -
     if let Some(vad) = &config.turn_detection {
         let turn_detection = match vad.mode {
             VadMode::ServerVad => {
-                let mut cfg = json!({
-                    "type": "server_vad",
-                    "interrupt_response": true
-                });
+                // `interrupt_response` was hardcoded `true` here, so a caller
+                // who set `Some(false)` was silently overruled. Forwarded only
+                // when chosen; omitted otherwise, leaving OpenAI's own default.
+                let mut cfg = json!({ "type": "server_vad" });
+                if let Some(interrupt) = vad.interrupt_response {
+                    cfg["interrupt_response"] = json!(interrupt);
+                }
                 if let Some(ms) = vad.silence_duration_ms {
                     cfg["silence_duration_ms"] = json!(ms);
                 }
@@ -135,10 +138,10 @@ pub(crate) fn convert_config_to_openai(config: &crate::config::RealtimeConfig) -
                 Some(cfg)
             }
             VadMode::SemanticVad => {
-                let mut cfg = json!({
-                    "type": "semantic_vad",
-                    "interrupt_response": true
-                });
+                let mut cfg = json!({ "type": "semantic_vad" });
+                if let Some(interrupt) = vad.interrupt_response {
+                    cfg["interrupt_response"] = json!(interrupt);
+                }
                 if let Some(eagerness) = &vad.eagerness {
                     cfg["eagerness"] = json!(eagerness);
                 }
