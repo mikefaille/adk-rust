@@ -560,17 +560,26 @@ impl GeminiRealtimeSession {
         if let Some(content) = value.get("serverContent") {
             let mut events = Vec::new();
 
-            // Barge-in. Emitted before anything else in this frame: the
-            // contract is "discard what is queued", so a consumer must see the
-            // purge before any audio that arrives alongside it, or it would
-            // drop the new turn and keep the stale one.
-            if content.get("interrupted").and_then(|i| i.as_bool()).unwrap_or(false) {
+            // Barge-in: the caller spoke over the model, so this generation is
+            // abandoned and the client must empty its playback queue.
+            let interrupted = content.get("interrupted").and_then(|i| i.as_bool()).unwrap_or(false);
+            if interrupted {
                 events.push(ServerEvent::ResponseCancelled {
                     event_id: uuid::Uuid::new_v4().to_string(),
                 });
             }
 
-            if let Some(parts) = content.get("modelTurn").and_then(|t| t.get("parts"))
+            // `modelTurn` content in an interrupted frame belongs to the
+            // generation that was just abandoned — a new generation only starts
+            // in response to later client input. Translating it would hand the
+            // consumer a purge immediately followed by one last stale chunk to
+            // enqueue, which is the very audio the purge exists to remove.
+            //
+            // Only playback-bearing content is suppressed. `inputTranscription`
+            // below is the *caller's* speech and is ordered independently of
+            // model-turn messages, so it must survive.
+            if !interrupted
+                && let Some(parts) = content.get("modelTurn").and_then(|t| t.get("parts"))
                 && let Some(parts_arr) = parts.as_array()
             {
                 for part in parts_arr {
@@ -1508,24 +1517,56 @@ mod tests {
     }
 
     #[test]
-    fn interrupted_is_ordered_before_audio_in_the_same_frame() {
-        // The contract is "discard what is queued". A consumer that saw the
-        // audio first would purge the new turn and keep the stale one.
+    fn interrupted_frame_yields_no_playback_audio() {
+        // A new generation only begins in response to later client input, so
+        // `modelTurn` content arriving with `interrupted` belongs to the
+        // abandoned generation. Emitting it would hand the consumer a purge
+        // followed by one last stale chunk to enqueue — the exact audio the
+        // purge exists to remove.
         let raw = json!({
             "serverContent": {
                 "interrupted": true,
-                "modelTurn": { "parts": [{ "inlineData": { "data": "AAAA" } }] }
+                "modelTurn": { "parts": [
+                    { "inlineData": { "data": "AAAA" } },
+                    { "text": "…as I was saying" }
+                ] }
             }
         })
         .to_string();
         let events = GeminiRealtimeSession::translate_event_static(&raw).unwrap();
 
         assert!(
-            matches!(
-                events.as_slice(),
-                [ServerEvent::ResponseCancelled { .. }, ServerEvent::AudioDelta { .. }]
-            ),
-            "cancellation must precede audio in the frame, got {events:?}"
+            matches!(events.as_slice(), [ServerEvent::ResponseCancelled { .. }]),
+            "an interrupted frame must leave playback empty, got {events:?}"
+        );
+    }
+
+    #[test]
+    fn interrupted_frame_still_surfaces_caller_speech() {
+        // Input transcription is ordered independently of model-turn messages,
+        // so suppressing the abandoned generation must not also drop what the
+        // caller said to cause the interruption.
+        let raw = json!({
+            "serverContent": {
+                "interrupted": true,
+                "modelTurn": { "parts": [{ "inlineData": { "data": "AAAA" } }] },
+                "inputTranscription": { "text": "actually, make it ravioli" }
+            }
+        })
+        .to_string();
+        let events = GeminiRealtimeSession::translate_event_static(&raw).unwrap();
+
+        assert!(
+            events.iter().any(|e| matches!(e, ServerEvent::ResponseCancelled { .. })),
+            "expected a cancellation, got {events:?}"
+        );
+        assert!(
+            events.iter().any(|e| matches!(e, ServerEvent::InputTranscriptDelta { .. })),
+            "caller speech must survive the suppression, got {events:?}"
+        );
+        assert!(
+            !events.iter().any(|e| matches!(e, ServerEvent::AudioDelta { .. })),
+            "abandoned model audio must not survive, got {events:?}"
         );
     }
 
