@@ -196,6 +196,33 @@ struct GeminiClientContent {
     turn_complete: bool,
 }
 
+// ── Server wire types ───────────────────────────────────────────────────
+//
+// The rest of this translator reads server frames by poking at a
+// `serde_json::Value` with `.get("someField")`, which puts the wire contract
+// in string literals scattered through one long function. These are the
+// beginning of a typed inbound layer; new server messages should land here
+// rather than adding another `.get`.
+//
+// Deliberately permissive — no `deny_unknown_fields`. Gemini Live is a
+// Preview surface and adds fields; an adapter that refuses to parse a frame
+// carrying something new would take a live call down over a field it did not
+// need. Strictness belongs in the normalization step, not here.
+
+/// `BidiGenerateContentToolCallCancellation`: function calls the model had
+/// already issued and has now withdrawn, normally because the caller
+/// interrupted the turn that produced them.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GeminiToolCallCancellation {
+    /// Ids matching `id`s previously delivered in a `toolCall` frame.
+    ///
+    /// Defaulted rather than required: a frame with the key present but no
+    /// ids withdraws nothing, which is a no-op rather than a protocol error.
+    #[serde(default)]
+    ids: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct GeminiTurn {
@@ -680,12 +707,15 @@ impl GeminiRealtimeSession {
         // and that a client which already caused side effects may need to undo
         // them — so dropping this frame means a request the caller withdrew can
         // still take effect.
-        if let Some(cancellation) = value.get("toolCallCancellation")
-            && let Some(ids) = cancellation.get("ids").and_then(|i| i.as_array())
-        {
-            let call_ids: Vec<crate::events::ToolCallId> = ids
-                .iter()
-                .filter_map(|id| id.as_str())
+        if let Some(raw) = value.get("toolCallCancellation") {
+            let cancellation: GeminiToolCallCancellation = serde_json::from_value(raw.clone())
+                .map_err(|e| {
+                    RealtimeError::protocol(format!("Malformed toolCallCancellation: {e}"))
+                })?;
+
+            let call_ids: Vec<crate::events::ToolCallId> = cancellation
+                .ids
+                .into_iter()
                 .filter_map(|id| match crate::events::ToolCallId::parse(id) {
                     Ok(id) => Some(id),
                     Err(_) => {
@@ -1610,6 +1640,41 @@ mod tests {
             }
             other => panic!("expected one ToolCallCancelled, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn cancellation_dto_tolerates_fields_google_adds_later() {
+        // Gemini Live is a Preview surface. A strict DTO would refuse the whole
+        // frame over a field this adapter does not need, taking a live call
+        // down for an additive provider change.
+        let raw = json!({
+            "toolCallCancellation": {
+                "ids": ["call_1"],
+                "someFutureField": { "nested": true }
+            }
+        })
+        .to_string();
+        let events = GeminiRealtimeSession::translate_event_static(&raw).unwrap();
+
+        match events.as_slice() {
+            [ServerEvent::ToolCallCancelled { call_ids }] => {
+                assert_eq!(call_ids[0].as_str(), "call_1");
+            }
+            other => panic!("expected one ToolCallCancelled, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn malformed_cancellation_is_a_protocol_error_not_a_silent_drop() {
+        // `ids` present but the wrong shape means the adapter misunderstands
+        // the frame. Failing loudly beats treating a real withdrawal as absent.
+        let raw = json!({ "toolCallCancellation": { "ids": "call_1" } }).to_string();
+        let err = GeminiRealtimeSession::translate_event_static(&raw)
+            .expect_err("a non-array ids field must not parse");
+        assert!(
+            err.to_string().contains("toolCallCancellation"),
+            "the error should name the frame, got {err}"
+        );
     }
 
     #[test]
