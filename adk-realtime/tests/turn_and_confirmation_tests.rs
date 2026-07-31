@@ -1,12 +1,12 @@
-use adk_realtime::{
-    ClientEvent, ConfirmationId, FrozenToolCall, InputTurnCompleted,
-    InputTurnCompletionSource, RealtimeConfig, RealtimeModel,
-    RealtimeRunner, RealtimeSession, Result, ServerEvent, ToolConfirmationDecision,
-    ToolConfirmationPolicyHook, ToolConfirmationRequest, ToolHandler, ToolResponse,
-};
 use adk_realtime::audio::AudioChunk;
 use adk_realtime::config::ToolDefinition;
 use adk_realtime::runner::EventHandler;
+use adk_realtime::{
+    ClientEvent, ConfirmationId, FrozenToolCall, InputTurnCompleted, InputTurnCompletionSource,
+    RealtimeConfig, RealtimeModel, RealtimeRunner, RealtimeSession, Result, ServerEvent,
+    ToolConfirmationDecision, ToolConfirmationPolicyHook, ToolConfirmationRequest, ToolHandler,
+    ToolResponse,
+};
 
 use async_trait::async_trait;
 use serde_json::json;
@@ -399,8 +399,10 @@ async fn test_confirmation_request_preserves_the_exact_original_call() {
     let (tx, rx) = tokio::sync::mpsc::channel(10);
     let model = MockModel { session_rx: Mutex::new(Some(rx)) };
     let handler = Arc::new(RecordingEventHandler::default());
-    let policy =
-        StaticToolConfirmationPolicy { require_confirm: true, hint: Some("Really perform transaction?".to_string()) };
+    let policy = StaticToolConfirmationPolicy {
+        require_confirm: true,
+        hint: Some("Really perform transaction?".to_string()),
+    };
     let tool_calls = Arc::new(AtomicUsize::new(0));
 
     let runner = RealtimeRunner::builder()
@@ -454,8 +456,10 @@ async fn test_confirmed_call_executes_once() {
     let (tx, rx) = tokio::sync::mpsc::channel(10);
     let model = MockModel { session_rx: Mutex::new(Some(rx)) };
     let handler = Arc::new(RecordingEventHandler::default());
-    let policy =
-        StaticToolConfirmationPolicy { require_confirm: true, hint: Some("Please confirm".to_string()) };
+    let policy = StaticToolConfirmationPolicy {
+        require_confirm: true,
+        hint: Some("Please confirm".to_string()),
+    };
     let tool_calls = Arc::new(AtomicUsize::new(0));
 
     let runner = RealtimeRunner::builder()
@@ -513,8 +517,10 @@ async fn test_rejected_call_executes_zero_times() {
     let (tx, rx) = tokio::sync::mpsc::channel(10);
     let model = MockModel { session_rx: Mutex::new(Some(rx)) };
     let handler = Arc::new(RecordingEventHandler::default());
-    let policy =
-        StaticToolConfirmationPolicy { require_confirm: true, hint: Some("Please confirm".to_string()) };
+    let policy = StaticToolConfirmationPolicy {
+        require_confirm: true,
+        hint: Some("Please confirm".to_string()),
+    };
     let tool_calls = Arc::new(AtomicUsize::new(0));
 
     let runner = RealtimeRunner::builder()
