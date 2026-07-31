@@ -154,16 +154,16 @@ pub trait EventHandler: Send + Sync {
     /// # Example
     ///
     /// ```rust,ignore
-    /// async fn on_tool_calls_cancelled(&self, call_ids: &[String]) -> Result<()> {
+    /// async fn on_tool_calls_cancelled(&self, call_ids: &[ToolCallId]) -> Result<()> {
     ///     for id in call_ids {
-    ///         if !self.pending.lock().remove(id) {
+    ///         if !self.pending.lock().remove(id.as_str()) {
     ///             tracing::warn!(call_id = %id, "cancelled after the effect landed");
     ///         }
     ///     }
     ///     Ok(())
     /// }
     /// ```
-    async fn on_tool_calls_cancelled(&self, _call_ids: &[String]) -> Result<()> {
+    async fn on_tool_calls_cancelled(&self, _call_ids: &[crate::events::ToolCallId]) -> Result<()> {
         Ok(())
     }
 

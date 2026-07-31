@@ -186,6 +186,73 @@ impl ConversationItem {
 
 // ── Server Events ───────────────────────────────────────────────────────
 
+/// Identifier of a provider-issued function call.
+///
+/// A newtype rather than a bare `String` because these are matched against
+/// each other to decide whether a side effect may proceed, and a
+/// provider-supplied identity that is empty is not an identity. An adapter
+/// that filled such a field with `String::new()` once let an empty value
+/// compare equal to another empty value across three layers before anything
+/// failed; [`ToolCallId::parse`] makes that unrepresentable at the boundary
+/// instead of surprising at the comparison.
+///
+/// Deserialization goes through the same check, which is safe here because
+/// only providers that emit a cancellation frame construct one — the OpenAI
+/// wire format, which is deserialized directly into [`ServerEvent`], has no
+/// `tool_call.cancelled` message.
+///
+/// # Example
+///
+/// ```
+/// use adk_realtime::events::ToolCallId;
+///
+/// let id = ToolCallId::parse("call_1").expect("non-empty");
+/// assert_eq!(id.as_str(), "call_1");
+/// assert!(ToolCallId::parse("   ").is_err());
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+#[serde(transparent)]
+pub struct ToolCallId(String);
+
+impl ToolCallId {
+    /// Accept a provider-supplied call id, rejecting one that carries no
+    /// identity.
+    pub fn parse(value: impl Into<String>) -> std::result::Result<Self, EmptyToolCallId> {
+        let value = value.into();
+        if value.trim().is_empty() {
+            return Err(EmptyToolCallId);
+        }
+        Ok(Self(value))
+    }
+
+    /// Borrow the underlying identifier, for comparison against a `call_id`
+    /// carried by the not-yet-typed variants of this enum.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for ToolCallId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// A tool call id was empty or whitespace-only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("tool call id is empty")]
+pub struct EmptyToolCallId;
+
+impl<'de> Deserialize<'de> for ToolCallId {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::parse(value).map_err(serde::de::Error::custom)
+    }
+}
+
 /// Events received from the realtime server.
 ///
 /// This is a unified event type that abstracts over provider-specific formats.
@@ -313,13 +380,10 @@ pub enum ServerEvent {
     /// dispatched — whether an in-flight effect can be cancelled or must be
     /// compensated is the application's decision, not the transport's.
     ///
-    /// `call_ids` are plain `String` to match `call_id` on the rest of this
-    /// enum; a typed `ToolCallId` is worth having, but only when the whole set
-    /// moves together, since these values are compared against those.
     #[serde(rename = "tool_call.cancelled")]
     ToolCallCancelled {
         /// Ids of the function calls being withdrawn.
-        call_ids: Vec<String>,
+        call_ids: Vec<ToolCallId>,
     },
 
     /// Response output item added.

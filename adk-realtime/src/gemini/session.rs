@@ -683,8 +683,20 @@ impl GeminiRealtimeSession {
         if let Some(cancellation) = value.get("toolCallCancellation")
             && let Some(ids) = cancellation.get("ids").and_then(|i| i.as_array())
         {
-            let call_ids: Vec<String> =
-                ids.iter().filter_map(|id| id.as_str().map(str::to_string)).collect();
+            let call_ids: Vec<crate::events::ToolCallId> = ids
+                .iter()
+                .filter_map(|id| id.as_str())
+                .filter_map(|id| match crate::events::ToolCallId::parse(id) {
+                    Ok(id) => Some(id),
+                    Err(_) => {
+                        // An id that identifies nothing is worse than useless:
+                        // it would let a consumer report a cancellation as
+                        // handled when it matched no outstanding call.
+                        tracing::warn!("Gemini sent an empty toolCallCancellation id; ignoring it");
+                        None
+                    }
+                })
+                .collect();
             if !call_ids.is_empty() {
                 return Ok(vec![ServerEvent::ToolCallCancelled { call_ids }]);
             }
@@ -1593,7 +1605,25 @@ mod tests {
 
         match events.as_slice() {
             [ServerEvent::ToolCallCancelled { call_ids }] => {
-                assert_eq!(call_ids, &["call_1".to_string(), "call_2".to_string()]);
+                let ids: Vec<&str> = call_ids.iter().map(|id| id.as_str()).collect();
+                assert_eq!(ids, ["call_1", "call_2"]);
+            }
+            other => panic!("expected one ToolCallCancelled, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn empty_ids_are_dropped_rather_than_carried() {
+        // The typed id makes an empty value unrepresentable, so a provider that
+        // sends one loses that entry instead of handing a consumer an id that
+        // can never match an outstanding call.
+        let raw = json!({ "toolCallCancellation": { "ids": ["", "  ", "call_1"] } }).to_string();
+        let events = GeminiRealtimeSession::translate_event_static(&raw).unwrap();
+
+        match events.as_slice() {
+            [ServerEvent::ToolCallCancelled { call_ids }] => {
+                assert_eq!(call_ids.len(), 1, "only the real id survives");
+                assert_eq!(call_ids[0].as_str(), "call_1");
             }
             other => panic!("expected one ToolCallCancelled, got {other:?}"),
         }
