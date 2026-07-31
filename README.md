@@ -5,10 +5,12 @@
 [![docs.rs](https://docs.rs/adk-rust/badge.svg)](https://docs.rs/adk-rust)
 [![Wiki](https://img.shields.io/badge/docs-Wiki-blue)](https://github.com/zavora-ai/adk-rust/wiki)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
-![Rust](https://img.shields.io/badge/rust-1.94%2B-orange.svg)
+![Rust](https://img.shields.io/badge/rust-1.95%2B-orange.svg)
 [![GitHub Discussions](https://img.shields.io/github/discussions/zavora-ai/adk-rust?style=flat&logo=github&color=5865F2)](https://github.com/zavora-ai/adk-rust/discussions)
 
-> **🚀 v2.0.0 Released!** 41 published crates. Official `rmcp 2.2` MCP SDK (protocol `2025-11-25`) with effective HTTP configuration, official `agent-client-protocol` 1.2 for ACP with exact capability publication, the new `adk-computer-use` governed desktop-automation layer, `adk-devtools` coding-agent tools, live async tool confirmation keyed by function-call ID, and resolved dependency advisories. See the [migration guide](docs/official_docs/migration/1.0-to-2.0.md) for the complete breaking-change list and [CHANGELOG](CHANGELOG.md) for full details.
+> **v2.0.0 release candidate — unpublished.** The 41-crate v2 workspace is being stabilized; v2 has not been published to crates.io. The candidate targets the official `rmcp 2.2` MCP SDK (protocol `2025-11-25`) with effective HTTP configuration, official `agent-client-protocol` 1.2 for ACP with exact capability publication, the new `adk-computer-use` governed desktop-automation layer, `adk-devtools` coding-agent tools, and live async tool confirmation keyed by function-call ID. See the [migration guide](docs/official_docs/migration/1.0-to-2.0.md) for the planned breaking changes and [CHANGELOG](CHANGELOG.md) for full details.
+>
+> **Release transition:** This banner changes to “Released” only after all 41 v2.0.0 crates are available on crates.io. The roadmap marker then changes from “release candidate” to “current.”
 >
 > **Contributors:** Many thanks to [@mikefaille](https://github.com/mikefaille) — AdkIdentity design, realtime audio, LiveKit bridge, skill system. [@rohan-panickar](https://github.com/rohan-panickar) — OpenAI-compatible providers, xAI, multimodal content. [@dhruv-pant](https://github.com/dhruv-pant) — Gemini service account auth. [@tomtom215](https://github.com/tomtom215) — A2A Protocol v1.0.0 types crate ([a2a-protocol-types](https://crates.io/crates/a2a-protocol-types)), Foundation-verified wire types powering our A2A v1 layer. [@danielsan](https://github.com/danielsan) — Google deps issue & PR (#181, #203), RAG crash report (#205). [@CodingFlow](https://github.com/CodingFlow) — Gemini 3 thinking level, global endpoint, citationSources (#177, #178, #179). [@ctylx](https://github.com/ctylx) — skill discovery fix (#204). [@poborin](https://github.com/poborin) — project config proposal (#176). [@chillin-capybara](https://github.com/chillin-capybara) — ACP integration, adk-acp crate. [@baotao2006](https://github.com/baotao2006) — UTF-8 boundary audit, CJK search/skill/eval fixes (#349, #357). [Get started →](https://github.com/zavora-ai/adk-rust/wiki/quickstart)
 >
@@ -227,7 +229,7 @@ is running. See the [MCP guide](docs/official_docs/tools/mcp-tools.md).
 | `adk-acp` | Agent Client Protocol integration | Official stable v1 client and server, one-shot and persistent sessions, streaming, cancellation, async permissions, client files and terminals, per-session MCP, and editor-facing ADK agents |
 | `adk-rag` | RAG pipeline | Document chunking, embeddings, vector search, reranking, 6 backends |
 | `adk-runner` | Agent execution runtime | Context management, event streaming, session lifecycle, callbacks |
-| `adk-server` | Production API servers | REST API, A2A v1.0.0 protocol (all 11 operations), middleware, health checks |
+| `adk-server` | Production API servers | REST API, A2A v1.0.0 protocol (11 JSON-RPC operations; `tasks/resubscribe` returns a snapshot, not a live re-attach), middleware, health checks |
 | `adk-cli` | Command-line interface | Interactive REPL, session management, MCP server integration |
 | `adk-realtime` | Real-time voice & multimodal agents | OpenAI Realtime + Gemini Live, bidirectional audio, video frames, VAD, affective dialogue, server-side tools via `IntegratedRealtimeRunner` |
 | `adk-graph` | Graph-based workflows | LangGraph-style orchestration, state management, checkpointing, human-in-the-loop |
@@ -273,7 +275,7 @@ Use `cargo adk build` to verify compilation without deploying.
 
 ### Manual installation
 
-Requires Rust 1.94 or later (Rust 2024 edition). Add to your `Cargo.toml`:
+Requires Rust 1.95 or later (Rust 2024 edition). Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
@@ -672,28 +674,63 @@ cargo run --manifest-path examples/realtime_tools/Cargo.toml -- probe openai
 Make any website or service natively accessible to AI agents using the `awp-types` and `adk-awp` crates:
 
 ```rust
-use adk_awp::{AwpState, BusinessContextLoader, awp_routes};
+use std::sync::Arc;
+
+use adk_awp::{AwpA2aHandler, AwpState, BusinessContextLoader, awp_routes};
+use async_trait::async_trait;
+use awp_types::AwpError;
+use axum::http::{HeaderMap, header};
+use serde_json::{Value, json};
+
+struct ApplicationA2a {
+    bearer_token: Arc<str>,
+}
+
+#[async_trait]
+impl AwpA2aHandler for ApplicationA2a {
+    async fn handle(&self, headers: HeaderMap, message: Value) -> Result<Value, AwpError> {
+        let expected = format!("Bearer {}", self.bearer_token);
+        if !headers
+            .get(header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value == expected)
+        {
+            return Err(AwpError::Unauthorized("invalid A2A credential".to_string()));
+        }
+        Ok(json!({ "status": "processed", "messageId": message["id"] }))
+    }
+}
 
 // Load business context from TOML
 let loader = BusinessContextLoader::from_file("business.toml".as_ref())?;
 
-// Build AWP state with sensible defaults (rate limiting, consent, health, events)
-let state = AwpState::builder(loader.context_ref()).build();
+// Install application-specific, authenticated A2A dispatch.
+let a2a_token: Arc<str> = std::env::var("AWP_A2A_TOKEN")?.into();
+let state = AwpState::builder(loader.context_ref())
+    .a2a_handler(Arc::new(ApplicationA2a { bearer_token: a2a_token }))
+    .build();
 
-// Merge AWP routes into your Axum app — 7 endpoints, version negotiation included
+// The safe default router excludes privileged subscription management.
 let app = axum::Router::new()
     .merge(awp_routes(state))
     .merge(your_custom_routes);
+
+let listener = tokio::net::TcpListener::bind("127.0.0.1:3456").await?;
+axum::serve(
+    listener,
+    app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+)
+.await?;
 ```
 
 **AWP Endpoints**:
 - `GET /.well-known/awp.json` — Discovery document (entry point for agents)
 - `GET /awp/manifest` — JSON-LD capability manifest
 - `GET /awp/health` — Health state (Healthy/Degrading/Degraded)
-- `POST /awp/events/subscribe` — Webhook subscriptions with HMAC-SHA256 signing
-- `POST /awp/a2a` — Agent-to-agent message handling
+- `POST /awp/a2a` — Application-provided agent-to-agent dispatch
+- `awp_management_routes()` — Explicit subscription CRUD; apply application auth before merging
 
-**Features**: Trust levels (Anonymous/Known/Partner/Internal), per-trust-level rate limiting, consent management (in-memory or file-backed), health state machine with event emission, version negotiation, business context hot-reload.
+**Features**: Fail-closed trust defaults, per-trust-level rate limiting, bounded A2A requests, consent storage, HMAC signing, health state transitions, version negotiation, and business context hot-reload.
 
 **Run the AWP example**:
 ```bash
@@ -1104,7 +1141,7 @@ Contributions welcome! Please open an issue or pull request on GitHub.
 
 ## Roadmap
 
-**v2.0.0** (current) — production agent framework:
+**v2.0.0** (release candidate) — production agent framework:
 - **Composable Template System** — 12 templates, 9 add-ons, 5 enterprise patterns via `cargo adk new --addon`.
 - **Cargo Adk Build** — compile-without-deploy subcommand for pre-deployment verification.
 - **A2A Simple Scaffolding** — `A2aServer::quick_start`, `A2aServer::builder`, and `cargo adk new --template a2a-server`.
