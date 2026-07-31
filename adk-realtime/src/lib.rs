@@ -119,7 +119,11 @@ pub use config::{
     InterruptionDetection, RealtimeConfig, RealtimeConfigBuilder, VadConfig, VadMode,
 };
 pub use error::{RealtimeError, Result};
-pub use events::{ClientEvent, ServerEvent, ToolCall, ToolResponse};
+pub use events::{
+    ClientEvent, ConfirmationId, FrozenToolCall, InputTurnCompleted, InputTurnCompletionSource,
+    InputTurnId, ServerEvent, ToolCall, ToolConfirmationDecision, ToolConfirmationRequest,
+    ToolResponse,
+};
 pub use model::{BoxedModel, RealtimeModel};
-pub use runner::RealtimeRunner;
+pub use runner::{RealtimeRunner, ToolConfirmationPolicyHook, ToolHandler};
 pub use session::{BoxedSession, RealtimeSession, RealtimeSessionExt};
