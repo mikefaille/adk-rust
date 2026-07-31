@@ -560,6 +560,16 @@ impl GeminiRealtimeSession {
         if let Some(content) = value.get("serverContent") {
             let mut events = Vec::new();
 
+            // Barge-in. Emitted before anything else in this frame: the
+            // contract is "discard what is queued", so a consumer must see the
+            // purge before any audio that arrives alongside it, or it would
+            // drop the new turn and keep the stale one.
+            if content.get("interrupted").and_then(|i| i.as_bool()).unwrap_or(false) {
+                events.push(ServerEvent::ResponseCancelled {
+                    event_id: uuid::Uuid::new_v4().to_string(),
+                });
+            }
+
             if let Some(parts) = content.get("modelTurn").and_then(|t| t.get("parts"))
                 && let Some(parts_arr) = parts.as_array()
             {
@@ -1483,6 +1493,53 @@ mod tests {
                 "Expected Protocol Error (via RealtimeError::protocol) due to schema compilation failure, got {:?}",
                 other
             ),
+        }
+    }
+
+    #[test]
+    fn interrupted_translates_to_response_cancelled() {
+        let raw = json!({ "serverContent": { "interrupted": true } }).to_string();
+        let events = GeminiRealtimeSession::translate_event_static(&raw).unwrap();
+
+        assert!(
+            matches!(events.as_slice(), [ServerEvent::ResponseCancelled { .. }]),
+            "barge-in must surface as a cancellation, got {events:?}"
+        );
+    }
+
+    #[test]
+    fn interrupted_is_ordered_before_audio_in_the_same_frame() {
+        // The contract is "discard what is queued". A consumer that saw the
+        // audio first would purge the new turn and keep the stale one.
+        let raw = json!({
+            "serverContent": {
+                "interrupted": true,
+                "modelTurn": { "parts": [{ "inlineData": { "data": "AAAA" } }] }
+            }
+        })
+        .to_string();
+        let events = GeminiRealtimeSession::translate_event_static(&raw).unwrap();
+
+        assert!(
+            matches!(
+                events.as_slice(),
+                [ServerEvent::ResponseCancelled { .. }, ServerEvent::AudioDelta { .. }]
+            ),
+            "cancellation must precede audio in the frame, got {events:?}"
+        );
+    }
+
+    #[test]
+    fn absent_or_false_interrupted_emits_no_cancellation() {
+        for raw in [
+            json!({ "serverContent": { "turnComplete": true } }).to_string(),
+            json!({ "serverContent": { "interrupted": false, "turnComplete": true } }).to_string(),
+        ] {
+            let events = GeminiRealtimeSession::translate_event_static(&raw).unwrap();
+            assert!(
+                !events.iter().any(|e| matches!(e, ServerEvent::ResponseCancelled { .. })),
+                "only a true `interrupted` is a barge-in, got {events:?}"
+            );
         }
     }
 }

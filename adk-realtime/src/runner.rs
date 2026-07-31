@@ -946,6 +946,13 @@ impl RealtimeRunner {
             ServerEvent::SpeechStopped { audio_end_ms, .. } => {
                 self.event_handler.on_speech_stopped(audio_end_ms).await?;
             }
+            ServerEvent::ResponseCancelled { .. } => {
+                // Until now nothing constructed this event, so
+                // `on_response_cancelled` was an orphan: declared on the trait,
+                // implemented by consumers, never called. Barge-in therefore
+                // never reached an audio sink on the Gemini backend.
+                self.event_handler.on_response_cancelled().await?;
+            }
             ServerEvent::ResponseDone { .. } => {
                 self.event_handler.on_response_done().await?;
                 // If this response dispatched tool call(s), send the one owed

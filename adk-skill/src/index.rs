@@ -36,11 +36,8 @@ pub fn load_skill_index(root: impl AsRef<Path>) -> SkillResult<SkillIndex> {
             .and_then(|ts| ts.duration_since(UNIX_EPOCH).ok())
             .map(|d| d.as_secs() as i64);
 
-        let id = format!(
-            "{}-{}",
-            normalize_id(&parsed.name),
-            &hash.chars().take(12).collect::<String>()
-        );
+        let id =
+            format!("{}-{}", normalize_id(&parsed.name), hash.chars().take(12).collect::<String>());
 
         skills.push(SkillDocument {
             id,
@@ -103,11 +100,8 @@ pub fn load_skill_index_with_extras(
             .and_then(|ts| ts.duration_since(UNIX_EPOCH).ok())
             .map(|d| d.as_secs() as i64);
 
-        let id = format!(
-            "{}-{}",
-            normalize_id(&parsed.name),
-            &hash.chars().take(12).collect::<String>()
-        );
+        let id =
+            format!("{}-{}", normalize_id(&parsed.name), hash.chars().take(12).collect::<String>());
 
         skills.push(SkillDocument {
             id,

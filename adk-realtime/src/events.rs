@@ -283,6 +283,23 @@ pub enum ServerEvent {
         response: Value,
     },
 
+    /// The in-flight response was cancelled before completion, normally
+    /// because the caller began speaking over it (barge-in).
+    ///
+    /// This is a normal lifecycle boundary, not an error. Consumers owning an
+    /// audio sink must discard anything already queued for playback: the
+    /// provider has abandoned that turn, and continuing to play it means
+    /// talking over the caller.
+    ///
+    /// Gemini signals this as `serverContent.interrupted`; the field was
+    /// previously parsed and dropped, so `EventHandler::on_response_cancelled`
+    /// could never fire on that backend.
+    #[serde(rename = "response.cancelled")]
+    ResponseCancelled {
+        /// Unique event ID.
+        event_id: String,
+    },
+
     /// Response output item added.
     #[serde(rename = "response.output_item.added")]
     OutputItemAdded {
