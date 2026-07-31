@@ -209,6 +209,8 @@ impl ConversationItem {
 /// let id = ToolCallId::parse("call_1").expect("non-empty");
 /// assert_eq!(id.as_str(), "call_1");
 /// assert!(ToolCallId::parse("   ").is_err());
+/// // Padding is stripped, so a padded id still matches a clean one.
+/// assert_eq!(ToolCallId::parse("  call_1  ").unwrap().as_str(), "call_1");
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 #[serde(transparent)]
@@ -219,10 +221,20 @@ impl ToolCallId {
     /// identity.
     pub fn parse(value: impl Into<String>) -> std::result::Result<Self, EmptyToolCallId> {
         let value = value.into();
-        if value.trim().is_empty() {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
             return Err(EmptyToolCallId);
         }
-        Ok(Self(value))
+        // Store the trimmed form. Validating on `trim()` while keeping the
+        // original let `"  call_1  "` through, and these ids are compared
+        // against the raw `call_id` of an earlier `FunctionCallDone` to decide
+        // whether a side effect may proceed — so a padded id would compare
+        // unequal to the same id delivered clean, and the withdrawal would
+        // silently match nothing. Avoids reallocating in the common case.
+        if trimmed.len() == value.len() {
+            return Ok(Self(value));
+        }
+        Ok(Self(trimmed.to_string()))
     }
 
     /// Borrow the underlying identifier, for comparison against a `call_id`
@@ -655,5 +667,38 @@ impl ToolResponse {
     /// Create a tool response from a string output.
     pub fn from_string(call_id: impl Into<String>, output: impl Into<String>) -> Self {
         Self { call_id: call_id.into(), output: Value::String(output.into()) }
+    }
+}
+
+#[cfg(test)]
+mod tool_call_id_tests {
+    use super::*;
+
+    #[test]
+    fn empty_and_whitespace_are_not_identities() {
+        assert!(ToolCallId::parse("").is_err());
+        assert!(ToolCallId::parse("   ").is_err());
+        assert!(ToolCallId::parse("\t\n").is_err());
+    }
+
+    #[test]
+    fn padding_is_stripped_so_a_padded_id_still_matches_a_clean_one() {
+        // These are compared against the raw `call_id` of an earlier
+        // `FunctionCallDone` to decide whether a side effect may proceed.
+        // Validating on `trim()` while storing the original would let a padded
+        // id compare unequal to the same id delivered clean, and the
+        // withdrawal would silently match nothing.
+        let padded = ToolCallId::parse("  call_1  ").expect("non-empty");
+        let clean = ToolCallId::parse("call_1").expect("non-empty");
+
+        assert_eq!(padded.as_str(), "call_1");
+        assert_eq!(padded, clean);
+    }
+
+    #[test]
+    fn deserialization_rejects_an_empty_id() {
+        // Strict at the boundary rather than surprising at the comparison.
+        assert!(serde_json::from_str::<ToolCallId>("\"\"").is_err());
+        assert!(serde_json::from_str::<ToolCallId>("\"call_1\"").is_ok());
     }
 }
