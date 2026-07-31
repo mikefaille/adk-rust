@@ -73,13 +73,30 @@ pub struct VadConfig {
 }
 
 impl Default for VadConfig {
+    /// Server VAD with **no tuning overrides**.
+    ///
+    /// Every field beyond `mode` is `None` on purpose, so that `Some(_)` means
+    /// "the caller chose this" and nothing else can. Previously this carried
+    /// `silence_duration_ms: Some(500)` and `interrupt_response: Some(true)`,
+    /// which made a default indistinguishable from a decision — and both
+    /// provider projections dutifully forwarded them, installing an
+    /// end-of-speech threshold nobody selected as live turn-taking policy.
+    ///
+    /// The number was not harmless. Gemini's server default is roughly 800 ms
+    /// and Google recommends 500 ms only as a floor, warning that lower
+    /// thresholds "often cause fragmented audio that degrades transcription
+    /// and model response quality". Asking for server VAD now means asking
+    /// for the provider's own tuning, which is what it reads like.
+    ///
+    /// This is why the projections need no rule about which values to trust:
+    /// there is no default left to mistake for a choice.
     fn default() -> Self {
         Self {
             mode: VadMode::ServerVad,
-            silence_duration_ms: Some(500),
+            silence_duration_ms: None,
             threshold: None,
             prefix_padding_ms: None,
-            interrupt_response: Some(true),
+            interrupt_response: None,
             eagerness: None,
         }
     }
