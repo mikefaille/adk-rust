@@ -146,7 +146,15 @@ impl<H: EventHandler> LiveKitEventHandler<H> {
     ///
     /// * `inner` — The inner event handler to delegate to.
     /// * `audio_source` — The LiveKit native audio source to push model audio to.
-    /// * `sample_rate` — Sample rate of the audio (e.g., 24000 for OpenAI, 16000 for Gemini).
+    /// * `sample_rate` — Sample rate of the **model's output** audio. 24000 for
+    ///   both OpenAI and Gemini Live, whose output is documented as raw 16-bit
+    ///   PCM at 24 kHz, little-endian.
+    ///
+    ///   This previously read "16000 for Gemini", which is that provider's
+    ///   *input* rate — what a client resamples microphone audio to before
+    ///   sending, and what this crate puts in `audio/pcm;rate=16000`. Following
+    ///   the old advice here plays 24 kHz samples through a 16 kHz sink, so the
+    ///   caller hears the assistant at two-thirds speed.
     /// * `num_channels` — Number of audio channels (typically 1 for mono).
     pub fn new(
         inner: H,
