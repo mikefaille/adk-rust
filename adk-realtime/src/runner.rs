@@ -52,6 +52,18 @@ pub trait ToolHandler: Send + Sync {
     async fn execute(&self, call: &ToolCall) -> Result<serde_json::Value>;
 }
 
+/// Dynamic decision source for tool calls that require human/application confirmation.
+#[async_trait]
+pub trait ToolConfirmationPolicyHook: Send + Sync {
+    /// Decide whether a tool call requires confirmation.
+    /// Returns `Ok(Some(hint))` if confirmation is required.
+    /// Returns `Ok(None)` if the tool can execute immediately.
+    async fn require_confirmation(
+        &self,
+        call: &crate::events::FrozenToolCall,
+    ) -> Result<Option<String>>;
+}
+
 /// A simple function-based tool handler.
 pub struct FnToolHandler<F>
 where
@@ -176,6 +188,22 @@ pub trait EventHandler: Send + Sync {
     async fn on_error(&self, _error: &RealtimeError) -> Result<()> {
         Ok(())
     }
+
+    /// Called when a caller-input turn has completed.
+    async fn on_input_turn_completed(
+        &self,
+        _turn: &crate::events::InputTurnCompleted,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    /// Called when a tool call requires human/application confirmation.
+    async fn on_tool_confirmation_requested(
+        &self,
+        _request: &crate::events::ToolConfirmationRequest,
+    ) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// Default no-op event handler.
@@ -217,6 +245,7 @@ pub struct RealtimeRunnerBuilder {
     runner_config: RunnerConfig,
     tools: HashMap<String, (ToolDefinition, Arc<dyn ToolHandler>)>,
     event_handler: Option<Arc<dyn EventHandler>>,
+    confirmation_policy: Option<Arc<dyn ToolConfirmationPolicyHook>>,
 }
 
 impl Default for RealtimeRunnerBuilder {
@@ -234,7 +263,20 @@ impl RealtimeRunnerBuilder {
             runner_config: RunnerConfig::default(),
             tools: HashMap::new(),
             event_handler: None,
+            confirmation_policy: None,
         }
+    }
+
+    /// Set the tool confirmation policy hook.
+    pub fn confirmation_policy(mut self, hook: impl ToolConfirmationPolicyHook + 'static) -> Self {
+        self.confirmation_policy = Some(Arc::new(hook));
+        self
+    }
+
+    /// Set the tool confirmation policy hook from an `Arc<dyn ToolConfirmationPolicyHook>` directly.
+    pub fn confirmation_policy_arc(mut self, hook: Arc<dyn ToolConfirmationPolicyHook>) -> Self {
+        self.confirmation_policy = Some(hook);
+        self
     }
 
     /// Set the realtime model.
@@ -333,8 +375,24 @@ impl RealtimeRunnerBuilder {
             tool_permits: Arc::new(tokio::sync::Semaphore::new(max_concurrent_tools)),
             outstanding_tools: Arc::new(AtomicUsize::new(0)),
             response_closed_awaiting_tools: Arc::new(AtomicBool::new(false)),
+            turn_state: Arc::new(std::sync::Mutex::new(TurnState::default())),
+            confirmation_policy: self.confirmation_policy,
+            pending_confirmations: Arc::new(std::sync::Mutex::new(HashMap::new())),
         })
     }
+}
+
+#[derive(Debug, Default)]
+struct TurnState {
+    pending_input_turn: bool,
+    last_completed_item_id: Option<String>,
+    latest_completed_turn: Option<crate::events::InputTurnCompleted>,
+}
+
+#[allow(dead_code)]
+struct PendingConfirmation {
+    original_call: crate::events::FrozenToolCall,
+    tx: tokio::sync::oneshot::Sender<crate::events::ToolConfirmationDecision>,
 }
 
 /// A runner that manages a realtime session with tool execution.
@@ -393,6 +451,13 @@ pub struct RealtimeRunner {
     /// Set when the dispatching response closed while tool calls were still running, so
     /// the follow-up `create_response` is owed by whichever tool finishes last.
     response_closed_awaiting_tools: Arc<AtomicBool>,
+    /// Tracks the current user completed-turn state.
+    turn_state: Arc<std::sync::Mutex<TurnState>>,
+    /// Hook for checking if a tool call requires confirmation before execution.
+    confirmation_policy: Option<Arc<dyn ToolConfirmationPolicyHook>>,
+    /// Outstanding tool confirmation requests keyed by unique confirmation ID.
+    pending_confirmations:
+        Arc<std::sync::Mutex<HashMap<crate::events::ConfirmationId, PendingConfirmation>>>,
 }
 
 impl RealtimeRunner {
@@ -676,6 +741,9 @@ impl RealtimeRunner {
     /// provider choose its native encoding path. Prefer this method when the
     /// caller already owns raw audio bytes.
     pub async fn send_audio_chunk(&self, audio: &crate::audio::AudioChunk) -> Result<()> {
+        {
+            self.turn_state.lock().unwrap().pending_input_turn = true;
+        }
         let session = self.session_handle().await?;
         session.send_audio(audio).await
     }
@@ -688,17 +756,26 @@ impl RealtimeRunner {
     /// decision at the provider-neutral runner boundary. This method forwards
     /// to [`send_audio_base64`](Self::send_audio_base64).
     pub async fn send_audio(&self, audio_base64: &str) -> Result<()> {
+        {
+            self.turn_state.lock().unwrap().pending_input_turn = true;
+        }
         self.send_audio_base64(audio_base64).await
     }
 
     /// Send base64-encoded audio to the session.
     pub async fn send_audio_base64(&self, audio_base64: &str) -> Result<()> {
+        {
+            self.turn_state.lock().unwrap().pending_input_turn = true;
+        }
         let session = self.session_handle().await?;
         session.send_audio_base64(audio_base64).await
     }
 
     /// Send text to the session.
     pub async fn send_text(&self, text: &str) -> Result<()> {
+        {
+            self.turn_state.lock().unwrap().pending_input_turn = true;
+        }
         let session = self.session_handle().await?;
         session.send_text(text).await
     }
@@ -924,10 +1001,33 @@ impl RealtimeRunner {
                     *state = RunnerState::ExecutingTool;
                 }
             }
+            ServerEvent::SpeechStarted { .. } | ServerEvent::InputTranscriptDelta { .. } => {
+                self.turn_state.lock().unwrap().pending_input_turn = true;
+            }
             _ => {}
         }
 
         match event {
+            ServerEvent::ResponseCreated { .. } => {
+                let emit_turn = {
+                    let mut turn_guard = self.turn_state.lock().unwrap();
+                    if turn_guard.pending_input_turn {
+                        turn_guard.pending_input_turn = false;
+                        let turn = crate::events::InputTurnCompleted {
+                            turn_id: crate::events::InputTurnId::new(),
+                            source: crate::events::InputTurnCompletionSource::ProviderTurnComplete,
+                            provider_item_id: None,
+                        };
+                        turn_guard.latest_completed_turn = Some(turn.clone());
+                        Some(turn)
+                    } else {
+                        None
+                    }
+                };
+                if let Some(turn) = emit_turn {
+                    self.event_handler.on_input_turn_completed(&turn).await?;
+                }
+            }
             ServerEvent::AudioDelta { delta, item_id, .. } => {
                 self.event_handler.on_audio(&delta, &item_id).await?;
             }
@@ -939,12 +1039,54 @@ impl RealtimeRunner {
             }
             ServerEvent::InputTranscriptCompleted { transcript, item_id, .. } => {
                 self.event_handler.on_input_transcript_completed(&transcript, &item_id).await?;
+                let emit_turn = {
+                    let mut turn_guard = self.turn_state.lock().unwrap();
+                    if turn_guard.last_completed_item_id.as_ref() != Some(&item_id) {
+                        turn_guard.last_completed_item_id = Some(item_id.clone());
+                        turn_guard.pending_input_turn = false;
+                        let turn = crate::events::InputTurnCompleted {
+                            turn_id: crate::events::InputTurnId::new(),
+                            source: crate::events::InputTurnCompletionSource::FinalTranscript,
+                            provider_item_id: Some(item_id),
+                        };
+                        turn_guard.latest_completed_turn = Some(turn.clone());
+                        Some(turn)
+                    } else {
+                        None
+                    }
+                };
+                if let Some(turn) = emit_turn {
+                    self.event_handler.on_input_turn_completed(&turn).await?;
+                }
             }
             ServerEvent::SpeechStarted { audio_start_ms, .. } => {
                 self.event_handler.on_speech_started(audio_start_ms).await?;
             }
             ServerEvent::SpeechStopped { audio_end_ms, .. } => {
                 self.event_handler.on_speech_stopped(audio_end_ms).await?;
+                let is_transcription_enabled =
+                    self.config.read().await.input_audio_transcription.is_some();
+                if !is_transcription_enabled {
+                    let emit_turn = {
+                        let mut turn_guard = self.turn_state.lock().unwrap();
+                        if turn_guard.pending_input_turn {
+                            turn_guard.pending_input_turn = false;
+                            let turn = crate::events::InputTurnCompleted {
+                                turn_id: crate::events::InputTurnId::new(),
+                                source:
+                                    crate::events::InputTurnCompletionSource::ProviderActivityEnd,
+                                provider_item_id: None,
+                            };
+                            turn_guard.latest_completed_turn = Some(turn.clone());
+                            Some(turn)
+                        } else {
+                            None
+                        }
+                    };
+                    if let Some(turn) = emit_turn {
+                        self.event_handler.on_input_turn_completed(&turn).await?;
+                    }
+                }
             }
             ServerEvent::ResponseDone { .. } => {
                 self.event_handler.on_response_done().await?;
@@ -1043,8 +1185,120 @@ impl RealtimeRunner {
         Ok(())
     }
 
+    /// Resolve a pending tool confirmation with a decision (Approve or Reject).
+    pub async fn resolve_confirmation(
+        &self,
+        id: &crate::events::ConfirmationId,
+        decision: crate::events::ToolConfirmationDecision,
+    ) -> Result<()> {
+        let pending = {
+            let mut guard = self.pending_confirmations.lock().unwrap();
+            guard.remove(id)
+        };
+
+        if let Some(pending) = pending {
+            if pending.tx.send(decision).is_err() {
+                return Err(RealtimeError::config("Confirmation receiver was dropped"));
+            }
+            Ok(())
+        } else {
+            Err(RealtimeError::config("Unknown, stale, or already-consumed confirmation ID"))
+        }
+    }
+
+    /// Returns the latest completed input turn details, if any.
+    pub fn latest_completed_input_turn(&self) -> Option<crate::events::InputTurnCompleted> {
+        self.turn_state.lock().unwrap().latest_completed_turn.clone()
+    }
+
     /// Execute a tool call and optionally send the response.
     async fn execute_tool_call(
+        &self,
+        call_id: &str,
+        name: &str,
+        arguments: &serde_json::Value,
+    ) -> Result<()> {
+        let frozen = crate::events::FrozenToolCall {
+            call_id: call_id.to_string(),
+            name: name.to_string(),
+            arguments: arguments.clone(),
+        };
+
+        // Validate first: if the tool name is unknown, fail before confirmation
+        if !self.tools.contains_key(name) {
+            return self.execute_tool_call_inner(call_id, name, arguments).await;
+        }
+
+        let mut hint = None;
+        if let Some(policy) = &self.confirmation_policy {
+            match policy.require_confirmation(&frozen).await {
+                Ok(Some(h)) => {
+                    hint = Some(h);
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    return Err(e);
+                }
+            }
+        }
+
+        if let Some(h) = hint {
+            let confirmation_id = crate::events::ConfirmationId::new();
+            let rx = {
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                let mut pending = self.pending_confirmations.lock().unwrap();
+                pending.insert(
+                    confirmation_id,
+                    PendingConfirmation { original_call: frozen.clone(), tx },
+                );
+                rx
+            };
+
+            let req = crate::events::ToolConfirmationRequest {
+                confirmation_id,
+                original_call: frozen.clone(),
+                hint: Some(h),
+            };
+
+            self.event_handler.on_tool_confirmation_requested(&req).await?;
+
+            let decision = match rx.await {
+                Ok(d) => d,
+                Err(_) => {
+                    return Err(RealtimeError::config("Confirmation receiver dropped"));
+                }
+            };
+
+            match decision {
+                crate::events::ToolConfirmationDecision::Confirmed { .. } => {
+                    // Approved! Execute the original frozen tool call exactly once.
+                    self.execute_tool_call_inner(call_id, &frozen.name, &frozen.arguments).await
+                }
+                crate::events::ToolConfirmationDecision::Rejected { reason } => {
+                    // Denied! Skip execution and send a structured error/rejection to the model.
+                    let rejection_reason =
+                        reason.unwrap_or_else(|| "User rejected tool confirmation".to_string());
+                    let result = serde_json::json!({
+                        "error": format!("Rejected: {}", rejection_reason)
+                    });
+                    if self.runner_config.auto_respond_tools {
+                        let response =
+                            ToolResponse { call_id: call_id.to_string(), output: result };
+                        if let Ok(session) = self.session_handle().await {
+                            session.send_tool_output(response).await?;
+                            self.pending_tool_response.store(true, Ordering::Release);
+                        }
+                    }
+                    Ok(())
+                }
+            }
+        } else {
+            self.execute_tool_call_inner(call_id, name, arguments).await
+        }
+    }
+
+    /// Helper that performs the actual tool execution and auto-respond.
+    async fn execute_tool_call_inner(
         &self,
         call_id: &str,
         name: &str,
@@ -1148,6 +1402,10 @@ impl RealtimeRunner {
 
     /// Close the session.
     pub async fn close(&self) -> Result<()> {
+        {
+            let mut pending = self.pending_confirmations.lock().unwrap();
+            pending.clear();
+        }
         if let Ok(session) = self.session_handle().await {
             session.close().await?;
         }

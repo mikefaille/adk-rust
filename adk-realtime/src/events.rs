@@ -554,3 +554,112 @@ impl ToolResponse {
         Self { call_id: call_id.into(), output: Value::String(output.into()) }
     }
 }
+
+// ── Input Turn and Tool Confirmation Types ───────────────────────────
+
+/// Unique stable identifier for a completed caller-input turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct InputTurnId(uuid::Uuid);
+
+impl InputTurnId {
+    /// Generate a new random input turn identifier.
+    pub fn new() -> Self {
+        Self(uuid::Uuid::new_v4())
+    }
+}
+
+impl Default for InputTurnId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl std::fmt::Display for InputTurnId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+/// Identifies the authoritative event source that completed the turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InputTurnCompletionSource {
+    /// Finalized transcript is complete.
+    FinalTranscript,
+    /// Provider voice activity detection indicated user speech ended.
+    ProviderActivityEnd,
+    /// Authoritative provider turn complete boundary (e.g. model response generation started).
+    ProviderTurnComplete,
+}
+
+/// A normalized, provider-neutral completed caller-input turn event.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct InputTurnCompleted {
+    /// Unique turn identifier.
+    pub turn_id: InputTurnId,
+    /// Authoritative source of turn completion.
+    pub source: InputTurnCompletionSource,
+    /// Provider-specific item/turn ID if available.
+    pub provider_item_id: Option<String>,
+}
+
+/// Unique identifier for a tool confirmation transaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ConfirmationId(uuid::Uuid);
+
+impl ConfirmationId {
+    /// Generate a new random confirmation identifier.
+    pub fn new() -> Self {
+        Self(uuid::Uuid::new_v4())
+    }
+}
+
+impl Default for ConfirmationId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl std::fmt::Display for ConfirmationId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+/// A frozen representation of a tool call before execution.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FrozenToolCall {
+    /// Unique call ID from the provider/model.
+    pub call_id: String,
+    /// Tool function name.
+    pub name: String,
+    /// Arguments passed to the tool.
+    pub arguments: serde_json::Value,
+}
+
+/// A structured request sent to the client to request user approval.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolConfirmationRequest {
+    /// Unique confirmation identifier.
+    pub confirmation_id: ConfirmationId,
+    /// Frozen original call details.
+    pub original_call: FrozenToolCall,
+    /// Optional context hint for the user.
+    pub hint: Option<String>,
+}
+
+/// Decision made by the application/user for a pending confirmation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ToolConfirmationDecision {
+    /// Approve/confirm the tool call execution.
+    Confirmed {
+        /// Optional application-defined payload or overrides.
+        payload: Option<serde_json::Value>,
+    },
+    /// Reject/deny the tool call execution.
+    Rejected {
+        /// Optional reason for rejection.
+        reason: Option<String>,
+    },
+}
