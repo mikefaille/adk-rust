@@ -127,6 +127,10 @@ struct GeminiSetup {
     /// Enable transcription of the model's spoken output (empty object = on).
     #[serde(skip_serializing_if = "Option::is_none")]
     output_audio_transcription: Option<Value>,
+    /// Voice-activity detection and interruption policy. Absent until now, so
+    /// every `VadConfig` the caller set was accepted and discarded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    realtime_input_config: Option<Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -194,6 +198,33 @@ struct GeminiFunctionResponse {
 struct GeminiClientContent {
     turns: Vec<GeminiTurn>,
     turn_complete: bool,
+}
+
+// ── Server wire types ───────────────────────────────────────────────────
+//
+// The rest of this translator reads server frames by poking at a
+// `serde_json::Value` with `.get("someField")`, which puts the wire contract
+// in string literals scattered through one long function. These are the
+// beginning of a typed inbound layer; new server messages should land here
+// rather than adding another `.get`.
+//
+// Deliberately permissive — no `deny_unknown_fields`. Gemini Live is a
+// Preview surface and adds fields; an adapter that refuses to parse a frame
+// carrying something new would take a live call down over a field it did not
+// need. Strictness belongs in the normalization step, not here.
+
+/// `BidiGenerateContentToolCallCancellation`: function calls the model had
+/// already issued and has now withdrawn, normally because the caller
+/// interrupted the turn that produced them.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GeminiToolCallCancellation {
+    /// Ids matching `id`s previously delivered in a `toolCall` frame.
+    ///
+    /// Defaulted rather than required: a frame with the key present but no
+    /// ids withdraws nothing, which is a no-op rather than a protocol error.
+    #[serde(default)]
+    ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -423,6 +454,8 @@ impl GeminiRealtimeSession {
             obj.insert("thinkingConfig".to_string(), json!({ "thinkingLevel": thinking_level }));
         }
 
+        // Computed before anything moves out of `config`.
+        let realtime_input_config = gemini_realtime_input_config(&config);
         let system_instruction = config.instruction.map(|text| GeminiContent {
             parts: vec![GeminiPart { text: Some(text), inline_data: None }],
         });
@@ -451,6 +484,7 @@ impl GeminiRealtimeSession {
                 cached_content: config.cached_content,
                 session_resumption,
                 input_audio_transcription: transcription.clone(),
+                realtime_input_config,
                 output_audio_transcription: transcription,
             }),
             realtime_input: None,
@@ -560,7 +594,26 @@ impl GeminiRealtimeSession {
         if let Some(content) = value.get("serverContent") {
             let mut events = Vec::new();
 
-            if let Some(parts) = content.get("modelTurn").and_then(|t| t.get("parts"))
+            // Barge-in: the caller spoke over the model, so this generation is
+            // abandoned and the client must empty its playback queue.
+            let interrupted = content.get("interrupted").and_then(|i| i.as_bool()).unwrap_or(false);
+            if interrupted {
+                events.push(ServerEvent::ResponseCancelled {
+                    event_id: uuid::Uuid::new_v4().to_string(),
+                });
+            }
+
+            // `modelTurn` content in an interrupted frame belongs to the
+            // generation that was just abandoned — a new generation only starts
+            // in response to later client input. Translating it would hand the
+            // consumer a purge immediately followed by one last stale chunk to
+            // enqueue, which is the very audio the purge exists to remove.
+            //
+            // Only playback-bearing content is suppressed. `inputTranscription`
+            // below is the *caller's* speech and is ordered independently of
+            // model-turn messages, so it must survive.
+            if !interrupted
+                && let Some(parts) = content.get("modelTurn").and_then(|t| t.get("parts"))
                 && let Some(parts_arr) = parts.as_array()
             {
                 for part in parts_arr {
@@ -653,6 +706,37 @@ impl GeminiRealtimeSession {
                 event_id: uuid::Uuid::new_v4().to_string(),
                 session: json!({ "resumeToken": token }),
             }]);
+        }
+
+        // Gemini withdraws function calls it already issued, normally because
+        // the caller interrupted the turn that produced them. Google's wording
+        // is that they "should not have been executed and should be cancelled",
+        // and that a client which already caused side effects may need to undo
+        // them — so dropping this frame means a request the caller withdrew can
+        // still take effect.
+        if let Some(raw) = value.get("toolCallCancellation") {
+            let cancellation: GeminiToolCallCancellation = serde_json::from_value(raw.clone())
+                .map_err(|e| {
+                    RealtimeError::protocol(format!("Malformed toolCallCancellation: {e}"))
+                })?;
+
+            let call_ids: Vec<crate::events::ToolCallId> = cancellation
+                .ids
+                .into_iter()
+                .filter_map(|id| match crate::events::ToolCallId::parse(id) {
+                    Ok(id) => Some(id),
+                    Err(_) => {
+                        // An id that identifies nothing is worse than useless:
+                        // it would let a consumer report a cancellation as
+                        // handled when it matched no outstanding call.
+                        tracing::warn!("Gemini sent an empty toolCallCancellation id; ignoring it");
+                        None
+                    }
+                })
+                .collect();
+            if !call_ids.is_empty() {
+                return Ok(vec![ServerEvent::ToolCallCancelled { call_ids }]);
+            }
         }
 
         // Check for tool calls
@@ -932,6 +1016,11 @@ impl RealtimeSession for GeminiRealtimeSession {
                     generation_config["temperature"] = json!(temp);
                 }
 
+                // Computed before anything moves out of `config`. Session
+                // updates rebuild setup from the live config, so the VAD
+                // projection has to come along or a mid-call update would
+                // silently reset it to Google's defaults.
+                let realtime_input_config = gemini_realtime_input_config(&config);
                 let system_instruction = config.instruction.map(|text| GeminiContent {
                     parts: vec![GeminiPart { text: Some(text), inline_data: None }],
                 });
@@ -963,6 +1052,7 @@ impl RealtimeSession for GeminiRealtimeSession {
                         session_resumption,
                         input_audio_transcription: None,
                         output_audio_transcription: None,
+                        realtime_input_config,
                     }),
                     realtime_input: None,
                     tool_response: None,
@@ -1048,6 +1138,63 @@ fn gemini_response_modalities(modalities: Option<&[String]>) -> Vec<String> {
         // Audio-only is the live-call default for this crate.
         _ => vec!["AUDIO".to_string()],
     }
+}
+
+/// Project the crate's `VadConfig` onto Gemini's `realtimeInputConfig`.
+///
+/// Until this existed the setup message carried no `realtimeInputConfig` at
+/// all, so every VAD setting a caller configured — including the
+/// `.with_server_vad()` the data plane sets on every production session — was
+/// accepted and silently discarded. A configuration API that implies control
+/// it does not exert is worse than one that refuses: the caller believes the
+/// line is tuned.
+///
+/// Returns `None` when there is nothing to say, so a default session keeps
+/// sending no `realtimeInputConfig` and inherits Google's defaults.
+///
+/// Two fields deliberately do not map, and are warned about rather than
+/// dropped in silence:
+/// - `threshold` is a 0.0-1.0 probability; Gemini exposes only coarse
+///   `START_SENSITIVITY_*` / `END_SENSITIVITY_*` enums, and inventing a
+///   cutoff would be this adapter making up policy.
+/// - `eagerness` is documented OpenAI-specific.
+fn gemini_realtime_input_config(config: &RealtimeConfig) -> Option<Value> {
+    let vad = config.turn_detection.as_ref()?;
+    let mut detection = serde_json::Map::new();
+
+    if vad.mode == crate::config::VadMode::None {
+        // Automatic detection off means the caller drives turns explicitly.
+        detection.insert("disabled".to_string(), json!(true));
+    }
+    if let Some(ms) = vad.silence_duration_ms {
+        detection.insert("silenceDurationMs".to_string(), json!(ms));
+    }
+    if let Some(ms) = vad.prefix_padding_ms {
+        detection.insert("prefixPaddingMs".to_string(), json!(ms));
+    }
+
+    if vad.threshold.is_some() {
+        tracing::warn!(
+            "VadConfig.threshold is not representable on Gemini Live, which exposes only \
+             coarse sensitivity levels; the configured value is not applied"
+        );
+    }
+    if vad.eagerness.is_some() {
+        tracing::debug!("VadConfig.eagerness is OpenAI-specific and does not apply to Gemini");
+    }
+
+    let mut input_config = serde_json::Map::new();
+    if !detection.is_empty() {
+        input_config.insert("automaticActivityDetection".to_string(), Value::Object(detection));
+    }
+    if let Some(interrupt) = vad.interrupt_response {
+        input_config.insert(
+            "activityHandling".to_string(),
+            json!(if interrupt { "START_OF_ACTIVITY_INTERRUPTS" } else { "NO_INTERRUPTION" }),
+        );
+    }
+
+    (!input_config.is_empty()).then_some(Value::Object(input_config))
 }
 
 /// Construct the Vertex AI Live WebSocket URL from region and project ID.
@@ -1414,6 +1561,7 @@ mod tests {
             cached_content: None,
             session_resumption: None,
             input_audio_transcription: None,
+            realtime_input_config: None,
             output_audio_transcription: None,
         };
         let wrapper = GeminiClientMessage {
@@ -1483,6 +1631,215 @@ mod tests {
                 "Expected Protocol Error (via RealtimeError::protocol) due to schema compilation failure, got {:?}",
                 other
             ),
+        }
+    }
+
+    #[test]
+    fn server_vad_reaches_the_wire_instead_of_being_discarded() {
+        // `.with_server_vad()` is set on every production session in the
+        // consuming data plane; before this projection existed the setup
+        // message carried no `realtimeInputConfig` at all and the whole
+        // configuration was silently dropped.
+        let config = RealtimeConfig::default().with_server_vad();
+        let projected =
+            gemini_realtime_input_config(&config).expect("a configured VAD must reach the wire");
+
+        assert_eq!(
+            projected.get("activityHandling").and_then(|v| v.as_str()),
+            Some("START_OF_ACTIVITY_INTERRUPTS"),
+            "server VAD interrupts the model by default, got {projected}"
+        );
+    }
+
+    #[test]
+    fn vad_timings_and_disable_map_to_googles_names() {
+        use crate::config::{VadConfig, VadMode};
+
+        let config = RealtimeConfig::default().with_vad(VadConfig {
+            mode: VadMode::None,
+            silence_duration_ms: Some(700),
+            prefix_padding_ms: Some(300),
+            threshold: None,
+            interrupt_response: Some(false),
+            eagerness: None,
+        });
+        let projected = gemini_realtime_input_config(&config).expect("projection");
+        let detection = projected.get("automaticActivityDetection").expect("detection block");
+
+        assert_eq!(detection.get("disabled").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(detection.get("silenceDurationMs").and_then(|v| v.as_u64()), Some(700));
+        assert_eq!(detection.get("prefixPaddingMs").and_then(|v| v.as_u64()), Some(300));
+        assert_eq!(
+            projected.get("activityHandling").and_then(|v| v.as_str()),
+            Some("NO_INTERRUPTION")
+        );
+    }
+
+    #[test]
+    fn no_vad_configured_sends_no_input_config() {
+        // A default session must keep inheriting Google's defaults rather than
+        // being pinned by an empty object this adapter invented.
+        assert!(gemini_realtime_input_config(&RealtimeConfig::default()).is_none());
+    }
+
+    #[test]
+    fn interrupted_translates_to_response_cancelled() {
+        let raw = json!({ "serverContent": { "interrupted": true } }).to_string();
+        let events = GeminiRealtimeSession::translate_event_static(&raw).unwrap();
+
+        assert!(
+            matches!(events.as_slice(), [ServerEvent::ResponseCancelled { .. }]),
+            "barge-in must surface as a cancellation, got {events:?}"
+        );
+    }
+
+    #[test]
+    fn interrupted_frame_yields_no_playback_audio() {
+        // A new generation only begins in response to later client input, so
+        // `modelTurn` content arriving with `interrupted` belongs to the
+        // abandoned generation. Emitting it would hand the consumer a purge
+        // followed by one last stale chunk to enqueue — the exact audio the
+        // purge exists to remove.
+        let raw = json!({
+            "serverContent": {
+                "interrupted": true,
+                "modelTurn": { "parts": [
+                    { "inlineData": { "data": "AAAA" } },
+                    { "text": "…as I was saying" }
+                ] }
+            }
+        })
+        .to_string();
+        let events = GeminiRealtimeSession::translate_event_static(&raw).unwrap();
+
+        assert!(
+            matches!(events.as_slice(), [ServerEvent::ResponseCancelled { .. }]),
+            "an interrupted frame must leave playback empty, got {events:?}"
+        );
+    }
+
+    #[test]
+    fn interrupted_frame_still_surfaces_caller_speech() {
+        // Input transcription is ordered independently of model-turn messages,
+        // so suppressing the abandoned generation must not also drop what the
+        // caller said to cause the interruption.
+        let raw = json!({
+            "serverContent": {
+                "interrupted": true,
+                "modelTurn": { "parts": [{ "inlineData": { "data": "AAAA" } }] },
+                "inputTranscription": { "text": "actually, make it ravioli" }
+            }
+        })
+        .to_string();
+        let events = GeminiRealtimeSession::translate_event_static(&raw).unwrap();
+
+        assert!(
+            events.iter().any(|e| matches!(e, ServerEvent::ResponseCancelled { .. })),
+            "expected a cancellation, got {events:?}"
+        );
+        assert!(
+            events.iter().any(|e| matches!(e, ServerEvent::InputTranscriptDelta { .. })),
+            "caller speech must survive the suppression, got {events:?}"
+        );
+        assert!(
+            !events.iter().any(|e| matches!(e, ServerEvent::AudioDelta { .. })),
+            "abandoned model audio must not survive, got {events:?}"
+        );
+    }
+
+    #[test]
+    fn tool_call_cancellation_is_translated() {
+        let raw = json!({ "toolCallCancellation": { "ids": ["call_1", "call_2"] } }).to_string();
+        let events = GeminiRealtimeSession::translate_event_static(&raw).unwrap();
+
+        match events.as_slice() {
+            [ServerEvent::ToolCallCancelled { call_ids }] => {
+                let ids: Vec<&str> = call_ids.iter().map(|id| id.as_str()).collect();
+                assert_eq!(ids, ["call_1", "call_2"]);
+            }
+            other => panic!("expected one ToolCallCancelled, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cancellation_dto_tolerates_fields_google_adds_later() {
+        // Gemini Live is a Preview surface. A strict DTO would refuse the whole
+        // frame over a field this adapter does not need, taking a live call
+        // down for an additive provider change.
+        let raw = json!({
+            "toolCallCancellation": {
+                "ids": ["call_1"],
+                "someFutureField": { "nested": true }
+            }
+        })
+        .to_string();
+        let events = GeminiRealtimeSession::translate_event_static(&raw).unwrap();
+
+        match events.as_slice() {
+            [ServerEvent::ToolCallCancelled { call_ids }] => {
+                assert_eq!(call_ids[0].as_str(), "call_1");
+            }
+            other => panic!("expected one ToolCallCancelled, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn malformed_cancellation_is_a_protocol_error_not_a_silent_drop() {
+        // `ids` present but the wrong shape means the adapter misunderstands
+        // the frame. Failing loudly beats treating a real withdrawal as absent.
+        let raw = json!({ "toolCallCancellation": { "ids": "call_1" } }).to_string();
+        let err = GeminiRealtimeSession::translate_event_static(&raw)
+            .expect_err("a non-array ids field must not parse");
+        assert!(
+            err.to_string().contains("toolCallCancellation"),
+            "the error should name the frame, got {err}"
+        );
+    }
+
+    #[test]
+    fn empty_ids_are_dropped_rather_than_carried() {
+        // The typed id makes an empty value unrepresentable, so a provider that
+        // sends one loses that entry instead of handing a consumer an id that
+        // can never match an outstanding call.
+        let raw = json!({ "toolCallCancellation": { "ids": ["", "  ", "call_1"] } }).to_string();
+        let events = GeminiRealtimeSession::translate_event_static(&raw).unwrap();
+
+        match events.as_slice() {
+            [ServerEvent::ToolCallCancelled { call_ids }] => {
+                assert_eq!(call_ids.len(), 1, "only the real id survives");
+                assert_eq!(call_ids[0].as_str(), "call_1");
+            }
+            other => panic!("expected one ToolCallCancelled, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn empty_tool_call_cancellation_is_not_an_event() {
+        // An empty id list withdraws nothing. Emitting for it would make a
+        // consumer that logs or alarms on cancellation fire on a no-op.
+        for raw in [
+            json!({ "toolCallCancellation": { "ids": [] } }).to_string(),
+            json!({ "toolCallCancellation": {} }).to_string(),
+        ] {
+            let events = GeminiRealtimeSession::translate_event_static(&raw).unwrap();
+            assert!(
+                !events.iter().any(|e| matches!(e, ServerEvent::ToolCallCancelled { .. })),
+                "no ids means nothing was withdrawn, got {events:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn absent_or_false_interrupted_emits_no_cancellation() {
+        for raw in [
+            json!({ "serverContent": { "turnComplete": true } }).to_string(),
+            json!({ "serverContent": { "interrupted": false, "turnComplete": true } }).to_string(),
+        ] {
+            let events = GeminiRealtimeSession::translate_event_static(&raw).unwrap();
+            assert!(
+                !events.iter().any(|e| matches!(e, ServerEvent::ResponseCancelled { .. })),
+                "only a true `interrupted` is a barge-in, got {events:?}"
+            );
         }
     }
 }
