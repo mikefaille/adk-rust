@@ -581,6 +581,7 @@ impl GeminiRealtimeSession {
         tracing::debug!(%raw, "Translating Gemini event");
         let value: Value = serde_json::from_str(raw)
             .map_err(|e| RealtimeError::protocol(format!("Parse error: {}, raw: {}", e, raw)))?;
+        log_frame_shape(&value);
 
         // Check for setup completion
         if let Some(_setup_complete) = value.get("setupComplete") {
@@ -1138,6 +1139,88 @@ fn gemini_response_modalities(modalities: Option<&[String]>) -> Vec<String> {
         // Audio-only is the live-call default for this crate.
         _ => vec!["AUDIO".to_string()],
     }
+}
+
+/// Frame-shape telemetry: what arrived, never what it said.
+///
+/// Deriving a caller-turn boundary on this provider needs the *ordering* of
+/// lifecycle signals — Google states plainly that transcription "is sent
+/// independently of the other server messages and there is no guaranteed
+/// ordering". That ordering cannot be reasoned out from the type definitions;
+/// it has to be observed on a real call.
+///
+/// The obvious way to observe it is to raise `translate_event_static`'s
+/// existing `debug!(%raw, ..)` in production, and that is the wrong way: a raw
+/// frame carries `inputTranscription.text` — the caller's own words — plus
+/// base64 audio and tool arguments. This crate already treats that as
+/// sensitive; it is why `record-payloads` exists and is off by default.
+///
+/// So this emits shape only, at `info`, and is safe to leave on: which message
+/// arrived, the lifecycle booleans, how many parts and how many bytes, and the
+/// *length* of a transcript rather than its text. That is sufficient to
+/// reconstruct turn boundaries and still discloses nothing a caller said.
+fn log_frame_shape(value: &Value) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    let kind = [
+        "setupComplete",
+        "serverContent",
+        "toolCall",
+        "toolCallCancellation",
+        "goAway",
+        "sessionResumptionUpdate",
+        "usageMetadata",
+    ]
+    .into_iter()
+    .find(|k| value.get(*k).is_some())
+    .unwrap_or("unknown");
+
+    let content = value.get("serverContent");
+    let flag =
+        |name: &str| content.and_then(|c| c.get(name)).and_then(|v| v.as_bool()).unwrap_or(false);
+    // Length, never the text.
+    let text_len = |name: &str| {
+        content
+            .and_then(|c| c.get(name))
+            .and_then(|t| t.get("text"))
+            .and_then(|t| t.as_str())
+            .map(str::len)
+    };
+    let parts = content
+        .and_then(|c| c.get("modelTurn"))
+        .and_then(|t| t.get("parts"))
+        .and_then(|p| p.as_array());
+    let audio_b64_len: usize = parts
+        .map(|ps| {
+            ps.iter().filter_map(|p| p.get("inlineData")?.get("data")?.as_str()).map(str::len).sum()
+        })
+        .unwrap_or(0);
+
+    tracing::info!(
+        target: "gemini_frame",
+        seq,
+        kind,
+        interrupted = flag("interrupted"),
+        turn_complete = flag("turnComplete"),
+        generation_complete = flag("generationComplete"),
+        input_transcript_len = text_len("inputTranscription"),
+        output_transcript_len = text_len("outputTranscription"),
+        model_turn_parts = parts.map(|p| p.len()),
+        audio_b64_len,
+        tool_calls = value
+            .get("toolCall")
+            .and_then(|t| t.get("functionCalls"))
+            .and_then(|c| c.as_array())
+            .map(|c| c.len()),
+        cancelled_tool_calls = value
+            .get("toolCallCancellation")
+            .and_then(|c| c.get("ids"))
+            .and_then(|i| i.as_array())
+            .map(|i| i.len()),
+        "gemini frame"
+    );
 }
 
 /// Project the crate's `VadConfig` onto Gemini's `realtimeInputConfig`.
