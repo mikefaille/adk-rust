@@ -1,5 +1,6 @@
 use crate::document::SchemaMetrics;
 use crate::error::{LimitKind, ReferenceRejection, Result, SchemaError};
+use crate::pointer::child as child_pointer;
 use crate::policy::IngestionPolicy;
 use crate::references::{PointerError, parse_local_ref, resolve_local_pointer};
 use serde_json::Value;
@@ -56,15 +57,10 @@ pub(crate) fn scan_all_nodes_iteratively(
         match frame.value {
             Value::Object(map) => {
                 for (key, val) in map {
-                    let next_pointer = if frame.pointer.is_empty() {
-                        format!("/{}", key.replace('~', "~0").replace('/', "~1"))
-                    } else {
-                        format!("{}/{}", frame.pointer, key.replace('~', "~0").replace('/', "~1"))
-                    };
                     stack.push(StructuralFrame {
                         value: val,
                         depth: frame.depth + 1,
-                        pointer: next_pointer,
+                        pointer: child_pointer(&frame.pointer, key),
                     });
                 }
             }
@@ -108,11 +104,7 @@ pub(crate) fn scan_schema_locations_iteratively(
             }
             Value::Object(map) => {
                 for (key, val) in map {
-                    let next_pointer = if frame.pointer.is_empty() {
-                        format!("/{}", key.replace('~', "~0").replace('/', "~1"))
-                    } else {
-                        format!("{}/{}", frame.pointer, key.replace('~', "~0").replace('/', "~1"))
-                    };
+                    let next_pointer = child_pointer(&frame.pointer, key);
 
                     if key == "$id" && !frame.pointer.is_empty() {
                         return Err(SchemaError::UnsupportedReference {
@@ -174,22 +166,12 @@ pub(crate) fn scan_schema_locations_iteratively(
                 // Maps of schemas
                 for kw in &["$defs", "properties", "patternProperties", "dependentSchemas"] {
                     if let Some(Value::Object(submap)) = map.get(*kw) {
+                        let keyword_pointer = child_pointer(&frame.pointer, kw);
                         for (subkey, subval) in submap {
-                            let sub_pointer = if frame.pointer.is_empty() {
-                                format!(
-                                    "/{}/{}",
-                                    kw.replace('~', "~0").replace('/', "~1"),
-                                    subkey.replace('~', "~0").replace('/', "~1")
-                                )
-                            } else {
-                                format!(
-                                    "{}/{}/{}",
-                                    frame.pointer,
-                                    kw.replace('~', "~0").replace('/', "~1"),
-                                    subkey.replace('~', "~0").replace('/', "~1")
-                                )
-                            };
-                            stack.push(SchemaFrame { schema: subval, pointer: sub_pointer });
+                            stack.push(SchemaFrame {
+                                schema: subval,
+                                pointer: child_pointer(&keyword_pointer, subkey),
+                            });
                         }
                     }
                 }
@@ -197,18 +179,12 @@ pub(crate) fn scan_schema_locations_iteratively(
                 // Arrays of schemas
                 for kw in &["prefixItems", "allOf", "anyOf", "oneOf"] {
                     if let Some(Value::Array(arr)) = map.get(*kw) {
+                        let keyword_pointer = child_pointer(&frame.pointer, kw);
                         for (i, subval) in arr.iter().enumerate() {
-                            let sub_pointer = if frame.pointer.is_empty() {
-                                format!("/{}/{}", kw.replace('~', "~0").replace('/', "~1"), i)
-                            } else {
-                                format!(
-                                    "{}/{}/{}",
-                                    frame.pointer,
-                                    kw.replace('~', "~0").replace('/', "~1"),
-                                    i
-                                )
-                            };
-                            stack.push(SchemaFrame { schema: subval, pointer: sub_pointer });
+                            stack.push(SchemaFrame {
+                                schema: subval,
+                                pointer: format!("{keyword_pointer}/{i}"),
+                            });
                         }
                     }
                 }
@@ -228,16 +204,10 @@ pub(crate) fn scan_schema_locations_iteratively(
                     "contentSchema",
                 ] {
                     if let Some(subval) = map.get(*kw) {
-                        let sub_pointer = if frame.pointer.is_empty() {
-                            format!("/{}", kw.replace('~', "~0").replace('/', "~1"))
-                        } else {
-                            format!(
-                                "{}/{}",
-                                frame.pointer,
-                                kw.replace('~', "~0").replace('/', "~1")
-                            )
-                        };
-                        stack.push(SchemaFrame { schema: subval, pointer: sub_pointer });
+                        stack.push(SchemaFrame {
+                            schema: subval,
+                            pointer: child_pointer(&frame.pointer, kw),
+                        });
                     }
                 }
             }
@@ -308,17 +278,19 @@ pub(crate) fn validate_reference_graph(
 
     let mut adj: HashMap<String, Vec<String>> = HashMap::new();
     for node in &keys {
-        let mut targets = Vec::new();
-        for edge in references {
-            let is_child = if node.is_empty() {
-                true
-            } else {
-                edge.schema_source == *node || edge.schema_source.starts_with(&format!("{}/", node))
-            };
-            if is_child {
-                targets.push(edge.target.clone());
-            }
-        }
+        // Built once per node rather than once per edge: this loop runs
+        // `nodes × references` times, and `max_references` alone admits half a
+        // million iterations.
+        let descendant_prefix = format!("{node}/");
+        let targets = references
+            .iter()
+            .filter(|edge| {
+                node.is_empty()
+                    || edge.schema_source == *node
+                    || edge.schema_source.starts_with(&descendant_prefix)
+            })
+            .map(|edge| edge.target.clone())
+            .collect();
         adj.insert(node.clone(), targets);
     }
 
