@@ -249,6 +249,7 @@ pub struct GeminiRealtimeSession {
     event_queue: Arc<Mutex<std::collections::VecDeque<ServerEvent>>>,
     schema_cache: Arc<adk_core::SchemaCache>,
     adapter: Arc<dyn adk_core::SchemaAdapter>,
+    frame_log: FrameLog,
 }
 
 impl GeminiRealtimeSession {
@@ -380,6 +381,15 @@ impl GeminiRealtimeSession {
         });
 
         let session_id = uuid::Uuid::new_v4().to_string();
+        let frame_log = FrameLog::new(
+            session_id.clone(),
+            match &backend {
+                GeminiLiveBackend::Studio { .. } => "studio",
+                #[cfg(feature = "vertex-live")]
+                GeminiLiveBackend::Vertex { .. } => "vertex",
+            },
+            model.to_string(),
+        );
 
         let session = Self {
             session_id,
@@ -391,6 +401,7 @@ impl GeminiRealtimeSession {
             event_queue: Arc::new(Mutex::new(std::collections::VecDeque::new())),
             schema_cache,
             adapter,
+            frame_log,
         };
 
         session.send_setup_with_compiled_tools(model, config, tools).await?;
@@ -574,14 +585,22 @@ impl GeminiRealtimeSession {
 
     /// Translate Gemini-specific events to unified format.
     fn translate_gemini_event(&self, raw: &str) -> Result<Vec<ServerEvent>> {
-        Self::translate_event_static(raw)
+        Self::translate_event_logged(raw, Some(&self.frame_log))
     }
 
+    /// Test entry point: no session, so no per-connection telemetry identity.
     pub(crate) fn translate_event_static(raw: &str) -> Result<Vec<ServerEvent>> {
+        Self::translate_event_logged(raw, None)
+    }
+
+    pub(crate) fn translate_event_logged(
+        raw: &str,
+        frame_log: Option<&FrameLog>,
+    ) -> Result<Vec<ServerEvent>> {
         tracing::debug!(%raw, "Translating Gemini event");
         let value: Value = serde_json::from_str(raw)
-            .map_err(|e| RealtimeError::protocol(format!("Parse error: {}, raw: {}", e, raw)))?;
-        log_frame_shape(&value);
+            .map_err(|e| RealtimeError::protocol(describe_unparseable_frame(raw, &e)))?;
+        log_frame_shape(&value, frame_log);
 
         // Check for setup completion
         if let Some(_setup_complete) = value.get("setupComplete") {
@@ -695,18 +714,41 @@ impl GeminiRealtimeSession {
             }
         }
 
-        // Catch the Server Update for sessionResumptionUpdate
-        // Note the intentional protocol asymmetry here: the client sends the parameter as handle,
-        // but the server transmits the parameter back as resumptionToken.
-        // Reference: https://ai.google.dev/gemini-api/docs/live-api/session-management
-        if let Some(resumption_update) = value.get("sessionResumptionUpdate")
-            && let Some(token) = resumption_update.get("resumptionToken").and_then(|t| t.as_str())
-        {
-            tracing::debug!("Received new Gemini 2.5 Native resumption token");
-            return Ok(vec![ServerEvent::SessionUpdated {
-                event_id: uuid::Uuid::new_v4().to_string(),
-                session: json!({ "resumeToken": token }),
-            }]);
+        // `sessionResumptionUpdate` carries `newHandle` and `resumable`. This
+        // read `resumptionToken`, under a comment asserting a protocol asymmetry
+        // — the server does not send that field, so the branch never fired and
+        // no handle was ever captured. Resumption looked supported and was not.
+        //
+        // `resumable` is not decoration: Google specifies a handle is usable
+        // only when it is true. An update with `resumable: false` means "there
+        // is no safe resume point right now", so it must not overwrite the last
+        // handle that *was* safe — that would trade a working resume point for
+        // an unusable one.
+        //
+        // Capturing the handle is not the same as being able to reconnect with
+        // it. Nothing here reconnects yet, so session resumption remains
+        // unsupported; this is the first of the two halves.
+        if let Some(resumption_update) = value.get("sessionResumptionUpdate") {
+            let resumable =
+                resumption_update.get("resumable").and_then(|r| r.as_bool()).unwrap_or(false);
+            let handle = resumption_update.get("newHandle").and_then(|h| h.as_str());
+            match (resumable, handle) {
+                (true, Some(handle)) => {
+                    tracing::debug!("Received a resumable Gemini session handle");
+                    return Ok(vec![ServerEvent::SessionUpdated {
+                        event_id: uuid::Uuid::new_v4().to_string(),
+                        session: json!({ "resumeHandle": handle }),
+                    }]);
+                }
+                _ => {
+                    tracing::debug!(
+                        resumable,
+                        has_handle = handle.is_some(),
+                        "Ignoring a non-resumable sessionResumptionUpdate"
+                    );
+                    return Ok(vec![]);
+                }
+            }
         }
 
         // Gemini withdraws function calls it already issued, normally because
@@ -1141,6 +1183,67 @@ fn gemini_response_modalities(modalities: Option<&[String]>) -> Vec<String> {
     }
 }
 
+/// Per-connection identity and counter for frame telemetry.
+///
+/// Owned by the session rather than being a `static`, so two concurrent calls
+/// produce two independently readable sequences instead of one interleaved
+/// stream that cannot be untangled after the fact.
+pub(crate) struct FrameLog {
+    session_id: String,
+    backend: &'static str,
+    model: String,
+    seq: std::sync::atomic::AtomicU64,
+}
+
+impl FrameLog {
+    pub(crate) fn new(session_id: String, backend: &'static str, model: String) -> Self {
+        Self { session_id, backend, model, seq: std::sync::atomic::AtomicU64::new(0) }
+    }
+}
+
+/// Describes a frame that could not be parsed, without quoting it.
+///
+/// The previous form was `format!("Parse error: {e}, raw: {raw}")`, which put
+/// the entire frame into an ordinary protocol error — and a Gemini frame carries
+/// `inputTranscription.text`, base64 audio and tool arguments. That error string
+/// travels wherever errors travel: logs, spans, an operator's terminal. The
+/// shape logger directly below this exists precisely to avoid that, and the
+/// error path went around it.
+///
+/// A length, a category and a hash are enough to correlate a bad frame with a
+/// capture and to tell two different bad frames apart, which is what diagnosis
+/// actually needs.
+fn describe_unparseable_frame(raw: &str, error: &serde_json::Error) -> String {
+    use std::hash::{Hash, Hasher};
+
+    let category = match error.classify() {
+        serde_json::error::Category::Io => "io",
+        serde_json::error::Category::Syntax => "syntax",
+        serde_json::error::Category::Data => "data",
+        serde_json::error::Category::Eof => "eof",
+    };
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    raw.hash(&mut hasher);
+    let payload_hash = hasher.finish();
+
+    if cfg!(feature = "record-payloads") {
+        return format!(
+            "invalid Gemini frame (category={category}, byte_length={}, \
+             payload_hash={payload_hash:016x}, line={}, column={}): {raw}",
+            raw.len(),
+            error.line(),
+            error.column(),
+        );
+    }
+    format!(
+        "invalid Gemini frame (category={category}, byte_length={}, \
+         payload_hash={payload_hash:016x}, line={}, column={})",
+        raw.len(),
+        error.line(),
+        error.column(),
+    )
+}
+
 /// Frame-shape telemetry: what arrived, never what it said.
 ///
 /// Deriving a caller-turn boundary on this provider needs the *ordering* of
@@ -1159,11 +1262,23 @@ fn gemini_response_modalities(modalities: Option<&[String]>) -> Vec<String> {
 /// arrived, the lifecycle booleans, how many parts and how many bytes, and the
 /// *length* of a transcript rather than its text. That is sufficient to
 /// reconstruct turn boundaries and still discloses nothing a caller said.
-fn log_frame_shape(value: &Value) {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static SEQ: AtomicU64 = AtomicU64::new(0);
+fn log_frame_shape(value: &Value, log: Option<&FrameLog>) {
+    use std::sync::atomic::Ordering;
 
-    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    // A process-global counter lived here, and the line carried no session
+    // identity. With one call on the box a capture reads correctly; with two it
+    // is a single interleaved sequence with no way to separate them, which is
+    // the situation any real deployment is in. The number is only useful if it
+    // is per-connection and the line says which connection.
+    let (session_id, backend, model, seq) = match log {
+        Some(log) => (
+            log.session_id.as_str(),
+            log.backend,
+            log.model.as_str(),
+            log.seq.fetch_add(1, Ordering::Relaxed),
+        ),
+        None => ("<detached>", "<detached>", "<detached>", 0),
+    };
     let kind = [
         "setupComplete",
         "serverContent",
@@ -1200,6 +1315,9 @@ fn log_frame_shape(value: &Value) {
 
     tracing::info!(
         target: "gemini_frame",
+        session_id,
+        backend,
+        model,
         seq,
         kind,
         interrupted = flag("interrupted"),
@@ -1498,6 +1616,74 @@ mod tests {
             gemini_parts[0].text.as_deref(),
             Some("[CRITICAL SYSTEM DIRECTIVE OVERRIDE]\nBe helpful")
         );
+    }
+
+    /// A malformed frame must not put what the caller said into an error string.
+    ///
+    /// The previous form interpolated the whole frame, and a Gemini frame
+    /// carries `inputTranscription.text`, base64 audio and tool arguments.
+    #[test]
+    fn unparseable_frames_do_not_leak_their_contents() {
+        let raw = r#"{"serverContent":{"inputTranscription":{"text":"my card number is 4111"#;
+        let error = GeminiRealtimeSession::translate_event_static(raw)
+            .expect_err("a truncated frame must not parse");
+        let rendered = error.to_string();
+
+        assert!(
+            !rendered.contains("4111") && !rendered.contains("my card number"),
+            "caller content reached an error string: {rendered}"
+        );
+        assert!(rendered.contains("byte_length="), "no length to diagnose with: {rendered}");
+        assert!(rendered.contains("payload_hash="), "no hash to correlate with: {rendered}");
+        assert!(rendered.contains("category="), "no parse category: {rendered}");
+    }
+
+    /// Two different bad frames must be distinguishable, or the hash is useless
+    /// for telling a repeated fault from a new one.
+    #[test]
+    fn unparseable_frames_hash_differently() {
+        let first = GeminiRealtimeSession::translate_event_static(r#"{"a":"#)
+            .expect_err("truncated")
+            .to_string();
+        let second = GeminiRealtimeSession::translate_event_static(r#"{"b":"#)
+            .expect_err("truncated")
+            .to_string();
+        assert_ne!(first, second);
+    }
+
+    /// The field the server actually sends. `resumptionToken` was never sent, so
+    /// this branch never fired and no handle was ever captured.
+    #[test]
+    fn resumable_session_update_yields_the_new_handle() {
+        let raw = r#"{"sessionResumptionUpdate":{"newHandle":"handle-abc","resumable":true}}"#;
+        let events = GeminiRealtimeSession::translate_event_static(raw).unwrap();
+
+        match events.as_slice() {
+            [ServerEvent::SessionUpdated { session, .. }] => {
+                assert_eq!(
+                    session.get("resumeHandle").and_then(|h| h.as_str()),
+                    Some("handle-abc")
+                );
+            }
+            other => panic!("expected one SessionUpdated, got {other:?}"),
+        }
+    }
+
+    /// `resumable: false` means "no safe resume point right now". Emitting the
+    /// handle anyway would let a caller overwrite a working resume point with an
+    /// unusable one.
+    #[test]
+    fn non_resumable_session_update_yields_no_handle() {
+        for raw in [
+            r#"{"sessionResumptionUpdate":{"newHandle":"handle-abc","resumable":false}}"#,
+            r#"{"sessionResumptionUpdate":{"newHandle":"handle-abc"}}"#,
+            r#"{"sessionResumptionUpdate":{"resumable":true}}"#,
+            // The field the old code read. It is not part of the contract.
+            r#"{"sessionResumptionUpdate":{"resumptionToken":"handle-abc"}}"#,
+        ] {
+            let events = GeminiRealtimeSession::translate_event_static(raw).unwrap();
+            assert!(events.is_empty(), "expected no event for {raw}, got {events:?}");
+        }
     }
 
     #[test]
