@@ -39,3 +39,29 @@ pub enum ReferencePolicy {
     /// Strict local JSON Pointer resolution with iterative cycle checks.
     LocalJsonPointerAcyclic,
 }
+
+/// Limits applied when validating an instance against a compiled schema.
+///
+/// [`IngestionPolicy`] bounds the schema; this bounds the instance, which is the
+/// side carrying untrusted input from models, users, and remote tools.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValidationOptions {
+    /// Stops collecting after this many issues.
+    ///
+    /// [`crate::SchemaError::InvalidInstance`] records that the limit was reached, so a
+    /// capped list is distinguishable from a complete one.
+    pub max_issues: usize,
+    /// Includes the offending instance values in issue messages.
+    ///
+    /// Defaults to `false`: instances validated here routinely carry
+    /// caller-supplied data, and the underlying error's `Display` embeds the
+    /// failing value. The JSON pointer and failed keyword are retained either
+    /// way.
+    pub include_instance_values: bool,
+}
+
+impl Default for ValidationOptions {
+    fn default() -> Self {
+        Self { max_issues: 100, include_instance_values: false }
+    }
+}
