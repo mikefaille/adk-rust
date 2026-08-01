@@ -7,8 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **adk-schema: `ValidationOptions` and `ValidatedSchemaDocument::validate_with`.**
+  `validate_with` takes an explicit issue limit and chooses whether messages may
+  quote the offending instance values; `validate` delegates to it under
+  `ValidationOptions::default()`. `SchemaError::InvalidInstance` gains
+  `truncated`, so a capped issue list is distinguishable from a complete one.
+
 ### Changed
 
+- **adk-schema: `validate` masks instance values and bounds issue collection.**
+  Messages are rendered through the underlying error's `masked()` wrapper, which
+  keeps the failed keyword and constraint and replaces the instance value with a
+  placeholder — instances validated here routinely carry caller-supplied data.
+  Collection stops at 100 issues by default; ingestion was already bounded while
+  the instance side was not. Both defaults are overridable through
+  `validate_with`.
+- **adk-schema: canonicalization normalizes integral floats.** `{"maximum": 5}`
+  and `{"maximum": 5.0}` are the same constraint and now share a digest, so
+  schema identity does not depend on which form a producer emitted. Follows
+  RFC 8785 (JCS) for the integral-float case.
+- **adk-schema: `SchemaError`, `LimitKind`, `ReferenceRejection`,
+  `JsonSchemaDialect`, and `ValidationIssue` are `#[non_exhaustive]`.** Adding a
+  variant or field is no longer a breaking change for downstream matches.
+  `ValidationOptions` is deliberately exhaustive so `..Default::default()`
+  construction keeps working.
+- **jsonschema is consolidated on 0.47 across the workspace.** `adk-agent`
+  (0.28), `adk-guardrail`, and `adk-payments` (0.45) move to the version
+  `adk-schema` already used, removing two duplicate `jsonschema` and two
+  duplicate `referencing` crates from every build. The API surface in use —
+  `validator_for` and `Validator` — is unchanged across those releases.
 - **adk-codeact-monty joined the root workspace.** Monty is on crates.io since
   `0.0.19`, so the crate's git dependency (and the empty `[workspace]` table it
   forced) is gone: it now depends on `monty`, `monty-types`, and `monty-fs`

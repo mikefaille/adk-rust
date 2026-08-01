@@ -57,6 +57,7 @@ The table below assigns one stability tier to every public `adk-*` crate in the 
 | `awp-types` | **Beta** | AWP protocol types, zero `adk-*` dependencies |
 | `adk-devtools` | **Beta** | Coding-agent dev tools scoped to a `Workspace` (new in 2.0.0) |
 | `adk-computer-use` | **Beta** | Governed orchestration for the `computer-use-mcp` server (new in 2.0.0) |
+| `adk-schema` | **Beta** | Canonical JSON Schema documents, bounded ingestion, and role-typed identity |
 | `adk-enterprise` | **Experimental** | Enterprise client SDK for ADK-Rust Managed Agent Service |
 | `adk-managed` | **Experimental** | Managed agent runtime engine |
 
@@ -73,6 +74,7 @@ minor release. Every other crate was promoted to Stable in 1.0.0.
 | `awp-types` | Mirrors the AWP wire format, so it moves with the spec | Stabilize alongside `adk-awp` |
 | `adk-devtools` | New in 2.0.0; the coding-agent tool surface is still being shaped by use | Promote after 1-2 release cycles without breaking changes |
 | `adk-computer-use` | New in 2.0.0; tracks the `computer-use-mcp` wire contracts | Stabilize when the upstream contracts are versioned |
+| `adk-schema` | New in 2.0.0; the introspection surface over canonical documents is still being shaped by use | Promote once the document API absorbs a second consumer without breaking changes |
 
 ### Excluded from Workspace
 
