@@ -589,6 +589,7 @@ impl GeminiRealtimeSession {
     }
 
     /// Test entry point: no session, so no per-connection telemetry identity.
+    #[cfg(test)]
     pub(crate) fn translate_event_static(raw: &str) -> Result<Vec<ServerEvent>> {
         Self::translate_event_logged(raw, None)
     }
