@@ -1,5 +1,5 @@
 [workspace]
-resolver = "2"
+resolver = "3"
 members = [
     # Core packages (publishable to crates.io)
     "adk-core",
@@ -37,6 +37,9 @@ members = [
     "adk-retry-reflect",
     "adk-schema",
 
+    # Python CodeRuntime for the CodeActAgent (Monty is on crates.io since 0.0.19)
+    "adk-codeact-monty",
+
     # AWP protocol crates
     "awp-types",
     "adk-awp",
@@ -65,10 +68,6 @@ members = [
 exclude = [
     # Extracted to standalone repo: https://github.com/zavora-ai/adk-studio
     "adk-studio",
-
-    # Python CodeRuntime for the CodeAgent — its own workspace because it depends
-    # on `monty` via git (not yet on crates.io).
-    "adk-codeact-monty",
 
     # Standalone example crates (have their own [workspace] key)
     "examples/enterprise_custom_tool",
@@ -121,7 +120,7 @@ opt-level = 2
 [workspace.package]
 version = "2.0.0"
 edition = "2024"
-rust-version = "1.94.0"
+rust-version = "1.95"
 license = "Apache-2.0"
 authors = ["James Karanja Maina <james.karanja@zavora.ai>"]
 homepage = "https://www.zavora.ai"
