@@ -17,10 +17,14 @@
 #![deny(missing_docs)]
 
 mod canonical;
+mod diff;
 mod digest;
 mod document;
 mod error;
+mod fields;
 mod ingest;
+mod outstanding;
+mod pointer;
 mod policy;
 mod references;
 mod role;
@@ -29,10 +33,13 @@ mod static_schema;
 #[cfg(feature = "runtime-validation")]
 mod validation;
 
+pub use diff::{Difference, DifferenceKind};
 pub use digest::SchemaDigest;
 pub use document::{JsonSchemaDialect, SchemaDirection, SchemaDocument, SchemaMetrics};
 pub use error::{LimitKind, ReferenceRejection, Result, SchemaError, ValidationIssue};
-pub use policy::{IngestionPolicy, ReferencePolicy};
+pub use fields::FieldEntry;
+pub use outstanding::Outstanding;
+pub use policy::{IngestionPolicy, ReferencePolicy, ValidationOptions};
 pub use role::{Input, InputSchema, Output, OutputSchema, SchemaRole};
 
 #[cfg(feature = "runtime-validation")]
