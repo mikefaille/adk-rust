@@ -15,10 +15,8 @@ pub struct SchemaCache {
 fn canonicalize_value(mut val: Value) -> Value {
     match val {
         Value::Object(ref mut map) => {
-            let mut entries: Vec<(String, Value)> = std::mem::take(map)
-                .into_iter()
-                .map(|(k, v)| (k, canonicalize_value(v)))
-                .collect();
+            let mut entries: Vec<(String, Value)> =
+                std::mem::take(map).into_iter().map(|(k, v)| (k, canonicalize_value(v))).collect();
             entries.sort_by(|a, b| a.0.cmp(&b.0));
             for (k, v) in entries {
                 map.insert(k, v);
@@ -239,7 +237,11 @@ mod tests {
         assert_eq!(cache.len(), 1);
 
         cache.get_or_normalize(&schema2, &adapter);
-        assert_eq!(cache.len(), 2, "Genuinely different schemas should produce distinct cache entries");
+        assert_eq!(
+            cache.len(),
+            2,
+            "Genuinely different schemas should produce distinct cache entries"
+        );
     }
 
     #[test]
@@ -270,6 +272,10 @@ mod tests {
         assert_eq!(cache.len(), 1);
 
         cache.get_or_normalize(&val2, &adapter);
-        assert_eq!(cache.len(), 2, "Distinct failing schemas must not collapse onto a single cache key");
+        assert_eq!(
+            cache.len(),
+            2,
+            "Distinct failing schemas must not collapse onto a single cache key"
+        );
     }
 }
