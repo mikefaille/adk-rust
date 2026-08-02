@@ -880,7 +880,7 @@ impl LlmAgentBuilder {
                     adk_core::ErrorComponent::Agent,
                     adk_core::ErrorCategory::InvalidInput,
                     "code.gemini_interactions_conflict",
-                    "Cannot combine Gemini Interactions API (server-managed environment)                      with client-side sandbox tools (Shell/Filesystem). These provide                      competing filesystems and would produce nondeterministic behavior.                      Either disable use_interactions_api or remove sandbox capabilities.",
+                    "Cannot combine Gemini Interactions API (server-managed environment) with client-side sandbox tools (Shell/Filesystem). These provide competing filesystems and would produce nondeterministic behavior. Either disable use_interactions_api or remove sandbox capabilities.",
                 ));
             }
         }
