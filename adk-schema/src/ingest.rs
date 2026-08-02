@@ -342,3 +342,52 @@ pub(crate) fn validate_reference_graph(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    /// A zero limit must reject, not wave everything through.
+    ///
+    /// `ValidationOptions::max_issues` had exactly this bug — the cap was
+    /// checked before anything was recorded, so a limit of zero turned into a
+    /// bypass. These pin the ingestion limits against the same shape.
+    mod zero_limits {
+        use crate::{IngestionPolicy, InputSchema};
+        use serde_json::json;
+
+        fn rejected_under(policy: IngestionPolicy) -> bool {
+            InputSchema::from_value(
+                json!({ "type": "object", "properties": { "a": { "type": "string" } } }),
+                &policy,
+            )
+            .is_err()
+        }
+
+        #[test]
+        fn zero_depth_rejects() {
+            assert!(rejected_under(IngestionPolicy { max_depth: 0, ..Default::default() }));
+        }
+
+        #[test]
+        fn zero_nodes_rejects() {
+            assert!(rejected_under(IngestionPolicy { max_nodes: 0, ..Default::default() }));
+        }
+
+        #[test]
+        fn zero_canonical_bytes_rejects() {
+            assert!(rejected_under(IngestionPolicy {
+                max_canonical_bytes: 0,
+                ..Default::default()
+            }));
+        }
+
+        /// `max_source_bytes` guards the raw-bytes entry point; `from_value`
+        /// has no source to measure, which is why this one is stated on
+        /// `from_json_slice`.
+        #[test]
+        fn zero_source_bytes_rejects_raw_input() {
+            let policy = IngestionPolicy { max_source_bytes: 0, ..Default::default() };
+
+            assert!(InputSchema::from_json_slice(br#"{"type":"object"}"#, &policy).is_err());
+        }
+    }
+}
