@@ -23,9 +23,9 @@ use std::sync::Mutex;
 /// Change an adapter's `version` and its old entries stop being used. You do
 /// not need to clear the cache.
 ///
-/// Key order is ignored on purpose. `serde_json` keeps object keys in the order
-/// they were written, so the same schema built two different ways would
-/// otherwise count as two schemas.
+/// Key order is ignored on purpose. When `serde_json/preserve_order` is enabled
+/// it keeps object keys in the order they were written, so the same schema built
+/// two different ways would otherwise count as two schemas.
 ///
 /// # Limits
 ///
@@ -43,7 +43,9 @@ pub struct SchemaCache {
 ///
 /// - **Object keys are sorted first.** The order they were written in cannot
 ///   change the hash.
-/// - **Nothing is copied.** This runs on every lookup, including ones that hit.
+/// - **No JSON values are cloned.** Object members are collected into a
+///   temporary `Vec` so they can be sorted. This runs on every lookup,
+///   including ones that hit.
 /// - **Each kind of value gets its own marker.** The text `"1"` and the number
 ///   `1` hash differently.
 fn hash_canonical(value: &Value, hasher: &mut DefaultHasher) {
@@ -55,19 +57,14 @@ fn hash_canonical(value: &Value, hasher: &mut DefaultHasher) {
         }
         Value::Number(number) => {
             2u8.hash(hasher);
-            // `Number` is not `Hash`. Integers keep their exact value; a float
-            // hashes by its bits, which is sound here because `Value` cannot
-            // hold NaN.
-            if let Some(unsigned) = number.as_u64() {
-                0u8.hash(hasher);
-                unsigned.hash(hasher);
-            } else if let Some(signed) = number.as_i64() {
-                1u8.hash(hasher);
-                signed.hash(hasher);
-            } else if let Some(float) = number.as_f64() {
-                2u8.hash(hasher);
-                float.to_bits().hash(hasher);
-            }
+            // `Number` is not `Hash`, so hash its written form. That form is
+            // exact in every build. Going through `as_u64`/`as_i64`/`as_f64`
+            // is not: with `serde_json/arbitrary_precision` the literal is
+            // kept as text, the integer accessors return `None` outside their
+            // range, and `as_f64` rounds — so two schemas differing past
+            // f64's precision would hash alike and the second would receive
+            // the first one's normalized schema.
+            number.to_string().hash(hasher);
         }
         Value::String(text) => {
             3u8.hash(hasher);
@@ -162,7 +159,7 @@ impl SchemaCache {
         adapter: &dyn SchemaAdapter,
         operation: &str,
     ) -> u64 {
-        // Use a robust, collision-resistant identity for the cache key.
+        // Build a compact cache identity.
         let mut hasher = DefaultHasher::new();
 
         // 1. Identity of the schema content itself, independent of key order.
@@ -300,6 +297,26 @@ mod tests {
     }
 
     /// A string and a number that render alike must not collide.
+    /// Numbers are identified by their written form, so `5` and `5.0` are
+    /// different schemas.
+    ///
+    /// This also closes an `arbitrary_precision` hazard that cannot be
+    /// reproduced here: with that feature a literal wider than f64 is kept
+    /// verbatim, and identifying numbers via `as_f64` would round distinct
+    /// values onto one cache entry. Without the feature `serde_json` already
+    /// collapses such literals while parsing, so exercising it would mean
+    /// enabling the feature for every crate in the build.
+    #[test]
+    fn test_cache_identifies_numbers_by_written_form() {
+        let cache = SchemaCache::new();
+        let adapter = MockAdapter("m");
+
+        cache.get_or_normalize(&json!({ "const": 5 }), &adapter);
+        cache.get_or_normalize(&json!({ "const": 5.0 }), &adapter);
+
+        assert_eq!(cache.len(), 2, "5 and 5.0 must not share a cache entry");
+    }
+
     #[test]
     fn test_cache_separates_values_of_different_types() {
         let cache = SchemaCache::new();
