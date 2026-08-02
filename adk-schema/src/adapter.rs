@@ -31,6 +31,12 @@ impl<R: SchemaRole> Projection<R> {
     ///
     /// The dangerous shape: the model is shown a looser contract than the one
     /// it will be judged against, so it cannot know which rule it broke.
+    ///
+    /// Deliberately conservative. A constraint present on both sides with a
+    /// different value — `minimum: 1` becoming `minimum: 5` — counts, because
+    /// ordering the two requires per-keyword semantics this crate does not
+    /// model. It over-reports a projection that tightened rather than staying
+    /// quiet about one that loosened.
     pub fn leaves_enforcement_gap(&self) -> bool {
         self.dropped.iter().any(Difference::leaves_enforcement_gap)
     }
@@ -123,5 +129,66 @@ mod tests {
             .expect("projection ingests");
 
         assert!(!projection.leaves_enforcement_gap(), "{:#?}", projection.dropped);
+    }
+
+    /// A projection that changed nothing reports nothing, so the signal stays
+    /// worth reading.
+    #[test]
+    fn an_identity_projection_reports_no_losses() {
+        #[derive(Debug)]
+        struct Identity;
+        impl SchemaAdapter for Identity {
+            fn normalize_schema(&self, schema: serde_json::Value) -> serde_json::Value {
+                schema
+            }
+        }
+
+        let canonical = ingest(json!({ "type": "object", "minimum": 1 }));
+
+        let projection =
+            Identity.project(&canonical, &IngestionPolicy::default()).expect("projection ingests");
+
+        assert!(projection.dropped.is_empty(), "{:#?}", projection.dropped);
+    }
+
+    /// Adapter output is re-ingested, not trusted. A provider that emits a
+    /// remote reference must not get one past the reference policy just by
+    /// being on the far side of a projection.
+    #[test]
+    fn adapter_output_that_violates_the_policy_is_rejected() {
+        #[derive(Debug)]
+        struct EmitsRemoteRef;
+        impl SchemaAdapter for EmitsRemoteRef {
+            fn normalize_schema(&self, _: serde_json::Value) -> serde_json::Value {
+                json!({ "$ref": "https://example.invalid/schema.json" })
+            }
+        }
+
+        let canonical = ingest(json!({ "type": "object" }));
+
+        let result = EmitsRemoteRef.project(&canonical, &IngestionPolicy::default());
+
+        assert!(result.is_err(), "a remote $ref survived projection");
+    }
+
+    /// A projection that tightens is still reported. The direction cannot be
+    /// ordered without per-keyword semantics, so the conservative reading wins.
+    #[test]
+    fn a_tightening_projection_is_reported_rather_than_assumed_safe() {
+        #[derive(Debug)]
+        struct Tightens;
+        impl SchemaAdapter for Tightens {
+            fn normalize_schema(&self, mut schema: serde_json::Value) -> serde_json::Value {
+                schema["minimum"] = json!(5);
+                schema
+            }
+        }
+
+        let canonical = ingest(json!({ "type": "object", "minimum": 1 }));
+
+        let projection =
+            Tightens.project(&canonical, &IngestionPolicy::default()).expect("projection ingests");
+
+        assert!(projection.leaves_enforcement_gap());
     }
 }
