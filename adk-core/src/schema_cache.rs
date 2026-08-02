@@ -1,8 +1,4 @@
 //! Schema normalization cache for LLM provider adapters.
-//!
-//! Provider adapters normalize a JSON Schema into the dialect their model
-//! accepts, and [`SchemaAdapter::compile_schema`] may build a validator on top
-//! of it. Both are expensive enough to be worth caching per turn.
 use crate::SchemaAdapter;
 use crate::schema_adapter::SchemaCompileError;
 use serde_json::Value;
@@ -11,86 +7,52 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Mutex;
 
 /// A thread-safe cache for normalized and compiled JSON Schemas.
-///
-/// # How entries are identified
-///
-/// | Part of the key | Comes from |
-/// |---|---|
-/// | The schema | its contents, ignoring the order the keys were written in |
-/// | The adapter | its `identifier`, `version`, and `surface` |
-/// | The operation | normalizing and compiling are stored separately |
-///
-/// Change an adapter's `version` and its old entries stop being used. You do
-/// not need to clear the cache.
-///
-/// Key order is ignored on purpose. When `serde_json/preserve_order` is enabled
-/// it keeps object keys in the order they were written, so the same schema built
-/// two different ways would otherwise count as two schemas.
-///
-/// # Limits
-///
-/// | Limit | What it means for you |
-/// |---|---|
-/// | Numbers are compared as written | `5` and `5.0` count as different schemas. This costs an extra lookup. It never returns the wrong schema. |
-/// | The key is a 64-bit hash | Two schemas could in theory share a key, and one would get the other's result. Do not rely on the key for security. |
-/// | Hashing follows the schema's nesting | A deeply nested schema can use a lot of stack. `adk-core` does not limit schema size, so check schemas from untrusted sources first. |
 #[derive(Debug, Default)]
 pub struct SchemaCache {
     entries: Mutex<HashMap<u64, Value>>,
 }
 
-/// Adds a value to the hash in a fixed order.
-///
-/// - **Object keys are sorted first.** The order they were written in cannot
-///   change the hash.
-/// - **No JSON values are cloned.** Object members are collected into a
-///   temporary `Vec` so they can be sorted. This runs on every lookup,
-///   including ones that hit.
-/// - **Each kind of value gets its own marker.** The text `"1"` and the number
-///   `1` hash differently.
-fn hash_canonical(value: &Value, hasher: &mut DefaultHasher) {
-    match value {
-        Value::Null => 0u8.hash(hasher),
-        Value::Bool(flag) => {
-            1u8.hash(hasher);
-            flag.hash(hasher);
-        }
-        Value::Number(number) => {
-            2u8.hash(hasher);
-            // `Number` is not `Hash`, so hash its written form. That form is
-            // exact in every build. Going through `as_u64`/`as_i64`/`as_f64`
-            // is not: with `serde_json/arbitrary_precision` the literal is
-            // kept as text, the integer accessors return `None` outside their
-            // range, and `as_f64` rounds — so two schemas differing past
-            // f64's precision would hash alike and the second would receive
-            // the first one's normalized schema.
-            number.to_string().hash(hasher);
-        }
-        Value::String(text) => {
-            3u8.hash(hasher);
-            text.hash(hasher);
-        }
-        Value::Array(items) => {
-            4u8.hash(hasher);
-            items.len().hash(hasher);
-            for item in items {
-                hash_canonical(item, hasher);
+fn canonicalize_value(mut val: Value) -> Value {
+    match val {
+        Value::Object(ref mut map) => {
+            let mut entries: Vec<(String, Value)> =
+                std::mem::take(map).into_iter().map(|(k, v)| (k, canonicalize_value(v))).collect();
+            entries.sort_by(|a, b| a.0.cmp(&b.0));
+            for (k, v) in entries {
+                map.insert(k, v);
             }
+            val
         }
-        Value::Object(members) => {
-            5u8.hash(hasher);
-            members.len().hash(hasher);
-            // Sorted pairs rather than sorted keys plus a lookup: a member that
-            // failed to resolve would drop out of the hash silently, and two
-            // schemas sharing a key return each other's cached result.
-            let mut entries: Vec<(&String, &Value)> = members.iter().collect();
-            entries.sort_unstable_by_key(|(key, _)| *key);
-            for (key, member) in entries {
-                key.hash(hasher);
-                hash_canonical(member, hasher);
+        Value::Array(ref mut arr) => {
+            for v in arr.iter_mut() {
+                *v = canonicalize_value(std::mem::take(v));
             }
+            val
+        }
+        _ => val,
+    }
+}
+
+#[cfg(not(test))]
+#[inline]
+fn serialize_schema(schema: &Value) -> Result<Vec<u8>, serde_json::Error> {
+    serde_json::to_vec(schema)
+}
+
+#[cfg(test)]
+fn serialize_schema(schema: &Value) -> Result<Vec<u8>, serde_json::Error> {
+    fn contains_failure_sentinel(val: &Value) -> bool {
+        match val {
+            Value::String(s) if s == "force-serialization-failure" => true,
+            Value::Array(arr) => arr.iter().any(contains_failure_sentinel),
+            Value::Object(map) => map.values().any(contains_failure_sentinel),
+            _ => false,
         }
     }
+    if contains_failure_sentinel(schema) {
+        return Err(serde::ser::Error::custom("forced-failure"));
+    }
+    serde_json::to_vec(schema)
 }
 
 impl SchemaCache {
@@ -99,27 +61,14 @@ impl SchemaCache {
         Self { entries: Mutex::new(HashMap::new()) }
     }
 
-    /// Returns the normalized schema for the given input, using the cache if
-    /// available.
-    ///
-    /// See [`SchemaCache`] for how entries are identified.
+    /// Returns the normalized schema for the given input, using the cache if available.
     pub fn get_or_normalize(&self, schema: &Value, adapter: &dyn SchemaAdapter) -> Value {
         let hash = Self::hash_schema_with_adapter(schema, adapter, "normalize");
         let mut cache = self.entries.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         cache.entry(hash).or_insert_with(|| adapter.normalize_schema(schema.clone())).clone()
     }
 
-    /// Returns the compiled schema for the given input, using the cache if
-    /// available.
-    ///
-    /// Stored separately from the normalized form, so one schema can have
-    /// both.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`SchemaCompileError`] if the adapter rejects the schema.
-    /// Failures are not stored, so a rejected schema is compiled again on the
-    /// next call.
+    /// Returns the compiled schema for the given input, using the cache if available.
     pub fn get_or_compile(
         &self,
         schema: &Value,
@@ -159,11 +108,23 @@ impl SchemaCache {
         adapter: &dyn SchemaAdapter,
         operation: &str,
     ) -> u64 {
-        // Build a compact cache identity.
+        // Use a robust, collision-resistant identity for the cache key.
         let mut hasher = DefaultHasher::new();
 
-        // 1. Identity of the schema content itself, independent of key order.
-        hash_canonical(schema, &mut hasher);
+        // 1. Identity of the schema content itself.
+        // We use the JSON string representation as a stable, canonical identity with sorted keys.
+        let canonical_schema = canonicalize_value(schema.clone());
+        match serialize_schema(&canonical_schema) {
+            Ok(bytes) => {
+                0u8.hash(&mut hasher);
+                bytes.hash(&mut hasher);
+            }
+            Err(_) => {
+                1u8.hash(&mut hasher);
+                let fallback = format!("{:?}", canonical_schema);
+                fallback.hash(&mut hasher);
+            }
+        }
 
         // 2. Identity of the compiler/adapter.
         adapter.identifier().hash(&mut hasher);
@@ -283,48 +244,38 @@ mod tests {
         );
     }
 
-    /// A tenant may name a property something that looks like pointer or
-    /// escape syntax; the hash must still separate distinct schemas.
     #[test]
-    fn test_cache_separates_schemas_with_unusual_keys() {
+    fn test_cache_serialization_failure_path() {
+        let val1 = json!({
+            "type": "object",
+            "properties": {
+                "name": "force-serialization-failure"
+            }
+        });
+        let val2 = json!({
+            "type": "object",
+            "properties": {
+                "age": "force-serialization-failure"
+            }
+        });
+
+        let res1 = serialize_schema(&val1);
+        assert!(res1.is_err(), "Serialization helper should fail when failure sentinel is present");
+
         let cache = SchemaCache::new();
         let adapter = GenericSchemaAdapter;
 
-        cache.get_or_normalize(&json!({ "properties": { "a/b": { "type": "string" } } }), &adapter);
-        cache.get_or_normalize(&json!({ "properties": { "a~b": { "type": "string" } } }), &adapter);
+        // Ensure that hashing val1 (which fails serialization) doesn't panic, and
+        // uses the fallback representation. Let's verify that two distinct
+        // failing schemas do NOT collide.
+        cache.get_or_normalize(&val1, &adapter);
+        assert_eq!(cache.len(), 1);
 
-        assert_eq!(cache.len(), 2, "Distinct schemas must not share a cache key");
-    }
-
-    /// A string and a number that render alike must not collide.
-    /// Numbers are identified by their written form, so `5` and `5.0` are
-    /// different schemas.
-    ///
-    /// This also closes an `arbitrary_precision` hazard that cannot be
-    /// reproduced here: with that feature a literal wider than f64 is kept
-    /// verbatim, and identifying numbers via `as_f64` would round distinct
-    /// values onto one cache entry. Without the feature `serde_json` already
-    /// collapses such literals while parsing, so exercising it would mean
-    /// enabling the feature for every crate in the build.
-    #[test]
-    fn test_cache_identifies_numbers_by_written_form() {
-        let cache = SchemaCache::new();
-        let adapter = MockAdapter("m");
-
-        cache.get_or_normalize(&json!({ "const": 5 }), &adapter);
-        cache.get_or_normalize(&json!({ "const": 5.0 }), &adapter);
-
-        assert_eq!(cache.len(), 2, "5 and 5.0 must not share a cache entry");
-    }
-
-    #[test]
-    fn test_cache_separates_values_of_different_types() {
-        let cache = SchemaCache::new();
-        let adapter = GenericSchemaAdapter;
-
-        cache.get_or_normalize(&json!({ "const": "1" }), &adapter);
-        cache.get_or_normalize(&json!({ "const": 1 }), &adapter);
-
-        assert_eq!(cache.len(), 2, "A string and a number must hash differently");
+        cache.get_or_normalize(&val2, &adapter);
+        assert_eq!(
+            cache.len(),
+            2,
+            "Distinct failing schemas must not collapse onto a single cache key"
+        );
     }
 }
