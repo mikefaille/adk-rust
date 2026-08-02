@@ -606,6 +606,30 @@ pub enum ServerEvent {
     Unknown,
 }
 
+/// Which server event carried the evidence that the caller was active.
+///
+/// Content-free on purpose. An application gating an action on "did the caller
+/// do something since we asked?" needs the *ordering* of that evidence and
+/// nothing else, and passing the transcript would invite gating on its words —
+/// which is keyword matching, not a lifecycle boundary, and obliges every
+/// consumer to handle caller speech it may not be allowed to retain.
+///
+/// The variants are ranked by how much they actually establish, weakest first.
+/// A transcript is produced by a remote transcription service and is not
+/// guaranteed to be ordered against other server messages, so its arrival after
+/// a given moment does not prove the speech happened after that moment. Speech
+/// offset from provider VAD is stronger. Neither is as strong as observing the
+/// caller's audio directly, which no provider event can give you.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum CallerActivitySource {
+    /// A partial input transcript arrived. One utterance yields several.
+    TranscriptDelta,
+    /// The provider finalized an input transcript item.
+    TranscriptCompleted,
+    /// The provider's VAD reported the caller stopped speaking.
+    SpeechStopped,
+}
+
 /// Error information from the server.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ErrorInfo {

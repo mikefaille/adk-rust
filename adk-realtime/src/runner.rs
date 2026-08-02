@@ -5,7 +5,7 @@
 
 use crate::config::{RealtimeConfig, SessionUpdateConfig, ToolDefinition};
 use crate::error::{RealtimeError, Result};
-use crate::events::{ServerEvent, ToolCall, ToolResponse};
+use crate::events::{CallerActivitySource, ServerEvent, ToolCall, ToolResponse};
 use crate::model::BoxedModel;
 use crate::session::ContextMutationOutcome;
 use async_trait::async_trait;
@@ -101,6 +101,25 @@ where
     }
 }
 
+/// Maps a server event to the caller-activity evidence it carries, if any.
+///
+/// The single place this question is answered. Adding a provider event that
+/// indicates caller activity means adding it here, and every consumer of the
+/// runner picks it up at once.
+pub fn caller_activity_source(event: &ServerEvent) -> Option<CallerActivitySource> {
+    match event {
+        ServerEvent::InputTranscriptDelta { .. } => Some(CallerActivitySource::TranscriptDelta),
+        ServerEvent::InputTranscriptCompleted { .. } => {
+            Some(CallerActivitySource::TranscriptCompleted)
+        }
+        ServerEvent::SpeechStopped { .. } => Some(CallerActivitySource::SpeechStopped),
+        // `SpeechStarted` is deliberately absent: the caller starting to speak
+        // is a barge-in signal, not evidence that they said anything an
+        // application should act on.
+        _ => None,
+    }
+}
+
 /// Event handler for processing realtime events.
 #[async_trait]
 pub trait EventHandler: Send + Sync {
@@ -124,7 +143,33 @@ pub trait EventHandler: Send + Sync {
     /// Consumers that only need a turn boundary should use `item_id` and avoid
     /// retaining `transcript`; the callback includes both so applications that
     /// explicitly own transcript persistence do not need a parallel event loop.
+    ///
+    /// Not every provider emits this. Gemini Live does not, so a handler that
+    /// treats it as its only caller-activity signal observes nothing at all on
+    /// that backend — use [`EventHandler::on_caller_activity`] instead.
     async fn on_input_transcript_completed(&self, _transcript: &str, _item_id: &str) -> Result<()> {
+        Ok(())
+    }
+
+    /// Called whenever a server event indicates the caller was active.
+    ///
+    /// This exists because "the caller did something" was previously only
+    /// derivable by picking the right subset of events yourself, and two
+    /// consumers of the same runner picked different subsets: one observed
+    /// `InputTranscriptDelta` directly off the event stream and worked on
+    /// Gemini, the other used `on_input_transcript_completed` and — since
+    /// Gemini never emits it — silently observed nothing. Both were reading the
+    /// same session. Deriving activity in the runner, once, is what stops that
+    /// class of divergence: a provider event added to the mapping reaches every
+    /// consumer at the same time.
+    ///
+    /// Fires *in addition to* the specific callback for the same event, so a
+    /// handler implementing both sees both. Ordering between the two is not
+    /// part of the contract.
+    ///
+    /// See [`CallerActivitySource`] for what each source does and does not
+    /// establish; they are not interchangeable strengths of evidence.
+    async fn on_caller_activity(&self, _source: CallerActivitySource) -> Result<()> {
         Ok(())
     }
 
@@ -951,6 +996,15 @@ impl RealtimeRunner {
             _ => {}
         }
 
+        // Derived ahead of the match below, and from the event rather than from
+        // inside an arm, so that caller-activity coverage cannot drift with
+        // whichever arms happen to exist. The match below ends in `_ => {}`, so
+        // a missing arm is silent — which is exactly how `InputTranscriptDelta`
+        // came to reach one consumer of this runner and not another.
+        if let Some(source) = caller_activity_source(&event) {
+            self.event_handler.on_caller_activity(source).await?;
+        }
+
         match event {
             ServerEvent::AudioDelta { delta, item_id, .. } => {
                 self.event_handler.on_audio(&delta, &item_id).await?;
@@ -1705,6 +1759,86 @@ mod runner_tests {
 
         assert_eq!(completed.load(Ordering::SeqCst), 1);
         assert_eq!(item_id.lock().as_deref(), Some("caller-turn-7"));
+    }
+
+    struct ActivityRecorder {
+        sources: Arc<parking_lot::Mutex<Vec<CallerActivitySource>>>,
+    }
+
+    #[async_trait]
+    impl EventHandler for ActivityRecorder {
+        async fn on_caller_activity(&self, source: CallerActivitySource) -> Result<()> {
+            self.sources.lock().push(source);
+            Ok(())
+        }
+    }
+
+    /// The event that reached one consumer of this runner and not another.
+    ///
+    /// Gemini Live emits `InputTranscriptDelta` and never
+    /// `InputTranscriptCompleted`, so a handler relying on the completed
+    /// callback observed no caller activity for an entire call while a consumer
+    /// reading the raw event stream observed it correctly. Both were reading the
+    /// same session.
+    #[tokio::test]
+    async fn input_transcript_delta_reaches_the_event_handler_as_caller_activity() {
+        let sources = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let runner = RealtimeRunner::builder()
+            .model(Arc::new(MockModel) as BoxedModel)
+            .event_handler(ActivityRecorder { sources: sources.clone() })
+            .build()
+            .unwrap();
+
+        runner
+            .handle_event(ServerEvent::InputTranscriptDelta {
+                item_id: String::new(), // Gemini leaves this empty.
+                content_index: 0,
+                delta: "sensitive caller content".to_string(),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(sources.lock().as_slice(), &[CallerActivitySource::TranscriptDelta]);
+    }
+
+    /// Every source in the mapping must actually arrive, and be labelled for
+    /// what it is — the ranking is what lets a consumer refuse to act on the
+    /// weakest evidence.
+    #[tokio::test]
+    async fn every_caller_activity_source_is_delivered_and_labelled() {
+        let sources = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let runner = RealtimeRunner::builder()
+            .model(Arc::new(MockModel) as BoxedModel)
+            .event_handler(ActivityRecorder { sources: sources.clone() })
+            .build()
+            .unwrap();
+
+        for event in [
+            ServerEvent::InputTranscriptDelta {
+                item_id: String::new(),
+                content_index: 0,
+                delta: "part".to_string(),
+            },
+            ServerEvent::InputTranscriptCompleted {
+                item_id: "item-1".to_string(),
+                content_index: 0,
+                transcript: "whole".to_string(),
+            },
+            ServerEvent::SpeechStopped { event_id: "e1".to_string(), audio_end_ms: 10 },
+            // Not caller activity: starting to speak is barge-in.
+            ServerEvent::SpeechStarted { event_id: "e2".to_string(), audio_start_ms: 0 },
+        ] {
+            runner.handle_event(event).await.unwrap();
+        }
+
+        assert_eq!(
+            sources.lock().as_slice(),
+            &[
+                CallerActivitySource::TranscriptDelta,
+                CallerActivitySource::TranscriptCompleted,
+                CallerActivitySource::SpeechStopped,
+            ]
+        );
     }
 
     #[tokio::test]
