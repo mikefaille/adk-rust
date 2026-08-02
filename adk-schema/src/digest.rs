@@ -33,3 +33,22 @@ pub(crate) fn calculate_digest<R: SchemaRole>(
     hasher.update(bytes);
     SchemaDigest(hasher.finalize().into())
 }
+
+#[cfg(test)]
+mod tests {
+    /// Role is part of a document's identity. An input contract and an output
+    /// contract that happen to share a shape are different things, and a digest
+    /// used as a cache key must not conflate them.
+    #[test]
+    fn input_and_output_documents_do_not_share_a_digest() {
+        use crate::{IngestionPolicy, InputSchema, OutputSchema};
+
+        let policy = IngestionPolicy::default();
+        let shape = serde_json::json!({ "type": "string" });
+
+        let input = InputSchema::from_value(shape.clone(), &policy).expect("ingests");
+        let output = OutputSchema::from_value(shape, &policy).expect("ingests");
+
+        assert_ne!(input.digest(), output.digest());
+    }
+}

@@ -6,6 +6,7 @@ pub type Result<T> = std::result::Result<T, SchemaError>;
 
 /// Categories of resource limit exhaustion.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum LimitKind {
     /// Input raw source bytes exceeded the limit.
     SourceBytes,
@@ -21,6 +22,7 @@ pub enum LimitKind {
 
 /// Specific reasons for rejecting a schema reference.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ReferenceRejection {
     /// Non-local references (such as http or file URIs).
     NonLocalReference,
@@ -40,6 +42,7 @@ pub enum ReferenceRejection {
 
 /// Description of an invalid field location and message.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ValidationIssue {
     /// JSON pointer path to the invalid field.
     pub pointer: String,
@@ -49,6 +52,7 @@ pub struct ValidationIssue {
 
 /// Error type returned by schema parsing and validation functions.
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum SchemaError {
     /// Failed to parse raw JSON.
     #[error("parse error: {message}")]
@@ -107,10 +111,12 @@ pub enum SchemaError {
         issues: Vec<ValidationIssue>,
     },
     /// The instance data does not match the schema.
-    #[error("invalid instance: {issues:?}")]
+    #[error("invalid instance ({} issue(s){}): {issues:?}", issues.len(), if *truncated { ", truncated" } else { "" })]
     InvalidInstance {
         /// Instance validation issues.
         issues: Vec<ValidationIssue>,
+        /// Whether collection stopped at `ValidationOptions::max_issues`.
+        truncated: bool,
     },
     /// Canonicalization encoding failed.
     #[error("canonicalization error: {message}")]

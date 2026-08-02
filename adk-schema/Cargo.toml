@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 description = "Canonical JSON Schema documents and validation for ADK"
+readme = "README.md"
 
 [dependencies]
 serde_json.workspace = true
@@ -14,8 +15,20 @@ sha2.workspace = true
 hex.workspace = true
 schemars = { version = "1.2", optional = true }
 jsonschema = { version = "0.47", optional = true, default-features = false }
+adk-core = { workspace = true, optional = true }
 
 [features]
 default = []
 schemars = ["dep:schemars"]
 runtime-validation = ["dep:jsonschema"]
+# Projection + loss reporting for every `adk_core::SchemaAdapter`, via a blanket
+# extension trait. Off by default so this crate stays usable as a standalone
+# JSON Schema library with no ADK dependency.
+adapters = ["dep:adk-core"]
+
+[[example]]
+name = "what_to_ask_next"
+
+[[example]]
+name = "what_the_provider_dropped"
+required-features = ["adapters"]

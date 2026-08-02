@@ -17,6 +17,7 @@ pub enum SchemaDirection {
 
 /// JSON Schema dialects supported by ADK.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[non_exhaustive]
 pub enum JsonSchemaDialect {
     /// Draft 2020-12
     #[default]
