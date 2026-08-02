@@ -12,47 +12,62 @@ pub struct SchemaCache {
     entries: Mutex<HashMap<u64, Value>>,
 }
 
-fn canonicalize_value(mut val: Value) -> Value {
-    match val {
-        Value::Object(ref mut map) => {
-            let mut entries: Vec<(String, Value)> =
-                std::mem::take(map).into_iter().map(|(k, v)| (k, canonicalize_value(v))).collect();
-            entries.sort_by(|a, b| a.0.cmp(&b.0));
-            for (k, v) in entries {
-                map.insert(k, v);
+/// Feeds a value to the hasher in canonical order.
+///
+/// Object members are visited by sorted key, so two schemas that differ only in
+/// key order produce the same hash. Nothing is cloned or serialized: this runs
+/// on every cache lookup, including hits, which is the path the cache exists to
+/// keep cheap.
+///
+/// Each variant is tagged so values of different types cannot collide — the
+/// string `"1"` and the number `1` hash differently.
+fn hash_canonical(value: &Value, hasher: &mut DefaultHasher) {
+    match value {
+        Value::Null => 0u8.hash(hasher),
+        Value::Bool(flag) => {
+            1u8.hash(hasher);
+            flag.hash(hasher);
+        }
+        Value::Number(number) => {
+            2u8.hash(hasher);
+            // `Number` is not `Hash`. Integers keep their exact value; a float
+            // hashes by its bits, which is sound here because `Value` cannot
+            // hold NaN.
+            if let Some(unsigned) = number.as_u64() {
+                0u8.hash(hasher);
+                unsigned.hash(hasher);
+            } else if let Some(signed) = number.as_i64() {
+                1u8.hash(hasher);
+                signed.hash(hasher);
+            } else if let Some(float) = number.as_f64() {
+                2u8.hash(hasher);
+                float.to_bits().hash(hasher);
             }
-            val
         }
-        Value::Array(ref mut arr) => {
-            for v in arr.iter_mut() {
-                *v = canonicalize_value(std::mem::take(v));
+        Value::String(text) => {
+            3u8.hash(hasher);
+            text.hash(hasher);
+        }
+        Value::Array(items) => {
+            4u8.hash(hasher);
+            items.len().hash(hasher);
+            for item in items {
+                hash_canonical(item, hasher);
             }
-            val
         }
-        _ => val,
-    }
-}
-
-#[cfg(not(test))]
-#[inline]
-fn serialize_schema(schema: &Value) -> Result<Vec<u8>, serde_json::Error> {
-    serde_json::to_vec(schema)
-}
-
-#[cfg(test)]
-fn serialize_schema(schema: &Value) -> Result<Vec<u8>, serde_json::Error> {
-    fn contains_failure_sentinel(val: &Value) -> bool {
-        match val {
-            Value::String(s) if s == "force-serialization-failure" => true,
-            Value::Array(arr) => arr.iter().any(contains_failure_sentinel),
-            Value::Object(map) => map.values().any(contains_failure_sentinel),
-            _ => false,
+        Value::Object(members) => {
+            5u8.hash(hasher);
+            members.len().hash(hasher);
+            let mut keys: Vec<&String> = members.keys().collect();
+            keys.sort_unstable();
+            for key in keys {
+                key.hash(hasher);
+                if let Some(member) = members.get(key) {
+                    hash_canonical(member, hasher);
+                }
+            }
         }
     }
-    if contains_failure_sentinel(schema) {
-        return Err(serde::ser::Error::custom("forced-failure"));
-    }
-    serde_json::to_vec(schema)
 }
 
 impl SchemaCache {
@@ -111,20 +126,8 @@ impl SchemaCache {
         // Use a robust, collision-resistant identity for the cache key.
         let mut hasher = DefaultHasher::new();
 
-        // 1. Identity of the schema content itself.
-        // We use the JSON string representation as a stable, canonical identity with sorted keys.
-        let canonical_schema = canonicalize_value(schema.clone());
-        match serialize_schema(&canonical_schema) {
-            Ok(bytes) => {
-                0u8.hash(&mut hasher);
-                bytes.hash(&mut hasher);
-            }
-            Err(_) => {
-                1u8.hash(&mut hasher);
-                let fallback = format!("{:?}", canonical_schema);
-                fallback.hash(&mut hasher);
-            }
-        }
+        // 1. Identity of the schema content itself, independent of key order.
+        hash_canonical(schema, &mut hasher);
 
         // 2. Identity of the compiler/adapter.
         adapter.identifier().hash(&mut hasher);
@@ -244,38 +247,28 @@ mod tests {
         );
     }
 
+    /// A tenant may name a property something that looks like pointer or
+    /// escape syntax; the hash must still separate distinct schemas.
     #[test]
-    fn test_cache_serialization_failure_path() {
-        let val1 = json!({
-            "type": "object",
-            "properties": {
-                "name": "force-serialization-failure"
-            }
-        });
-        let val2 = json!({
-            "type": "object",
-            "properties": {
-                "age": "force-serialization-failure"
-            }
-        });
-
-        let res1 = serialize_schema(&val1);
-        assert!(res1.is_err(), "Serialization helper should fail when failure sentinel is present");
-
+    fn test_cache_separates_schemas_with_unusual_keys() {
         let cache = SchemaCache::new();
         let adapter = GenericSchemaAdapter;
 
-        // Ensure that hashing val1 (which fails serialization) doesn't panic, and
-        // uses the fallback representation. Let's verify that two distinct
-        // failing schemas do NOT collide.
-        cache.get_or_normalize(&val1, &adapter);
-        assert_eq!(cache.len(), 1);
+        cache.get_or_normalize(&json!({ "properties": { "a/b": { "type": "string" } } }), &adapter);
+        cache.get_or_normalize(&json!({ "properties": { "a~b": { "type": "string" } } }), &adapter);
 
-        cache.get_or_normalize(&val2, &adapter);
-        assert_eq!(
-            cache.len(),
-            2,
-            "Distinct failing schemas must not collapse onto a single cache key"
-        );
+        assert_eq!(cache.len(), 2, "Distinct schemas must not share a cache key");
+    }
+
+    /// A string and a number that render alike must not collide.
+    #[test]
+    fn test_cache_separates_values_of_different_types() {
+        let cache = SchemaCache::new();
+        let adapter = GenericSchemaAdapter;
+
+        cache.get_or_normalize(&json!({ "const": "1" }), &adapter);
+        cache.get_or_normalize(&json!({ "const": 1 }), &adapter);
+
+        assert_eq!(cache.len(), 2, "A string and a number must hash differently");
     }
 }
