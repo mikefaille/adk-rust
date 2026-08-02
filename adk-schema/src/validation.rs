@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 /// A compiled, validated schema document.
 #[cfg(feature = "runtime-validation")]
+#[cfg_attr(docsrs, doc(cfg(feature = "runtime-validation")))]
 pub struct ValidatedSchemaDocument<R: SchemaRole> {
     document: SchemaDocument<R>,
     validator: Arc<jsonschema::Validator>,
@@ -129,6 +130,7 @@ impl<R: SchemaRole> ValidatedSchemaDocument<R> {
 }
 
 #[cfg(feature = "runtime-validation")]
+#[cfg_attr(docsrs, doc(cfg(feature = "runtime-validation")))]
 impl<R: SchemaRole> SchemaDocument<R> {
     /// Compile this schema into a `ValidatedSchemaDocument`.
     pub fn compile(self) -> Result<ValidatedSchemaDocument<R>> {

@@ -6,6 +6,7 @@ use schemars::JsonSchema;
 use schemars::generate::SchemaSettings;
 
 #[cfg(feature = "schemars")]
+#[cfg_attr(docsrs, doc(cfg(feature = "schemars")))]
 impl SchemaDocument<Input> {
     /// Generate an InputSchema for type T using the default IngestionPolicy.
     pub fn for_type<T: JsonSchema>() -> Result<Self> {
@@ -24,6 +25,7 @@ impl SchemaDocument<Input> {
 }
 
 #[cfg(feature = "schemars")]
+#[cfg_attr(docsrs, doc(cfg(feature = "schemars")))]
 impl SchemaDocument<Output> {
     /// Generate an OutputSchema for type T using the default IngestionPolicy.
     pub fn for_type<T: JsonSchema>() -> Result<Self> {

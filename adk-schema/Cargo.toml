@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 description = "Canonical JSON Schema documents and validation for ADK"
+documentation = "https://docs.rs/adk-schema"
 readme = "README.md"
 
 [dependencies]
@@ -32,3 +33,11 @@ name = "what_to_ask_next"
 [[example]]
 name = "what_the_provider_dropped"
 required-features = ["adapters"]
+
+# `default = []`, so a docs.rs build that took the defaults would publish a page
+# with no validation, no schemars generation and no adapter projection — every
+# reason to reach for this crate, absent. Build the whole surface and label each
+# item with the feature it needs.
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]

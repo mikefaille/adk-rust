@@ -1,3 +1,4 @@
+#![cfg_attr(docsrs, feature(doc_cfg))]
 //! # adk-schema
 //!
 //! Canonical JSON Schema documents and validation for ADK.
@@ -36,6 +37,7 @@ mod static_schema;
 mod validation;
 
 #[cfg(feature = "adapters")]
+#[cfg_attr(docsrs, doc(cfg(feature = "adapters")))]
 pub use adapter::{InputProjection, Projection, SchemaAdapterExt};
 pub use diff::{Difference, DifferenceKind};
 pub use digest::SchemaDigest;
@@ -47,4 +49,5 @@ pub use policy::{IngestionPolicy, ReferencePolicy, ValidationOptions};
 pub use role::{Input, InputSchema, Output, OutputSchema, SchemaRole};
 
 #[cfg(feature = "runtime-validation")]
+#[cfg_attr(docsrs, doc(cfg(feature = "runtime-validation")))]
 pub use validation::ValidatedSchemaDocument;
