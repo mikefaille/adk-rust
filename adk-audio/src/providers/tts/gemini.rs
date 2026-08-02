@@ -200,10 +200,10 @@ impl TtsProvider for GeminiTts {
         let mut builder = adk_gemini::GeminiBuilder::new(&self.config.api_key)
             .with_model(adk_gemini::Model::Custom(self.model.clone()));
 
-        if let Some(ref base) = self.config.base_url {
-            if let Ok(url) = reqwest::Url::parse(base) {
-                builder = builder.with_base_url(url);
-            }
+        if let Some(url) =
+            self.config.base_url.as_ref().and_then(|base| reqwest::Url::parse(base).ok())
+        {
+            builder = builder.with_base_url(url);
         }
 
         let client = builder
@@ -293,10 +293,10 @@ impl TtsProvider for GeminiTts {
         let mut builder = adk_gemini::GeminiBuilder::new(&self.config.api_key)
             .with_model(adk_gemini::Model::Custom(self.model.clone()));
 
-        if let Some(ref base) = self.config.base_url {
-            if let Ok(url) = reqwest::Url::parse(base) {
-                builder = builder.with_base_url(url);
-            }
+        if let Some(url) =
+            self.config.base_url.as_ref().and_then(|base| reqwest::Url::parse(base).ok())
+        {
+            builder = builder.with_base_url(url);
         }
 
         let client = builder
@@ -377,29 +377,23 @@ impl TtsProvider for GeminiTts {
                             state.sample_rate = Some(sr);
                             state.channels = Some(ch);
                         } else {
-                            if let Some(ref m) = mime_type {
-                                if Some(m) != state.mime_type.as_ref() {
-                                    Err(AudioError::Tts {
-                                        provider: "gemini".into(),
-                                        message: "contradictory metadata: mime_type changed mid-stream".into(),
-                                    })?;
-                                }
+                            if mime_type.is_some() && mime_type.as_ref() != state.mime_type.as_ref() {
+                                Err(AudioError::Tts {
+                                    provider: "gemini".into(),
+                                    message: "contradictory metadata: mime_type changed mid-stream".into(),
+                                })?;
                             }
-                            if let Some(sr) = sample_rate {
-                                if Some(sr) != state.sample_rate {
-                                    Err(AudioError::Tts {
-                                        provider: "gemini".into(),
-                                        message: "contradictory metadata: sample_rate changed mid-stream".into(),
-                                    })?;
-                                }
+                            if sample_rate.is_some() && sample_rate != state.sample_rate {
+                                Err(AudioError::Tts {
+                                    provider: "gemini".into(),
+                                    message: "contradictory metadata: sample_rate changed mid-stream".into(),
+                                })?;
                             }
-                            if let Some(ch) = channels {
-                                if Some(ch) != state.channels {
-                                    Err(AudioError::Tts {
-                                        provider: "gemini".into(),
-                                        message: "contradictory metadata: channels changed mid-stream".into(),
-                                    })?;
-                                }
+                            if channels.is_some() && channels != state.channels {
+                                Err(AudioError::Tts {
+                                    provider: "gemini".into(),
+                                    message: "contradictory metadata: channels changed mid-stream".into(),
+                                })?;
                             }
                         }
 

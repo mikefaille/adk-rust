@@ -833,6 +833,7 @@ fn sse_step_delta_to_chunk(
             }
             None
         }
+        StepDelta::Audio { .. } => None,
         // A delta type this crate version does not model: ignore it.
         StepDelta::Other(_) => None,
     }

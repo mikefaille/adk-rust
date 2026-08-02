@@ -31,7 +31,7 @@ async fn spawn_mock_sse_server(events: Vec<serde_json::Value>) -> String {
                 "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: keep-alive\r\n\r\n",
             );
             for event in events {
-                response.push_str(&format!("data: {}\n\n", event.to_string()));
+                response.push_str(&format!("data: {event}\n\n"));
             }
             let _ = socket.write_all(response.as_bytes()).await;
             let _ = socket.flush().await;
