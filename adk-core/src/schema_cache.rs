@@ -58,13 +58,14 @@ fn hash_canonical(value: &Value, hasher: &mut DefaultHasher) {
         Value::Object(members) => {
             5u8.hash(hasher);
             members.len().hash(hasher);
-            let mut keys: Vec<&String> = members.keys().collect();
-            keys.sort_unstable();
-            for key in keys {
+            // Sorted pairs rather than sorted keys plus a lookup: a member that
+            // failed to resolve would drop out of the hash silently, and two
+            // schemas sharing a key return each other's cached result.
+            let mut entries: Vec<(&String, &Value)> = members.iter().collect();
+            entries.sort_unstable_by_key(|(key, _)| *key);
+            for (key, member) in entries {
                 key.hash(hasher);
-                if let Some(member) = members.get(key) {
-                    hash_canonical(member, hasher);
-                }
+                hash_canonical(member, hasher);
             }
         }
     }
