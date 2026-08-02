@@ -49,9 +49,27 @@ impl<R: SchemaRole> SchemaDocument<R> {
     /// Reports what this schema still requires, given the fields collected so
     /// far.
     ///
-    /// Reads `required`, `dependentRequired`, and `allOf` entries of the
-    /// `if`/`then` form — all standard Draft 2020-12. Needs no compiled
-    /// validator, so it is available without the `runtime-validation` feature.
+    /// Needs no compiled validator, so it is available without the
+    /// `runtime-validation` feature.
+    ///
+    /// # What it reads
+    ///
+    /// Draft 2020-12 applicators that can carry a `required`, traversed
+    /// recursively so nesting does not hide an obligation: `required`,
+    /// `dependentRequired`, `dependentSchemas`, `allOf`, and `if`/`then`/`else`
+    /// — the last both at the top level and inside any branch.
+    ///
+    /// # What it does not
+    ///
+    /// `anyOf` and `oneOf` state a choice, so no single branch's `required` is
+    /// owed; neither contributes. An `if` predicate outside `const`, `enum`,
+    /// and `required` is reported [`undecided`](Outstanding::undecided) rather
+    /// than guessed — including when its deciding value is already in hand,
+    /// since presence does not make an unmodelled predicate evaluable.
+    ///
+    /// The bias throughout is to over-report rather than waive: a field asked
+    /// for twice is a wording cost, a field never asked for is a broken
+    /// contract.
     ///
     /// # Examples
     ///
@@ -73,75 +91,95 @@ impl<R: SchemaRole> SchemaDocument<R> {
     /// # Ok::<(), SchemaError>(())
     /// ```
     pub fn outstanding(&self, collected: &Map<String, Value>) -> Outstanding {
-        let mut result = Outstanding::default();
-        let schema = self.as_value();
-
-        for key in required_keys(schema) {
-            if !collected.contains_key(key) {
-                result.missing.insert(key.to_string());
-            }
-        }
-
-        if let Some(dependent) = schema.get("dependentRequired").and_then(Value::as_object) {
-            for (trigger, required) in dependent {
-                if !collected.contains_key(trigger) {
-                    continue;
-                }
-                for key in required.as_array().into_iter().flatten().filter_map(Value::as_str) {
-                    if !collected.contains_key(key) {
-                        result.missing.insert(key.to_string());
-                    }
-                }
-            }
-        }
-
-        let mut absent_gates = BTreeSet::new();
-        let mut unsupported_gates = BTreeSet::new();
-
-        for rule in schema.get("allOf").and_then(Value::as_array).into_iter().flatten() {
-            // A branch with no `if` is an unconditional intersection: its own
-            // `required` is owed outright, not gated on anything.
-            if rule.get("if").is_none() {
-                for key in required_keys(rule) {
-                    if !collected.contains_key(key) {
-                        result.missing.insert(key.to_string());
-                    }
-                }
-                continue;
-            }
-
-            match evaluate_condition(rule.get("if"), collected) {
-                Condition::Matched => {
-                    let then_keys = rule.get("then").map(required_keys).unwrap_or_default();
-                    for key in then_keys {
-                        if !collected.contains_key(key) {
-                            result.missing.insert(key.to_string());
-                        }
-                    }
-                }
-                // A decided-false condition still carries the `else` obligation.
-                Condition::Unmatched => {
-                    let else_keys = rule.get("else").map(required_keys).unwrap_or_default();
-                    for key in else_keys {
-                        if !collected.contains_key(key) {
-                            result.missing.insert(key.to_string());
-                        }
-                    }
-                }
-                Condition::Undecided { absent, unsupported } => {
-                    absent_gates.extend(absent);
-                    unsupported_gates.extend(unsupported);
-                }
-            }
-        }
+        let mut found = Obligations::default();
+        collect(self.as_value(), collected, &mut found);
 
         // A gate that has since been collected is decided, however many other
         // rules still name it. Unsupported predicates are exempt: their key
         // being present does not make them evaluable.
-        absent_gates.retain(|key| !collected.contains_key(key));
-        result.undecided = absent_gates;
-        result.undecided.extend(unsupported_gates);
-        result
+        found.absent_gates.retain(|key| !collected.contains_key(key));
+
+        let mut undecided = found.absent_gates;
+        undecided.extend(found.unsupported_gates);
+        Outstanding { missing: found.missing, undecided }
+    }
+}
+
+/// Obligations accumulated while walking a schema.
+#[derive(Default)]
+struct Obligations {
+    missing: BTreeSet<String>,
+    absent_gates: BTreeSet<String>,
+    unsupported_gates: BTreeSet<String>,
+}
+
+impl Obligations {
+    fn owe(&mut self, keys: Vec<&str>, collected: &Map<String, Value>) {
+        for key in keys {
+            if !collected.contains_key(key) {
+                self.missing.insert(key.to_string());
+            }
+        }
+    }
+}
+
+/// Collects what `node` still demands, recursing through every applicator that
+/// can carry a `required`.
+///
+/// Recursive rather than a flat scan of `allOf`, because obligations nest: an
+/// `allOf` branch may hold another `allOf`, a `then` may hold its own
+/// conditional, and `if`/`then` is a top-level applicator in its own right and
+/// does not need an `allOf` wrapper. Handling only the outer layer loses the
+/// inner ones silently, which is the one failure mode this whole API exists to
+/// prevent.
+///
+/// Termination: ingestion rejects `$ref`, so a document is a finite tree.
+fn collect(node: &Value, collected: &Map<String, Value>, found: &mut Obligations) {
+    found.owe(required_keys(node), collected);
+
+    if let Some(dependent) = node.get("dependentRequired").and_then(Value::as_object) {
+        for (trigger, required) in dependent {
+            if !collected.contains_key(trigger) {
+                continue;
+            }
+            let keys =
+                required.as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+            found.owe(keys, collected);
+        }
+    }
+
+    // A triggered `dependentSchemas` entry applies its whole subschema.
+    if let Some(dependent) = node.get("dependentSchemas").and_then(Value::as_object) {
+        for (trigger, subschema) in dependent {
+            if collected.contains_key(trigger) {
+                collect(subschema, collected, found);
+            }
+        }
+    }
+
+    if node.get("if").is_some() {
+        match evaluate_condition(node.get("if"), collected) {
+            Condition::Matched => {
+                if let Some(then) = node.get("then") {
+                    collect(then, collected, found);
+                }
+            }
+            // A decided-false condition still carries the `else` obligation.
+            Condition::Unmatched => {
+                if let Some(otherwise) = node.get("else") {
+                    collect(otherwise, collected, found);
+                }
+            }
+            Condition::Undecided { absent, unsupported } => {
+                found.absent_gates.extend(absent);
+                found.unsupported_gates.extend(unsupported);
+            }
+        }
+    }
+
+    // Every `allOf` branch applies unconditionally, whatever it contains.
+    for branch in node.get("allOf").and_then(Value::as_array).into_iter().flatten() {
+        collect(branch, collected, found);
     }
 }
 
@@ -248,6 +286,92 @@ mod tests {
                 .outstanding(&collected(json!({ "card": "4242" })));
 
             assert_eq!(result.missing, ["billing_address".to_string()].into());
+        }
+    }
+
+    /// Applicators that carry obligations without an `allOf` wrapper, or below
+    /// one. Each of these silently reported "nothing outstanding" before.
+    mod nested_applicators {
+        use super::*;
+
+        /// `if`/`then` is a top-level applicator in Draft 2020-12. It does not
+        /// need an `allOf` around it, and a scan that only reads `allOf` loses
+        /// the obligation entirely.
+        #[test]
+        fn top_level_if_then_is_honoured() {
+            let result = schema(json!({
+                "if": {
+                    "properties": { "kind": { "const": "order" } },
+                    "required": ["kind"]
+                },
+                "then": { "required": ["caller_name"] }
+            }))
+            .outstanding(&collected(json!({ "kind": "order" })));
+
+            assert_eq!(result.missing, ["caller_name".to_string()].into());
+        }
+
+        #[test]
+        fn top_level_if_else_is_honoured() {
+            let result = schema(json!({
+                "if": {
+                    "properties": { "kind": { "const": "order" } },
+                    "required": ["kind"]
+                },
+                "then": { "required": ["caller_name"] },
+                "else": { "required": ["callback_number"] }
+            }))
+            .outstanding(&collected(json!({ "kind": "information" })));
+
+            assert_eq!(result.missing, ["callback_number".to_string()].into());
+        }
+
+        /// Obligations nest: an `allOf` branch may hold another `allOf`.
+        #[test]
+        fn nested_all_of_is_honoured() {
+            let result = schema(json!({ "allOf": [{ "allOf": [{ "required": ["deep"] }] }] }))
+                .outstanding(&collected(json!({})));
+
+            assert_eq!(result.missing, ["deep".to_string()].into());
+        }
+
+        /// A `then` may itself carry a conditional.
+        #[test]
+        fn a_conditional_inside_a_then_is_honoured() {
+            let result = schema(json!({
+                "allOf": [{
+                    "if": { "properties": { "a": { "const": 1 } }, "required": ["a"] },
+                    "then": {
+                        "if": { "properties": { "b": { "const": 2 } }, "required": ["b"] },
+                        "then": { "required": ["c"] }
+                    }
+                }]
+            }))
+            .outstanding(&collected(json!({ "a": 1, "b": 2 })));
+
+            assert_eq!(result.missing, ["c".to_string()].into());
+        }
+
+        /// A triggered `dependentSchemas` entry applies its whole subschema,
+        /// not just a `required` list.
+        #[test]
+        fn triggered_dependent_schemas_applies_its_subschema() {
+            let result = schema(json!({
+                "dependentSchemas": { "card": { "required": ["billing_address"] } }
+            }))
+            .outstanding(&collected(json!({ "card": "4242" })));
+
+            assert_eq!(result.missing, ["billing_address".to_string()].into());
+        }
+
+        #[test]
+        fn untriggered_dependent_schemas_owes_nothing() {
+            let result = schema(json!({
+                "dependentSchemas": { "card": { "required": ["billing_address"] } }
+            }))
+            .outstanding(&collected(json!({})));
+
+            assert!(result.is_complete(), "{result:?}");
         }
     }
 
