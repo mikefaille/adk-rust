@@ -126,7 +126,8 @@ async fn process_text_to_speech(
                                 m.total_audio_ms += duration_ms as u64;
                                 if !first_audio_sent {
                                     first_audio_sent = true;
-                                    m.tts_first_audio_latency_ms = tts_start.elapsed().as_millis() as f64;
+                                    m.tts_first_audio_latency_ms =
+                                        tts_start.elapsed().as_millis() as f64;
                                 }
                             }
                         }

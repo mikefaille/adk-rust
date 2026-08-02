@@ -230,10 +230,7 @@ impl TtsProvider for DelayedMockTts {
 
 #[tokio::test]
 async fn test_pipeline_streaming_latency_and_telemetry() {
-    let handle = AudioPipelineBuilder::new()
-        .tts(Arc::new(DelayedMockTts))
-        .build_tts()
-        .unwrap();
+    let handle = AudioPipelineBuilder::new().tts(Arc::new(DelayedMockTts)).build_tts().unwrap();
 
     let start_time = std::time::Instant::now();
     handle.input_tx.send(PipelineInput::Text("hello world".to_string())).await.unwrap();
@@ -336,7 +333,10 @@ async fn test_live_gemini_tts_stream() {
 
     println!(
         "Live proof success! Received {} chunks ({} bytes). First arrival: {:?}, stream complete: {:?}",
-        total_chunks, total_bytes, first_arrival.unwrap(), end_arrival
+        total_chunks,
+        total_bytes,
+        first_arrival.unwrap(),
+        end_arrival
     );
     assert!(first_arrival.unwrap() < end_arrival);
 }

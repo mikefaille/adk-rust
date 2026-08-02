@@ -272,13 +272,13 @@ fn unknown_sse_event_falls_back_to_other() {
 
 #[test]
 fn test_gemini_31_tts_request_serialization() {
-    use adk_gemini::interactions::{SpeechConfig, VoiceConfig, PrebuiltVoiceConfig, GenerationConfig, ResponseModality};
+    use adk_gemini::interactions::{
+        GenerationConfig, PrebuiltVoiceConfig, ResponseModality, SpeechConfig, VoiceConfig,
+    };
 
     let speech_config = SpeechConfig {
         voice_config: Some(VoiceConfig {
-            prebuilt_voice_config: PrebuiltVoiceConfig {
-                voice_name: "Kore".to_string(),
-            },
+            prebuilt_voice_config: PrebuiltVoiceConfig { voice_name: "Kore".to_string() },
         }),
         multi_speaker_voice_config: None,
     };

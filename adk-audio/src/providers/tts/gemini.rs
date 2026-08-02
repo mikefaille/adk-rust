@@ -157,7 +157,8 @@ impl GeminiTts {
 
     fn build_speech_config_typed(&self, voice: &str) -> adk_gemini::interactions::SpeechConfig {
         use adk_gemini::interactions::{
-            SpeechConfig, VoiceConfig, PrebuiltVoiceConfig, SpeakerVoiceConfig, MultiSpeakerVoiceConfig,
+            MultiSpeakerVoiceConfig, PrebuiltVoiceConfig, SpeakerVoiceConfig, SpeechConfig,
+            VoiceConfig,
         };
         match &self.speakers {
             Some(speakers) if !speakers.is_empty() => {
@@ -180,12 +181,11 @@ impl GeminiTts {
                 }
             }
             _ => {
-                let voice_name = if voice.is_empty() { "Kore".to_string() } else { voice.to_string() };
+                let voice_name =
+                    if voice.is_empty() { "Kore".to_string() } else { voice.to_string() };
                 SpeechConfig {
                     voice_config: Some(VoiceConfig {
-                        prebuilt_voice_config: PrebuiltVoiceConfig {
-                            voice_name,
-                        },
+                        prebuilt_voice_config: PrebuiltVoiceConfig { voice_name },
                     }),
                     multi_speaker_voice_config: None,
                 }
@@ -206,13 +206,13 @@ impl TtsProvider for GeminiTts {
             }
         }
 
-        let client = builder.build().map_err(|e| AudioError::Tts {
-            provider: "gemini".into(),
-            message: e.to_string(),
-        })?;
+        let client = builder
+            .build()
+            .map_err(|e| AudioError::Tts { provider: "gemini".into(), message: e.to_string() })?;
 
         let speech_config = self.build_speech_config_typed(&request.voice);
-        let inter_builder = client.create_interaction()
+        let inter_builder = client
+            .create_interaction()
             .input_text(&request.text)
             .response_modalities(vec![adk_gemini::interactions::ResponseModality::Audio])
             .generation_config(adk_gemini::interactions::GenerationConfig {
@@ -220,10 +220,10 @@ impl TtsProvider for GeminiTts {
                 ..Default::default()
             });
 
-        let interaction = inter_builder.send().await.map_err(|e| AudioError::Tts {
-            provider: "gemini".into(),
-            message: e.to_string(),
-        })?;
+        let interaction = inter_builder
+            .send()
+            .await
+            .map_err(|e| AudioError::Tts { provider: "gemini".into(), message: e.to_string() })?;
 
         let mut audio_content: Option<&adk_gemini::interactions::AudioContent> = None;
         for step in interaction.steps.iter().rev() {
@@ -266,7 +266,11 @@ impl TtsProvider for GeminiTts {
         })?;
 
         let mime_lower = mime.to_lowercase();
-        if !mime_lower.contains("audio/l16") && !mime_lower.contains("audio/pcm") && !mime_lower.contains("audio/wav") && !mime_lower.contains("audio/x-wav") {
+        if !mime_lower.contains("audio/l16")
+            && !mime_lower.contains("audio/pcm")
+            && !mime_lower.contains("audio/wav")
+            && !mime_lower.contains("audio/x-wav")
+        {
             return Err(AudioError::Tts {
                 provider: "gemini".into(),
                 message: format!("unsupported audio format: {mime}"),
@@ -276,10 +280,7 @@ impl TtsProvider for GeminiTts {
         let audio_b64 = audio.data.as_deref().unwrap_or_default();
         use base64::Engine;
         let pcm = base64::engine::general_purpose::STANDARD.decode(audio_b64).map_err(|e| {
-            AudioError::Tts {
-                provider: "gemini".into(),
-                message: format!("invalid base64: {e}"),
-            }
+            AudioError::Tts { provider: "gemini".into(), message: format!("invalid base64: {e}") }
         })?;
 
         Ok(AudioFrame::new(Bytes::from(pcm), sample_rate as u32, channels as u8))
@@ -298,13 +299,13 @@ impl TtsProvider for GeminiTts {
             }
         }
 
-        let client = builder.build().map_err(|e| AudioError::Tts {
-            provider: "gemini".into(),
-            message: e.to_string(),
-        })?;
+        let client = builder
+            .build()
+            .map_err(|e| AudioError::Tts { provider: "gemini".into(), message: e.to_string() })?;
 
         let speech_config = self.build_speech_config_typed(&request.voice);
-        let inter_builder = client.create_interaction()
+        let inter_builder = client
+            .create_interaction()
             .input_text(&request.text)
             .response_modalities(vec![adk_gemini::interactions::ResponseModality::Audio])
             .generation_config(adk_gemini::interactions::GenerationConfig {
@@ -312,10 +313,10 @@ impl TtsProvider for GeminiTts {
                 ..Default::default()
             });
 
-        let sse_stream = inter_builder.stream().await.map_err(|e| AudioError::Tts {
-            provider: "gemini".into(),
-            message: e.to_string(),
-        })?;
+        let sse_stream = inter_builder
+            .stream()
+            .await
+            .map_err(|e| AudioError::Tts { provider: "gemini".into(), message: e.to_string() })?;
 
         struct TtsStreamState {
             mime_type: Option<String>,
