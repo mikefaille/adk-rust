@@ -1,4 +1,8 @@
 //! Schema normalization cache for LLM provider adapters.
+//!
+//! Provider adapters normalize a JSON Schema into the dialect their model
+//! accepts, and [`SchemaAdapter::compile_schema`] may build a validator on top
+//! of it. Both are expensive enough to be worth caching per turn.
 use crate::SchemaAdapter;
 use crate::schema_adapter::SchemaCompileError;
 use serde_json::Value;
@@ -7,6 +11,31 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Mutex;
 
 /// A thread-safe cache for normalized and compiled JSON Schemas.
+///
+/// # Identity
+///
+/// An entry is keyed by four things: the schema's content, the adapter's
+/// `identifier`, `version`, and `surface`, and which operation produced it.
+/// Changing an adapter's version therefore invalidates its entries without
+/// clearing the cache.
+///
+/// Schema content is compared **independently of object key order**: two
+/// schemas that differ only in the order their members were written share an
+/// entry. `serde_json` preserves insertion order here, so schemas arriving by
+/// different routes — a re-fetched tool declaration, a republished contract —
+/// otherwise miss the cache and pay for normalization again.
+///
+/// # Deliberate limits
+///
+/// - **Numbers are keyed by their written form.** `5` and `5.0` are distinct
+///   keys. The effect is an extra miss, never a wrong hit, so the cache stays
+///   conservative rather than adopting a semantic equality it cannot verify.
+/// - **Keys are a 64-bit non-cryptographic hash.** A collision returns another
+///   schema's normalized result, which the cache assumes will not occur; the
+///   key is not a security boundary and must not be used as one.
+/// - **Hashing recurses with schema depth.** `adk-core` applies no ingestion
+///   bounds, so a caller accepting schemas from an untrusted source should
+///   bound them before caching.
 #[derive(Debug, Default)]
 pub struct SchemaCache {
     entries: Mutex<HashMap<u64, Value>>,
@@ -77,14 +106,28 @@ impl SchemaCache {
         Self { entries: Mutex::new(HashMap::new()) }
     }
 
-    /// Returns the normalized schema for the given input, using the cache if available.
+    /// Returns the normalized schema for the given input, using the cache if
+    /// available.
+    ///
+    /// Keyed by schema content, adapter identity, and this operation — see
+    /// [`SchemaCache`] for what content identity covers.
     pub fn get_or_normalize(&self, schema: &Value, adapter: &dyn SchemaAdapter) -> Value {
         let hash = Self::hash_schema_with_adapter(schema, adapter, "normalize");
         let mut cache = self.entries.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         cache.entry(hash).or_insert_with(|| adapter.normalize_schema(schema.clone())).clone()
     }
 
-    /// Returns the compiled schema for the given input, using the cache if available.
+    /// Returns the compiled schema for the given input, using the cache if
+    /// available.
+    ///
+    /// Keyed separately from normalization, so both may be cached for one
+    /// schema.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SchemaCompileError`] when the adapter rejects the schema.
+    /// Failures are not cached, so a rejected schema is recompiled on the next
+    /// call.
     pub fn get_or_compile(
         &self,
         schema: &Value,
