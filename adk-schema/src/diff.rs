@@ -126,6 +126,37 @@ impl<R: SchemaRole> SchemaDocument<R> {
     }
 }
 
+/// Whether a keyword's value constrains nothing, making it equivalent to the
+/// keyword being absent.
+///
+/// `required: []` demands nothing and `properties: {}` restricts nothing, so
+/// writing either is the same as omitting it. Reporting the omission as a
+/// dropped constraint is representational noise of exactly the kind
+/// [`Difference::affects_validation`] exists to filter out.
+///
+/// `enum: []` is deliberately excluded: an empty `enum` accepts *nothing*, so
+/// it is the strongest constraint expressible, not a vacuous one.
+fn is_vacuous(keyword: &str, value: &Value) -> bool {
+    match value {
+        Value::Array(items) => items.is_empty() && keyword != "enum",
+        Value::Object(members) => members.is_empty(),
+        _ => false,
+    }
+}
+
+/// Rewrites a single-element `type` array to the scalar it means.
+///
+/// `{"type": ["string"]}` and `{"type": "string"}` are the same schema, and
+/// provider adapters routinely collapse one into the other — Gemini's does it
+/// unconditionally. Comparing them literally reports a `TypeMismatch`, which
+/// `leaves_enforcement_gap()` then treats as dangerous.
+fn normalized_type(value: &Value) -> &Value {
+    match value {
+        Value::Array(items) if items.len() == 1 => &items[0],
+        other => other,
+    }
+}
+
 /// Compares two canonical documents.
 ///
 /// `keyword_position` distinguishes a schema keyword from a member name: under
@@ -144,8 +175,17 @@ fn walk(
                 let child = child_pointer(pointer, key);
                 match right_map.get(key) {
                     Some(right_value) => {
+                        // `["string"]` and `"string"` are one schema written two
+                        // ways, so compare what the keyword means.
+                        let (left_value, right_value) = if keyword_position && key == "type" {
+                            (normalized_type(left_value), normalized_type(right_value))
+                        } else {
+                            (left_value, right_value)
+                        };
                         walk(left_value, right_value, &child, names_schemas(key), out)
                     }
+                    // A vacuous keyword is equivalent to its own absence.
+                    None if keyword_position && is_vacuous(key, left_value) => {}
                     None => out.push(Difference {
                         kind: classify(key, keyword_position, DifferenceKind::ConstraintRelaxed),
                         pointer: child,
@@ -153,7 +193,12 @@ fn walk(
                     }),
                 }
             }
-            for key in right_map.keys().filter(|key| !left_map.contains_key(*key)) {
+            for (key, right_value) in
+                right_map.iter().filter(|(key, _)| !left_map.contains_key(*key))
+            {
+                if keyword_position && is_vacuous(key, right_value) {
+                    continue;
+                }
                 out.push(Difference {
                     kind: classify(key, keyword_position, DifferenceKind::ConstraintTightened),
                     pointer: child_pointer(pointer, key),
@@ -449,6 +494,56 @@ mod tests {
 
     mod representational_noise {
         use super::*;
+
+        /// `["string"]` and `"string"` are one schema written two ways, and
+        /// provider adapters collapse one into the other routinely.
+        #[test]
+        fn a_single_element_type_array_equals_the_scalar() {
+            let losses =
+                schema(json!({ "type": ["string"] })).diff(&schema(json!({ "type": "string" })));
+
+            assert!(
+                losses.is_empty(),
+                "a spelling of `type` was reported as a change: {losses:#?}"
+            );
+        }
+
+        /// A genuinely narrowed union must still be caught.
+        #[test]
+        fn a_narrowed_type_union_is_still_reported() {
+            let losses = schema(json!({ "type": ["string", "null"] }))
+                .diff(&schema(json!({ "type": "string" })));
+
+            assert!(!losses.is_empty(), "dropping `null` from a union went unreported");
+        }
+
+        /// `required: []` demands nothing, so omitting it drops no constraint.
+        #[test]
+        fn an_empty_required_equals_its_absence() {
+            let losses = schema(json!({ "required": [] })).diff(&schema(json!({})));
+
+            assert!(losses.is_empty(), "{losses:#?}");
+        }
+
+        /// `properties: {}` restricts nothing.
+        #[test]
+        fn an_empty_properties_equals_its_absence() {
+            let losses = schema(json!({ "properties": {} })).diff(&schema(json!({})));
+
+            assert!(losses.is_empty(), "{losses:#?}");
+        }
+
+        /// `enum: []` is the opposite case: it accepts *nothing*, so it is the
+        /// strongest constraint expressible and dropping it is a real relaxation.
+        #[test]
+        fn an_empty_enum_is_not_vacuous() {
+            let losses = schema(json!({ "enum": [] })).diff(&schema(json!({})));
+
+            assert!(
+                losses.iter().any(Difference::leaves_enforcement_gap),
+                "dropping an unsatisfiable `enum` was treated as noise: {losses:#?}",
+            );
+        }
 
         /// Members of `allOf` are schemas, so their keys are keywords. Without
         /// that context a nested `description` reads as a dropped constraint.
