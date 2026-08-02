@@ -64,6 +64,7 @@ pub use model::{
     ImageConfig, ImageContent, Input, Interaction, InteractionStatus, ModalityTokens,
     ResponseFormat, ResponseModality, ServiceTier, Step, TextContent, ThinkingSummaries, Tool,
     ToolChoice, Usage, VideoContent,
+    SpeechConfig, VoiceConfig, PrebuiltVoiceConfig, SpeakerVoiceConfig, MultiSpeakerVoiceConfig,
 };
 pub use sse::{InteractionSseEvent, InteractionStreamError, StepDelta};
 

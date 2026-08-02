@@ -343,6 +343,47 @@ pub struct ImageConfig {
     pub image_size: Option<String>,
 }
 
+/// Prebuilt voice configuration.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PrebuiltVoiceConfig {
+    /// The name of the voice.
+    pub voice_name: String,
+}
+
+/// Voice configuration.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VoiceConfig {
+    /// Prebuilt voice configuration.
+    pub prebuilt_voice_config: PrebuiltVoiceConfig,
+}
+
+/// Speaker-specific voice configuration.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SpeakerVoiceConfig {
+    /// The name of the speaker.
+    pub speaker: String,
+    /// Voice configuration for this speaker.
+    pub voice_config: VoiceConfig,
+}
+
+/// Configuration for multi-speaker synthesis.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MultiSpeakerVoiceConfig {
+    /// Speaker voice configurations.
+    pub speaker_voice_configs: Vec<SpeakerVoiceConfig>,
+}
+
+/// Speech configuration controlling the voice and speakers.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SpeechConfig {
+    /// Configuration for a single voice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voice_config: Option<VoiceConfig>,
+    /// Configuration for multiple speakers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub multi_speaker_voice_config: Option<MultiSpeakerVoiceConfig>,
+}
+
 /// Configuration parameters for a model interaction.
 ///
 /// This is the Interactions API equivalent of `generateContent`'s
@@ -378,6 +419,9 @@ pub struct GenerationConfig {
     /// Configuration for image output.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_config: Option<ImageConfig>,
+    /// Speech configuration controlling voice/speaker output.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speech_config: Option<SpeechConfig>,
 }
 
 impl GenerationConfig {

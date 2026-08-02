@@ -135,6 +135,24 @@ pub enum StepDelta {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
     },
+    /// Audio data delta.
+    Audio {
+        /// Inline base64-encoded audio content.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        data: Option<String>,
+        /// The MIME type of the audio.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mime_type: Option<String>,
+        /// The sample rate of the audio in Hz.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sample_rate: Option<i64>,
+        /// The number of audio channels.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        channels: Option<i64>,
+        /// A URI referencing the audio instead of inline data.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        uri: Option<String>,
+    },
     /// A delta type not modelled by this crate version.
     #[serde(untagged)]
     Other(serde_json::Value),

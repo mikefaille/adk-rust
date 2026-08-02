@@ -156,10 +156,41 @@ impl AudioPipelineBuilder {
                             continue;
                         };
                         let request = TtsRequest { text, ..Default::default() };
-                        if let Ok(frame) = tts.synthesize(&request).await {
-                            let mut metrics = m.write().await;
-                            metrics.total_audio_ms += frame.duration_ms as u64;
-                            let _ = output_tx.send(PipelineOutput::Audio(frame)).await;
+                        let tts_start = std::time::Instant::now();
+                        let stream_res = tts.synthesize_stream(&request).await;
+
+                        match stream_res {
+                            Ok(mut stream) => {
+                                use futures::StreamExt;
+                                let mut first_audio_sent = false;
+
+                                while let Some(frame_res) = stream.next().await {
+                                    match frame_res {
+                                        Ok(frame) => {
+                                            let duration_ms = frame.duration_ms;
+                                            if output_tx.send(PipelineOutput::Audio(frame)).await.is_ok() {
+                                                let mut metrics = m.write().await;
+                                                metrics.total_audio_ms += duration_ms as u64;
+                                                if !first_audio_sent {
+                                                    first_audio_sent = true;
+                                                    metrics.tts_first_audio_latency_ms = tts_start.elapsed().as_millis() as f64;
+                                                }
+                                            }
+                                        }
+                                        Err(e) => {
+                                            tracing::error!("TTS stream error in pipeline: {:?}", e);
+                                        }
+                                    }
+                                }
+
+                                if first_audio_sent {
+                                    let mut metrics = m.write().await;
+                                    metrics.tts_latency_ms = tts_start.elapsed().as_millis() as f64;
+                                }
+                            }
+                            Err(e) => {
+                                tracing::error!("TTS synthesis stream error: {:?}", e);
+                            }
                         }
                     }
                 }

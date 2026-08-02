@@ -269,3 +269,102 @@ fn unknown_sse_event_falls_back_to_other() {
     let event: InteractionSseEvent = serde_json::from_value(raw).unwrap();
     assert!(matches!(event, InteractionSseEvent::Other(_)));
 }
+
+#[test]
+fn test_gemini_31_tts_request_serialization() {
+    use adk_gemini::interactions::{SpeechConfig, VoiceConfig, PrebuiltVoiceConfig, GenerationConfig, ResponseModality};
+
+    let speech_config = SpeechConfig {
+        voice_config: Some(VoiceConfig {
+            prebuilt_voice_config: PrebuiltVoiceConfig {
+                voice_name: "Kore".to_string(),
+            },
+        }),
+        multi_speaker_voice_config: None,
+    };
+
+    let req = CreateInteractionRequest {
+        model: Some("gemini-3.1-flash-tts-preview".to_string()),
+        input: Input::Text("Hello world".to_string()),
+        response_modalities: vec![ResponseModality::Audio],
+        generation_config: Some(GenerationConfig {
+            speech_config: Some(speech_config),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    let value = serde_json::to_value(&req).unwrap();
+
+    assert_eq!(value["model"], json!("gemini-3.1-flash-tts-preview"));
+    assert_eq!(value["input"], json!("Hello world"));
+    assert_eq!(value["response_modalities"][0], json!("audio"));
+
+    let gen_cfg = &value["generation_config"];
+    let sp_cfg = &gen_cfg["speech_config"];
+    let voice_cfg = &sp_cfg["voice_config"];
+    let prebuilt = &voice_cfg["prebuilt_voice_config"];
+
+    assert_eq!(prebuilt["voice_name"], json!("Kore"));
+}
+
+#[test]
+fn test_sse_fixture_parsing_audio_deltas() {
+    let raw1 = json!({
+        "event_type": "step.delta",
+        "index": 1,
+        "delta": {
+            "type": "audio",
+            "data": "UklGRgAAAABXQVZFZg==",
+            "mime_type": "audio/pcm",
+            "sample_rate": 24000,
+            "channels": 1
+        }
+    });
+
+    let raw2 = json!({
+        "event_type": "step.delta",
+        "index": 1,
+        "delta": {
+            "type": "audio",
+            "data": "Zm10IAAAAAA="
+        }
+    });
+
+    let event1: InteractionSseEvent = serde_json::from_value(raw1).unwrap();
+    let event2: InteractionSseEvent = serde_json::from_value(raw2).unwrap();
+
+    match event1 {
+        InteractionSseEvent::StepDelta { index, delta, .. } => {
+            assert_eq!(index, 1);
+            match delta {
+                StepDelta::Audio { data, mime_type, sample_rate, channels, uri } => {
+                    assert_eq!(data.as_deref(), Some("UklGRgAAAABXQVZFZg=="));
+                    assert_eq!(mime_type.as_deref(), Some("audio/pcm"));
+                    assert_eq!(sample_rate, Some(24000));
+                    assert_eq!(channels, Some(1));
+                    assert!(uri.is_none());
+                }
+                other => panic!("expected Audio delta, got {other:?}"),
+            }
+        }
+        other => panic!("expected StepDelta event, got {other:?}"),
+    }
+
+    match event2 {
+        InteractionSseEvent::StepDelta { index, delta, .. } => {
+            assert_eq!(index, 1);
+            match delta {
+                StepDelta::Audio { data, mime_type, sample_rate, channels, uri } => {
+                    assert_eq!(data.as_deref(), Some("Zm10IAAAAAA="));
+                    assert!(mime_type.is_none());
+                    assert!(sample_rate.is_none());
+                    assert!(channels.is_none());
+                    assert!(uri.is_none());
+                }
+                other => panic!("expected Audio delta, got {other:?}"),
+            }
+        }
+        other => panic!("expected StepDelta event, got {other:?}"),
+    }
+}

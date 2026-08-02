@@ -40,6 +40,8 @@ pub enum PipelineOutput {
 pub struct PipelineMetrics {
     /// TTS synthesis latency in milliseconds.
     pub tts_latency_ms: f64,
+    /// First audio latency in milliseconds.
+    pub tts_first_audio_latency_ms: f64,
     /// STT transcription latency in milliseconds.
     pub stt_latency_ms: f64,
     /// LLM agent reasoning latency in milliseconds.

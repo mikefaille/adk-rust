@@ -16,6 +16,7 @@ categories = ["multimedia::audio", "asynchronous"]
 # Core (always included)
 # 'rustls' feature provides ensure_crypto_provider() to fix process-wide provider panics.
 adk-core = { workspace = true, features = ["rustls"] }
+adk-gemini = { workspace = true, features = ["interactions"] }
 bytes = "1"
 bytemuck = { version = "1", features = ["derive"] }
 async-trait = { workspace = true }
