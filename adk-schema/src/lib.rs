@@ -16,6 +16,8 @@
 
 #![deny(missing_docs)]
 
+#[cfg(feature = "adapters")]
+mod adapter;
 mod canonical;
 mod diff;
 mod digest;
@@ -33,6 +35,8 @@ mod static_schema;
 #[cfg(feature = "runtime-validation")]
 mod validation;
 
+#[cfg(feature = "adapters")]
+pub use adapter::{InputProjection, Projection, SchemaAdapterExt};
 pub use diff::{Difference, DifferenceKind};
 pub use digest::SchemaDigest;
 pub use document::{JsonSchemaDialect, SchemaDirection, SchemaDocument, SchemaMetrics};
