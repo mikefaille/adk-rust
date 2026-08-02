@@ -33,11 +33,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   variant or field is no longer a breaking change for downstream matches.
   `ValidationOptions` is deliberately exhaustive so `..Default::default()`
   construction keeps working.
-- **jsonschema is consolidated on 0.47 across the workspace.** `adk-agent`
-  (0.28), `adk-guardrail`, and `adk-payments` (0.45) move to the version
-  `adk-schema` already used, removing two duplicate `jsonschema` and two
-  duplicate `referencing` crates from every build. The API surface in use —
-  `validator_for` and `Validator` — is unchanged across those releases.
 - **adk-codeact-monty joined the root workspace.** Monty is on crates.io since
   `0.0.19`, so the crate's git dependency (and the empty `[workspace]` table it
   forced) is gone: it now depends on `monty`, `monty-types`, and `monty-fs`

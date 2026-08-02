@@ -162,10 +162,35 @@ fn walk(
             }
         }
         (Value::Array(left_items), Value::Array(right_items)) => {
+            let keyword = last_token(pointer);
+
+            // `required` and `enum` are sets written as arrays. Comparing them
+            // positionally reports a reorder as a constraint change, which is
+            // exactly the representational noise `affects_validation()` exists
+            // to filter out.
+            if UNORDERED.contains(&keyword.as_str()) {
+                compare_unordered(
+                    left_items,
+                    right_items,
+                    pointer,
+                    &keyword,
+                    keyword_position,
+                    out,
+                );
+                return;
+            }
+
+            // Members of `allOf`/`anyOf`/`oneOf`/`prefixItems` are schemas, so
+            // their keys are keywords — without this an annotation nested in a
+            // branch is misreported as a dropped constraint.
+            let members_are_schemas = SCHEMA_ARRAYS.contains(&keyword.as_str());
+
             for (index, left_item) in left_items.iter().enumerate() {
                 let child = format!("{pointer}/{index}");
                 match right_items.get(index) {
-                    Some(right_item) => walk(left_item, right_item, &child, false, out),
+                    Some(right_item) => {
+                        walk(left_item, right_item, &child, members_are_schemas, out)
+                    }
                     None => out.push(Difference {
                         pointer: child,
                         keyword: index.to_string(),
@@ -200,6 +225,54 @@ fn walk(
 
 /// Whether a keyword's value is a map of named subschemas rather than more
 /// keywords.
+/// Array-valued keywords whose members are schemas, not plain values.
+const SCHEMA_ARRAYS: &[&str] = &["allOf", "anyOf", "oneOf", "prefixItems"];
+
+/// Array-valued keywords that denote sets, where order carries no meaning.
+const UNORDERED: &[&str] = &["required", "enum", "type"];
+
+/// Compares two set-valued keywords by membership.
+///
+/// A value only on the left is a constraint the right no longer states; a value
+/// only on the right is one it added. Order alone produces nothing.
+fn compare_unordered(
+    left_items: &[Value],
+    right_items: &[Value],
+    pointer: &str,
+    keyword: &str,
+    keyword_position: bool,
+    out: &mut Vec<Difference>,
+) {
+    // `enum` and a `type` union both *list what is accepted*, so dropping a
+    // member accepts less — tightened. `required` lists what is demanded, so
+    // dropping one demands less — relaxed. The two run opposite ways.
+    let dropped_from_left = if matches!(keyword, "enum" | "type") {
+        DifferenceKind::ConstraintTightened
+    } else {
+        DifferenceKind::ConstraintRelaxed
+    };
+    let added_on_right = if matches!(keyword, "enum" | "type") {
+        DifferenceKind::ConstraintRelaxed
+    } else {
+        DifferenceKind::ConstraintTightened
+    };
+
+    let mut report = |kind| {
+        out.push(Difference {
+            kind: classify(keyword, keyword_position, kind),
+            pointer: pointer.to_string(),
+            keyword: keyword.to_string(),
+        });
+    };
+
+    if left_items.iter().any(|value| !right_items.contains(value)) {
+        report(dropped_from_left);
+    }
+    if right_items.iter().any(|value| !left_items.contains(value)) {
+        report(added_on_right);
+    }
+}
+
 fn names_schemas(keyword: &str) -> bool {
     !matches!(keyword, "properties" | "$defs" | "patternProperties" | "dependentSchemas")
 }
@@ -371,6 +444,73 @@ mod tests {
             };
 
             assert!(!difference.leaves_enforcement_gap());
+        }
+    }
+
+    mod representational_noise {
+        use super::*;
+
+        /// Members of `allOf` are schemas, so their keys are keywords. Without
+        /// that context a nested `description` reads as a dropped constraint.
+        #[test]
+        fn annotation_inside_all_of_is_not_an_enforcement_gap() {
+            let left = schema(json!({ "allOf": [{ "description": "before", "minimum": 1 }] }));
+            let right = schema(json!({ "allOf": [{ "description": "after", "minimum": 1 }] }));
+
+            let losses = left.diff(&right);
+
+            assert!(
+                !losses.iter().any(Difference::leaves_enforcement_gap),
+                "an annotation change was reported as an enforcement gap: {losses:#?}",
+            );
+        }
+
+        /// `required` and `enum` are sets written as arrays; reordering them
+        /// accepts exactly the same instances.
+        #[test]
+        fn reordered_required_and_enum_arrays_do_not_create_false_losses() {
+            let left = schema(json!({
+                "required": ["a", "b"],
+                "properties": { "k": { "enum": ["x", "y"] } }
+            }));
+            let right = schema(json!({
+                "required": ["b", "a"],
+                "properties": { "k": { "enum": ["y", "x"] } }
+            }));
+
+            let losses = left.diff(&right);
+
+            assert!(losses.is_empty(), "a reorder was reported as a difference: {losses:#?}");
+        }
+
+        /// The set comparison must still catch a genuine removal.
+        #[test]
+        fn a_dropped_required_key_is_still_reported() {
+            let left = schema(json!({ "required": ["a", "b"] }));
+            let right = schema(json!({ "required": ["a"] }));
+
+            let losses = left.diff(&right);
+
+            assert!(
+                losses.iter().any(|loss| loss.keyword == "required"
+                    && loss.kind == DifferenceKind::ConstraintRelaxed),
+                "dropping a required key was not reported as relaxed: {losses:#?}",
+            );
+        }
+
+        /// And a narrowed `enum` runs the other way: fewer accepted values is a
+        /// tightening, not a relaxation.
+        #[test]
+        fn a_narrowed_enum_is_reported_as_tightened() {
+            let left = schema(json!({ "enum": ["x", "y"] }));
+            let right = schema(json!({ "enum": ["x"] }));
+
+            let losses = left.diff(&right);
+
+            assert!(
+                losses.iter().any(|loss| loss.kind == DifferenceKind::ConstraintTightened),
+                "a narrowed enum was not reported as tightened: {losses:#?}",
+            );
         }
     }
 }

@@ -32,8 +32,17 @@ impl Outstanding {
 enum Condition {
     Matched,
     Unmatched,
-    /// Undecidable until these keys are supplied.
-    Undecided(BTreeSet<String>),
+    Undecided {
+        /// Keys not yet supplied. Collecting them settles the condition, so
+        /// they stop being outstanding once present.
+        absent: BTreeSet<String>,
+        /// Keys that *are* present but sit under a predicate this code cannot
+        /// evaluate. Collecting them settles nothing, so they must survive the
+        /// "already collected" filter — otherwise the obligation behind an
+        /// unsupported condition silently disappears the moment its deciding
+        /// field arrives.
+        unsupported: BTreeSet<String>,
+    },
 }
 
 impl<R: SchemaRole> SchemaDocument<R> {
@@ -86,7 +95,21 @@ impl<R: SchemaRole> SchemaDocument<R> {
             }
         }
 
+        let mut absent_gates = BTreeSet::new();
+        let mut unsupported_gates = BTreeSet::new();
+
         for rule in schema.get("allOf").and_then(Value::as_array).into_iter().flatten() {
+            // A branch with no `if` is an unconditional intersection: its own
+            // `required` is owed outright, not gated on anything.
+            if rule.get("if").is_none() {
+                for key in required_keys(rule) {
+                    if !collected.contains_key(key) {
+                        result.missing.insert(key.to_string());
+                    }
+                }
+                continue;
+            }
+
             match evaluate_condition(rule.get("if"), collected) {
                 Condition::Matched => {
                     let then_keys = rule.get("then").map(required_keys).unwrap_or_default();
@@ -96,14 +119,28 @@ impl<R: SchemaRole> SchemaDocument<R> {
                         }
                     }
                 }
-                Condition::Undecided(gates) => result.undecided.extend(gates),
-                Condition::Unmatched => {}
+                // A decided-false condition still carries the `else` obligation.
+                Condition::Unmatched => {
+                    let else_keys = rule.get("else").map(required_keys).unwrap_or_default();
+                    for key in else_keys {
+                        if !collected.contains_key(key) {
+                            result.missing.insert(key.to_string());
+                        }
+                    }
+                }
+                Condition::Undecided { absent, unsupported } => {
+                    absent_gates.extend(absent);
+                    unsupported_gates.extend(unsupported);
+                }
             }
         }
 
         // A gate that has since been collected is decided, however many other
-        // rules still name it.
-        result.undecided.retain(|key| !collected.contains_key(key));
+        // rules still name it. Unsupported predicates are exempt: their key
+        // being present does not make them evaluable.
+        absent_gates.retain(|key| !collected.contains_key(key));
+        result.undecided = absent_gates;
+        result.undecided.extend(unsupported_gates);
         result
     }
 }
@@ -126,18 +163,19 @@ fn evaluate_condition(clause: Option<&Value>, collected: &Map<String, Value>) ->
         return Condition::Unmatched;
     };
 
-    let mut gates = BTreeSet::new();
+    let mut absent = BTreeSet::new();
+    let mut unsupported = BTreeSet::new();
 
     for key in required_keys(clause) {
         if !collected.contains_key(key) {
-            gates.insert(key.to_string());
+            absent.insert(key.to_string());
         }
     }
 
     if let Some(properties) = clause.get("properties").and_then(Value::as_object) {
         for (key, constraint) in properties {
             let Some(actual) = collected.get(key) else {
-                gates.insert(key.clone());
+                absent.insert(key.clone());
                 continue;
             };
             if let Some(expected) = constraint.get("const") {
@@ -149,12 +187,18 @@ fn evaluate_condition(clause: Option<&Value>, collected: &Map<String, Value>) ->
                     return Condition::Unmatched;
                 }
             } else {
-                gates.insert(key.clone());
+                // The value is in hand but the predicate is one this code does
+                // not model. Undecided, and no amount of collecting fixes it.
+                unsupported.insert(key.clone());
             }
         }
     }
 
-    if gates.is_empty() { Condition::Matched } else { Condition::Undecided(gates) }
+    if absent.is_empty() && unsupported.is_empty() {
+        Condition::Matched
+    } else {
+        Condition::Undecided { absent, unsupported }
+    }
 }
 
 #[cfg(test)]
@@ -204,6 +248,28 @@ mod tests {
                 .outstanding(&collected(json!({ "card": "4242" })));
 
             assert_eq!(result.missing, ["billing_address".to_string()].into());
+        }
+    }
+
+    mod unconditional_all_of {
+        use super::*;
+
+        /// A branch with no `if` is a plain intersection, so its `required` is
+        /// owed outright rather than gated on anything.
+        #[test]
+        fn unconditional_all_of_required_is_outstanding() {
+            let result = schema(json!({ "allOf": [{ "required": ["caller_name"] }] }))
+                .outstanding(&collected(json!({})));
+
+            assert_eq!(result.missing, ["caller_name".to_string()].into());
+        }
+
+        #[test]
+        fn unconditional_all_of_required_clears_once_collected() {
+            let result = schema(json!({ "allOf": [{ "required": ["caller_name"] }] }))
+                .outstanding(&collected(json!({ "caller_name": "Ada" })));
+
+            assert!(result.is_complete(), "{result:?}");
         }
     }
 
@@ -264,6 +330,45 @@ mod tests {
             })));
 
             assert!(result.is_complete(), "{result:?}");
+        }
+
+        /// A condition decided *false* still carries its `else` obligation.
+        #[test]
+        fn unmatched_condition_collects_else_required() {
+            let result = schema(json!({
+                "allOf": [{
+                    "if": {
+                        "properties": { "request_kind": { "const": "order" } },
+                        "required": ["request_kind"]
+                    },
+                    "then": { "required": ["fulfillment_method"] },
+                    "else": { "required": ["callback_number"] }
+                }]
+            }))
+            .outstanding(&collected(json!({ "request_kind": "information" })));
+
+            assert_eq!(result.missing, ["callback_number".to_string()].into());
+        }
+
+        /// The fail-open this guards: the deciding field is *present* but its
+        /// predicate is unsupported, so the condition is still undecided. An
+        /// "already collected" filter must not treat presence as resolution and
+        /// discard the obligation behind it.
+        #[test]
+        fn unsupported_condition_with_present_gate_remains_undecided() {
+            let result = schema(json!({
+                "allOf": [{
+                    "if": { "properties": { "total": { "minimum": 100 } } },
+                    "then": { "required": ["approval"] }
+                }]
+            }))
+            .outstanding(&collected(json!({ "total": 150 })));
+
+            assert!(
+                !result.is_complete(),
+                "an unsupported condition was discharged by its gate being present: {result:?}",
+            );
+            assert_eq!(result.undecided, ["total".to_string()].into());
         }
 
         /// An `if` shape this code does not model must not silently waive the

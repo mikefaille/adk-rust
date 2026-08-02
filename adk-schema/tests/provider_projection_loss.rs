@@ -88,10 +88,11 @@ fn classifies_the_loss_as_an_enforcement_gap() {
     );
 }
 
-/// Every reported loss changes which instances are accepted — the projection
-/// dropped rules, not annotations.
+/// At least one reported loss changes which instances are accepted, so the
+/// report is not purely cosmetic. (It does not claim *every* difference is
+/// substantive — the projection also drops `$schema`, which is not a rule.)
 #[test]
-fn reports_no_merely_cosmetic_difference_as_a_loss() {
+fn reports_at_least_one_substantive_loss() {
     let losses = ingest(source()).diff(&ingest(gemini_projection()));
 
     assert!(

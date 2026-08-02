@@ -100,7 +100,12 @@ fn canonical_number(n: serde_json::Number) -> serde_json::Number {
     }
 
     // JCS renders `-0.0` as `0`.
-    if float >= 0.0 && float <= u64::MAX as f64 {
+    //
+    // The bound is strict. `u64::MAX as f64` rounds *up* to 2^64, so a
+    // non-strict `<=` would admit 2^64 itself, and `as u64` saturates it back
+    // down to `u64::MAX` — giving 2^64 and 2^64 - 1 one shared identity. Every
+    // integral f64 strictly below 2^64 is exactly representable as a `u64`.
+    if float >= 0.0 && float < u64::MAX as f64 {
         #[expect(clippy::cast_possible_truncation, reason = "fract() == 0 and range-checked")]
         #[expect(clippy::cast_sign_loss, reason = "guarded by float >= 0.0")]
         return serde_json::Number::from(float as u64);
@@ -162,5 +167,24 @@ mod tests {
                 digest_of(json!({ "properties": { "n": { "enum": [1, 2] } } })),
             );
         }
+    }
+
+    /// `u64::MAX as f64` rounds up to 2^64, so a non-strict bound would admit
+    /// 2^64 and saturate it back to `u64::MAX`, giving two distinct constraints
+    /// one identity.
+    #[test]
+    fn two_to_the_64_does_not_canonicalize_to_u64_max() {
+        let at_bound = InputSchema::from_value(
+            serde_json::json!({ "maximum": 18446744073709551616.0_f64 }),
+            &IngestionPolicy::default(),
+        )
+        .expect("ingests");
+        let max = InputSchema::from_value(
+            serde_json::json!({ "maximum": u64::MAX }),
+            &IngestionPolicy::default(),
+        )
+        .expect("ingests");
+
+        assert_ne!(at_bound.digest(), max.digest(), "2^64 and u64::MAX share a digest");
     }
 }

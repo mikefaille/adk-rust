@@ -95,8 +95,14 @@ impl<R: SchemaRole> ValidatedSchemaDocument<R> {
     ) -> Result<()> {
         let mut issues = Vec::with_capacity(options.max_issues.min(16));
         let mut truncated = false;
+        // Tracked separately from `issues`, because `max_issues` caps *reporting*
+        // and must never cap *enforcement*. At `max_issues: 0` the loop breaks
+        // before pushing anything, and deciding on `issues.is_empty()` would
+        // return `Ok(())` for an instance the validator rejected.
+        let mut rejected = false;
 
         for err in self.validator.iter_errors(instance) {
+            rejected = true;
             if issues.len() >= options.max_issues {
                 // `iter_errors` is lazy, so this also stops the work behind the
                 // remaining errors.
@@ -115,7 +121,7 @@ impl<R: SchemaRole> ValidatedSchemaDocument<R> {
             });
         }
 
-        if !issues.is_empty() {
+        if rejected {
             return Err(SchemaError::InvalidInstance { issues, truncated });
         }
         Ok(())
@@ -241,6 +247,36 @@ mod tests {
         }
 
         mod validate_with {
+            /// `max_issues` caps reporting, never enforcement. At zero the
+            /// validator still rejects; it just has nothing to say about why.
+            #[test]
+            fn max_issues_zero_still_rejects_invalid_instance() {
+                let schema = InputSchema::for_type::<Caller>()
+                    .and_then(InputSchema::compile)
+                    .expect("type compiles");
+                let options = ValidationOptions { max_issues: 0, ..Default::default() };
+
+                let result = schema.validate_with(&serde_json::json!({}), &options);
+
+                assert!(result.is_err(), "a zero reporting cap accepted an invalid instance");
+            }
+
+            #[test]
+            fn max_issues_zero_reports_truncation() {
+                let schema = InputSchema::for_type::<Caller>()
+                    .and_then(InputSchema::compile)
+                    .expect("type compiles");
+                let options = ValidationOptions { max_issues: 0, ..Default::default() };
+
+                match schema.validate_with(&serde_json::json!({}), &options) {
+                    Err(SchemaError::InvalidInstance { issues, truncated }) => {
+                        assert!(issues.is_empty());
+                        assert!(truncated, "silence must be marked as truncation, not cleanliness");
+                    }
+                    other => panic!("expected InvalidInstance, got {other:?}"),
+                }
+            }
+
             use super::*;
 
             /// Opting in restores the value for fixture debugging.
