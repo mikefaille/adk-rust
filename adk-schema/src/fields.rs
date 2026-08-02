@@ -35,12 +35,19 @@ impl<R: SchemaRole> SchemaDocument<R> {
     /// hand. A consumer that already has typed domain objects should read those
     /// instead of recovering facts from a projection.
     ///
-    /// Merges unconditional `allOf` branches best-effort. **Conditional
-    /// branches are left alone**: an `allOf` entry carrying `if`, `then`, or
-    /// `else` states an obligation that depends on a value, and promoting its
-    /// `required` keys here would report them as unconditionally required —
-    /// false for every instance that fails the condition. Use
-    /// [`SchemaDocument::outstanding`] for conditional requirements.
+    /// Merges unconditional `allOf` branches at any depth — a branch may hold
+    /// another `allOf`, and a property declared two layers down is still
+    /// declared.
+    ///
+    /// **Conditional branches are left alone, at every depth.** An `allOf`
+    /// entry carrying `if`, `then`, or `else` states an obligation that depends
+    /// on a value, and promoting its `required` keys here would report them as
+    /// unconditionally required — false for every instance that fails the
+    /// condition. Burying such a branch inside another does not change that.
+    /// Use [`SchemaDocument::outstanding`] for conditional requirements.
+    ///
+    /// `anyOf` and `oneOf` are not merged either: they state a choice, so no
+    /// single branch's properties are unconditionally declared.
     ///
     /// # Examples
     ///
@@ -62,21 +69,29 @@ impl<R: SchemaRole> SchemaDocument<R> {
     /// # Ok::<(), SchemaError>(())
     /// ```
     pub fn fields(&self) -> Vec<FieldEntry> {
-        let schema = self.as_value();
         let mut collected: BTreeMap<String, FieldEntry> = BTreeMap::new();
-
-        collect_properties(schema, "", &mut collected);
-
-        for (index, branch) in
-            schema.get("allOf").and_then(Value::as_array).into_iter().flatten().enumerate()
-        {
-            if is_conditional(branch) {
-                continue;
-            }
-            collect_properties(branch, &format!("/allOf/{index}"), &mut collected);
-        }
-
+        collect_from(self.as_value(), "", &mut collected);
         collected.into_values().collect()
+    }
+}
+
+/// Collects `node`'s own properties, then descends through its unconditional
+/// `allOf` branches.
+///
+/// Recursive because `allOf` nests: a branch may hold another `allOf`, and a
+/// single-level scan reports a property declared two layers down as absent. The
+/// conditional test is applied at every depth, not just the first, so burying a
+/// conditional branch does not smuggle its fields into the flat view.
+fn collect_from(node: &Value, prefix: &str, out: &mut BTreeMap<String, FieldEntry>) {
+    collect_properties(node, prefix, out);
+
+    for (index, branch) in
+        node.get("allOf").and_then(Value::as_array).into_iter().flatten().enumerate()
+    {
+        if is_conditional(branch) {
+            continue;
+        }
+        collect_from(branch, &format!("{prefix}/allOf/{index}"), out);
     }
 }
 
@@ -234,6 +249,59 @@ mod tests {
             .fields();
 
             assert!(fields[0].required);
+        }
+
+        /// `allOf` nests, and a single-level scan reports a property declared
+        /// two layers down as absent.
+        #[test]
+        fn merges_a_branch_nested_inside_another_branch() {
+            let fields = schema(json!({
+                "allOf": [{ "allOf": [{ "properties": { "deep": {} } }] }]
+            }))
+            .fields();
+
+            let names: Vec<&str> = fields.iter().map(|f| f.name.as_str()).collect();
+            assert_eq!(names, ["deep"]);
+        }
+
+        #[test]
+        fn honours_a_requirement_stated_in_a_nested_branch() {
+            let fields = schema(json!({
+                "properties": { "a": {} },
+                "allOf": [{ "allOf": [{ "required": ["a"] }] }]
+            }))
+            .fields();
+
+            assert!(fields[0].required);
+        }
+
+        /// The pointer records the path actually walked, so a nested branch is
+        /// addressable rather than collapsed onto the outer one.
+        #[test]
+        fn reports_the_full_path_to_a_nested_branch() {
+            let fields = schema(json!({
+                "allOf": [{ "allOf": [{ "properties": { "deep": {} } }] }]
+            }))
+            .fields();
+
+            assert_eq!(fields[0].pointer, "/allOf/0/allOf/0/properties/deep");
+        }
+
+        /// Burying a conditional must not smuggle its fields in: the test is
+        /// applied at every depth, not just the first.
+        #[test]
+        fn does_not_merge_a_conditional_branch_found_while_nested() {
+            let fields = schema(json!({
+                "properties": { "a": {} },
+                "allOf": [{ "allOf": [{
+                    "if": { "properties": { "a": { "const": 1 } } },
+                    "then": { "properties": { "conditional_only": {} } }
+                }] }]
+            }))
+            .fields();
+
+            let names: Vec<&str> = fields.iter().map(|f| f.name.as_str()).collect();
+            assert_eq!(names, ["a"]);
         }
 
         /// The rule this primitive exists to respect. Promoting a conditional
