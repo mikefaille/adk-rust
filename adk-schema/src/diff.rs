@@ -95,8 +95,8 @@ impl<R: SchemaRole> SchemaDocument<R> {
     ///
     /// A provider projection is the motivating use: diffing a canonical schema
     /// against the reduced form sent to a model reports every constraint the
-    /// reduction dropped, as [`DifferenceKind::Removed`]. Those are the rules
-    /// the runtime still enforces and the model was never shown.
+    /// reduction dropped, as [`DifferenceKind::ConstraintRelaxed`]. Those are
+    /// the rules the runtime still enforces and the model was never shown.
     ///
     /// # Examples
     ///
