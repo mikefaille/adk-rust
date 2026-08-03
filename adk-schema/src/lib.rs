@@ -1,7 +1,8 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
-//! # adk-schema
-//!
-//! Canonical JSON Schema documents and validation for ADK.
+// The README is the crate's front page, so it is compiled as documentation
+// rather than duplicated here. Its examples run as doctests, which is the only
+// thing that keeps a README honest as the API moves.
+#![doc = include_str!("../README.md")]
 //!
 //! ## Role Separation Compile-Time Assertions
 //!

@@ -266,7 +266,6 @@ impl GeminiRealtimeSession {
         model: &str,
         config: RealtimeConfig,
     ) -> Result<Self> {
-        let schema_cache = Arc::new(adk_core::SchemaCache::new());
         let adapter: Arc<dyn adk_core::SchemaAdapter> = match &backend {
             GeminiLiveBackend::Studio { .. } => {
                 Arc::new(adk_gemini::schema_adapter::GeminiSchemaAdapter::new())
@@ -276,6 +275,10 @@ impl GeminiRealtimeSession {
                 Arc::new(adk_gemini::schema_adapter::GeminiSchemaAdapter::vertex_ai())
             }
         };
+        // Bound to the adapter chosen above, so a Studio-shaped schema can never
+        // be served for a Vertex session: the two normalize `additionalProperties`
+        // differently.
+        let schema_cache = Arc::new(adk_core::SchemaCache::for_adapter(Arc::clone(&adapter)));
 
         // 1. Compile tools BEFORE establishing the WebSocket connection.
         // If any tool fails to compile (semantic loss), we abort early.
@@ -1546,7 +1549,7 @@ fn convert_tools(
             decl["description"] = json!(desc);
         }
         if let Some(params) = &t.parameters {
-            let compiled = cache.get_or_compile(params, adapter).map_err(|e| {
+            let compiled = cache.compile(params).map_err(|e| {
                 RealtimeError::protocol(format!(
                     "Failed to compile schema for tool {}: {}",
                     t.name, e

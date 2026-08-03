@@ -17,7 +17,7 @@ thiserror.workspace = true
 sha2.workspace = true
 hex.workspace = true
 schemars = { version = "1.2", optional = true }
-jsonschema = { version = "0.47", optional = true, default-features = false }
+jsonschema = { workspace = true, optional = true }
 adk-core = { workspace = true, optional = true }
 
 [features]
@@ -28,6 +28,12 @@ runtime-validation = ["dep:jsonschema"]
 # extension trait. Off by default so this crate stays usable as a standalone
 # JSON Schema library with no ADK dependency.
 adapters = ["dep:adk-core"]
+
+# The README is compiled as the crate's front page, and its `schemars` example
+# derives `Serialize`/`Deserialize` — the way anyone actually uses that feature.
+# Only the doctest needs `serde`; the library itself does not.
+[dev-dependencies]
+serde = { workspace = true }
 
 [[example]]
 name = "what_to_ask_next"
