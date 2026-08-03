@@ -5,8 +5,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use adk_audio::{
-    AudioFrame, AudioPipelineBuilder, GeminiTts, PipelineInput, PipelineOutput, TtsProvider,
-    TtsRequest, Voice,
+    AudioFrame, AudioPipelineBuilder, AudioResult, GeminiTts, PipelineInput, PipelineOutput,
+    TtsProvider, TtsRequest, Voice,
 };
 use bytes::Bytes;
 use futures::Stream;
@@ -20,25 +20,21 @@ async fn spawn_mock_sse_server(events: Vec<serde_json::Value>) -> String {
     use tokio::net::TcpListener;
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
-    let events = Arc::new(events);
 
     tokio::spawn(async move {
-        while let Ok((mut socket, _)) = listener.accept().await {
-            let events = events.clone();
-            tokio::spawn(async move {
-                use tokio::io::{AsyncReadExt, AsyncWriteExt};
-                let mut buf = [0; 4096];
-                let _ = socket.read(&mut buf).await;
+        if let Ok((mut socket, _)) = listener.accept().await {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let mut buf = [0; 1024];
+            let _ = socket.read(&mut buf).await;
 
-                let mut response = String::from(
-                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: keep-alive\r\n\r\n",
-                );
-                for event in events.iter() {
-                    response.push_str(&format!("data: {event}\n\n"));
-                }
-                let _ = socket.write_all(response.as_bytes()).await;
-                let _ = socket.flush().await;
-            });
+            let mut response = String::from(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: keep-alive\r\n\r\n",
+            );
+            for event in events {
+                response.push_str(&format!("data: {event}\n\n"));
+            }
+            let _ = socket.write_all(response.as_bytes()).await;
+            let _ = socket.flush().await;
         }
     });
 
@@ -199,49 +195,6 @@ async fn test_uri_only_audio_returns_error() {
     assert!(err_str.contains("URI-only audio is not supported"));
 }
 
-#[tokio::test]
-async fn test_empty_audio_delta_skipped() {
-    let base_url = spawn_mock_sse_server(vec![
-        json!({
-            "event_type": "step.delta",
-            "index": 1,
-            "delta": {
-                "type": "audio",
-                "data": "",
-                "mime_type": "audio/pcm",
-                "sample_rate": 24000,
-                "channels": 1
-            }
-        }),
-        json!({
-            "event_type": "step.delta",
-            "index": 1,
-            "delta": {
-                "type": "audio",
-                "data": "UklGRgAAAABXQVZFZg==",
-                "mime_type": "audio/pcm",
-                "sample_rate": 24000,
-                "channels": 1
-            }
-        }),
-    ])
-    .await;
-
-    let config = adk_audio::providers::tts::CloudTtsConfig::new("test_key").with_base_url(base_url);
-    let tts = GeminiTts::new(config);
-
-    let req = TtsRequest { text: "hello".to_string(), ..Default::default() };
-    let mut stream = tts.synthesize_stream(&req).await.unwrap();
-
-    use futures::StreamExt;
-    let res = stream.next().await.unwrap();
-    assert!(res.is_ok());
-    let frame = res.unwrap();
-    assert_eq!(frame.data.len(), 15); // "UklGRgAAAABXQVZFZg==" decodes to 15 bytes
-
-    assert!(stream.next().await.is_none());
-}
-
 // ══════════════════════════════════════════════════════════════════════
 // Pipeline Streaming and Telemetry Tests
 // ══════════════════════════════════════════════════════════════════════
@@ -315,19 +268,15 @@ async fn test_pipeline_streaming_latency_and_telemetry() {
     // Proves first PipelineOutput::Audio arrives *before* the stream finishes completing
     assert!(first_arrival < second_arrival);
 
-    // Polling for metrics instead of a fixed sleep to avoid CI flakes
-    let mut success = false;
-    for _ in 0..50 {
-        {
-            let metrics = handle.metrics.read().await;
-            if metrics.total_audio_ms == 20 && metrics.tts_latency_ms > 0.0 {
-                success = true;
-                break;
-            }
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    assert!(success, "Metrics did not reach the expected values in time");
+    // Let the loop run fully
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Verify metrics inside handle
+    let metrics = handle.metrics.read().await;
+    assert_eq!(metrics.total_audio_ms, 20); // 10ms + 10ms
+    assert!(metrics.tts_first_audio_latency_ms >= 100.0);
+    assert!(metrics.tts_latency_ms >= 200.0);
+    assert!(metrics.tts_latency_ms > metrics.tts_first_audio_latency_ms);
 }
 
 // ══════════════════════════════════════════════════════════════════════

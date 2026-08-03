@@ -9,9 +9,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **adk-audio: `PipelineMetrics::tts_first_audio_latency_ms`.**
-  Added first-audio latency tracking to the audio pipeline performance metrics to measure time-to-first-audio independently of stream completion. Added `#[non_exhaustive]` to `PipelineMetrics` to preserve external compatibility.
-
 - **adk-schema: `ValidationOptions` and `ValidatedSchemaDocument::validate_with`.**
   `validate_with` takes an explicit issue limit and chooses whether messages may
   quote the offending instance values; `validate` delegates to it under

@@ -113,16 +113,29 @@ async fn process_text_to_speech(
         let stream_res = tts.synthesize_stream(&request).await;
 
         match stream_res {
-            Ok(stream) => {
+            Ok(mut stream) => {
+                use futures::StreamExt;
                 let mut first_audio_sent = false;
-                crate::pipeline::types::consume_tts_stream(
-                    stream,
-                    output_tx,
-                    metrics,
-                    tts_start,
-                    &mut first_audio_sent,
-                )
-                .await;
+
+                while let Some(frame_res) = stream.next().await {
+                    match frame_res {
+                        Ok(frame) => {
+                            let duration_ms = frame.duration_ms;
+                            if output_tx.send(PipelineOutput::Audio(frame)).await.is_ok() {
+                                let mut m = metrics.write().await;
+                                m.total_audio_ms += duration_ms as u64;
+                                if !first_audio_sent {
+                                    first_audio_sent = true;
+                                    m.tts_first_audio_latency_ms =
+                                        tts_start.elapsed().as_millis() as f64;
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!("TTS stream error in pipeline: {:?}", e);
+                        }
+                    }
+                }
 
                 if first_audio_sent {
                     let mut m = metrics.write().await;

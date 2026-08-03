@@ -349,7 +349,6 @@ let handle = enhance_pipeline()?;                         // FX transform
 | Field | Description |
 |-------|-------------|
 | `tts_latency_ms` | TTS synthesis latency |
-| `tts_first_audio_latency_ms` | First audio latency |
 | `stt_latency_ms` | STT transcription latency |
 | `llm_latency_ms` | Agent reasoning latency |
 | `total_audio_ms` | Total audio processed |

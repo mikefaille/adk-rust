@@ -833,11 +833,7 @@ fn sse_step_delta_to_chunk(
             }
             None
         }
-        StepDelta::Audio { .. } => {
-            // Audio deltas are handled natively in the pipeline (e.g., TtsProvider synthesis stream)
-            // and do not produce general LLM text/tool call chunks.
-            None
-        }
+        StepDelta::Audio { .. } => None,
         // A delta type this crate version does not model: ignore it.
         StepDelta::Other(_) => None,
     }

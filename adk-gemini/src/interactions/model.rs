@@ -445,17 +445,6 @@ impl GenerationConfig {
         {
             return Err("max_output_tokens must be positive".to_string());
         }
-        if let Some(ref sc) = self.speech_config {
-            match (&sc.voice_config, &sc.multi_speaker_voice_config) {
-                (Some(_), Some(_)) => {
-                    return Err("speech_config is invalid: cannot specify both voice_config and multi_speaker_voice_config".to_string());
-                }
-                (None, None) => {
-                    return Err("speech_config is invalid: must specify either voice_config or multi_speaker_voice_config".to_string());
-                }
-                _ => {}
-            }
-        }
         Ok(())
     }
 }
