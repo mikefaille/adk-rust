@@ -300,12 +300,15 @@ fn test_gemini_31_tts_request_serialization() {
     assert_eq!(value["input"], json!("Hello world"));
     assert_eq!(value["response_modalities"][0], json!("audio"));
 
-    let gen_cfg = &value["generation_config"];
-    let sp_cfg = &gen_cfg["speech_config"];
-    let voice_cfg = &sp_cfg["voice_config"];
-    let prebuilt = &voice_cfg["prebuilt_voice_config"];
+    let expected_speech_config = json!({
+        "voice_config": {
+            "prebuilt_voice_config": {
+                "voice_name": "Kore"
+            }
+        }
+    });
 
-    assert_eq!(prebuilt["voice_name"], json!("Kore"));
+    assert_eq!(value["generation_config"]["speech_config"], expected_speech_config);
 }
 
 #[test]
@@ -367,4 +370,46 @@ fn test_sse_fixture_parsing_audio_deltas() {
         }
         other => panic!("expected StepDelta event, got {other:?}"),
     }
+}
+
+#[test]
+fn test_speech_config_validation() {
+    use adk_gemini::interactions::{
+        GenerationConfig, MultiSpeakerVoiceConfig, PrebuiltVoiceConfig, SpeechConfig, VoiceConfig,
+    };
+
+    // 1. Valid: exactly one specified (voice_config)
+    let valid_cfg = GenerationConfig {
+        speech_config: Some(SpeechConfig {
+            voice_config: Some(VoiceConfig {
+                prebuilt_voice_config: PrebuiltVoiceConfig { voice_name: "Kore".to_string() },
+            }),
+            multi_speaker_voice_config: None,
+        }),
+        ..Default::default()
+    };
+    assert!(valid_cfg.validate().is_ok());
+
+    // 2. Invalid: both None
+    let invalid_both_none = GenerationConfig {
+        speech_config: Some(SpeechConfig { voice_config: None, multi_speaker_voice_config: None }),
+        ..Default::default()
+    };
+    let err1 = invalid_both_none.validate().unwrap_err();
+    assert!(err1.contains("must specify either voice_config or multi_speaker_voice_config"));
+
+    // 3. Invalid: both Some
+    let invalid_both_some = GenerationConfig {
+        speech_config: Some(SpeechConfig {
+            voice_config: Some(VoiceConfig {
+                prebuilt_voice_config: PrebuiltVoiceConfig { voice_name: "Kore".to_string() },
+            }),
+            multi_speaker_voice_config: Some(MultiSpeakerVoiceConfig {
+                speaker_voice_configs: vec![],
+            }),
+        }),
+        ..Default::default()
+    };
+    let err2 = invalid_both_some.validate().unwrap_err();
+    assert!(err2.contains("cannot specify both voice_config and multi_speaker_voice_config"));
 }
