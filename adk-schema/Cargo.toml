@@ -7,6 +7,8 @@ license.workspace = true
 authors.workspace = true
 description = "Canonical JSON Schema documents and validation for ADK"
 documentation = "https://docs.rs/adk-schema"
+keywords = ["json-schema", "schema", "validation", "adk", "ai"]
+categories = ["data-structures", "encoding", "api-bindings"]
 readme = "README.md"
 
 [dependencies]
