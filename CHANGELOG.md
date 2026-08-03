@@ -7,6 +7,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Inline and file content metadata survives session persistence.**
+  `Part::InlineData`, `Part::FileData`, `Part::FunctionResponse`, and multimodal
+  function-response parts retain optional annotations; inline data also retains
+  its optional source URI. ACP image conversion now round-trips both fields, and
+  Vertex sessions route metadata-bearing content through lossless `rawEvent`
+  persistence. Existing payloads continue to deserialize with empty metadata.
+- **MCP tool annotations now control per-tool safety metadata.** Discovered
+  `readOnlyHint` and `idempotentHint` values flow into ADK tool metadata,
+  automatic dispatch, and reconnect replay decisions. Tools without hints keep
+  the conservative sequential, no-replay defaults.
+- **Schema caches keep adapter results isolated.** `SchemaCache` binds one
+  `SchemaAdapter` instance at construction, so the same input schema cannot
+  return a result produced by another provider or adapter configuration. The
+  deprecated per-call adapter API also keys entries by normalized output to
+  preserve correctness during migration.
+- **`LlmAgent` skill injection preserves prompt-cache prefixes.** Contextual
+  skills are injected into the current user turn instead of leading the request,
+  so stable instructions and prior conversation history remain reusable by
+  provider prompt caches across turns.
+- **adk-sandbox's optional dependencies are no longer scoped to Unix.** Every
+  optional dependency sat below a `[target.'cfg(unix)'.dependencies]` header, so
+  `wasmtime` and `wasmtime-wasi` were unix-only and the `wasm` feature could not
+  build on Windows, while `windows-sys` — declared for the AppContainer path —
+  could never be selected on any platform. The optional dependencies move back to
+  `[dependencies]` and `windows-sys` gets a `cfg(windows)` block.
+- **The workspace builds clean on Windows.** Three `collapsible_if` violations
+  failed `clippy -D warnings` in code paths no CI job compiled: one in
+  `cargo-adk` behind `#[cfg(not(unix))]`, two in `adk-rust`'s `run()` that only
+  compile at the `standard` tier and above. An `unneeded_return` in
+  `adk-sandbox`'s Windows enforcer surfaced once the manifest fix made that
+  module compile.
+- **adk-bench's external-runner tests run on a stock Windows host.** They invoked
+  `sh` and a bare `echo`, neither of which a plain Windows install provides, and
+  passing a shell one-liner as an argument corrupted any embedded JSON because
+  `cmd.exe` does not implement `CommandLineToArgvW` escaping. The tests now write
+  a temporary script — PowerShell on Windows, `sh` elsewhere — so no payload
+  crosses the command line.
+- **Sandboxed Rust compilation discovers the Windows SDK outside a Developer
+  shell.** `ProcessBackend` now obtains the MSVC `PATH`, `LIB`, `LIBPATH`, and
+  `INCLUDE` values from the installed Build Tools when the parent environment
+  does not provide them. The compiler receives the SDK import-library paths while
+  the generated program still starts with a cleared environment. The exact
+  compile-and-run regression now runs in the PR-tier Windows smoke gate.
+- **adk-sandbox now preserves Windows shell quoting and selects the intended Rust
+  linker.** Raw command text reaches `cmd.exe` without `CommandLineToArgvW`
+  escaping, so quoted executable and script paths work. Direct sandboxed Rust
+  compilation uses the toolchain's `rust-lld` instead of accidentally resolving
+  Git's unrelated GNU `link.exe` from `PATH` on hosted Windows runners.
+
 ### Added
 
 - **adk-schema: `ValidationOptions` and `ValidatedSchemaDocument::validate_with`.**
@@ -14,6 +65,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   quote the offending instance values; `validate` delegates to it under
   `ValidationOptions::default()`. `SchemaError::InvalidInstance` gains
   `truncated`, so a capped issue list is distinguishable from a complete one.
+
+- **adk-realtime: `DisconnectReason`, so a closed stream can say why.**
+  `RealtimeSession::disconnect_reason()` reports the close code and reason the
+  provider sent, and `RealtimeRunner::disconnect_reason()` forwards it. The
+  Gemini session records its close frame before the event stream ends.
+
+  Applications that *poll* `RealtimeRunner::next_event()` never reach the
+  runner's `on_disconnect` dispatch, and `next_event` returns a bare `None`
+  whether the provider deliberately closed an idle session or the socket died.
+  Both therefore landed in the caller's terminal record as the same generic
+  stream failure — one that reads like a network defect when it was a policy
+  close. Google's Live API closes an idle session with `1008` and
+  `"The operation was aborted."`; that string was reachable in logs but nowhere
+  a durable record could use it.
+
+  The trait method is defaulted to `None`, so existing `RealtimeSession`
+  implementations are unaffected and this is not a breaking change.
+
+- **`scripts/setup-dev.ps1` — first-time setup for Windows.** `make setup`,
+  `scripts/setup-dev.sh`, and `devenv shell` all require a POSIX shell, so
+  Windows had no scripted path. Checks the toolchain and MSVC environment,
+  installs `sccache`, `cargo-nextest`, `protoc`, and NASM, verifies `bash` and
+  `python3` resolve, registers lefthook, and persists `RUSTC_WRAPPER`,
+  `CMAKE_POLICY_VERSION_MINIMUM`, and `PROTOC`. `-Check` reports without
+  changing anything.
+- **`scripts/setup-dev.sh` now checks `cargo-nextest` and `protoc`.** Both are
+  required by gates that CI installs for itself, so a missing local copy failed
+  the build while CI stayed green.
+- **PSScriptAnalyzer pre-commit gate.** `scripts/lint-powershell.ps1` backs a new
+  lefthook hook for staged `*.ps1`, the PowerShell counterpart to the shellcheck
+  gate. Skips itself when the module is not installed.
+
+### Security
+
+- **Wasmtime is updated to 46.0.2.** This resolves RUSTSEC-2026-0222 and
+  RUSTSEC-2026-0223. The PyO3 0.28 advisories are documented as unreachable:
+  PyO3 exists only in the lockfile through jiter's disabled `python` feature,
+  and no workspace feature compiles it. The supply-chain license policy now
+  recognizes Monty's OSI-approved Unicode-DFS-2016 data license.
 
 ### Changed
 
@@ -33,6 +123,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   variant or field is no longer a breaking change for downstream matches.
   `ValidationOptions` is deliberately exhaustive so `..Default::default()`
   construction keeps working.
+
 - **adk-codeact-monty joined the root workspace.** Monty is on crates.io since
   `0.0.19`, so the crate's git dependency (and the empty `[workspace]` table it
   forced) is gone: it now depends on `monty`, `monty-types`, and `monty-fs`

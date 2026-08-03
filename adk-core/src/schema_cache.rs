@@ -1,49 +1,257 @@
 //! Schema normalization cache for LLM provider adapters.
-use crate::SchemaAdapter;
-use crate::schema_adapter::SchemaCompileError;
-use serde_json::Value;
+//!
+//! Binds one adapter to each cache and stores normalized schemas by content hash,
+//! avoiding redundant normalization without allowing one adapter's result to be
+//! returned for another adapter. The hash ignores the order object keys were
+//! written in, so when `serde_json/preserve_order` is enabled — where insertion
+//! order would otherwise change the key — one schema built two different ways is
+//! one entry.
+//!
+//! # Example
+//!
+//! ```rust
+//! use adk_core::{GenericSchemaAdapter, SchemaCache};
+//! use serde_json::json;
+//! use std::sync::Arc;
+//!
+//! let cache = SchemaCache::for_adapter(Arc::new(GenericSchemaAdapter));
+//! let schema = json!({"type": "object", "properties": {"name": {"type": "string"}}});
+//!
+//! // First call normalizes and caches
+//! let result1 = cache.normalize(&schema);
+//!
+//! // Second call returns cached value without re-normalizing
+//! let result2 = cache.normalize(&schema);
+//! assert_eq!(result1, result2);
+//! ```
+
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
-/// A thread-safe cache for normalized and compiled JSON Schemas.
-#[derive(Debug, Default)]
+use serde_json::Value;
+
+use crate::schema_adapter::SchemaCompileError;
+use crate::{GenericSchemaAdapter, SchemaAdapter};
+
+/// A thread-safe cache for normalized JSON Schemas.
+///
+/// An adapter-bound cache stores normalized schemas keyed by a 64-bit hash of the
+/// input schema. Binding the adapter at construction prevents results produced by
+/// different adapter instances from sharing an entry.
+///
+/// # Thread Safety
+///
+/// Uses [`std::sync::Mutex`] internally, making it safe to share across threads.
+/// The lock is held only briefly during hash lookup and insertion.
+///
+/// # Placement
+///
+/// Intended to live on model instances so each provider adapter maintains its own
+/// cache of normalized schemas. Use [`SchemaCache::new`] for the generic adapter
+/// or [`SchemaCache::for_adapter`] for a provider-specific adapter.
+#[derive(Debug)]
 pub struct SchemaCache {
-    entries: Mutex<HashMap<u64, Value>>,
+    adapter: Arc<dyn SchemaAdapter>,
+    entries: Mutex<HashMap<CacheKey, Value>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum CacheKey {
+    Bound(u64),
+    Legacy {
+        schema: u64,
+        normalized: u64,
+    },
+    /// A schema compiled by a named adapter. Keyed on the adapter's declared
+    /// identity rather than its normalized output, because compilation can fail
+    /// and two adapters that agree on one schema may disagree on the next.
+    Compiled {
+        schema: u64,
+        adapter: u64,
+    },
+}
+
+/// Adds a value to the hash in a fixed order.
+///
+/// - **Object keys are sorted first.** The order they were written in cannot
+///   change the hash.
+/// - **No JSON values are cloned.** Object members are collected into a
+///   temporary `Vec` for sorting; this runs on every lookup, including hits.
+/// - **Each kind of value gets its own marker.** The text `"1"` and the number
+///   `1` hash differently.
+fn hash_canonical(value: &Value, hasher: &mut DefaultHasher) {
+    match value {
+        Value::Null => 0u8.hash(hasher),
+        Value::Bool(flag) => {
+            1u8.hash(hasher);
+            flag.hash(hasher);
+        }
+        Value::Number(number) => {
+            2u8.hash(hasher);
+            // The textual form, because it is exact in every build. Going
+            // through `as_f64` loses precision when `serde_json` is built with
+            // `arbitrary_precision`, where a literal wider than f64 is kept
+            // verbatim: distinct numbers would round together and share a cache
+            // entry, and a literal outside f64 entirely would hash to nothing.
+            number.to_string().hash(hasher);
+        }
+        Value::String(text) => {
+            3u8.hash(hasher);
+            text.hash(hasher);
+        }
+        Value::Array(items) => {
+            4u8.hash(hasher);
+            items.len().hash(hasher);
+            for item in items {
+                hash_canonical(item, hasher);
+            }
+        }
+        Value::Object(members) => {
+            5u8.hash(hasher);
+            members.len().hash(hasher);
+            let mut entries: Vec<(&String, &Value)> = members.iter().collect();
+            entries.sort_unstable_by_key(|(key, _)| *key);
+            for (key, member) in entries {
+                key.hash(hasher);
+                hash_canonical(member, hasher);
+            }
+        }
+    }
 }
 
 impl SchemaCache {
-    /// Creates a new empty schema cache.
+    /// Creates an empty cache bound to [`GenericSchemaAdapter`].
+    ///
+    /// Use [`SchemaCache::for_adapter`] when normalization requires a
+    /// provider-specific adapter.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use adk_core::SchemaCache;
+    /// use serde_json::json;
+    ///
+    /// let cache = SchemaCache::new();
+    /// let normalized = cache.normalize(&json!({"type": "string"}));
+    /// ```
     pub fn new() -> Self {
-        Self { entries: Mutex::new(HashMap::new()) }
+        Self::for_adapter(Arc::new(GenericSchemaAdapter))
     }
 
-    /// Returns the normalized schema for the given input, using the cache if available.
-    pub fn get_or_normalize(&self, schema: &Value, adapter: &dyn SchemaAdapter) -> Value {
-        let hash = Self::hash_schema_with_adapter(schema, adapter, "normalize");
+    /// Creates an empty cache bound to one schema adapter.
+    ///
+    /// The cache owns the adapter, so every entry is guaranteed to have been
+    /// produced by that adapter instance.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use adk_core::{GenericSchemaAdapter, SchemaCache};
+    /// use std::sync::Arc;
+    ///
+    /// let cache = SchemaCache::for_adapter(Arc::new(GenericSchemaAdapter));
+    /// assert!(cache.is_empty());
+    /// ```
+    pub fn for_adapter(adapter: Arc<dyn SchemaAdapter>) -> Self {
+        Self { adapter, entries: Mutex::new(HashMap::new()) }
+    }
+
+    /// Returns the schema normalized by this cache's adapter.
+    ///
+    /// If the same input schema has been normalized before, the cached result is
+    /// returned. Otherwise, the bound adapter normalizes the schema and the
+    /// result is stored.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use adk_core::{GenericSchemaAdapter, SchemaCache};
+    /// use serde_json::json;
+    /// use std::sync::Arc;
+    ///
+    /// let cache = SchemaCache::for_adapter(Arc::new(GenericSchemaAdapter));
+    /// let schema = json!({"$schema": "draft-07", "type": "string"});
+    ///
+    /// let normalized = cache.normalize(&schema);
+    /// assert!(normalized.get("$schema").is_none());
+    /// ```
+    pub fn normalize(&self, schema: &Value) -> Value {
+        let hash = Self::hash_schema(schema);
         let mut cache = self.entries.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        cache.entry(hash).or_insert_with(|| adapter.normalize_schema(schema.clone())).clone()
+        cache
+            .entry(CacheKey::Bound(hash))
+            .or_insert_with(|| self.adapter.normalize_schema(schema.clone()))
+            .clone()
     }
 
-    /// Returns the compiled schema for the given input, using the cache if available.
+    /// Returns a schema normalized by the supplied adapter.
+    ///
+    /// This compatibility path normalizes before looking up the result because a
+    /// borrowed trait object has no stable identity that the cache can safely
+    /// retain. Use [`SchemaCache::for_adapter`] and [`SchemaCache::normalize`] to
+    /// avoid repeated normalization.
+    #[deprecated(
+        note = "bind the adapter with SchemaCache::for_adapter and call SchemaCache::normalize"
+    )]
+    pub fn get_or_normalize(&self, schema: &Value, adapter: &dyn SchemaAdapter) -> Value {
+        let schema_hash = Self::hash_schema(schema);
+        let normalized = adapter.normalize_schema(schema.clone());
+        let key =
+            CacheKey::Legacy { schema: schema_hash, normalized: Self::hash_schema(&normalized) };
+        let mut cache = self.entries.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        cache.entry(key).or_insert(normalized).clone()
+    }
+
+    /// Returns the schema compiled by the supplied adapter, caching the result.
+    ///
+    /// Compilation is fallible, so unlike normalization a rejected schema is not
+    /// cached: the error is returned and the next call retries. Entries are keyed
+    /// on the adapter's declared identity (`identifier`/`version`/`surface`), so
+    /// two adapters never read each other's compiled output.
     pub fn get_or_compile(
         &self,
         schema: &Value,
         adapter: &dyn SchemaAdapter,
     ) -> Result<Value, SchemaCompileError> {
-        let hash = Self::hash_schema_with_adapter(schema, adapter, "compile");
-        let mut cache = self.entries.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let key = CacheKey::Compiled {
+            schema: Self::hash_schema(schema),
+            adapter: Self::hash_adapter_identity(adapter),
+        };
 
-        if let Some(cached) = cache.get(&hash) {
-            return Ok(cached.clone());
+        {
+            let cache = self.entries.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(cached) = cache.get(&key) {
+                return Ok(cached.clone());
+            }
         }
 
         let compiled = adapter.compile_schema(schema)?;
-        cache.insert(hash, compiled.clone());
-        Ok(compiled)
+        let mut cache = self.entries.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        Ok(cache.entry(key).or_insert(compiled).clone())
     }
 
     /// Clears all cached entries.
+    ///
+    /// Call this when the set of tools changes (e.g., MCP server advertises
+    /// updated schemas) to force re-normalization on the next request.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use adk_core::{GenericSchemaAdapter, SchemaCache};
+    /// use serde_json::json;
+    /// use std::sync::Arc;
+    ///
+    /// let cache = SchemaCache::for_adapter(Arc::new(GenericSchemaAdapter));
+    /// let schema = json!({"type": "string"});
+    ///
+    /// // Populate cache
+    /// cache.normalize(&schema);
+    ///
+    /// // Invalidate all entries
+    /// cache.clear();
+    /// ```
     pub fn clear(&self) {
         let mut cache = self.entries.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         cache.clear();
@@ -55,74 +263,174 @@ impl SchemaCache {
         cache.len()
     }
 
-    /// Returns true if the cache contains no entries.
+    /// Returns `true` if the cache contains no entries.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
-    fn hash_schema_with_adapter(
-        schema: &Value,
-        adapter: &dyn SchemaAdapter,
-        operation: &str,
-    ) -> u64 {
-        // Use a robust, collision-resistant identity for the cache key.
+    /// Computes a 64-bit hash of the schema's contents.
+    ///
+    /// Object keys are sorted before hashing, so the order they were written in
+    /// does not change the result. When `serde_json/preserve_order` is enabled,
+    /// keys stay in insertion order, and without sorting the same schema built
+    /// two different ways would occupy two entries and be normalized twice.
+    ///
+    /// Numbers are hashed as written: `5` and `5.0` are separate entries. That
+    /// costs an extra normalization and never returns the wrong schema.
+    fn hash_schema(schema: &Value) -> u64 {
         let mut hasher = DefaultHasher::new();
+        hash_canonical(schema, &mut hasher);
+        hasher.finish()
+    }
 
-        // 1. Identity of the schema content itself.
-        // We use the JSON string representation as a stable, canonical identity.
-        // If serialization fails (pathological), we hash a fallback sentinel.
-        match serde_json::to_vec(schema) {
-            Ok(bytes) => bytes.hash(&mut hasher),
-            Err(_) => "serialization-failure-sentinel".hash(&mut hasher),
-        }
-
-        // 2. Identity of the compiler/adapter.
+    /// Hashes the identity an adapter declares for itself.
+    ///
+    /// A borrowed `&dyn SchemaAdapter` has no address the cache can trust, so the
+    /// adapter's own `identifier`/`version`/`surface` stand in for it.
+    fn hash_adapter_identity(adapter: &dyn SchemaAdapter) -> u64 {
+        let mut hasher = DefaultHasher::new();
         adapter.identifier().hash(&mut hasher);
         adapter.version().hash(&mut hasher);
         adapter.surface().hash(&mut hasher);
-
-        // 3. Identity of the operation type.
-        operation.hash(&mut hasher);
-
         hasher.finish()
+    }
+}
+
+impl Default for SchemaCache {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::GenericSchemaAdapter;
     use serde_json::json;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use crate::GenericSchemaAdapter;
+
+    fn generic_cache() -> SchemaCache {
+        SchemaCache::for_adapter(Arc::new(GenericSchemaAdapter))
+    }
 
     #[derive(Debug)]
-    struct MockAdapter(&'static str);
-    impl crate::SchemaAdapter for MockAdapter {
-        fn identifier(&self) -> &str {
-            self.0
+    struct TaggedAdapter(&'static str);
+
+    impl SchemaAdapter for TaggedAdapter {
+        fn normalize_schema(&self, mut schema: Value) -> Value {
+            schema
+                .as_object_mut()
+                .expect("test schema should be an object")
+                .insert("normalized_by".to_string(), Value::String(self.0.to_string()));
+            schema
         }
+    }
+
+    #[derive(Debug)]
+    struct CountingAdapter(Arc<AtomicUsize>);
+
+    impl SchemaAdapter for CountingAdapter {
         fn normalize_schema(&self, schema: Value) -> Value {
+            self.0.fetch_add(1, Ordering::Relaxed);
             schema
         }
     }
 
     #[test]
-    fn test_cache_separation_by_adapter() {
-        let cache = SchemaCache::new();
-        let schema = json!({"type": "string"});
+    fn test_cache_returns_normalized_schema() {
+        let cache = generic_cache();
+        let schema = json!({
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "type": "object",
+            "properties": { "name": { "type": "string" } }
+        });
 
-        let adapter1 = MockAdapter("a1");
-        let adapter2 = MockAdapter("a2");
-
-        // Use get_or_normalize to insert into cache
-        cache.get_or_normalize(&schema, &adapter1);
-        assert_eq!(cache.len(), 1);
-
-        cache.get_or_normalize(&schema, &adapter2);
-        assert_eq!(cache.len(), 2, "Cache should have separate entries for different adapters");
+        let result = cache.normalize(&schema);
+        assert!(result.get("$schema").is_none());
+        assert_eq!(result["type"], "object");
     }
 
     #[test]
-    fn test_cache_separation_by_operation() {
+    fn test_cache_returns_same_result_on_repeated_calls() {
+        let cache = generic_cache();
+        let schema = json!({
+            "type": "object",
+            "properties": { "x": { "type": "integer", "const": 42 } }
+        });
+
+        let first = cache.normalize(&schema);
+        let second = cache.normalize(&schema);
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn repeated_calls_only_invoke_the_bound_adapter_once() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let cache = SchemaCache::for_adapter(Arc::new(CountingAdapter(Arc::clone(&calls))));
+        let schema = json!({"type": "string"});
+
+        cache.normalize(&schema);
+        cache.normalize(&schema);
+
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn adapter_instances_cannot_share_entries() {
+        let schema = json!({"type": "object"});
+        let alpha = SchemaCache::for_adapter(Arc::new(TaggedAdapter("alpha")));
+        let beta = SchemaCache::for_adapter(Arc::new(TaggedAdapter("beta")));
+
+        assert_eq!(alpha.normalize(&schema)["normalized_by"], "alpha");
+        assert_eq!(beta.normalize(&schema)["normalized_by"], "beta");
+        assert_eq!(alpha.len(), 1);
+        assert_eq!(beta.len(), 1);
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn deprecated_api_keeps_adapter_results_separate() {
+        let cache = SchemaCache::new();
+        let schema = json!({"type": "object"});
+
+        let alpha = cache.get_or_normalize(&schema, &TaggedAdapter("alpha"));
+        let beta = cache.get_or_normalize(&schema, &TaggedAdapter("beta"));
+
+        assert_eq!(alpha["normalized_by"], "alpha");
+        assert_eq!(beta["normalized_by"], "beta");
+        assert_eq!(cache.len(), 2);
+    }
+
+    /// Ported from the fork: compiled output must not leak between adapters.
+    #[test]
+    fn compiled_entries_are_separated_by_adapter_identity() {
+        #[derive(Debug)]
+        struct NamedAdapter(&'static str);
+        impl SchemaAdapter for NamedAdapter {
+            fn identifier(&self) -> &str {
+                self.0
+            }
+            fn normalize_schema(&self, schema: Value) -> Value {
+                schema
+            }
+        }
+
+        let cache = SchemaCache::new();
+        let schema = json!({"type": "string"});
+
+        cache.get_or_compile(&schema, &NamedAdapter("a1")).expect("compiles");
+        assert_eq!(cache.len(), 1);
+
+        cache.get_or_compile(&schema, &NamedAdapter("a2")).expect("compiles");
+        assert_eq!(cache.len(), 2, "different adapters must not share a compiled entry");
+    }
+
+    /// Ported from the fork: normalize and compile are separate operations and
+    /// must not collide on one key.
+    #[test]
+    #[allow(deprecated)]
+    fn normalize_and_compile_do_not_share_an_entry() {
         let cache = SchemaCache::new();
         let schema = json!({"type": "string"});
         let adapter = GenericSchemaAdapter;
@@ -130,20 +438,166 @@ mod tests {
         cache.get_or_normalize(&schema, &adapter);
         assert_eq!(cache.len(), 1);
 
-        cache.get_or_compile(&schema, &adapter).unwrap();
-        assert_eq!(cache.len(), 2, "Cache should have separate entries for normalize vs compile");
+        cache.get_or_compile(&schema, &adapter).expect("compiles");
+        assert_eq!(cache.len(), 2, "normalize and compile must be separate entries");
     }
 
+    /// Ported from the fork: a second compile of the same schema is a cache hit.
     #[test]
-    fn test_cache_hit() {
+    fn repeated_compiles_reuse_one_entry() {
         let cache = SchemaCache::new();
         let schema = json!({"type": "string"});
         let adapter = GenericSchemaAdapter;
 
-        cache.get_or_normalize(&schema, &adapter);
+        cache.get_or_compile(&schema, &adapter).expect("compiles");
+        cache.get_or_compile(&schema, &adapter).expect("compiles");
+        assert_eq!(cache.len(), 1);
+    }
+
+    #[test]
+    fn test_cache_stores_entries() {
+        let cache = generic_cache();
+
+        assert!(cache.is_empty());
+        assert_eq!(cache.len(), 0);
+
+        let schema1 = json!({"type": "string"});
+        let schema2 = json!({"type": "number"});
+
+        cache.normalize(&schema1);
         assert_eq!(cache.len(), 1);
 
-        cache.get_or_normalize(&schema, &adapter);
-        assert_eq!(cache.len(), 1, "Cache should hit for same schema and adapter");
+        cache.normalize(&schema2);
+        assert_eq!(cache.len(), 2);
+
+        // Same schema doesn't add a new entry
+        cache.normalize(&schema1);
+        assert_eq!(cache.len(), 2);
+    }
+
+    #[test]
+    fn test_cache_clear_removes_all_entries() {
+        let cache = generic_cache();
+
+        cache.normalize(&json!({"type": "string"}));
+        cache.normalize(&json!({"type": "number"}));
+        assert_eq!(cache.len(), 2);
+
+        cache.clear();
+        assert!(cache.is_empty());
+    }
+
+    #[test]
+    fn test_cache_different_schemas_produce_different_entries() {
+        let cache = generic_cache();
+
+        let schema_a = json!({"type": "string", "format": "hostname"});
+        let schema_b = json!({"type": "string", "format": "email"});
+
+        let result_a = cache.normalize(&schema_a);
+        let result_b = cache.normalize(&schema_b);
+
+        // "hostname" is stripped, "email" is preserved
+        assert!(result_a.get("format").is_none());
+        assert_eq!(result_b["format"], "email");
+        assert_eq!(cache.len(), 2);
+    }
+
+    #[test]
+    fn test_cache_new_is_empty() {
+        let cache = SchemaCache::new();
+        assert!(cache.is_empty());
+        assert_eq!(cache.len(), 0);
+    }
+
+    #[test]
+    fn test_cache_default_is_empty() {
+        let cache = SchemaCache::default();
+        assert!(cache.is_empty());
+    }
+
+    #[test]
+    fn test_cache_handles_empty_schema() {
+        let cache = generic_cache();
+        let schema = json!({});
+
+        let result = cache.normalize(&schema);
+        assert_eq!(result, json!({}));
+        assert_eq!(cache.len(), 1);
+    }
+
+    #[test]
+    fn test_cache_handles_null_schema() {
+        let cache = generic_cache();
+        let schema = Value::Null;
+
+        let result = cache.normalize(&schema);
+        // GenericSchemaAdapter passes through non-object values
+        assert_eq!(result, Value::Null);
+        assert_eq!(cache.len(), 1);
+    }
+
+    /// Two schemas differing only in key order are one schema, so they share a
+    /// cache entry rather than each paying for normalization.
+    #[test]
+    fn key_order_does_not_create_a_second_entry() {
+        let cache = generic_cache();
+
+        cache.normalize(&json!({ "type": "object", "properties": { "a": {}, "b": {} } }));
+        cache.normalize(&json!({ "properties": { "b": {}, "a": {} }, "type": "object" }));
+
+        assert_eq!(cache.len(), 1, "key order must not change a schema's identity");
+    }
+
+    #[test]
+    fn genuinely_different_schemas_keep_separate_entries() {
+        let cache = generic_cache();
+
+        cache.normalize(&json!({ "type": "string" }));
+        cache.normalize(&json!({ "type": "integer" }));
+
+        assert_eq!(cache.len(), 2);
+    }
+
+    /// A property name containing pointer or escape syntax must not collapse
+    /// two schemas onto one key.
+    #[test]
+    fn unusual_property_names_stay_distinct() {
+        let cache = generic_cache();
+
+        cache.normalize(&json!({ "properties": { "a/b": {} } }));
+        cache.normalize(&json!({ "properties": { "a~b": {} } }));
+
+        assert_eq!(cache.len(), 2);
+    }
+
+    /// Text and a number that render alike must not collide.
+    #[test]
+    fn a_string_and_a_number_hash_differently() {
+        let cache = generic_cache();
+
+        cache.normalize(&json!({ "const": "1" }));
+        cache.normalize(&json!({ "const": 1 }));
+
+        assert_eq!(cache.len(), 2);
+    }
+
+    /// Numbers are identified by their written form, so `5` and `5.0` are
+    /// different schemas.
+    ///
+    /// This also closes an `arbitrary_precision` hazard that cannot be
+    /// exercised here: with that feature a literal wider than f64 is kept
+    /// verbatim, and identifying numbers by `as_f64` would round distinct
+    /// values onto one cache entry. Without the feature `serde_json` already
+    /// collapses such literals during parsing, so reproducing it would mean
+    /// enabling the feature for every crate in the build.
+    #[test]
+    fn numbers_are_identified_by_their_written_form() {
+        let cache = generic_cache();
+
+        cache.normalize(&json!({ "const": 5 }));
+        cache.normalize(&json!({ "const": 5.0 }));
+
+        assert_eq!(cache.len(), 2);
     }
 }
