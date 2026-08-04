@@ -122,6 +122,10 @@ fn main() {
         "the MSVC library path leaked into the produced program: {}",
         result.stdout
     );
+
+    // A Developer shell supplies LIB directly. A regular PowerShell does not, so
+    // ProcessBackend discovers the same SDK paths from the installed MSVC tools.
+    // Either way, the compiler sees LIB and the produced program does not.
     #[cfg(windows)]
     assert!(
         result.stdout.contains("compile_lib=true"),
