@@ -11291,14 +11291,15 @@ checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
 
 [[package]]
 name = "livekit"
-version = "0.8.0"
+version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4deb846377d935e313e8a9ae630d8d0ce25cece6b53addd3a2821202088257ec"
+checksum = "b648d1bc1e837ca5d07f6bc57ff55423837800488e268f55f1f5b8e314a7dc6f"
 dependencies = [
  "base64 0.22.1",
  "bmrng",
  "bytes",
  "chrono",
+ "flate2",
  "futures-util",
  "lazy_static",
  "libloading 0.8.9",
@@ -11322,9 +11323,9 @@ dependencies = [
 
 [[package]]
 name = "livekit-api"
-version = "0.6.0"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "537991d07fe4e7b70051bb70ef1057bf2097c71e2f9f746ff11dbf953510d491"
+checksum = "77d266ec6227044e74bde80ccbeaed2a2ee0487b65c20c89cb0a34f30fa3a1ff"
 dependencies = [
  "base64 0.21.7",
  "bytes",
@@ -11388,9 +11389,9 @@ dependencies = [
 
 [[package]]
 name = "livekit-datatrack"
-version = "0.1.12"
+version = "0.1.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "510124db800f1a492e6cb02d57c53028181fdb7a6fa75053d41ea5a361440998"
+checksum = "376a22d6dae592bff4068a551343461b8e683ffe70aab92e037fb91cb9237ad2"
 dependencies = [
  "anyhow",
  "bytes",
