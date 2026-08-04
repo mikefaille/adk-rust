@@ -68,8 +68,18 @@ const NON_WINDOWS_TOOLCHAIN_ENV_KEYS: &[&str] = &[
 /// `LIB` is the linker's library search path. The remaining Windows-specific
 /// values support temporary files, system DLL discovery, and rustup's default
 /// toolchain location without copying the full developer-shell environment.
-const WINDOWS_TOOLCHAIN_ENV_KEYS: &[&str] =
-    &["PATH", "LIB", "SystemRoot", "TEMP", "TMP", "USERPROFILE", "RUSTUP_HOME", "RUSTUP_TOOLCHAIN"];
+const WINDOWS_TOOLCHAIN_ENV_KEYS: &[&str] = &[
+    "PATH",
+    "LIB",
+    "LIBPATH",
+    "INCLUDE",
+    "SystemRoot",
+    "TEMP",
+    "TMP",
+    "USERPROFILE",
+    "RUSTUP_HOME",
+    "RUSTUP_TOOLCHAIN",
+];
 
 /// Configuration for [`ProcessBackend`].
 ///
@@ -386,10 +396,34 @@ impl ProcessBackend {
         // process group — and Rust compilation is not inert: `include_str!` and
         // procedural macros read files and can run arbitrary code at compile time, so
         // the compiler needs the same boundary as the binary it produces.
+        let toolchain_env = Self::toolchain_env();
+        #[cfg(windows)]
+        let has_msvc_library_path =
+            toolchain_env.iter().any(|(key, _)| key.eq_ignore_ascii_case("LIB"));
+
         let compile_result = {
             let mut cmd = Command::new(&self.config.rustc_path);
+            // Cargo applies the workspace's rust-lld setting, but this direct rustc
+            // invocation does not read .cargo/config.toml. Hosted Windows runners put
+            // Git's GNU `link.exe` ahead of MSVC on PATH, so naming rust-lld prevents
+            // rustc from launching the unrelated Unix utility.
+            #[cfg(windows)]
+            cmd.arg("-Clinker=rust-lld");
             cmd.arg(&src_path).arg("-o").arg(&bin_path);
-            self.run_command_with_env(cmd, request, &Self::toolchain_env()).await?
+            self.run_command_with_env(cmd, request, &toolchain_env).await?
+        };
+
+        #[cfg(windows)]
+        let compile_result = {
+            let mut result = compile_result;
+            if result.exit_code != 0 && !has_msvc_library_path {
+                result.stderr.push_str(
+                    "\nWindows Rust linking requires the MSVC Build Tools and Windows SDK. \
+                     Install the `Desktop development with C++` workload; ProcessBackend could \
+                     not discover its LIB paths from this host.",
+                );
+            }
+            result
         };
 
         if compile_result.exit_code != 0 {
@@ -426,11 +460,21 @@ impl ProcessBackend {
 
     /// Executes a raw shell command via the platform shell.
     async fn execute_command(&self, request: &ExecRequest) -> Result<ExecResult, SandboxError> {
-        let cmd = if cfg!(windows) {
+        #[cfg(windows)]
+        let cmd = {
+            use std::os::windows::process::CommandExt;
+
             let mut c = Command::new("cmd");
-            c.arg("/C").arg(&request.code);
+            c.arg("/D").arg("/C");
+            // `cmd.exe` does not follow CommandLineToArgvW escaping. In particular,
+            // Command::arg turns embedded quotes into `\"`, which makes a quoted
+            // executable path part of the program name. The command is already an
+            // explicitly requested shell program, so pass it with cmd's own syntax.
+            c.as_std_mut().raw_arg(&request.code);
             c
-        } else {
+        };
+        #[cfg(not(windows))]
+        let cmd = {
             let mut c = Command::new("sh");
             c.arg("-c").arg(&request.code);
             c
@@ -465,11 +509,12 @@ impl ProcessBackend {
     /// `rustc` shells out to a platform linker and resolves it through the environment.
     /// The MSVC linker also reads `LIB` to find the Windows and C runtime libraries.
     /// With the environment cleared it cannot link at all, so compilation gets a small
-    /// platform-specific allowlist from the caller when those values are set.
+    /// platform-specific allowlist. On Windows, missing values are discovered from the
+    /// installed Visual Studio Build Tools and Windows SDK.
     ///
     /// This widens what the compile phase can see compared with the run phase. An OS
     /// enforcer is what constrains it; see [`ProcessBackend::isolation`].
-    fn toolchain_env() -> Vec<(String, String)> {
+    fn toolchain_env() -> Vec<(String, OsString)> {
         // RUSTUP_TOOLCHAIN matters as much as RUSTUP_HOME: `rustc` on PATH is usually a rustup
         // shim, and without it the shim ignores the caller's selection and resolves
         // `rust-toolchain.toml` instead. That either compiles with a different toolchain than the
@@ -479,9 +524,38 @@ impl ProcessBackend {
         let keys =
             if cfg!(windows) { WINDOWS_TOOLCHAIN_ENV_KEYS } else { NON_WINDOWS_TOOLCHAIN_ENV_KEYS };
 
-        keys.iter()
-            .filter_map(|key| std::env::var(key).ok().map(|value| ((*key).to_string(), value)))
-            .collect()
+        let environment: Vec<(String, OsString)> = keys
+            .iter()
+            .filter_map(|key| std::env::var_os(key).map(|value| ((*key).to_string(), value)))
+            .collect();
+
+        #[cfg(windows)]
+        let mut environment = environment;
+
+        #[cfg(windows)]
+        if !environment.iter().any(|(key, _)| key.eq_ignore_ascii_case("LIB"))
+            && let Some(linker) = find_msvc_tools::find(std::env::consts::ARCH, "link.exe")
+        {
+            for (key, value) in linker.get_envs() {
+                let Some(value) = value else {
+                    continue;
+                };
+                let Some(allowed_key) = WINDOWS_TOOLCHAIN_ENV_KEYS
+                    .iter()
+                    .find(|allowed| key.eq_ignore_ascii_case(OsStr::new(allowed)))
+                else {
+                    continue;
+                };
+                if !environment
+                    .iter()
+                    .any(|(existing, _)| existing.eq_ignore_ascii_case(allowed_key))
+                {
+                    environment.push(((*allowed_key).to_string(), value.to_os_string()));
+                }
+            }
+        }
+
+        environment
     }
 
     /// Shared execution logic, with `extra_env` applied below policy and request values.
@@ -489,7 +563,7 @@ impl ProcessBackend {
         &self,
         cmd: Command,
         request: &ExecRequest,
-        extra_env: &[(String, String)],
+        extra_env: &[(String, OsString)],
     ) -> Result<ExecResult, SandboxError> {
         // If a sandbox enforcer is configured, wrap the command.
         // We extract the program and args from the pre-built Command,
@@ -709,6 +783,21 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(windows)]
+    async fn test_command_supports_quoted_script_paths() {
+        let directory = tempfile::tempdir().unwrap();
+        let script = directory.path().join("quoted helper.cmd");
+        std::fs::write(&script, "@echo quoted-path-ok\r\n").unwrap();
+
+        let backend = ProcessBackend::default();
+        let request = make_request(Language::Command, &format!("\"{}\"", script.display()));
+        let result = backend.execute(request).await.unwrap();
+
+        assert_eq!(result.exit_code, 0, "stderr: {}", result.stderr);
+        assert!(result.stdout.contains("quoted-path-ok"), "stdout: {}", result.stdout);
+    }
+
+    #[tokio::test]
     async fn test_timeout_enforcement() {
         let backend = ProcessBackend::default();
         let code =
@@ -900,6 +989,8 @@ mod tests {
             &[
                 "PATH",
                 "LIB",
+                "LIBPATH",
+                "INCLUDE",
                 "SystemRoot",
                 "TEMP",
                 "TMP",

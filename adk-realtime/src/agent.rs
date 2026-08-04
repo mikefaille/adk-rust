@@ -839,6 +839,8 @@ impl Agent for RealtimeAgent {
                                     parts: vec![Part::InlineData {
                                         mime_type: "audio/pcm".to_string(),
                                         data: delta,
+                                        uri: None,
+                                        annotations: None,
                                     }],
                                 });
                                 yield Ok(audio_event);
@@ -952,6 +954,7 @@ impl Agent for RealtimeAgent {
                                     parts: vec![Part::FunctionResponse {
                                         function_response: adk_core::FunctionResponseData::new(name.clone(), result.clone()),
                                         id: Some(call_id.clone()),
+                                        annotations: None,
                                     }],
                                 });
                                 yield Ok(tool_event);
@@ -1368,6 +1371,7 @@ mod tool_safety_tests {
                             serde_json::json!({ "cached": true }),
                         ),
                         id: None,
+                        annotations: None,
                     }],
                 }))
             })
