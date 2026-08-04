@@ -9,6 +9,7 @@ use async_trait::async_trait;
 
 use super::session::{GeminiLiveBackend, GeminiRealtimeSession};
 use super::{DEFAULT_MODEL, GEMINI_VOICES};
+use adk_gemini::schema_adapter::GeminiSchemaDialect;
 
 /// Gemini Live model for creating realtime sessions.
 ///
@@ -26,17 +27,38 @@ use super::{DEFAULT_MODEL, GEMINI_VOICES};
 pub struct GeminiRealtimeModel {
     backend: GeminiLiveBackend,
     model_id: String,
+    schema_dialect: GeminiSchemaDialect,
 }
 
 impl GeminiRealtimeModel {
     /// Create a new Gemini Live model.
     pub fn new(backend: GeminiLiveBackend, model_id: impl Into<String>) -> Self {
-        Self { backend, model_id: model_id.into() }
+        let schema_dialect = GeminiRealtimeSession::default_schema_dialect(&backend);
+        Self { backend, model_id: model_id.into(), schema_dialect }
     }
 
     /// Create with the default Live model.
     pub fn with_default_model(backend: GeminiLiveBackend) -> Self {
         Self::new(backend, DEFAULT_MODEL)
+    }
+
+    /// Choose the dialect tool schemas are written in.
+    ///
+    /// [`GeminiSchemaDialect::JsonSchema`] keeps `additionalProperties`,
+    /// `allOf`/`anyOf`, `if`/`then` and the string/numeric bounds that the
+    /// default OpenAPI subset must strip, so the model is shown the same
+    /// contract the caller validates against. It is an opt-in because the field
+    /// it uses is undocumented and verified only by probe — read
+    /// [`GeminiSchemaDialect`] before selecting it, and re-probe before
+    /// assuming it on another model, surface, or endpoint version.
+    pub fn with_schema_dialect(mut self, dialect: GeminiSchemaDialect) -> Self {
+        self.schema_dialect = dialect;
+        self
+    }
+
+    /// The dialect this model writes tool schemas in.
+    pub fn schema_dialect(&self) -> GeminiSchemaDialect {
+        self.schema_dialect
     }
 }
 
@@ -63,8 +85,13 @@ impl RealtimeModel for GeminiRealtimeModel {
     }
 
     async fn connect(&self, config: RealtimeConfig) -> Result<BoxedSession> {
-        let session =
-            GeminiRealtimeSession::connect(self.backend.clone(), &self.model_id, config).await?;
+        let session = GeminiRealtimeSession::connect_with_dialect(
+            self.backend.clone(),
+            &self.model_id,
+            config,
+            self.schema_dialect,
+        )
+        .await?;
         Ok(Box::new(session))
     }
 }

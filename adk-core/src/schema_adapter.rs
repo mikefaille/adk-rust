@@ -43,6 +43,24 @@ pub trait SchemaAdapter: Send + Sync + std::fmt::Debug {
         None
     }
 
+    /// Name of the function-declaration field that carries the parameter schema.
+    ///
+    /// A provider that offers more than one schema dialect usually offers them
+    /// under *different field names*, and the fields are mutually exclusive —
+    /// Gemini's `parameters` (an OpenAPI subset) and `parametersJsonSchema`
+    /// (JSON Schema) are the worked example. Sending a dialect under the wrong
+    /// name is not a degraded request: the Live socket closes with WS 1007
+    /// before any turn happens.
+    ///
+    /// Returning the field name from the adapter keeps the pair — "what did I
+    /// reduce to?" and "what do I call it on the wire?" — in one place, so a
+    /// caller cannot select a dialect and then post it under the other name.
+    /// The default is the long-standing `parameters`, so existing adapters are
+    /// unaffected.
+    fn parameters_field(&self) -> &'static str {
+        "parameters"
+    }
+
     /// Normalize a raw JSON Schema for this provider (infallible).
     fn normalize_schema(&self, schema: Value) -> Value;
 

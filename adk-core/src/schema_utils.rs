@@ -61,6 +61,50 @@ pub fn strip_schema_keyword(schema: &mut Value) {
     recurse_into_subschemas(schema, strip_schema_keyword);
 }
 
+/// Removes identity and bundling keywords from the schema and all nested
+/// sub-schemas: `$id`, `$anchor`, `$dynamicAnchor`, `$comment`, `$defs` and
+/// `definitions`.
+///
+/// For a provider that accepts real JSON Schema, these are the keywords that
+/// still have to go even though nothing about validation is lost by removing
+/// them. They identify and bundle a document rather than constrain an instance,
+/// and providers that parse the rest happily still reject them — Gemini rejects
+/// `$schema` on both of its function-declaration fields.
+///
+/// Call this *after* [`resolve_refs`], which is what consumes `$defs` /
+/// `definitions`; removing them first would strand every `$ref`.
+///
+/// # Example
+///
+/// ```rust
+/// use serde_json::json;
+/// use adk_core::schema_utils::strip_identity_keywords;
+///
+/// let mut schema = json!({
+///     "$id": "https://example.com/order",
+///     "type": "object",
+///     "properties": {
+///         "note": { "$comment": "internal", "type": "string", "minLength": 3 }
+///     },
+///     "$defs": { "Unused": { "type": "string" } }
+/// });
+///
+/// strip_identity_keywords(&mut schema);
+/// assert!(schema.get("$id").is_none());
+/// assert!(schema.get("$defs").is_none());
+/// assert!(schema["properties"]["note"].get("$comment").is_none());
+/// // The constraint is untouched — this strips identity, not validation.
+/// assert_eq!(schema["properties"]["note"]["minLength"], 3);
+/// ```
+pub fn strip_identity_keywords(schema: &mut Value) {
+    if let Some(obj) = schema.as_object_mut() {
+        for keyword in ["$id", "$anchor", "$dynamicAnchor", "$comment", "$defs", "definitions"] {
+            obj.remove(keyword);
+        }
+    }
+    recurse_into_subschemas(schema, strip_identity_keywords);
+}
+
 /// Removes conditional keywords (`if`, `then`, `else`) from the schema and all
 /// nested sub-schemas.
 ///
