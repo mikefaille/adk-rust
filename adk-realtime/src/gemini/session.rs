@@ -8,6 +8,7 @@ use crate::config::{RealtimeConfig, ToolDefinition};
 use crate::error::{RealtimeError, Result};
 use crate::events::{ClientEvent, ServerEvent, ToolResponse};
 use crate::session::{ContextMutationOutcome, RealtimeSession};
+use adk_gemini::schema_adapter::GeminiSchemaDialect;
 use async_trait::async_trait;
 use base64::Engine;
 use bytes::{BufMut, BytesMut};
@@ -266,22 +267,47 @@ impl GeminiRealtimeSession {
         bytes_per_second.saturating_mul(AUDIO_FLUSH_TARGET_MS).div_ceil(1000).max(1)
     }
 
+    /// The dialect a backend uses unless the caller names another.
+    ///
+    /// Studio's default stays the OpenAPI subset even though
+    /// [`GeminiSchemaDialect::JsonSchema`] preserves more, because
+    /// `parametersJsonSchema` is absent from Google's reference docs and is
+    /// verified only by probe, on one model and one endpoint version. A shared
+    /// crate does not change what every consumer puts on the wire on the
+    /// strength of that; opting in is one call.
+    pub fn default_schema_dialect(backend: &GeminiLiveBackend) -> GeminiSchemaDialect {
+        match backend {
+            GeminiLiveBackend::Studio { .. } => GeminiSchemaDialect::OpenApiSubset,
+            #[cfg(feature = "vertex-live")]
+            GeminiLiveBackend::Vertex { .. } => GeminiSchemaDialect::VertexOpenApiSubset,
+        }
+    }
+
     /// Connect to Gemini Live API using the specified backend.
     pub async fn connect(
         backend: GeminiLiveBackend,
         model: &str,
         config: RealtimeConfig,
     ) -> Result<Self> {
+        let dialect = Self::default_schema_dialect(&backend);
+        Self::connect_with_dialect(backend, model, config, dialect).await
+    }
+
+    /// Connect, writing tool schemas in an explicitly chosen dialect.
+    ///
+    /// The dialect decides both how the schema is reduced and which
+    /// function-declaration field carries it, so the two can never disagree.
+    /// See [`GeminiSchemaDialect`] for what each one preserves and for the
+    /// endpoint evidence behind [`GeminiSchemaDialect::JsonSchema`].
+    pub async fn connect_with_dialect(
+        backend: GeminiLiveBackend,
+        model: &str,
+        config: RealtimeConfig,
+        dialect: GeminiSchemaDialect,
+    ) -> Result<Self> {
         let schema_cache = Arc::new(adk_core::SchemaCache::new());
-        let adapter: Arc<dyn adk_core::SchemaAdapter> = match &backend {
-            GeminiLiveBackend::Studio { .. } => {
-                Arc::new(adk_gemini::schema_adapter::GeminiSchemaAdapter::new())
-            }
-            #[cfg(feature = "vertex-live")]
-            GeminiLiveBackend::Vertex { .. } => {
-                Arc::new(adk_gemini::schema_adapter::GeminiSchemaAdapter::vertex_ai())
-            }
-        };
+        let adapter: Arc<dyn adk_core::SchemaAdapter> =
+            Arc::new(adk_gemini::schema_adapter::GeminiSchemaAdapter::with_dialect(dialect));
 
         // 1. Compile tools BEFORE establishing the WebSocket connection.
         // If any tool fails to compile (semantic loss), we abort early.
@@ -1575,6 +1601,13 @@ fn convert_tools(
         if let Some(desc) = &t.description {
             decl["description"] = json!(desc);
         }
+        // The adapter names the field, because the field and the dialect are one
+        // decision. `parameters` and `parametersJsonSchema` are mutually
+        // exclusive, and posting a schema under the wrong one is not a degraded
+        // request — a keyword the OpenAPI subset does not know closes the Live
+        // socket with WS 1007 during setup, before the first turn. Writing
+        // exactly one key makes the exclusivity structural.
+        let field = adapter.parameters_field();
         if let Some(params) = &t.parameters {
             let compiled = cache.get_or_compile(params, adapter).map_err(|e| {
                 RealtimeError::protocol(format!(
@@ -1582,9 +1615,9 @@ fn convert_tools(
                     t.name, e
                 ))
             })?;
-            decl["parameters"] = compiled;
+            decl[field] = compiled;
         } else {
-            decl["parameters"] = adapter.empty_schema();
+            decl[field] = adapter.empty_schema();
         }
         declarations.push(decl);
     }
@@ -1598,6 +1631,96 @@ fn convert_tools(
 mod tests {
     use super::*;
     use adk_core::types::Part;
+
+    mod tool_declarations {
+        use super::*;
+
+        fn intake_tool() -> ToolDefinition {
+            ToolDefinition::new("submit_conversational_result").with_parameters(json!({
+                "type": "object",
+                "properties": {
+                    "callback_number": { "type": "string", "minLength": 7 }
+                },
+                "required": ["callback_number"],
+                "additionalProperties": false
+            }))
+        }
+
+        fn declaration(dialect: GeminiSchemaDialect) -> Value {
+            let adapter = adk_gemini::schema_adapter::GeminiSchemaAdapter::with_dialect(dialect);
+            let cache = adk_core::SchemaCache::new();
+            let tools = convert_tools(Some(vec![intake_tool()]), &cache, &adapter)
+                .expect("the fixture compiles")
+                .expect("tools were supplied");
+            tools[0]["functionDeclarations"][0].clone()
+        }
+
+        /// The field is chosen by the dialect, and exactly one is written.
+        /// `parameters` and `parametersJsonSchema` are mutually exclusive, and
+        /// sending a JSON Schema under the older name closes the Live socket
+        /// with WS 1007 during setup — a dead call, not a degraded one.
+        #[test]
+        fn each_dialect_writes_its_own_field_and_only_its_own() {
+            let subset = declaration(GeminiSchemaDialect::OpenApiSubset);
+            assert!(subset.get("parameters").is_some(), "{subset}");
+            assert!(subset.get("parametersJsonSchema").is_none(), "{subset}");
+
+            let json_schema = declaration(GeminiSchemaDialect::JsonSchema);
+            assert!(json_schema.get("parametersJsonSchema").is_some(), "{json_schema}");
+            assert!(json_schema.get("parameters").is_none(), "{json_schema}");
+        }
+
+        /// The reason the field matters: the constraints the caller is judged
+        /// against reach the model on one dialect and not the other.
+        #[test]
+        fn the_json_schema_field_carries_constraints_the_older_one_drops() {
+            let subset = declaration(GeminiSchemaDialect::OpenApiSubset);
+            assert!(
+                subset["parameters"]["properties"]["callback_number"].get("minLength").is_none()
+            );
+            assert!(subset["parameters"].get("additionalProperties").is_none());
+
+            let json_schema = declaration(GeminiSchemaDialect::JsonSchema);
+            assert_eq!(
+                json_schema["parametersJsonSchema"]["properties"]["callback_number"]["minLength"],
+                7
+            );
+            assert_eq!(json_schema["parametersJsonSchema"]["additionalProperties"], json!(false));
+        }
+
+        /// A tool with no parameters still declares an empty object, under the
+        /// same field — otherwise the fallback quietly reintroduces the split.
+        #[test]
+        fn a_parameterless_tool_declares_its_empty_schema_on_the_same_field() {
+            let adapter = adk_gemini::schema_adapter::GeminiSchemaAdapter::json_schema();
+            let cache = adk_core::SchemaCache::new();
+
+            let tools = convert_tools(Some(vec![ToolDefinition::new("hangup")]), &cache, &adapter)
+                .expect("a parameterless tool compiles")
+                .expect("tools were supplied");
+            let declaration = &tools[0]["functionDeclarations"][0];
+
+            assert_eq!(
+                declaration["parametersJsonSchema"],
+                json!({"type": "object", "properties": {}})
+            );
+            assert!(declaration.get("parameters").is_none(), "{declaration}");
+        }
+
+        /// Studio keeps its historical dialect unless a caller opts in.
+        /// `parametersJsonSchema` is absent from Google's reference docs and
+        /// verified only by probe, which is not a basis for changing what every
+        /// consumer of this crate puts on the wire.
+        #[test]
+        fn the_default_dialect_is_unchanged() {
+            let backend = GeminiLiveBackend::studio("unused-in-this-test");
+
+            assert_eq!(
+                GeminiRealtimeSession::default_schema_dialect(&backend),
+                GeminiSchemaDialect::OpenApiSubset
+            );
+        }
+    }
 
     #[test]
     fn test_gemini_translate_text_only() {
