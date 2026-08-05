@@ -129,6 +129,7 @@ repository = "https://github.com/zavora-ai/adk-rust"
 [workspace.dependencies]
 # External dependencies
 tokio = { version = "1.40", default-features = false }
+tokio-util = "0.7"
 tokio-stream = "0.1"
 async-trait = "0.1"
 futures = "0.3"

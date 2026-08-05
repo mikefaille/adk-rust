@@ -271,11 +271,18 @@ pub struct RunnerConfig {
     pub auto_respond_tools: bool,
     /// Maximum concurrent tool executions.
     pub max_concurrent_tools: usize,
+    /// Maximum consecutive tool execution failures before tripping the circuit breaker (default: 3).
+    pub max_consecutive_tool_failures: usize,
 }
 
 impl Default for RunnerConfig {
     fn default() -> Self {
-        Self { auto_execute_tools: true, auto_respond_tools: true, max_concurrent_tools: 4 }
+        Self {
+            auto_execute_tools: true,
+            auto_respond_tools: true,
+            max_concurrent_tools: 4,
+            max_consecutive_tool_failures: 3,
+        }
     }
 }
 
@@ -402,6 +409,7 @@ impl RealtimeRunnerBuilder {
             tool_permits: Arc::new(tokio::sync::Semaphore::new(max_concurrent_tools)),
             outstanding_tools: Arc::new(AtomicUsize::new(0)),
             response_closed_awaiting_tools: Arc::new(AtomicBool::new(false)),
+            consecutive_tool_failures: Arc::new(AtomicUsize::new(0)),
         })
     }
 }
@@ -462,6 +470,8 @@ pub struct RealtimeRunner {
     /// Set when the dispatching response closed while tool calls were still running, so
     /// the follow-up `create_response` is owed by whichever tool finishes last.
     response_closed_awaiting_tools: Arc<AtomicBool>,
+    /// Tracks consecutive tool execution failures to enforce circuit breaking.
+    consecutive_tool_failures: Arc<AtomicUsize>,
 }
 
 impl RealtimeRunner {
@@ -904,6 +914,79 @@ impl RealtimeRunner {
         Ok(())
     }
 
+    /// Run the event loop, processing events until disconnected or until `cancel_token` is cancelled.
+    pub async fn run_with_cancellation(
+        &self,
+        cancel_token: tokio_util::sync::CancellationToken,
+    ) -> Result<()> {
+        use futures::stream::{FuturesUnordered, StreamExt};
+
+        let mut running_tools = FuturesUnordered::new();
+
+        loop {
+            if cancel_token.is_cancelled() {
+                tracing::info!("RealtimeRunner run loop cancelled via cancellation token.");
+                self.event_handler.on_disconnect().await?;
+                break;
+            }
+
+            let session = self.session_handle().await?;
+            let old_session_id = session.session_id().to_string();
+
+            let event = if running_tools.is_empty() {
+                tokio::select! {
+                    _ = cancel_token.cancelled() => {
+                        tracing::info!("RealtimeRunner run loop cancelled via cancellation token.");
+                        self.event_handler.on_disconnect().await?;
+                        return Ok(());
+                    }
+                    ev = session.next_event() => ev,
+                }
+            } else {
+                tokio::select! {
+                    biased;
+                    _ = cancel_token.cancelled() => {
+                        tracing::info!("RealtimeRunner run loop cancelled via cancellation token.");
+                        self.event_handler.on_disconnect().await?;
+                        return Ok(());
+                    }
+                    Some(finished) = running_tools.next() => {
+                        let () = finished?;
+                        continue;
+                    }
+                    event = session.next_event() => event,
+                }
+            };
+
+            match event {
+                Some(Ok(event)) => {
+                    if let Some(call) = self.handle_event(event).await? {
+                        self.outstanding_tools.fetch_add(1, Ordering::AcqRel);
+                        running_tools.push(self.run_tool_call(call));
+                    }
+                }
+                Some(Err(e)) => {
+                    self.event_handler.on_error(&e).await?;
+                    return Err(e);
+                }
+                None => {
+                    let current_session_id = self.session_id().await;
+                    if let Some(id) = current_session_id
+                        && id != old_session_id
+                    {
+                        continue;
+                    }
+                    while let Some(finished) = running_tools.next().await {
+                        finished?;
+                    }
+                    self.event_handler.on_disconnect().await?;
+                    break;
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Run the event loop, processing events until disconnected.
     pub async fn run(&self) -> Result<()> {
         use futures::stream::{FuturesUnordered, StreamExt};
@@ -1175,10 +1258,30 @@ impl RealtimeRunner {
             };
 
             match handler.execute(&call).await {
-                Ok(value) => value,
-                Err(e) => serde_json::json!({
-                    "error": e.to_string()
-                }),
+                Ok(value) => {
+                    self.consecutive_tool_failures.store(0, Ordering::Release);
+                    value
+                }
+                Err(e) => {
+                    let failures =
+                        self.consecutive_tool_failures.fetch_add(1, Ordering::AcqRel) + 1;
+                    if failures >= self.runner_config.max_consecutive_tool_failures {
+                        tracing::error!(
+                            call_id,
+                            name,
+                            failures,
+                            max = self.runner_config.max_consecutive_tool_failures,
+                            "Tool execution circuit breaker tripped: max consecutive failures reached"
+                        );
+                        let _ = self.event_handler.on_error(&RealtimeError::provider(format!(
+                            "Tool execution circuit breaker tripped after {} consecutive failures: {}",
+                            failures, e
+                        ))).await;
+                    }
+                    serde_json::json!({
+                        "error": e.to_string()
+                    })
+                }
             }
         } else {
             serde_json::json!({
@@ -1631,6 +1734,7 @@ mod runner_tests {
                 auto_execute_tools: true,
                 auto_respond_tools: true,
                 max_concurrent_tools: 3,
+                ..Default::default()
             })
             .tool(tool_def("a"), probe())
             .tool(tool_def("b"), probe())
@@ -1671,6 +1775,7 @@ mod runner_tests {
                 auto_execute_tools: true,
                 auto_respond_tools: true,
                 max_concurrent_tools: 2,
+                ..Default::default()
             })
             .tool(tool_def("a"), probe())
             .tool(tool_def("b"), probe())
@@ -1883,6 +1988,38 @@ mod runner_tests {
 
         assert_eq!(audio_events.load(Ordering::SeqCst), 1, "the audio delta was handled");
         assert_eq!(counts.tool_output.load(Ordering::SeqCst), 1, "the tool still reported output");
+    }
+
+    #[tokio::test]
+    async fn circuit_breaker_trips_on_consecutive_tool_failures() {
+        let runner = RealtimeRunner::builder()
+            .model(Arc::new(MockModel) as BoxedModel)
+            .tool_fn(tool_def("failing"), |_| Err(RealtimeError::provider("database failure")))
+            .build()
+            .unwrap();
+
+        // 3 consecutive failures should trip the circuit breaker
+        for _ in 0..3 {
+            runner.execute_tool_call("call-fail", "failing", &serde_json::json!({})).await.unwrap();
+        }
+
+        assert_eq!(
+            runner.consecutive_tool_failures.load(Ordering::Acquire),
+            3,
+            "consecutive tool failure counter reached threshold"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_with_cancellation_exits_cleanly() {
+        let runner =
+            RealtimeRunner::builder().model(Arc::new(MockModel) as BoxedModel).build().unwrap();
+
+        let cancel_token = tokio_util::sync::CancellationToken::new();
+        cancel_token.cancel();
+
+        let result = runner.run_with_cancellation(cancel_token).await;
+        assert!(result.is_ok(), "runner exited cleanly on cancellation token");
     }
 
     #[tokio::test]

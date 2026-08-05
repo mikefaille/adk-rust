@@ -1866,11 +1866,10 @@ mod tests {
     /// would be served under the other's field name.
     #[test]
     fn each_dialect_declares_a_distinct_surface() {
-        let surfaces = [
-            GeminiSchemaAdapter::new().surface(),
-            GeminiSchemaAdapter::vertex_ai().surface(),
-            GeminiSchemaAdapter::json_schema().surface(),
-        ];
+        let a1 = GeminiSchemaAdapter::new();
+        let a2 = GeminiSchemaAdapter::vertex_ai();
+        let a3 = GeminiSchemaAdapter::json_schema();
+        let surfaces = [a1.surface(), a2.surface(), a3.surface()];
 
         assert_eq!(surfaces, [Some("studio"), Some("vertex"), Some("studio-json-schema")]);
     }
