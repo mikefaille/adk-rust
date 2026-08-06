@@ -18,10 +18,11 @@ use tokio_tungstenite::{
     },
 };
 
-type WsStream =
-    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
-type WsSink = futures::stream::SplitSink<WsStream, Message>;
-type WsSource = futures::stream::SplitStream<WsStream>;
+type WsSource = Box<
+    dyn futures::Stream<Item = std::result::Result<Message, tokio_tungstenite::tungstenite::Error>>
+        + Send
+        + Unpin,
+>;
 
 /// OpenAI Realtime session.
 ///
@@ -29,6 +30,7 @@ type WsSource = futures::stream::SplitStream<WsStream>;
 pub struct OpenAIRealtimeSession {
     session_id: String,
     connected: Arc<AtomicBool>,
+    cancel_token: tokio_util::sync::CancellationToken,
     outbound_tx: tokio::sync::mpsc::Sender<Message>,
     writer_task: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
     receiver: Arc<Mutex<WsSource>>,
@@ -90,6 +92,8 @@ impl OpenAIRealtimeSession {
 
         let (mut sink, source) = ws_stream.split();
         let connected = Arc::new(AtomicBool::new(true));
+        let cancel_token = tokio_util::sync::CancellationToken::new();
+        let writer_cancel = cancel_token.clone();
         // Single-writer pattern (Realtime Concurrency Rule 3): Sink ownership is moved to a
         // dedicated writer task fed by a bounded MPSC channel. This prevents send_raw() from
         // holding a Mutex guard across .await network calls, which previously caused
@@ -97,15 +101,28 @@ impl OpenAIRealtimeSession {
         let (outbound_tx, mut outbound_rx) = tokio::sync::mpsc::channel::<Message>(256);
         let writer_connected = Arc::clone(&connected);
         let writer_task = tokio::spawn(async move {
-            while let Some(message) = outbound_rx.recv().await {
-                let should_close = matches!(message, Message::Close(_));
-                if let Err(error) = sink.send(message).await {
-                    writer_connected.store(false, Ordering::SeqCst);
-                    tracing::warn!(error = %error, "openai websocket writer send failed");
-                    break;
-                }
-                if should_close {
-                    break;
+            loop {
+                tokio::select! {
+                    _ = writer_cancel.cancelled() => {
+                        tracing::info!("openai websocket writer task cancelled via token");
+                        break;
+                    }
+                    msg = outbound_rx.recv() => {
+                        match msg {
+                            Some(message) => {
+                                let should_close = matches!(message, Message::Close(_));
+                                if let Err(error) = sink.send(message).await {
+                                    writer_connected.store(false, Ordering::SeqCst);
+                                    tracing::warn!(error = %error, "openai websocket writer send failed");
+                                    break;
+                                }
+                                if should_close {
+                                    break;
+                                }
+                            }
+                            None => break,
+                        }
+                    }
                 }
             }
             writer_connected.store(false, Ordering::SeqCst);
@@ -117,9 +134,10 @@ impl OpenAIRealtimeSession {
         let session = Self {
             session_id,
             connected,
+            cancel_token,
             outbound_tx,
             writer_task: Arc::new(Mutex::new(Some(writer_task))),
-            receiver: Arc::new(Mutex::new(source)),
+            receiver: Arc::new(Mutex::new(Box::new(source))),
         };
 
         // Send initial session configuration via the trait default implementation
@@ -243,13 +261,25 @@ impl OpenAITransportLink for OpenAIRealtimeSession {
 
     async fn close(&self) -> Result<()> {
         self.connected.store(false, Ordering::SeqCst);
-        // Route close through the writer channel so message ordering is preserved.
-        let _ = self.outbound_tx.send(Message::Close(None)).await;
 
-        // Ensure deterministic teardown: await writer task completion once the Close frame is flushed.
+        // Attempt graceful close frame enqueue under a short timeout (500ms) so a full
+        // channel never blocks teardown indefinitely.
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            self.outbound_tx.send(Message::Close(None)),
+        )
+        .await;
+
+        // Signal cancellation token to wake writer task if blocked on channel read or network I/O
+        self.cancel_token.cancel();
+
+        // Ensure deterministic teardown: await writer task completion under 1s timeout, aborting if stalled
         let mut writer_task = self.writer_task.lock().await;
-        if let Some(handle) = writer_task.take() {
-            let _ = handle.await;
+        if let Some(mut handle) = writer_task.take() {
+            if tokio::time::timeout(std::time::Duration::from_secs(1), &mut handle).await.is_err() {
+                tracing::warn!("OpenAI writer task did not exit within 1s; aborting handle");
+                handle.abort();
+            }
         }
         Ok(())
     }
@@ -374,5 +404,55 @@ mod redaction_tests {
         let frame = r#"{"type":"response.done","response":{"unexpected":true}}"#;
         assert_eq!(payload_digest(frame), payload_digest(frame));
         assert_ne!(payload_digest(frame), payload_digest(r#"{"type":"response.done"}"#));
+    }
+}
+
+#[cfg(test)]
+mod teardown_tests {
+    use super::*;
+    use std::time::Duration;
+    use tokio::sync::mpsc;
+    use tokio_util::sync::CancellationToken;
+
+    #[tokio::test]
+    async fn close_is_bounded_even_when_channel_is_full() {
+        let (outbound_tx, mut outbound_rx) = mpsc::channel::<Message>(1);
+        // Fill channel to capacity
+        outbound_tx.try_send(Message::Text("blocker".into())).unwrap();
+
+        let connected = Arc::new(AtomicBool::new(true));
+        let cancel_token = CancellationToken::new();
+        let writer_cancel = cancel_token.clone();
+
+        // Spawn a writer task that simulates being stuck on a slow/blocked socket send
+        let writer_task = tokio::spawn(async move {
+            let _msg = outbound_rx.recv().await;
+            tokio::select! {
+                _ = writer_cancel.cancelled() => {},
+                _ = tokio::time::sleep(Duration::from_secs(60)) => {},
+            }
+        });
+
+        let session = OpenAIRealtimeSession {
+            session_id: "test-session".into(),
+            connected,
+            cancel_token,
+            outbound_tx,
+            writer_task: Arc::new(Mutex::new(Some(writer_task))),
+            receiver: Arc::new(Mutex::new(Box::new(futures::stream::pending()))),
+        };
+
+        // Execution of close() must complete quickly despite channel full & writer blocked
+        let start = std::time::Instant::now();
+        let close_result = session.close().await;
+        let elapsed = start.elapsed();
+
+        assert!(close_result.is_ok());
+        assert!(
+            elapsed < Duration::from_secs(3),
+            "close() took too long ({:?}); must be bounded under 3s",
+            elapsed
+        );
+        assert!(!session.connected.load(Ordering::SeqCst));
     }
 }

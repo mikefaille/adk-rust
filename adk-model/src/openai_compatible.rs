@@ -949,7 +949,66 @@ mod tests {
         );
         assert!(err.is_err(), "Invalid Kimi tool name 'ab' must fail request building locally");
 
-        // 2. Valid tool name succeeds
+        // 2. Overlong Kimi tool name (>64 chars) fails request building
+        let mut overlong_tools = std::collections::HashMap::new();
+        let overlong_name = "a".repeat(65);
+        overlong_tools.insert(
+            overlong_name,
+            serde_json::json!({
+                "description": "Overlong tool name",
+                "parameters": { "type": "object" }
+            }),
+        );
+        let overlong_request = LlmRequest {
+            model: "moonshot-v1-8k".to_string(),
+            contents: vec![],
+            tools: overlong_tools,
+            config: None,
+            previous_response_id: None,
+        };
+        let err_overlong = build_request_json(
+            "moonshot-v1-8k",
+            &overlong_request,
+            &None,
+            false,
+            client.schema_adapter(),
+            &client.cache,
+        );
+        assert!(
+            err_overlong.is_err(),
+            "Overlong Kimi tool name (>64 chars) must fail request building before truncation"
+        );
+
+        // 3. Kimi tool parameter schema with unsupported keyword (e.g., $ref) fails compilation
+        let mut unsupported_schema_tools = std::collections::HashMap::new();
+        unsupported_schema_tools.insert(
+            "get_user_info".to_string(),
+            serde_json::json!({
+                "description": "Get user info",
+                "parameters": {
+                    "type": "object",
+                    "$ref": "#/definitions/User"
+                }
+            }),
+        );
+        let unsupported_request = LlmRequest {
+            model: "moonshot-v1-8k".to_string(),
+            contents: vec![],
+            tools: unsupported_schema_tools,
+            config: None,
+            previous_response_id: None,
+        };
+        let err_schema = build_request_json(
+            "moonshot-v1-8k",
+            &unsupported_request,
+            &None,
+            false,
+            client.schema_adapter(),
+            &client.cache,
+        );
+        assert!(err_schema.is_err(), "Kimi tool schema containing $ref must fail compilation");
+
+        // 4. Valid tool name succeeds
         let mut valid_tools = std::collections::HashMap::new();
         valid_tools.insert(
             "get_weather".to_string(),

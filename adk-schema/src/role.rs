@@ -67,36 +67,64 @@ impl InputSchema {
                 continue;
             }
 
-            if let Some(item_obj) = item.as_object() {
-                // Merge properties
-                if let Some(item_props) = item_obj.get("properties").and_then(|p| p.as_object()) {
-                    let base_props = obj
-                        .entry("properties")
-                        .or_insert_with(|| serde_json::json!({}))
-                        .as_object_mut();
-                    if let Some(base_map) = base_props {
-                        for (k, v) in item_props {
-                            base_map.entry(k.clone()).or_insert_with(|| v.clone());
-                        }
-                    }
-                }
-
-                // Merge required fields
-                if let Some(item_req) = item_obj.get("required").and_then(|r| r.as_array()) {
-                    let base_req = obj
-                        .entry("required")
-                        .or_insert_with(|| serde_json::json!([]))
-                        .as_array_mut();
-                    if let Some(base_arr) = base_req {
-                        for r_val in item_req {
-                            if !base_arr.contains(r_val) {
-                                base_arr.push(r_val.clone());
-                            }
-                        }
-                    }
-                }
-            } else {
+            let Some(item_obj) = item.as_object() else {
                 remaining_all_of.push(item);
+                continue;
+            };
+
+            // Only merge if the item contains ONLY static object keywords (properties, required, type, description, title)
+            let has_other_keywords = item_obj.keys().any(|k| {
+                !matches!(k.as_str(), "properties" | "required" | "type" | "description" | "title")
+            });
+
+            if has_other_keywords {
+                remaining_all_of.push(item);
+                continue;
+            }
+
+            // Reject merging if property definitions conflict with existing top-level definitions
+            let mut can_merge_properties = true;
+            if let Some(item_props) = item_obj.get("properties").and_then(|p| p.as_object())
+                && let Some(base_props) = obj.get("properties").and_then(|p| p.as_object())
+            {
+                for (k, v) in item_props {
+                    if let Some(existing_v) = base_props.get(k)
+                        && existing_v != v
+                    {
+                        can_merge_properties = false;
+                        break;
+                    }
+                }
+            }
+
+            if !can_merge_properties {
+                remaining_all_of.push(item);
+                continue;
+            }
+
+            // Perform lossless merge
+            if let Some(item_props) = item_obj.get("properties").and_then(|p| p.as_object()) {
+                let base_props = obj
+                    .entry("properties")
+                    .or_insert_with(|| serde_json::json!({}))
+                    .as_object_mut();
+                if let Some(base_map) = base_props {
+                    for (k, v) in item_props {
+                        base_map.entry(k.clone()).or_insert_with(|| v.clone());
+                    }
+                }
+            }
+
+            if let Some(item_req) = item_obj.get("required").and_then(|r| r.as_array()) {
+                let base_req =
+                    obj.entry("required").or_insert_with(|| serde_json::json!([])).as_array_mut();
+                if let Some(base_arr) = base_req {
+                    for r_val in item_req {
+                        if !base_arr.contains(r_val) {
+                            base_arr.push(r_val.clone());
+                        }
+                    }
+                }
             }
         }
 
@@ -115,20 +143,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_flatten_static_all_of_merges_static_properties_and_required() {
+    fn test_flatten_static_all_of_preserves_non_mergeable_and_conflicting_branches() {
         let policy = IngestionPolicy::default();
         let raw = serde_json::json!({
             "type": "object",
             "properties": {
                 "name": { "type": "string" }
             },
-            "required": ["name"],
             "allOf": [
                 {
                     "properties": {
-                        "age": { "type": "integer" }
+                        "name": { "type": "integer" } // Conflicting definition
+                    }
+                },
+                {
+                    "properties": {
+                        "tag": { "type": "string" }
                     },
-                    "required": ["age"]
+                    "additionalProperties": false // Extra constraint
                 }
             ]
         });
@@ -137,11 +169,7 @@ mod tests {
         let flattened = schema.flatten_static_all_of(&policy).expect("flatten succeeds");
         let val = flattened.as_value();
 
-        assert!(val.get("allOf").is_none(), "static allOf must be removed after flattening");
-        assert!(val.pointer("/properties/name").is_some(), "base property must survive");
-        assert!(val.pointer("/properties/age").is_some(), "static allOf property must be merged");
-        let req = val.get("required").and_then(|r| r.as_array()).expect("required array exists");
-        assert!(req.contains(&serde_json::json!("name")));
-        assert!(req.contains(&serde_json::json!("age")));
+        let remaining = val.get("allOf").and_then(|a| a.as_array()).expect("allOf preserved");
+        assert_eq!(remaining.len(), 2, "both non-mergeable allOf branches must remain");
     }
 }

@@ -151,10 +151,55 @@ impl SchemaAdapter for KimiSchemaAdapter {
         Ok(())
     }
 
+    fn compile_schema(&self, schema: &Value) -> Result<Value, SchemaCompileError> {
+        if !schema.is_object() {
+            return Err(SchemaCompileError::new(
+                "Kimi tool parameter schema must be a JSON object",
+            ));
+        }
+
+        // Validate that schema does not contain unsupported keywords for Kimi
+        validate_kimi_supported_keywords(schema)?;
+
+        let mut normalized = self.normalize_schema(schema.clone());
+        if let Some(obj) = normalized.as_object_mut()
+            && !obj.contains_key("type")
+        {
+            obj.insert("type".to_string(), Value::String("object".to_string()));
+        }
+        Ok(normalized)
+    }
+
     fn normalize_schema(&self, mut schema: Value) -> Value {
         schema_utils::strip_schema_keyword(&mut schema);
         schema_utils::strip_conditional_keywords(&mut schema);
         schema_utils::strip_unsupported_formats(&mut schema, GENERIC_ALLOWED_FORMATS);
         schema
     }
+}
+
+fn validate_kimi_supported_keywords(val: &Value) -> Result<(), SchemaCompileError> {
+    if let Some(obj) = val.as_object() {
+        for (key, child) in obj {
+            match key.as_str() {
+                "$ref" | "oneOf" | "anyOf" | "allOf" | "not" | "if" | "then" | "else" => {
+                    return Err(SchemaCompileError::new(format!(
+                        "Kimi function calling schema does not support keyword '{key}'"
+                    )));
+                }
+                "properties" => {
+                    if let Some(props) = child.as_object() {
+                        for prop_val in props.values() {
+                            validate_kimi_supported_keywords(prop_val)?;
+                        }
+                    }
+                }
+                "items" => {
+                    validate_kimi_supported_keywords(child)?;
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(())
 }

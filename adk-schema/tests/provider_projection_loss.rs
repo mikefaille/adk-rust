@@ -51,6 +51,48 @@ fn gemini_projection() -> Value {
     })
 }
 
+/// Normalized projection under OpenAI schema adapter.
+fn openai_projection() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "request_kind": { "type": "string", "enum": ["order", "information"] },
+            "issue_description": { "type": "string" },
+            "caller_name": { "type": ["string", "null"] },
+            "fulfillment_method": { "type": "string" }
+        },
+        "required": ["request_kind", "issue_description"]
+    })
+}
+
+/// Normalized projection under Anthropic schema adapter.
+fn anthropic_projection() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "request_kind": { "type": "string", "enum": ["order", "information"] },
+            "issue_description": { "type": "string" },
+            "caller_name": { "type": "string" },
+            "fulfillment_method": { "type": "string" }
+        },
+        "required": ["request_kind", "issue_description"]
+    })
+}
+
+/// Normalized projection under Kimi schema adapter.
+fn kimi_projection() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "request_kind": { "type": "string", "enum": ["order", "information"] },
+            "issue_description": { "type": "string" },
+            "caller_name": { "type": ["string", "null"] },
+            "fulfillment_method": { "type": "string" }
+        },
+        "required": ["request_kind", "issue_description"]
+    })
+}
+
 fn ingest(value: Value) -> InputSchema {
     InputSchema::from_value(value, &IngestionPolicy::default()).expect("fixture ingests")
 }
@@ -122,5 +164,35 @@ fn outstanding_recovers_the_obligation_the_projection_dropped() {
     assert!(
         !from_projection.missing.contains("caller_name"),
         "projection was expected to have dropped the obligation: {from_projection:#?}",
+    );
+}
+
+#[test]
+fn reports_that_openai_projection_drops_conditional_constraints() {
+    let losses = ingest(source()).diff(&ingest(openai_projection()));
+    assert!(!losses.is_empty(), "openai projection reported no differences");
+    assert!(
+        losses.iter().any(|loss| loss.pointer.starts_with("/allOf") || loss.keyword == "allOf"),
+        "the dropped if/then obligation was not reported for openai: {losses:#?}"
+    );
+}
+
+#[test]
+fn reports_that_anthropic_projection_drops_conditional_constraints() {
+    let losses = ingest(source()).diff(&ingest(anthropic_projection()));
+    assert!(!losses.is_empty(), "anthropic projection reported no differences");
+    assert!(
+        losses.iter().any(|loss| loss.pointer.starts_with("/allOf") || loss.keyword == "allOf"),
+        "the dropped if/then obligation was not reported for anthropic: {losses:#?}"
+    );
+}
+
+#[test]
+fn reports_that_kimi_projection_drops_conditional_constraints() {
+    let losses = ingest(source()).diff(&ingest(kimi_projection()));
+    assert!(!losses.is_empty(), "kimi projection reported no differences");
+    assert!(
+        losses.iter().any(|loss| loss.pointer.starts_with("/allOf") || loss.keyword == "allOf"),
+        "the dropped if/then obligation was not reported for kimi: {losses:#?}"
     );
 }

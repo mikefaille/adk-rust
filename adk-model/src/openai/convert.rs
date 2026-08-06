@@ -239,19 +239,31 @@ pub fn convert_tools(
     adapter: &dyn SchemaAdapter,
     cache: &SchemaCache,
 ) -> Result<Vec<ChatCompletionTools>, AdkError> {
+    let mut seen_wire_names = std::collections::HashSet::with_capacity(tools.len());
+
     tools
         .iter()
         .map(|(name, decl)| {
             let description = decl.get("description").and_then(|d| d.as_str()).map(String::from);
 
-            // Normalize and validate tool name via the schema adapter
-            let normalized_name = adapter.normalize_tool_name(name);
-            adapter.validate_tool_name(&normalized_name).map_err(|e| {
+            // 1. Validate original tool name via the schema adapter first
+            adapter.validate_tool_name(name).map_err(|e| {
                 AdkError::model(format!(
                     "Invalid tool name '{name}' for adapter '{}': {e}",
                     adapter.identifier()
                 ))
             })?;
+
+            // 2. Normalize tool name
+            let normalized_name = adapter.normalize_tool_name(name);
+
+            // 3. Detect duplicate normalized wire names
+            if !seen_wire_names.insert(normalized_name.to_string()) {
+                return Err(AdkError::model(format!(
+                    "Tool name collision: multiple tools normalized to wire name '{normalized_name}' for adapter '{}'",
+                    adapter.identifier()
+                )));
+            }
 
             // Get the parameters schema from the declaration, or use the
             // adapter's empty_schema fallback when none is provided.

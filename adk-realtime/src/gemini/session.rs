@@ -243,6 +243,7 @@ struct GeminiTurn {
 pub struct GeminiRealtimeSession {
     session_id: String,
     connected: Arc<AtomicBool>,
+    cancel_token: tokio_util::sync::CancellationToken,
     outbound_tx: mpsc::Sender<Message>,
     writer_task: Arc<Mutex<Option<JoinHandle<()>>>>,
     receiver: Arc<Mutex<WsSource>>,
@@ -393,19 +394,33 @@ impl GeminiRealtimeSession {
 
         let (mut sink, source) = ws_stream.split();
         let connected = Arc::new(AtomicBool::new(true));
+        let cancel_token = tokio_util::sync::CancellationToken::new();
+        let writer_cancel = cancel_token.clone();
         let (outbound_tx, mut outbound_rx) = mpsc::channel(WRITER_CHANNEL_CAPACITY);
         let writer_connected = Arc::clone(&connected);
         let writer_task = tokio::spawn(async move {
-            while let Some(message) = outbound_rx.recv().await {
-                // Close frames are terminal for the writer lifecycle: send once then stop.
-                let should_close = matches!(message, Message::Close(_));
-                if let Err(error) = sink.send(message).await {
-                    writer_connected.store(false, Ordering::SeqCst);
-                    tracing::warn!(error = %error, "gemini websocket writer send failed");
-                    break;
-                }
-                if should_close {
-                    break;
+            loop {
+                tokio::select! {
+                    _ = writer_cancel.cancelled() => {
+                        tracing::info!("gemini websocket writer task cancelled via token");
+                        break;
+                    }
+                    msg = outbound_rx.recv() => {
+                        match msg {
+                            Some(message) => {
+                                let should_close = matches!(message, Message::Close(_));
+                                if let Err(error) = sink.send(message).await {
+                                    writer_connected.store(false, Ordering::SeqCst);
+                                    tracing::warn!(error = %error, "gemini websocket writer send failed");
+                                    break;
+                                }
+                                if should_close {
+                                    break;
+                                }
+                            }
+                            None => break,
+                        }
+                    }
                 }
             }
             // Mark disconnected on *any* writer exit path (error, close, channel shutdown).
@@ -426,6 +441,7 @@ impl GeminiRealtimeSession {
         let session = Self {
             session_id,
             connected,
+            cancel_token,
             outbound_tx,
             writer_task: Arc::new(Mutex::new(Some(writer_task))),
             receiver: Arc::new(Mutex::new(source)),
@@ -1188,13 +1204,25 @@ impl RealtimeSession for GeminiRealtimeSession {
 
     async fn close(&self) -> Result<()> {
         self.connected.store(false, Ordering::SeqCst);
-        // Route close through the same channel as normal writes so ordering is preserved.
-        let _ = self.outbound_tx.send(Message::Close(None)).await;
 
+        // Attempt graceful close frame enqueue under a short timeout (500ms) so a full
+        // channel never blocks teardown indefinitely.
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            self.outbound_tx.send(Message::Close(None)),
+        )
+        .await;
+
+        // Signal cancellation token to wake writer task if blocked on channel read or network I/O
+        self.cancel_token.cancel();
+
+        // Ensure deterministic teardown: await writer task completion under 1s timeout, aborting if stalled
         let mut writer_task = self.writer_task.lock().await;
-        if let Some(handle) = writer_task.take() {
-            // Ensure deterministic teardown: don't return until the writer released the sink.
-            let _ = handle.await;
+        if let Some(mut handle) = writer_task.take() {
+            if tokio::time::timeout(std::time::Duration::from_secs(1), &mut handle).await.is_err() {
+                tracing::warn!("Gemini writer task did not exit within 1s; aborting handle");
+                handle.abort();
+            }
         }
         Ok(())
     }

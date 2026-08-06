@@ -61,6 +61,10 @@ const NON_WINDOWS_TOOLCHAIN_ENV_KEYS: &[&str] = &[
     "RUSTUP_HOME",
     "CARGO_HOME",
     "RUSTUP_TOOLCHAIN",
+    "SCCACHE_GCS_BUCKET",
+    "SCCACHE_GCS_KEY_PATH",
+    "GOOGLE_APPLICATION_CREDENTIALS",
+    "SCCACHE_DIR",
 ];
 
 /// Host variables exposed only while compiling Rust with the MSVC toolchain.
