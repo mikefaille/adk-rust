@@ -147,6 +147,20 @@ pub trait RealtimeSession: Send + Sync {
         None
     }
 
+    /// The most recent resumption handle the provider issued, if it issues any.
+    ///
+    /// Exposed so a caller assembling [`ReconnectOptions`] can populate
+    /// `resume_handle` from the session rather than hardcoding `None` and
+    /// relying on the implementation to substitute its own cached value. The
+    /// substitution is real (see Gemini's `reconnect_with_backoff`), but a
+    /// caller that *looks* like it is discarding conversation state is a
+    /// standing invitation to reintroduce the bug where it actually did.
+    ///
+    /// Defaulted to `None` for providers without session resumption.
+    fn last_resume_handle(&self) -> Option<String> {
+        None
+    }
+
     /// Send raw audio data to the server.
     ///
     /// The audio should be in the format specified in the session configuration.

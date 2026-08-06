@@ -75,6 +75,24 @@ pub enum RealtimeError {
     #[error("Transport reset: {0}")]
     TransportReset(String),
 
+    /// The provider sent a WebSocket Close frame on a session that had already
+    /// completed setup, with a code the provider layer judged *resumable*.
+    ///
+    /// Constructed only where that judgement is made (Gemini:
+    /// `close_is_resumable`), so any holder of this variant may reconnect
+    /// without re-deriving the policy. A close the provider judged terminal is
+    /// NOT this variant — it stays end-of-stream (`None`), because a caller
+    /// that retried it would replay the same rejected request.
+    ///
+    /// This variant exists because the alternative — reporting a server-sent
+    /// Close as a clean end of stream — made reconnect unreachable for the
+    /// single most common live-call failure in production: 8 of 11 failed
+    /// pilot calls over the 7 days to 2026-08-06 ended on close code 1008
+    /// with reason "The operation was aborted.", each one a healthy mid-call
+    /// session the server dropped, and none of them ever consulted reconnect.
+    #[error("Server closed the stream: {0}")]
+    ServerClosed(crate::session::DisconnectReason),
+
     /// Opus codec error.
     #[error("Opus codec error: {0}")]
     OpusCodecError(String),
@@ -181,6 +199,18 @@ impl RealtimeError {
             RealtimeError::TransportReset(_) => true,
             _ => false,
         }
+    }
+
+    /// Whether a caller polling the event stream should attempt a reconnect
+    /// rather than terminate the session.
+    ///
+    /// Two disjoint causes, deliberately kept apart from `is_connection_reset`:
+    /// a TCP-level reset (the socket died under us) and a server-sent Close
+    /// frame the provider judged resumable. A server close is not a "reset" —
+    /// the transport worked perfectly and the peer used it to hang up — so
+    /// folding it into `is_connection_reset` would make that predicate lie.
+    pub fn should_attempt_reconnect(&self) -> bool {
+        matches!(self, RealtimeError::ServerClosed(_)) || self.is_connection_reset()
     }
 }
 

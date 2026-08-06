@@ -842,6 +842,20 @@ impl RealtimeRunner {
         self.session_handle().await.ok().and_then(|session| session.disconnect_reason())
     }
 
+    /// The most recent resumption handle the provider issued, if any.
+    ///
+    /// A caller building [`crate::session::ReconnectOptions`] should populate
+    /// `resume_handle` from this rather than passing `None`. Gemini's
+    /// `reconnect_with_backoff` does fall back to its own cached handle, so
+    /// `None` is not currently a live bug — but a call site that reads as
+    /// "reconnect with no conversation state" is one refactor away from
+    /// becoming one, and a reconnect that silently starts a fresh session
+    /// looks identical to a working one until the caller is asked to repeat
+    /// everything they already said.
+    pub async fn last_resume_handle(&self) -> Option<String> {
+        self.session_handle().await.ok().and_then(|session| session.last_resume_handle())
+    }
+
     /// Check the provider-neutral availability state.
     pub async fn availability(&self) -> crate::session::RealtimeAvailability {
         if let Ok(session) = self.session_handle().await {

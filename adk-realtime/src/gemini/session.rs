@@ -281,6 +281,20 @@ pub struct GeminiRealtimeSession {
     /// through that filter. Do not add a second producer of
     /// `ServerEvent::SessionUpdated` that bypasses it.
     last_resume_handle: Arc<ParkingMutex<Option<String>>>,
+    /// Whether the CURRENT connection has received `setupComplete`.
+    ///
+    /// The discriminator that keeps `close_is_resumable` from retrying a
+    /// rejected request. Gemini answers a bad setup — an unprefixed model id,
+    /// a schema on the wrong dialect field, a rejected key — by closing
+    /// *before* `setupComplete`, and it reuses ordinary close codes to do it
+    /// (a missing `models/` prefix closes with 1008, the same code an aborted
+    /// live session gets). Reconnecting after a setup rejection replays the
+    /// identical rejected setup, so the code alone cannot decide.
+    ///
+    /// Reset to `false` in `try_reconnect_once` before the new setup frame is
+    /// sent, so it always describes the connection currently in hand rather
+    /// than a healthier predecessor.
+    session_established: Arc<AtomicBool>,
     /// The `RealtimeConfig` this session was first connected with —
     /// `system_instruction`, `tools`, and generation config included.
     ///
@@ -392,6 +406,65 @@ impl GeminiRealtimeSession {
         self.last_resume_handle.lock().clone()
     }
 
+    /// Whether a server-sent Close frame should be reported as a resumable
+    /// error (reconnect) rather than as end-of-stream (terminate the call).
+    ///
+    /// # Why this is not a close-code lookup table
+    ///
+    /// Gemini Live overloads its close codes. The measured evidence — the
+    /// pilot journal for the 7 days to 2026-08-06 — is that **every one** of
+    /// the 8 calls lost to a server close got
+    /// `CloseFrame { code: Policy, reason: "The operation was aborted." }`,
+    /// i.e. 1008, on a session that was mid-call and healthy. Zero `goAway`
+    /// frames, zero 1011s, zero TCP resets. But 1008 is *also* what Gemini
+    /// returns for a malformed setup ("… is not found for API version …" when
+    /// the `models/` prefix is missing), which is deterministic and would
+    /// retry forever. The code cannot separate them; **whether setup ever
+    /// completed** can, and does so structurally rather than by matching
+    /// Google's English.
+    ///
+    /// # The policy
+    ///
+    /// 1. A close on a connection that never reached `setupComplete` is
+    ///    TERMINAL. The server rejected our request; a reconnect replays it
+    ///    verbatim. This covers bad model id (1008), wrong schema dialect
+    ///    (1007), and rejected credentials.
+    /// 2. After `setupComplete`, codes meaning *we* sent something illegal are
+    ///    TERMINAL — 1002 protocol error, 1003 unsupported data, 1007 invalid
+    ///    payload. These reproduce on retry because the input reproduces.
+    /// 3. Every other code after `setupComplete` is RESUMABLE: the server
+    ///    dropped a working session. That includes 1000/1001 (Gemini's
+    ///    session-expiry and `goAway` follow-through), 1006, **1008 — the
+    ///    observed production abort**, 1011, 1012, 1013, and a close with no
+    ///    code at all.
+    ///
+    /// # Why the default leans resumable
+    ///
+    /// The two misclassifications do not cost the same. Calling a terminal
+    /// close resumable costs one bounded reconnect budget — 3 attempts inside
+    /// 3000 ms (`ReconnectOptions::default`) — after which the caller fails
+    /// closed exactly as it would have anyway; the caller loses ~3 seconds.
+    /// Calling a resumable close terminal costs the entire call, which is the
+    /// defect being fixed here. With that asymmetry, an unrecognised code on
+    /// an established session belongs on the resumable side.
+    ///
+    /// Note this is deliberately NOT keyed on the reason text. "The operation
+    /// was aborted." is a provider string that may be reworded without notice,
+    /// and a policy that silently stops matching would restore the original
+    /// bug with no test failing.
+    fn close_is_resumable(&self, code: Option<u16>) -> bool {
+        // We asked for this close: `close()` sets Teardown before enqueuing the
+        // Close frame, and the server echoes one back. Reconnecting here would
+        // resurrect a session the application deliberately ended.
+        if matches!(*self.availability.lock(), RealtimeAvailability::Teardown) {
+            return false;
+        }
+        if !self.session_established.load(Ordering::SeqCst) {
+            return false;
+        }
+        !matches!(code, Some(1002) | Some(1003) | Some(1007))
+    }
+
     /// Constructs a mock `GeminiRealtimeSession` for testing connection lifecycle & recovery.
     ///
     /// `config` becomes `original_config`, the same field a real
@@ -427,6 +500,7 @@ impl GeminiRealtimeSession {
             reconnect_url: ReconnectUrl(reconnect_url),
             reconnect_model,
             last_resume_handle: Arc::new(ParkingMutex::new(None)),
+            session_established: Arc::new(AtomicBool::new(false)),
             original_config: config,
             availability: ParkingMutex::new(RealtimeAvailability::Connected),
             reconnect_epoch: std::sync::atomic::AtomicU64::new(0),
@@ -634,6 +708,7 @@ impl GeminiRealtimeSession {
             reconnect_url: ReconnectUrl(reconnect_url),
             reconnect_model: normalized_model.clone(),
             last_resume_handle: Arc::new(ParkingMutex::new(None)),
+            session_established: Arc::new(AtomicBool::new(false)),
             original_config,
             availability: ParkingMutex::new(RealtimeAvailability::Connected),
             reconnect_epoch: std::sync::atomic::AtomicU64::new(0),
@@ -834,6 +909,10 @@ impl GeminiRealtimeSession {
             *tx = new_tx;
         }
         self.connected.store(true, Ordering::SeqCst);
+        // The new socket has not been accepted yet. Leaving this `true` from
+        // the previous connection would let a *setup rejection* on the retry
+        // be judged resumable, which is the one case that must not retry.
+        self.session_established.store(false, Ordering::SeqCst);
 
         // Recompile tools from the ORIGINAL config using the retained
         // compiler target — the same pattern `ClientEvent::SessionUpdate`
@@ -959,15 +1038,40 @@ impl GeminiRealtimeSession {
                         close_frame.as_ref().map(|frame| frame.reason.as_ref()).unwrap_or(""),
                     "WebSocket closed by server"
                 );
-                *self.last_disconnect.lock() = Some(crate::session::DisconnectReason {
+                let disconnect = crate::session::DisconnectReason {
                     code: close_frame.as_ref().map(|frame| u16::from(frame.code)),
                     reason: close_frame
                         .as_ref()
                         .map(|frame| frame.reason.to_string())
                         .unwrap_or_default(),
-                });
+                };
+                *self.last_disconnect.lock() = Some(disconnect.clone());
                 self.connected.store(false, Ordering::SeqCst);
-                None
+
+                // The defect this replaces: every server-sent Close returned
+                // `None`, which a polling caller cannot tell from "the stream
+                // is finished". Reconnect only ever ran on the `Err` path, so
+                // a provider hang-up could not reach it — and a third of pilot
+                // calls died that way without one reconnect being attempted.
+                //
+                // `None` is still returned for a close the policy calls
+                // terminal, so a genuinely finished or rejected stream is not
+                // turned into a spurious retry. End-of-stream from an
+                // exhausted receiver keeps its own `None` arm below.
+                if self.close_is_resumable(disconnect.code) {
+                    tracing::warn!(
+                        close_code = disconnect.code.unwrap_or_default(),
+                        "Server close judged resumable; surfacing as an error so the caller can reconnect"
+                    );
+                    Some(Err(RealtimeError::ServerClosed(disconnect)))
+                } else {
+                    tracing::info!(
+                        close_code = disconnect.code.unwrap_or_default(),
+                        established = self.session_established.load(Ordering::SeqCst),
+                        "Server close judged terminal; reporting end of stream"
+                    );
+                    None
+                }
             }
             Some(Ok(msg)) => {
                 tracing::warn!("Received unhandled tungstenite message: {:?}", msg);
@@ -1003,6 +1107,14 @@ impl GeminiRealtimeSession {
             {
                 *self.last_resume_handle.lock() = Some(handle.to_string());
                 tracing::debug!(handle = %handle, "Cached resumable handle for reconnect");
+            }
+            // `setupComplete` is the only evidence that the server accepted
+            // this connection's setup frame, and `close_is_resumable` refuses
+            // to reconnect without it. Recorded here rather than in
+            // `try_reconnect_once`'s wait loop so the initial connection and
+            // every reconnect share one producer.
+            if matches!(event, ServerEvent::SessionCreated { .. }) {
+                self.session_established.store(true, Ordering::SeqCst);
             }
         }
         Ok(events)
@@ -1181,6 +1293,30 @@ impl GeminiRealtimeSession {
             }
         }
 
+        // `goAway` announces a *scheduled* disconnect: the server will close
+        // shortly and states how long is left. Previously it fell through to
+        // `ServerEvent::Unknown`, so the one frame that gives advance warning
+        // of a close was indistinguishable from a frame we failed to parse.
+        //
+        // Deliberately NOT acted on proactively. A reconnect triggered here
+        // would tear down a socket that is still carrying the caller's audio,
+        // on the strength of a frame that appeared ZERO times in the 7-day
+        // pilot journal that motivated this fix — every observed loss was an
+        // unannounced 1008. Racing a disconnect we have never seen, using an
+        // untested path, is a new way to drop a healthy call. The close that
+        // follows a `goAway` is handled by the resumable-close path like any
+        // other, which is the conservative half of the same repair. Logging it
+        // is what makes the proactive version answerable later: if `goAway`
+        // starts appearing, this line is the evidence.
+        if let Some(go_away) = value.get("goAway") {
+            let time_left = go_away.get("timeLeft").and_then(|t| t.as_str()).unwrap_or("<unset>");
+            tracing::warn!(
+                time_left,
+                "Gemini sent goAway: the server intends to close this session shortly"
+            );
+            return Ok(vec![]);
+        }
+
         // Gemini withdraws function calls it already issued, normally because
         // the caller interrupted the turn that produced them. Google's wording
         // is that they "should not have been executed and should be cancelled",
@@ -1270,6 +1406,15 @@ impl RealtimeSession for GeminiRealtimeSession {
 
     fn disconnect_reason(&self) -> Option<crate::session::DisconnectReason> {
         self.last_disconnect.lock().clone()
+    }
+
+    /// Delegates to the inherent method of the same name. Both exist because
+    /// the inherent one predates the trait method and is used directly by
+    /// `tests/mock_websocket_server.rs`, which holds a concrete session; the
+    /// trait method is what a caller behind `Arc<dyn RealtimeSession>` (i.e.
+    /// `RealtimeRunner`, i.e. the data plane) can actually reach.
+    fn last_resume_handle(&self) -> Option<String> {
+        GeminiRealtimeSession::last_resume_handle(self)
     }
 
     /// The real producer for `RealtimeAvailability`: mutated by
@@ -2895,6 +3040,7 @@ mod teardown_tests {
             reconnect_url: ReconnectUrl("wss://localhost/ws".to_string()),
             reconnect_model: "models/gemini-3.1-flash-live-preview".into(),
             last_resume_handle: Arc::new(ParkingMutex::new(None)),
+            session_established: Arc::new(AtomicBool::new(false)),
             original_config: RealtimeConfig::default(),
             availability: ParkingMutex::new(RealtimeAvailability::Connected),
             reconnect_epoch: std::sync::atomic::AtomicU64::new(0),
@@ -2928,6 +3074,8 @@ mod reconnect_setup_tests {
     use std::sync::atomic::AtomicBool;
     use tokio::sync::mpsc;
     use tokio_tungstenite::tungstenite::Message;
+    use tokio_tungstenite::tungstenite::protocol::CloseFrame;
+    use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
     use tokio_util::sync::CancellationToken;
 
     /// Build a `GeminiRealtimeSession` wired to `ws_url`'s CURRENT connection,
@@ -2971,6 +3119,7 @@ mod reconnect_setup_tests {
             reconnect_url: ReconnectUrl(ws_url),
             reconnect_model: "models/gemini-3.1-flash-live-preview".into(),
             last_resume_handle: Arc::new(ParkingMutex::new(None)),
+            session_established: Arc::new(AtomicBool::new(false)),
             original_config: config,
             availability: ParkingMutex::new(RealtimeAvailability::Connected),
             reconnect_epoch: std::sync::atomic::AtomicU64::new(0),
@@ -3108,6 +3257,244 @@ mod reconnect_setup_tests {
 
         let seen_handle = server.await.unwrap();
         assert_eq!(seen_handle.as_deref(), Some("caller-supplied-handle"));
+    }
+
+    /// Drive a mock server that completes setup (or not) and then closes with
+    /// `code`, and return what the SECOND `receive_raw()` produced.
+    ///
+    /// Returns a rendered description rather than the value itself so the
+    /// assertions below read as the distinction under test — resumable error
+    /// vs end-of-stream — rather than as pattern-matching noise.
+    async fn close_outcome(complete_setup: bool, code: CloseCode, reason: &str) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let ws_url = format!("ws://{addr}");
+        let reason = reason.to_string();
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            if complete_setup {
+                ws.send(Message::Text(json!({ "setupComplete": {} }).to_string().into()))
+                    .await
+                    .unwrap();
+            }
+            ws.send(Message::Close(Some(CloseFrame { code, reason: reason.into() })))
+                .await
+                .unwrap();
+            // Hold the connection until the client has read both frames.
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        });
+
+        let session = session_for_reconnect(ws_url, RealtimeConfig::default()).await;
+
+        if complete_setup {
+            match session.receive_raw().await {
+                Some(Ok(ServerEvent::SessionCreated { .. })) => {}
+                other => panic!("expected SessionCreated first, got {other:?}"),
+            }
+        }
+
+        let outcome = match session.receive_raw().await {
+            Some(Err(RealtimeError::ServerClosed(disconnect))) => {
+                format!("resumable:{}:{}", disconnect.code.unwrap_or_default(), disconnect.reason)
+            }
+            Some(Err(other)) => format!("other-error:{other}"),
+            Some(Ok(event)) => format!("event:{event:?}"),
+            None => "end-of-stream".to_string(),
+        };
+        server.abort();
+        outcome
+    }
+
+    /// THE regression test for the production defect.
+    ///
+    /// Every one of the 8 pilot calls lost to `model_stream_closed` in the 7
+    /// days to 2026-08-06 died on exactly this frame: close code 1008
+    /// (`Policy`), reason "The operation was aborted.", on a session that had
+    /// completed setup and was mid-call. Before the fix `receive_raw` returned
+    /// `None` for it, the bridge read that as a clean end of stream, and
+    /// reconnect — which only ever ran on the `Err` path — was never consulted.
+    #[tokio::test]
+    async fn the_observed_production_close_is_resumable_not_end_of_stream() {
+        let outcome = close_outcome(true, CloseCode::Policy, "The operation was aborted.").await;
+        assert_eq!(
+            outcome, "resumable:1008:The operation was aborted.",
+            "the observed production close must surface as a resumable error, not end-of-stream"
+        );
+    }
+
+    /// The other half of the contract: a close that arrives before
+    /// `setupComplete` is the server REJECTING our setup (bad model id, wrong
+    /// schema dialect, rejected key). Gemini uses 1008 for that too, so only
+    /// the absence of `setupComplete` separates it from the case above.
+    /// Reconnecting would replay the identical rejected setup.
+    #[tokio::test]
+    async fn a_close_before_setup_complete_is_terminal_not_resumable() {
+        let outcome = close_outcome(
+            false,
+            CloseCode::Policy,
+            "models/nonexistent is not found for API version v1alpha",
+        )
+        .await;
+        assert_eq!(
+            outcome, "end-of-stream",
+            "a setup rejection must not be retried — the retry replays the same rejected setup"
+        );
+    }
+
+    /// Codes that mean *we* sent something illegal stay terminal even on an
+    /// established session: the offending input reproduces on the new socket.
+    #[tokio::test]
+    async fn a_payload_violation_after_setup_is_still_terminal() {
+        let outcome = close_outcome(true, CloseCode::Invalid, "invalid frame payload").await;
+        assert_eq!(outcome, "end-of-stream", "1007 must not be retried");
+    }
+
+    /// A code nobody enumerated, on an established session, resumes. Getting
+    /// this backwards costs the whole call; getting it wrong the other way
+    /// costs one bounded 3s reconnect budget and then the same fail-closed end.
+    #[tokio::test]
+    async fn an_unenumerated_code_on_an_established_session_resumes() {
+        let outcome = close_outcome(true, CloseCode::Error, "internal error").await;
+        assert_eq!(outcome, "resumable:1011:internal error");
+    }
+
+    /// We asked for this close. `close()` sets `Teardown` before enqueuing the
+    /// Close frame and the server echoes one back; reconnecting there would
+    /// resurrect a session the application deliberately ended.
+    #[tokio::test]
+    async fn a_locally_initiated_teardown_close_is_not_resumable() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let ws_url = format!("ws://{addr}");
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            ws.send(Message::Text(json!({ "setupComplete": {} }).to_string().into()))
+                .await
+                .unwrap();
+            ws.send(Message::Close(Some(CloseFrame {
+                code: CloseCode::Normal,
+                reason: "bye".into(),
+            })))
+            .await
+            .unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        });
+
+        let session = session_for_reconnect(ws_url, RealtimeConfig::default()).await;
+        match session.receive_raw().await {
+            Some(Ok(ServerEvent::SessionCreated { .. })) => {}
+            other => panic!("expected SessionCreated first, got {other:?}"),
+        }
+        // Exactly what `close()` does before the Close frame goes out.
+        *session.availability.lock() = RealtimeAvailability::Teardown;
+
+        assert!(
+            session.receive_raw().await.is_none(),
+            "a close during local teardown must be end-of-stream, not a reconnect trigger"
+        );
+        server.abort();
+    }
+
+    /// A resumable close must reach the reconnect predicate the data plane
+    /// actually branches on. `is_connection_reset` deliberately stays false —
+    /// the transport did not reset, the peer hung up on a working one.
+    #[test]
+    fn a_resumable_server_close_asks_for_a_reconnect_without_claiming_a_reset() {
+        let err = RealtimeError::ServerClosed(crate::session::DisconnectReason {
+            code: Some(1008),
+            reason: "The operation was aborted.".to_string(),
+        });
+        assert!(err.should_attempt_reconnect(), "{err:?}");
+        assert!(!err.is_connection_reset(), "a server close is not a transport reset: {err:?}");
+    }
+
+    /// `goAway` is the one frame that warns a close is coming. It used to fall
+    /// through to `ServerEvent::Unknown`, indistinguishable from a frame we
+    /// failed to parse. Not acted on proactively — zero `goAway` frames
+    /// appeared in the 7-day journal — but it must be recognised.
+    #[test]
+    fn go_away_is_recognised_rather_than_reported_as_unknown() {
+        let events =
+            GeminiRealtimeSession::translate_event_static(r#"{"goAway":{"timeLeft":"10s"}}"#)
+                .unwrap();
+        assert!(
+            events.is_empty(),
+            "goAway must be recognised and consumed, not surfaced as Unknown: {events:?}"
+        );
+    }
+
+    /// Setup replay, in full. A reconnect that drops `inputAudioTranscription`
+    /// produces a session that looks alive and silently stops feeding text to
+    /// the graph — the failure mode is invisible until the call produces no
+    /// intake at all. `realtimeInputConfig` carries the VAD/interruption
+    /// policy; dropping it silently changes barge-in behaviour mid-call.
+    #[tokio::test]
+    async fn reconnect_setup_replays_transcription_and_realtime_input_config() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let ws_url = format!("ws://{addr}");
+
+        let server = tokio::spawn(async move {
+            let (stream1, _) = listener.accept().await.unwrap();
+            let _ws1 = tokio_tungstenite::accept_async(stream1).await.unwrap();
+
+            let (stream2, _) = listener.accept().await.unwrap();
+            let mut ws2 = tokio_tungstenite::accept_async(stream2).await.unwrap();
+            let value = expect_text(ws2.next().await.unwrap().unwrap());
+            ws2.send(Message::Text(json!({ "setupComplete": {} }).to_string().into()))
+                .await
+                .unwrap();
+            value
+        });
+
+        // `realtimeInputConfig` is only emitted when turn detection is
+        // configured, so it has to be set here for its replay to be provable
+        // at all — asserting on it with a default config would have failed
+        // against correct code, which is how this fixture was first wrong.
+        let config = RealtimeConfig {
+            input_audio_transcription: Some(crate::config::TranscriptionConfig::whisper()),
+            instruction: Some("Be a helpful assistant".to_string()),
+            turn_detection: Some(crate::config::VadConfig {
+                mode: crate::config::VadMode::ServerVad,
+                silence_duration_ms: Some(700),
+                threshold: None,
+                prefix_padding_ms: Some(200),
+                interrupt_response: Some(true),
+                eagerness: None,
+            }),
+            ..RealtimeConfig::default()
+        };
+        let session = session_for_reconnect(ws_url, config).await;
+        session.reconnect_with_backoff(crate::session::ReconnectOptions::default()).await.unwrap();
+
+        let value = server.await.unwrap();
+        let setup = value.get("setup").expect("setup frame");
+        assert!(
+            setup.get("inputAudioTranscription").is_some(),
+            "reconnect dropped inputAudioTranscription — the session would stop feeding the graph: {setup}"
+        );
+        assert!(
+            setup.get("outputAudioTranscription").is_some(),
+            "reconnect dropped outputAudioTranscription: {setup}"
+        );
+        assert_eq!(
+            setup["realtimeInputConfig"]["automaticActivityDetection"]["silenceDurationMs"],
+            json!(700),
+            "reconnect dropped realtimeInputConfig (VAD/interruption policy): {setup}"
+        );
+        assert_eq!(
+            setup["systemInstruction"]["parts"][0]["text"],
+            json!("Be a helpful assistant"),
+            "reconnect dropped the system instruction: {setup}"
+        );
+        assert!(
+            setup.get("sessionResumption").is_some(),
+            "reconnect setup must always carry a sessionResumption block: {setup}"
+        );
     }
 
     /// D5: the API key must never appear in `{:?}` output.
