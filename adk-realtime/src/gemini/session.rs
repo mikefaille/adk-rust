@@ -429,6 +429,13 @@ pub struct GeminiRealtimeSession {
     /// Makes the outbound signal edge-triggered: several observers of one
     /// barge-in collapse to a single frame. See [`ActivitySignaller`].
     activity_open: Arc<AtomicBool>,
+    /// Which function-declaration field tool schemas are posted under.
+    ///
+    /// Held on the session because the setup frame is built from `&self`, and
+    /// because it must match the dialect the caller reduced its schemas to —
+    /// posting a schema that kept `additionalProperties` under the legacy
+    /// `parameters` field closes the socket with WS 1007.
+    schema_dialect: adk_gemini::GeminiSchemaDialect,
 }
 
 impl GeminiRealtimeSession {
@@ -444,6 +451,24 @@ impl GeminiRealtimeSession {
         backend: GeminiLiveBackend,
         model: &str,
         config: RealtimeConfig,
+    ) -> Result<Self> {
+        Self::connect_with_dialect(backend, model, config, Default::default()).await
+    }
+
+    /// Connect, declaring which schema dialect the caller reduced its tool
+    /// schemas to.
+    ///
+    /// Use this when tool schemas were produced by
+    /// [`GeminiSchemaAdapter::json_schema()`](adk_gemini::GeminiSchemaAdapter::json_schema):
+    /// their constraints survive only if they are posted under
+    /// `parametersJsonSchema`, and this is what selects that field.
+    /// [`connect`](Self::connect) keeps the legacy `parameters` field, so
+    /// existing callers are unaffected.
+    pub async fn connect_with_dialect(
+        backend: GeminiLiveBackend,
+        model: &str,
+        config: RealtimeConfig,
+        schema_dialect: adk_gemini::GeminiSchemaDialect,
     ) -> Result<Self> {
         let ws_stream = match &backend {
             GeminiLiveBackend::Studio { api_key } => {
@@ -555,6 +580,7 @@ impl GeminiRealtimeSession {
             event_queue: Arc::new(Mutex::new(std::collections::VecDeque::new())),
             activity_detection,
             activity_open: Arc::new(AtomicBool::new(false)),
+            schema_dialect,
         };
 
         session.send_setup(model, config).await?;
@@ -647,7 +673,7 @@ impl GeminiRealtimeSession {
 
     /// Send initial setup message.
     async fn send_setup(&self, model: &str, config: RealtimeConfig) -> Result<()> {
-        let setup = Self::build_setup_message(model, config);
+        let setup = Self::build_setup_message(model, config, self.schema_dialect);
 
         if self.activity_detection == ActivityDetection::Manual {
             // Loud, because this is the configuration in which the server does
@@ -672,7 +698,11 @@ impl GeminiRealtimeSession {
     /// can be asserted without a socket — the setup frame is the only place a
     /// session states who owns turn detection, and getting it wrong is not
     /// visible until a live call misbehaves.
-    fn build_setup_message(model: &str, config: RealtimeConfig) -> GeminiClientMessage {
+    fn build_setup_message(
+        model: &str,
+        config: RealtimeConfig,
+        dialect: adk_gemini::GeminiSchemaDialect,
+    ) -> GeminiClientMessage {
         let realtime_input_config = ActivityDetection::from_config(&config).realtime_input_config();
 
         let mut generation_config = json!({
@@ -710,7 +740,7 @@ impl GeminiRealtimeSession {
             parts: vec![GeminiPart { text: Some(text), inline_data: None }],
         });
 
-        let tools = convert_tools(config.tools);
+        let tools = convert_tools(config.tools, dialect);
 
         // Functionally extract the token if it exists in the prior state map
         let handle = config
@@ -1381,7 +1411,19 @@ pub(crate) fn translate_client_message(
 }
 
 /// Convert ADK tool definitions to Gemini format.
-fn convert_tools(tools: Option<Vec<ToolDefinition>>) -> Option<Vec<Value>> {
+///
+/// `dialect` decides the field the schema is posted under. It is a parameter
+/// rather than a constant because Gemini's two schema fields are mutually
+/// exclusive and express different things: `parameters` takes an OpenAPI
+/// subset, `parametersJsonSchema` takes standard JSON Schema. Hardcoding the
+/// legacy field silently discards every constraint the subset cannot carry —
+/// `additionalProperties`, `allOf`, `if`/`then`, `minLength`, the numeric
+/// bounds — leaving the model to guess at rules the caller still enforces.
+fn convert_tools(
+    tools: Option<Vec<ToolDefinition>>,
+    dialect: adk_gemini::GeminiSchemaDialect,
+) -> Option<Vec<Value>> {
+    let field = dialect.parameters_field();
     tools.map(|tools| {
         vec![json!({
             "functionDeclarations": tools.iter().map(|t| {
@@ -1390,7 +1432,7 @@ fn convert_tools(tools: Option<Vec<ToolDefinition>>) -> Option<Vec<Value>> {
                     decl["description"] = json!(desc);
                 }
                 if let Some(params) = &t.parameters {
-                    decl["parameters"] = params.clone();
+                    decl[field] = params.clone();
                 }
                 decl
             }).collect::<Vec<_>>()
@@ -1548,7 +1590,11 @@ mod tests {
     use crate::config::{VadConfig, VadMode};
 
     fn setup_json(config: RealtimeConfig) -> Value {
-        let msg = GeminiRealtimeSession::build_setup_message("models/test", config);
+        let msg = GeminiRealtimeSession::build_setup_message(
+            "models/test",
+            config,
+            adk_gemini::GeminiSchemaDialect::default(),
+        );
         serde_json::to_value(&msg).expect("setup serializes")
     }
 
@@ -1662,6 +1708,19 @@ mod tests {
     async fn session_on_loopback(
         activity_detection: ActivityDetection,
     ) -> (GeminiRealtimeSession, ServerEnd) {
+        session_on_loopback_with_dialect(
+            activity_detection,
+            adk_gemini::GeminiSchemaDialect::default(),
+        )
+        .await
+    }
+
+    /// As [`session_on_loopback`], with an explicit schema dialect, so a test
+    /// can prove the session's own dialect is what reaches the wire.
+    async fn session_on_loopback_with_dialect(
+        activity_detection: ActivityDetection,
+        schema_dialect: adk_gemini::GeminiSchemaDialect,
+    ) -> (GeminiRealtimeSession, ServerEnd) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
@@ -1701,6 +1760,7 @@ mod tests {
             last_disconnect: Arc::new(ParkingMutex::new(None)),
             activity_detection,
             activity_open: Arc::new(AtomicBool::new(false)),
+            schema_dialect,
         };
 
         (session, server_ws)
@@ -1839,5 +1899,71 @@ mod tests {
             next_frame(&mut server).await,
             json!({ "realtimeInput": { "activityStart": {} } })
         );
+    }
+
+    fn tool_with_constrained_schema() -> Vec<ToolDefinition> {
+        vec![ToolDefinition {
+            name: "submit".to_string(),
+            description: Some("a tool".to_string()),
+            parameters: Some(json!({
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {"n": {"type": "string", "minLength": 7}}
+            })),
+        }]
+    }
+
+    /// The default stays on the legacy field, so nothing changes for callers
+    /// who do not opt in.
+    #[test]
+    fn tools_default_to_the_legacy_parameters_field() {
+        let tools =
+            convert_tools(Some(tool_with_constrained_schema()), Default::default()).unwrap();
+        let decl = &tools[0]["functionDeclarations"][0];
+
+        assert!(decl.get("parameters").is_some(), "{decl}");
+        assert!(decl.get("parametersJsonSchema").is_none(), "{decl}");
+    }
+
+    /// The bug this exists to fix: a schema that kept `additionalProperties`
+    /// must not be posted under `parameters`. Gemini answers that frame by
+    /// closing the socket with WS 1007, so the call dies before any audio
+    /// flows — the two fields are mutually exclusive, never interchangeable.
+    #[test]
+    fn json_schema_dialect_posts_under_parameters_json_schema() {
+        let tools = convert_tools(
+            Some(tool_with_constrained_schema()),
+            adk_gemini::GeminiSchemaDialect::JsonSchema,
+        )
+        .unwrap();
+        let decl = &tools[0]["functionDeclarations"][0];
+
+        assert!(decl.get("parameters").is_none(), "both fields sent: {decl}");
+        assert_eq!(decl["parametersJsonSchema"]["additionalProperties"], json!(false));
+        assert_eq!(decl["parametersJsonSchema"]["properties"]["n"]["minLength"], 7);
+    }
+
+    /// The dialect held on the session — not a default — is what the setup
+    /// frame carries. `build_setup_message` takes the dialect as an argument,
+    /// so nothing but this test observes whether `send_setup` passes its own.
+    /// Getting it wrong sends constraints under `parameters` and Gemini Live
+    /// closes the socket with WS 1007.
+    #[tokio::test]
+    async fn send_setup_posts_tools_under_the_session_dialect() {
+        let (session, mut server) = session_on_loopback_with_dialect(
+            ActivityDetection::Automatic,
+            adk_gemini::GeminiSchemaDialect::JsonSchema,
+        )
+        .await;
+
+        let config =
+            RealtimeConfig { tools: Some(tool_with_constrained_schema()), ..Default::default() };
+        session.send_setup("models/test", config).await.unwrap();
+
+        let frame = next_frame(&mut server).await;
+        let decl = &frame["setup"]["tools"][0]["functionDeclarations"][0];
+
+        assert!(decl.get("parameters").is_none(), "legacy field used: {frame}");
+        assert_eq!(decl["parametersJsonSchema"]["additionalProperties"], json!(false));
     }
 }
