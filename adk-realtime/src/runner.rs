@@ -1115,10 +1115,9 @@ impl RealtimeRunner {
                 self.event_handler.on_tool_calls_cancelled(&call_ids).await?;
             }
             ServerEvent::ResponseCancelled { .. } => {
-                // Clear any pending tool follow-up response state from the cancelled turn.
-                // When caller barge-in or turn cancellation occurs, in-flight tool calls from
-                // that turn may finish later. Resetting these flags prevents a stale create_response
-                // trigger from spilling over into subsequent user turns.
+                // Both atomic flags must be reset on cancellation (caller barge-in):
+                // 1) `pending_tool_response`: Prevents completed tool outputs from firing create_response in a future turn.
+                // 2) `response_closed_awaiting_tools`: Prevents late-finishing tools from triggering a follow-up response mid-utterance.
                 self.pending_tool_response.store(false, Ordering::Release);
                 self.response_closed_awaiting_tools.store(false, Ordering::Release);
                 // An abandoned generation must not leave the state machine
