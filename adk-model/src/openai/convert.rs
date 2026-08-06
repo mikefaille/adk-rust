@@ -2,7 +2,7 @@
 
 use crate::attachment;
 use adk_core::{
-    Content, FinishReason, LlmResponse, Part, SchemaAdapter, SchemaCache, UsageMetadata,
+    AdkError, Content, FinishReason, LlmResponse, Part, SchemaAdapter, SchemaCache, UsageMetadata,
 };
 use async_openai::types::chat::{
     ChatCompletionMessageToolCall, ChatCompletionMessageToolCalls,
@@ -233,36 +233,46 @@ fn extract_tool_calls(parts: &[Part]) -> Vec<ChatCompletionMessageToolCalls> {
         .collect()
 }
 
-/// Convert ADK tools to OpenAI ChatCompletionTools.
+/// Convert ADK tools to OpenAI ChatCompletionTools with adapter validation and compilation.
 pub fn convert_tools(
     tools: &HashMap<String, serde_json::Value>,
     adapter: &dyn SchemaAdapter,
     cache: &SchemaCache,
-) -> Vec<ChatCompletionTools> {
+) -> Result<Vec<ChatCompletionTools>, AdkError> {
     tools
         .iter()
         .map(|(name, decl)| {
             let description = decl.get("description").and_then(|d| d.as_str()).map(String::from);
 
-            // Normalize tool name via the schema adapter
+            // Normalize and validate tool name via the schema adapter
             let normalized_name = adapter.normalize_tool_name(name);
+            adapter.validate_tool_name(&normalized_name).map_err(|e| {
+                AdkError::model(format!(
+                    "Invalid tool name '{name}' for adapter '{}': {e}",
+                    adapter.identifier()
+                ))
+            })?;
 
             // Get the parameters schema from the declaration, or use the
             // adapter's empty_schema fallback when none is provided.
-            let parameters = decl
-                .get("parameters")
-                .cloned()
-                .map(|schema| cache.normalize(&schema))
-                .or_else(|| Some(adapter.empty_schema()));
+            let input_schema =
+                decl.get("parameters").cloned().unwrap_or_else(|| adapter.empty_schema());
 
-            ChatCompletionTools::Function(ChatCompletionTool {
+            let parameters = cache.get_or_compile(&input_schema, adapter).map_err(|e| {
+                AdkError::model(format!(
+                    "Invalid parameter schema for tool '{name}' under adapter '{}': {e}",
+                    adapter.identifier()
+                ))
+            })?;
+
+            Ok(ChatCompletionTools::Function(ChatCompletionTool {
                 function: FunctionObject {
                     name: normalized_name.into_owned(),
                     description,
-                    parameters,
+                    parameters: Some(parameters),
                     strict: None,
                 },
-            })
+            }))
         })
         .collect()
 }
@@ -796,7 +806,7 @@ mod tests {
 
         let adapter = OpenAiSchemaAdapter;
         let cache = SchemaCache::for_adapter(std::sync::Arc::new(OpenAiSchemaAdapter));
-        let openai_tools = convert_tools(&tools, &adapter, &cache);
+        let openai_tools = convert_tools(&tools, &adapter, &cache).expect("convert_tools succeeds");
         assert_eq!(openai_tools.len(), 1);
         if let ChatCompletionTools::Function(tool) = &openai_tools[0] {
             assert_eq!(tool.function.name, "get_weather");

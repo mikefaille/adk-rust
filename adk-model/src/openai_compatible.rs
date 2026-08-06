@@ -316,7 +316,7 @@ pub(crate) fn build_request_json(
     request_builder.model(model).messages(messages);
 
     if !request.tools.is_empty() {
-        let tools = convert::convert_tools(&request.tools, adapter, cache);
+        let tools = convert::convert_tools(&request.tools, adapter, cache)?;
         request_builder.tools(tools);
         // OpenAI defaults parallel_tool_calls to true.
         request_builder.parallel_tool_calls(parallel_tool_calls);
@@ -481,6 +481,10 @@ fn parse_usage_from_chunk(chunk: &serde_json::Value) -> Option<UsageMetadata> {
 impl Llm for OpenAICompatible {
     fn name(&self) -> &str {
         &self.model
+    }
+
+    fn schema_adapter(&self) -> &dyn SchemaAdapter {
+        self.adapter.as_ref()
     }
 
     #[tracing::instrument(
@@ -908,5 +912,74 @@ mod tests {
             client.schema_adapter().validate_tool_name("ab").is_err(),
             "tool name under 3 chars is invalid for Kimi"
         );
+
+        // Verify trait object polymorphism through `&dyn Llm`
+        let llm: &dyn Llm = &client;
+        assert_eq!(llm.schema_adapter().identifier(), "kimi");
+    }
+
+    #[test]
+    fn build_request_json_enforces_kimi_tool_name_validation_and_compilation() {
+        let config = OpenAICompatibleConfig::kimi("test-kimi-key", "moonshot-v1-8k");
+        let client = OpenAICompatible::new(config).expect("client builds");
+
+        // 1. Invalid tool name under 3 chars fails request building locally
+        let mut invalid_tools = std::collections::HashMap::new();
+        invalid_tools.insert(
+            "ab".to_string(),
+            serde_json::json!({
+                "description": "Short tool name",
+                "parameters": { "type": "object" }
+            }),
+        );
+        let invalid_request = LlmRequest {
+            model: "moonshot-v1-8k".to_string(),
+            contents: vec![],
+            tools: invalid_tools,
+            config: None,
+            previous_response_id: None,
+        };
+        let err = build_request_json(
+            "moonshot-v1-8k",
+            &invalid_request,
+            &None,
+            false,
+            client.schema_adapter(),
+            &client.cache,
+        );
+        assert!(err.is_err(), "Invalid Kimi tool name 'ab' must fail request building locally");
+
+        // 2. Valid tool name succeeds
+        let mut valid_tools = std::collections::HashMap::new();
+        valid_tools.insert(
+            "get_weather".to_string(),
+            serde_json::json!({
+                "description": "Get weather forecast",
+                "parameters": {
+                    "type": "object",
+                    "properties": { "location": { "type": "string" } }
+                }
+            }),
+        );
+        let valid_request = LlmRequest {
+            model: "moonshot-v1-8k".to_string(),
+            contents: vec![],
+            tools: valid_tools,
+            config: None,
+            previous_response_id: None,
+        };
+        let body = build_request_json(
+            "moonshot-v1-8k",
+            &valid_request,
+            &None,
+            false,
+            client.schema_adapter(),
+            &client.cache,
+        )
+        .expect("Valid Kimi tool request must build");
+
+        let tools_json = body.get("tools").and_then(|t| t.as_array()).expect("tools array");
+        assert_eq!(tools_json.len(), 1);
+        assert_eq!(tools_json[0]["function"]["name"].as_str(), Some("get_weather"));
     }
 }

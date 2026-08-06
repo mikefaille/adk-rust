@@ -1635,11 +1635,31 @@ mod runner_tests {
     struct ScriptedSession {
         counts: Arc<Counts>,
         events: parking_lot::Mutex<std::collections::VecDeque<ServerEvent>>,
+        close_calls: Arc<AtomicUsize>,
+        stay_connected_when_empty: bool,
     }
 
     impl ScriptedSession {
         fn new(counts: Arc<Counts>, events: Vec<ServerEvent>) -> Self {
-            Self { counts, events: parking_lot::Mutex::new(events.into()) }
+            Self {
+                counts,
+                events: parking_lot::Mutex::new(events.into()),
+                close_calls: Arc::new(AtomicUsize::new(0)),
+                stay_connected_when_empty: false,
+            }
+        }
+
+        fn with_close_counter(
+            counts: Arc<Counts>,
+            events: Vec<ServerEvent>,
+            close_calls: Arc<AtomicUsize>,
+        ) -> Self {
+            Self {
+                counts,
+                events: parking_lot::Mutex::new(events.into()),
+                close_calls,
+                stay_connected_when_empty: true,
+            }
         }
     }
 
@@ -1686,12 +1706,20 @@ mod runner_tests {
         }
         async fn next_event(&self) -> Option<Result<ServerEvent>> {
             let event = self.events.lock().pop_front();
-            event.map(Ok)
+            if let Some(ev) = event {
+                Some(Ok(ev))
+            } else if self.stay_connected_when_empty {
+                tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+                None
+            } else {
+                None
+            }
         }
         fn events(&self) -> Pin<Box<dyn futures::Stream<Item = Result<ServerEvent>> + Send + '_>> {
             Box::pin(futures::stream::empty())
         }
         async fn close(&self) -> Result<()> {
+            self.close_calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
         async fn mutate_context(&self, _config: RealtimeConfig) -> Result<ContextMutationOutcome> {
@@ -2069,6 +2097,74 @@ mod runner_tests {
 
         let result = runner.run_with_cancellation(cancel_token).await;
         assert!(result.is_ok(), "runner exited cleanly on cancellation token");
+    }
+
+    #[tokio::test]
+    async fn run_with_cancellation_closes_session_and_cleans_up_in_flight_tools() {
+        let counts = Arc::new(Counts::default());
+        let close_calls = Arc::new(AtomicUsize::new(0));
+
+        struct BlockingTool;
+        #[async_trait]
+        impl ToolHandler for BlockingTool {
+            async fn execute(&self, _call: &ToolCall) -> Result<serde_json::Value> {
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                Ok(serde_json::json!({"status": "done"}))
+            }
+        }
+
+        let runner = RealtimeRunner::builder()
+            .model(Arc::new(MockModel) as BoxedModel)
+            .tool(tool_def("blocking_tool"), BlockingTool)
+            .build()
+            .unwrap();
+
+        let scripted = Arc::new(ScriptedSession::with_close_counter(
+            Arc::clone(&counts),
+            vec![function_call("c1", "blocking_tool")],
+            Arc::clone(&close_calls),
+        ));
+        *runner.session.write().await = Some(scripted as Arc<dyn RealtimeSession>);
+
+        let cancel_token = tokio_util::sync::CancellationToken::new();
+        let cancel_token_clone = cancel_token.clone();
+
+        let runner_handle = Arc::new(runner);
+        let runner_clone = Arc::clone(&runner_handle);
+
+        let task =
+            tokio::spawn(
+                async move { runner_clone.run_with_cancellation(cancel_token_clone).await },
+            );
+
+        // Give the runner time to process the event and launch the in-flight tool call
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        assert_eq!(
+            runner_handle.outstanding_tools.load(Ordering::Acquire),
+            1,
+            "one tool is in flight"
+        );
+
+        // Cancel mid-flight
+        cancel_token.cancel();
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), task)
+            .await
+            .expect("task completes quickly on cancellation")
+            .unwrap();
+
+        assert!(result.is_ok(), "runner exited cleanly");
+        assert_eq!(
+            close_calls.load(Ordering::SeqCst),
+            1,
+            "session.close() was invoked on cancellation"
+        );
+        assert_eq!(
+            runner_handle.outstanding_tools.load(Ordering::Acquire),
+            0,
+            "in-flight tool was dropped and ToolCounterGuard restored counter to 0"
+        );
     }
 
     #[tokio::test]

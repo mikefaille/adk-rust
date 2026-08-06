@@ -225,13 +225,24 @@ pub fn convert_tools(
 
             let description = decl.get("description").and_then(|d| d.as_str()).map(String::from);
 
+            let normalized_name = adapter.normalize_tool_name(name);
+            adapter.validate_tool_name(&normalized_name).map_err(|e| {
+                ConversionError::InvalidToolDeclaration(format!(
+                    "invalid tool name '{name}' for adapter '{}': {e}",
+                    adapter.identifier()
+                ))
+            })?;
+
             let input_schema =
                 decl.get("parameters").cloned().unwrap_or_else(|| adapter.empty_schema());
-            let normalized_schema = cache.normalize(&input_schema);
+            let compiled_schema = cache.get_or_compile(&input_schema, adapter).map_err(|e| {
+                ConversionError::InvalidToolDeclaration(format!(
+                    "invalid parameter schema for tool '{name}' under adapter '{}': {e}",
+                    adapter.identifier()
+                ))
+            })?;
 
-            let normalized_name = adapter.normalize_tool_name(name);
-
-            let mut tool_param = ToolParam::new(normalized_name.into_owned(), normalized_schema);
+            let mut tool_param = ToolParam::new(normalized_name.into_owned(), compiled_schema);
             if let Some(desc) = description {
                 tool_param = tool_param.with_description(desc);
             }

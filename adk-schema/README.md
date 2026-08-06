@@ -34,7 +34,7 @@ adk-schema = { version = "2.0.0", features = ["schemars", "runtime-validation"] 
 | *(none)* | Ingestion, canonicalization, SHA-256 digests, reference policy | `serde`, `serde_json`, `sha2` |
 | `schemars` | Derive `SchemaDocument::for_type::<T>()` directly from Rust structs | `schemars` |
 | `runtime-validation` | High-performance zero-allocation instance validation via `compile()` | `jsonschema` |
-| `adapters` | Trait adapters for automatic projection onto provider dialects | *(none)* |
+| `adapters` | Trait adapters for automatic projection onto provider dialects | `adk-core` (optional) |
 
 ## Quick Start
 
