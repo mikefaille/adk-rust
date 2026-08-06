@@ -29,7 +29,8 @@ type WsSource = futures::stream::SplitStream<WsStream>;
 pub struct OpenAIRealtimeSession {
     session_id: String,
     connected: Arc<AtomicBool>,
-    sender: Arc<Mutex<WsSink>>,
+    outbound_tx: tokio::sync::mpsc::Sender<Message>,
+    writer_task: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
     receiver: Arc<Mutex<WsSource>>,
 }
 
@@ -87,15 +88,33 @@ impl OpenAIRealtimeSession {
             .await
             .map_err(|e| RealtimeError::connection(format!("WebSocket connect error: {}", e)))?;
 
-        let (sink, source) = ws_stream.split();
+        let (mut sink, source) = ws_stream.split();
+        let connected = Arc::new(AtomicBool::new(true));
+        let (outbound_tx, mut outbound_rx) = tokio::sync::mpsc::channel::<Message>(256);
+        let writer_connected = Arc::clone(&connected);
+        let writer_task = tokio::spawn(async move {
+            while let Some(message) = outbound_rx.recv().await {
+                let should_close = matches!(message, Message::Close(_));
+                if let Err(error) = sink.send(message).await {
+                    writer_connected.store(false, Ordering::SeqCst);
+                    tracing::warn!(error = %error, "openai websocket writer send failed");
+                    break;
+                }
+                if should_close {
+                    break;
+                }
+            }
+            writer_connected.store(false, Ordering::SeqCst);
+        });
 
         // Generate session ID (will be updated when we receive session.created)
         let session_id = uuid::Uuid::new_v4().to_string();
 
         let session = Self {
             session_id,
-            connected: Arc::new(AtomicBool::new(true)),
-            sender: Arc::new(Mutex::new(sink)),
+            connected,
+            outbound_tx,
+            writer_task: Arc::new(Mutex::new(Some(writer_task))),
             receiver: Arc::new(Mutex::new(source)),
         };
 
@@ -117,11 +136,13 @@ impl OpenAITransportLink for OpenAIRealtimeSession {
     }
 
     async fn send_raw(&self, value: &Value) -> Result<()> {
+        if !self.is_connected() {
+            return Err(RealtimeError::connection("Session disconnected"));
+        }
         let msg = serde_json::to_string(value)
             .map_err(|e| RealtimeError::protocol(format!("JSON serialize error: {}", e)))?;
 
-        let mut sender = self.sender.lock().await;
-        sender
+        self.outbound_tx
             .send(Message::Text(msg.into()))
             .await
             .map_err(|e| RealtimeError::connection(format!("Send error: {}", e)))?;
@@ -218,13 +239,12 @@ impl OpenAITransportLink for OpenAIRealtimeSession {
 
     async fn close(&self) -> Result<()> {
         self.connected.store(false, Ordering::SeqCst);
+        let _ = self.outbound_tx.send(Message::Close(None)).await;
 
-        let mut sender = self.sender.lock().await;
-        sender
-            .send(Message::Close(None))
-            .await
-            .map_err(|e| RealtimeError::connection(format!("Close error: {}", e)))?;
-
+        let mut writer_task = self.writer_task.lock().await;
+        if let Some(handle) = writer_task.take() {
+            let _ = handle.await;
+        }
         Ok(())
     }
 }

@@ -1115,6 +1115,9 @@ impl RealtimeRunner {
                 self.event_handler.on_tool_calls_cancelled(&call_ids).await?;
             }
             ServerEvent::ResponseCancelled { .. } => {
+                // Clear any pending tool follow-up response state from the cancelled turn
+                self.pending_tool_response.store(false, Ordering::Release);
+                self.response_closed_awaiting_tools.store(false, Ordering::Release);
                 // An abandoned generation must not leave the state machine
                 // mid-turn: `Generating` blocks queued resumptions and teardown,
                 // and only `ResponseDone` clears it — which a cancelled turn
@@ -1709,7 +1712,7 @@ mod runner_tests {
             if let Some(ev) = event {
                 Some(Ok(ev))
             } else if self.stay_connected_when_empty {
-                tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+                std::future::pending::<()>().await;
                 None
             } else {
                 None
