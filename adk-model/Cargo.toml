@@ -72,6 +72,12 @@ tracing-subscriber = { workspace = true, features = ["fmt", "env-filter"] }
 futures = "0.3"
 wiremock = "0.6"
 dotenvy = "0.15"
+# Loss-reporting yardstick for the provider schema adapters below. Points the
+# other way from `adk-schema` depending on `adk-model` — that would drag a
+# 51-dependency provider crate into a small Beta crate's dev graph, exactly
+# the tight-coupling concern raised upstream on issue #550. `adapters` gates
+# `Projection` / `SchemaAdapterExt` / `leaves_enforcement_gap()`.
+adk-schema = { workspace = true, features = ["adapters"] }
 
 # Examples require the openrouter feature — skip when not enabled.
 [[example]]
@@ -101,3 +107,11 @@ required-features = ["openai"]
 [[test]]
 name = "openai_schema_property_tests"
 required-features = ["openai"]
+
+[[test]]
+name = "openai_schema_projection_loss"
+required-features = ["openai"]
+
+[[test]]
+name = "anthropic_schema_projection_loss"
+required-features = ["anthropic"]
