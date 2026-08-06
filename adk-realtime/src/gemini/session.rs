@@ -7,7 +7,7 @@ use crate::audio::{AudioChunk, AudioFormat};
 use crate::config::{RealtimeConfig, ToolDefinition};
 use crate::error::{RealtimeError, Result};
 use crate::events::{ClientEvent, ServerEvent, ToolResponse};
-use crate::session::{ContextMutationOutcome, RealtimeSession};
+use crate::session::{ContextMutationOutcome, RealtimeAvailability, RealtimeSession};
 use adk_gemini::schema_adapter::GeminiSchemaDialect;
 use async_trait::async_trait;
 use base64::Engine;
@@ -266,7 +266,7 @@ pub struct GeminiRealtimeSession {
     /// The full WebSocket URL used to establish this session, stored so that
     /// `reconnect_with_backoff` can open a fresh connection to the same endpoint
     /// without requiring the caller to repeat authentication parameters.
-    reconnect_url: String,
+    reconnect_url: ReconnectUrl,
     /// The normalized model ID sent in the initial setup frame, used to rebuild
     /// the setup message on reconnect.
     reconnect_model: String,
@@ -275,8 +275,55 @@ pub struct GeminiRealtimeSession {
     /// Gemini Live emits a new handle roughly every 60 s when `resumable: true`.
     /// Only resumable handles are stored here; a non-resumable update must not
     /// overwrite the last safe point (the previous resumable handle remains the
-    /// best reconnect anchor).
+    /// best reconnect anchor). The filter lives where the handle is *parsed*
+    /// (`translate_event_logged`'s `sessionResumptionUpdate` arm), not here —
+    /// this cache write is unconditional because it is unreachable except
+    /// through that filter. Do not add a second producer of
+    /// `ServerEvent::SessionUpdated` that bypasses it.
     last_resume_handle: Arc<ParkingMutex<Option<String>>>,
+    /// The `RealtimeConfig` this session was first connected with —
+    /// `system_instruction`, `tools`, and generation config included.
+    ///
+    /// `try_reconnect_once` replays this on every reconnect attempt. Gemini
+    /// Live session resumption restores conversation *history*, not the
+    /// setup declaration: a reconnect frame that omits it produces a session
+    /// with no tools, so `submit_conversational_result` — the sole
+    /// conversational exit — can never be called again.
+    original_config: RealtimeConfig,
+    /// Provider-neutral lifecycle state (`RealtimeSession::availability`).
+    /// Mutated at each reconnect phase transition and on `close`. Not
+    /// `Arc`-wrapped like the mutex-guarded fields above: nothing spawns a
+    /// task that needs a second handle to it.
+    availability: ParkingMutex<RealtimeAvailability>,
+    /// Incremented once per `reconnect_with_backoff` call — an attempt
+    /// *sequence*, not a per-retry counter — so a caller buffering audio
+    /// during a reconnect can tell a stale attempt's epoch from the one that
+    /// is actually live.
+    reconnect_epoch: std::sync::atomic::AtomicU64,
+}
+
+/// A WebSocket URL that may carry an API key query parameter.
+///
+/// Not the bare `String` it wraps: a Studio `reconnect_url` embeds
+/// `?key={api_key}`, and a plain `String` field is one future
+/// `#[derive(Debug)]`, log line, or panic message away from putting the key
+/// in a log or crash report. `Debug` here redacts it explicitly instead.
+#[derive(Clone)]
+struct ReconnectUrl(String);
+
+impl ReconnectUrl {
+    fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for ReconnectUrl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.0.split_once("?key=") {
+            Some((base, _)) => write!(f, "{base}?key=<redacted>"),
+            None => write!(f, "{}", self.0),
+        }
+    }
 }
 
 /// Ensure the model ID is prefixed with "models/" as required by Gemini Live setup frames.
@@ -288,6 +335,47 @@ pub fn normalize_model_id(model_id: &str) -> String {
         model_id.to_string()
     } else {
         format!("models/{}", model_id)
+    }
+}
+
+/// Classify a tungstenite stream error into a typed `RealtimeError`.
+///
+/// Distinguishes a genuine transport-level reset (worth `reconnect_with_backoff`)
+/// from a protocol violation, malformed frame, or other stream failure (must
+/// fail the call, not retry it as a reset). `receive_raw` used to collapse
+/// every variant into `ConnectionError("Receive error: {e}")`, and
+/// `RealtimeError::is_connection_reset`'s substring match on that text then
+/// treated all of them as resets.
+fn classify_receive_error(e: tokio_tungstenite::tungstenite::Error) -> RealtimeError {
+    use tokio_tungstenite::tungstenite::Error as WsError;
+    use tokio_tungstenite::tungstenite::error::ProtocolError;
+    match e {
+        WsError::Io(io_err) => RealtimeError::IoError(io_err),
+        // Reading after the peer has already closed the connection is a dead
+        // transport, not a protocol violation — worth a reconnect.
+        WsError::ConnectionClosed | WsError::AlreadyClosed => {
+            RealtimeError::TransportReset(format!("Receive error: {e}"))
+        }
+        // The peer's TCP socket died without a WS close handshake — this is
+        // tungstenite's canonical shape for "the network connection to
+        // Gemini dropped mid-call" and is functionally identical to
+        // ConnectionClosed/AlreadyClosed above: a dead transport, not a
+        // malformed frame. Every other `ProtocolError` variant (bad
+        // handshake headers, unmasked/oversized/fragmented frames, invalid
+        // opcodes, ...) reflects an actual protocol violation and must keep
+        // falling into the `_` arm below.
+        WsError::Protocol(ProtocolError::ResetWithoutClosingHandshake) => {
+            RealtimeError::TransportReset(format!("Receive error: {e}"))
+        }
+        // Everything else (protocol violations, oversized frames, invalid
+        // UTF-8, TLS/URL/HTTP errors) is a real stream failure, not a
+        // transport reset — retrying it as one just repeats the failure. Must
+        // NOT reuse the "Receive error: " prefix above: `is_connection_reset`
+        // treats that exact substring on `ConnectionError` as a reset signal
+        // (kept for `openai/session.rs`'s still-untyped receive path and the
+        // `challenger_stress_harness` fixture), so stamping it here would
+        // silently reclassify every protocol violation as a reset.
+        _ => RealtimeError::ConnectionError(format!("stream error: {e}")),
     }
 }
 
@@ -305,6 +393,13 @@ impl GeminiRealtimeSession {
     }
 
     /// Constructs a mock `GeminiRealtimeSession` for testing connection lifecycle & recovery.
+    ///
+    /// `config` becomes `original_config`, the same field a real
+    /// `connect_with_dialect` call populates — so a caller that wants to
+    /// exercise `reconnect_with_backoff`'s setup-frame rebuild against a mock
+    /// server can pass the config it expects to be replayed. Callers that
+    /// only care about the reconnect handshake itself, not what it carries,
+    /// can pass `RealtimeConfig::default()`.
     pub fn new_for_test(
         session_id: String,
         reconnect_url: String,
@@ -312,6 +407,7 @@ impl GeminiRealtimeSession {
         outbound_tx: mpsc::Sender<Message>,
         writer_task: tokio::task::JoinHandle<()>,
         receiver: WsSource,
+        config: RealtimeConfig,
     ) -> Self {
         use std::sync::atomic::AtomicBool;
         let cancel_token = tokio_util::sync::CancellationToken::new();
@@ -328,9 +424,12 @@ impl GeminiRealtimeSession {
             adapter: Arc::new(adk_core::GenericSchemaAdapter),
             frame_log: FrameLog::new(session_id, "studio", reconnect_model.clone()),
             last_disconnect: Arc::new(ParkingMutex::new(None)),
-            reconnect_url,
+            reconnect_url: ReconnectUrl(reconnect_url),
             reconnect_model,
             last_resume_handle: Arc::new(ParkingMutex::new(None)),
+            original_config: config,
+            availability: ParkingMutex::new(RealtimeAvailability::Connected),
+            reconnect_epoch: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -517,6 +616,8 @@ impl GeminiRealtimeSession {
             normalized_model.clone(),
         );
 
+        let original_config = config.clone();
+
         let session = Self {
             session_id,
             connected,
@@ -530,9 +631,12 @@ impl GeminiRealtimeSession {
             schema_cache,
             adapter,
             frame_log,
-            reconnect_url,
+            reconnect_url: ReconnectUrl(reconnect_url),
             reconnect_model: normalized_model.clone(),
             last_resume_handle: Arc::new(ParkingMutex::new(None)),
+            original_config,
+            availability: ParkingMutex::new(RealtimeAvailability::Connected),
+            reconnect_epoch: std::sync::atomic::AtomicU64::new(0),
         };
 
         session.send_setup_with_compiled_tools(&normalized_model, config, tools).await?;
@@ -558,13 +662,21 @@ impl GeminiRealtimeSession {
         Ok(())
     }
 
-    /// Send initial setup message with pre-compiled tools.
-    async fn send_setup_with_compiled_tools(
-        &self,
+    /// Build a `GeminiSetup` frame body from a config, pre-compiled tools, and
+    /// an explicit resumption handle.
+    ///
+    /// Shared by the initial `connect_with_dialect` path and
+    /// `try_reconnect_once` so a reconnect setup frame can never diverge from
+    /// what the first connection sent — this is exactly the defect that made
+    /// a resumed session amnesic and toolless (no `system_instruction`, no
+    /// `tools`). Takes `config` by reference: the reconnect caller only ever
+    /// has `&self.original_config`.
+    fn build_setup(
         model: &str,
-        config: RealtimeConfig,
+        config: &RealtimeConfig,
         compiled_tools: Option<Vec<Value>>,
-    ) -> Result<()> {
+        resume_handle: Option<String>,
+    ) -> GeminiSetup {
         let mut generation_config = json!({
             "responseModalities": gemini_response_modalities(config.modalities.as_deref()),
         });
@@ -596,41 +708,54 @@ impl GeminiRealtimeSession {
             obj.insert("thinkingConfig".to_string(), json!({ "thinkingLevel": thinking_level }));
         }
 
-        // Computed before anything moves out of `config`.
-        let realtime_input_config = gemini_realtime_input_config(&config);
-        let system_instruction = config.instruction.map(|text| GeminiContent {
+        let realtime_input_config = gemini_realtime_input_config(config);
+        let system_instruction = config.instruction.clone().map(|text| GeminiContent {
             parts: vec![GeminiPart { text: Some(text), inline_data: None }],
         });
 
         let normalized_model = normalize_model_id(model);
-
-        // Functionally extract the token if it exists in the prior state map
-        let handle = config
-            .extra
-            .as_ref()
-            .and_then(|ext| ext.get("resumeToken").or_else(|| ext.get("resumeHandle")))
-            .and_then(|val| val.as_str())
-            .map(|s| s.to_string());
-
-        let session_resumption = Some(SessionResumptionConfig { handle });
+        let session_resumption = Some(SessionResumptionConfig { handle: resume_handle });
 
         // When transcription is requested, enable both input (user speech) and
         // output (model speech) transcription so consumers get clean text for
         // native-audio turns. An empty object turns the feature on.
         let transcription = config.input_audio_transcription.as_ref().map(|_| json!({}));
 
+        GeminiSetup {
+            model: Some(normalized_model),
+            system_instruction,
+            generation_config: Some(generation_config),
+            tools: compiled_tools,
+            cached_content: config.cached_content.clone(),
+            session_resumption,
+            input_audio_transcription: transcription.clone(),
+            realtime_input_config,
+            output_audio_transcription: transcription,
+        }
+    }
+
+    /// Send initial setup message with pre-compiled tools.
+    async fn send_setup_with_compiled_tools(
+        &self,
+        model: &str,
+        config: RealtimeConfig,
+        compiled_tools: Option<Vec<Value>>,
+    ) -> Result<()> {
+        // An explicit `resumeToken`/`resumeHandle` in `extra` lets a caller
+        // resume a previously known session on first connect; nothing has
+        // been cached from a live socket yet (that only happens after a
+        // `sessionResumptionUpdate`, which requires a connection to exist).
+        let resume_handle = config
+            .extra
+            .as_ref()
+            .and_then(|ext| ext.get("resumeToken").or_else(|| ext.get("resumeHandle")))
+            .and_then(|val| val.as_str())
+            .map(|s| s.to_string());
+
+        let normalized_model = normalize_model_id(model);
+        let setup_body = Self::build_setup(model, &config, compiled_tools, resume_handle);
         let setup = GeminiClientMessage {
-            setup: Some(GeminiSetup {
-                model: Some(normalized_model.clone()),
-                system_instruction,
-                generation_config: Some(generation_config),
-                tools: compiled_tools,
-                cached_content: config.cached_content,
-                session_resumption,
-                input_audio_transcription: transcription.clone(),
-                realtime_input_config,
-                output_audio_transcription: transcription,
-            }),
+            setup: Some(setup_body),
             realtime_input: None,
             tool_response: None,
             client_content: None,
@@ -649,7 +774,7 @@ impl GeminiRealtimeSession {
     /// fresh session context).
     async fn try_reconnect_once(&self, resume_handle: &Option<String>) -> Result<()> {
         // Open a new WebSocket connection to the same URL.
-        let request = self.reconnect_url.clone().into_client_request().map_err(|e| {
+        let request = self.reconnect_url.as_str().into_client_request().map_err(|e| {
             RealtimeError::connection(format!("reconnect: failed to build request: {e}"))
         })?;
         let (ws_stream, response) = connect_async(request).await.map_err(|e| {
@@ -710,19 +835,24 @@ impl GeminiRealtimeSession {
         }
         self.connected.store(true, Ordering::SeqCst);
 
-        // Send a reconnect setup frame with the resume handle (if available).
+        // Recompile tools from the ORIGINAL config using the retained
+        // compiler target — the same pattern `ClientEvent::SessionUpdate`
+        // uses (`convert_tools` against `self.schema_cache`/`self.adapter`)
+        // rather than caching a `Vec<Value>` that could drift from the
+        // schema cache's state.
+        let compiled_tools = convert_tools(
+            self.original_config.tools.clone(),
+            &self.schema_cache,
+            self.adapter.as_ref(),
+        )?;
+        let setup_body = Self::build_setup(
+            &self.reconnect_model,
+            &self.original_config,
+            compiled_tools,
+            resume_handle.clone(),
+        );
         let setup_msg = GeminiClientMessage {
-            setup: Some(GeminiSetup {
-                model: Some(self.reconnect_model.clone()),
-                system_instruction: None,
-                generation_config: None,
-                tools: None,
-                cached_content: None,
-                session_resumption: Some(SessionResumptionConfig { handle: resume_handle.clone() }),
-                input_audio_transcription: None,
-                output_audio_transcription: None,
-                realtime_input_config: None,
-            }),
+            setup: Some(setup_body),
             realtime_input: None,
             tool_response: None,
             client_content: None,
@@ -731,37 +861,29 @@ impl GeminiRealtimeSession {
         tracing::info!(
             model = %self.reconnect_model,
             has_resume_handle = resume_handle.is_some(),
+            has_tools = self.original_config.tools.as_ref().is_some_and(|t| !t.is_empty()),
+            has_system_instruction = self.original_config.instruction.is_some(),
             "GeminiRealtimeSession: sending reconnect setup frame"
         );
         self.send_raw(&setup_msg).await?;
 
-        // Wait for `setupComplete` from the server (up to 5 s).
-        let deadline = std::time::Duration::from_secs(5);
-        let setup_result = tokio::time::timeout(deadline, async {
-            loop {
-                match self.receive_raw().await {
-                    Some(Ok(ServerEvent::SessionCreated { .. })) => return Ok(()),
-                    Some(Ok(_)) => continue, // other events before setupComplete
-                    Some(Err(e)) => return Err(e),
-                    None => {
-                        return Err(RealtimeError::connection(
-                            "reconnect: server closed before setupComplete",
-                        ));
-                    }
+        // Wait for `setupComplete` from the server. No timeout here — the
+        // caller (`reconnect_with_backoff`) bounds this whole attempt,
+        // including this wait, against the remaining reconnect budget.
+        loop {
+            match self.receive_raw().await {
+                Some(Ok(ServerEvent::SessionCreated { .. })) => {
+                    tracing::info!("GeminiRealtimeSession: setupComplete received after reconnect");
+                    return Ok(());
+                }
+                Some(Ok(_)) => continue, // other events before setupComplete
+                Some(Err(e)) => return Err(e),
+                None => {
+                    return Err(RealtimeError::connection(
+                        "reconnect: server closed before setupComplete",
+                    ));
                 }
             }
-        })
-        .await;
-
-        match setup_result {
-            Ok(Ok(())) => {
-                tracing::info!("GeminiRealtimeSession: setupComplete received after reconnect");
-                Ok(())
-            }
-            Ok(Err(e)) => Err(e),
-            Err(_) => Err(RealtimeError::connection(
-                "reconnect: timed out waiting for setupComplete (5 s)",
-            )),
         }
     }
 
@@ -853,7 +975,7 @@ impl GeminiRealtimeSession {
             }
             Some(Err(e)) => {
                 self.connected.store(false, Ordering::SeqCst);
-                Some(Err(RealtimeError::connection(format!("Receive error: {}", e))))
+                Some(Err(classify_receive_error(e)))
             }
             None => {
                 self.connected.store(false, Ordering::SeqCst);
@@ -869,7 +991,12 @@ impl GeminiRealtimeSession {
     /// `reconnect_with_backoff` can present it on the next connection attempt.
     fn translate_gemini_event(&self, raw: &str) -> Result<Vec<ServerEvent>> {
         let events = Self::translate_event_logged(raw, Some(&self.frame_log))?;
-        // Intercept SessionUpdated to cache the resume handle locally.
+        // Intercept SessionUpdated to cache the resume handle locally. This
+        // write is unconditional on `resumeHandle` presence — it is safe only
+        // because `translate_event_logged`'s `sessionResumptionUpdate` arm is
+        // the sole producer of `SessionUpdated`, and it already filters on
+        // `resumable == true` before emitting one. Do not add a second
+        // producer of `SessionUpdated` that bypasses that filter.
         for event in &events {
             if let ServerEvent::SessionUpdated { session, .. } = event
                 && let Some(handle) = session.get("resumeHandle").and_then(|h| h.as_str())
@@ -1143,6 +1270,16 @@ impl RealtimeSession for GeminiRealtimeSession {
 
     fn disconnect_reason(&self) -> Option<crate::session::DisconnectReason> {
         self.last_disconnect.lock().clone()
+    }
+
+    /// The real producer for `RealtimeAvailability`: mutated by
+    /// `reconnect_with_backoff` (`Reconnecting`/`Connected`/`Exhausted`) and
+    /// `close` (`Teardown`). The trait default can only ever report
+    /// `Connected`/`Exhausted` from `is_connected()`; this session tracks
+    /// the state explicitly so a caller can distinguish "reconnecting" and
+    /// "torn down" from a bare disconnect.
+    fn availability(&self) -> RealtimeAvailability {
+        self.availability.lock().clone()
     }
 
     async fn send_audio(&self, audio: &AudioChunk) -> Result<()> {
@@ -1438,6 +1575,7 @@ impl RealtimeSession for GeminiRealtimeSession {
 
     async fn close(&self) -> Result<()> {
         self.connected.store(false, Ordering::SeqCst);
+        *self.availability.lock() = RealtimeAvailability::Teardown;
 
         // Attempt graceful close frame enqueue under a short timeout (500ms) so a full
         // channel never blocks teardown indefinitely.
@@ -1475,6 +1613,9 @@ impl RealtimeSession for GeminiRealtimeSession {
         &self,
         options: crate::session::ReconnectOptions,
     ) -> Result<()> {
+        let epoch = self.reconnect_epoch.fetch_add(1, Ordering::SeqCst) + 1;
+        *self.availability.lock() = RealtimeAvailability::Reconnecting { epoch };
+
         // Abort the stale writer task before replacing the socket internals.
         {
             let mut writer_task = self.writer_task.lock().await;
@@ -1484,48 +1625,73 @@ impl RealtimeSession for GeminiRealtimeSession {
         }
         self.cancel_token.lock().await.cancel();
 
-        // Retrieve the latest resumable handle (may be None on first call).
-        let resume_handle = self.last_resume_handle.lock().clone();
+        // Caller-supplied handle wins; the session's cached handle (from a
+        // prior `sessionResumptionUpdate`) is the fallback. A struct field
+        // the callee never read was the previous shape of this bug.
+        let resume_handle =
+            options.resume_handle.clone().or_else(|| self.last_resume_handle.lock().clone());
 
+        let budget = std::time::Duration::from_millis(options.backoff_budget_ms);
+        let start = std::time::Instant::now();
         let mut delay_ms: u64 = 50;
-        let mut spent_ms: u64 = 0;
         let mut last_err: Option<RealtimeError> = None;
 
         for attempt in 1..=options.max_retries {
-            // Enforce overall time budget.
-            if spent_ms >= options.backoff_budget_ms {
+            let elapsed = start.elapsed();
+            if elapsed >= budget {
                 break;
             }
+            let remaining = budget - elapsed;
 
             tracing::info!(
                 attempt,
                 delay_ms,
-                spent_ms,
+                elapsed_ms = elapsed.as_millis() as u64,
+                remaining_ms = remaining.as_millis() as u64,
                 resume_handle = resume_handle.as_deref().unwrap_or("<none>"),
                 "GeminiRealtimeSession: reconnect attempt"
             );
 
-            match self.try_reconnect_once(&resume_handle).await {
-                Ok(()) => {
+            match tokio::time::timeout(remaining, self.try_reconnect_once(&resume_handle)).await {
+                Ok(Ok(())) => {
                     tracing::info!(attempt, "GeminiRealtimeSession: reconnect succeeded");
+                    *self.availability.lock() = RealtimeAvailability::Connected;
                     return Ok(());
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
                     tracing::warn!(
                         attempt,
                         error = %e,
                         "GeminiRealtimeSession: reconnect attempt failed"
                     );
                     last_err = Some(e);
-                    // Sleep for `delay_ms`, bounded by remaining budget.
-                    let sleep = delay_ms.min(options.backoff_budget_ms.saturating_sub(spent_ms));
-                    tokio::time::sleep(std::time::Duration::from_millis(sleep)).await;
-                    spent_ms += sleep;
-                    delay_ms = delay_ms.saturating_mul(2);
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        attempt,
+                        remaining_ms = remaining.as_millis() as u64,
+                        "GeminiRealtimeSession: reconnect attempt timed out against the remaining budget"
+                    );
+                    last_err = Some(RealtimeError::connection(format!(
+                        "reconnect attempt {attempt} timed out after {} ms (budget exhausted)",
+                        remaining.as_millis()
+                    )));
+                    // The budget that bounded this attempt is spent; no point sleeping further.
+                    break;
                 }
             }
+
+            // Sleep for `delay_ms`, bounded by remaining budget.
+            let remaining_after = budget.saturating_sub(start.elapsed());
+            if remaining_after.is_zero() {
+                break;
+            }
+            let sleep = std::time::Duration::from_millis(delay_ms).min(remaining_after);
+            tokio::time::sleep(sleep).await;
+            delay_ms = delay_ms.saturating_mul(2);
         }
 
+        *self.availability.lock() = RealtimeAvailability::Exhausted;
         Err(last_err.unwrap_or_else(|| {
             RealtimeError::connection(format!(
                 "reconnect exhausted after {} ms / {} retries",
@@ -2726,9 +2892,12 @@ mod teardown_tests {
                 "models/gemini-3.1-flash-live-preview".into(),
             ),
             last_disconnect: Arc::new(ParkingMutex::new(None)),
-            reconnect_url: "wss://localhost/ws".into(),
+            reconnect_url: ReconnectUrl("wss://localhost/ws".to_string()),
             reconnect_model: "models/gemini-3.1-flash-live-preview".into(),
             last_resume_handle: Arc::new(ParkingMutex::new(None)),
+            original_config: RealtimeConfig::default(),
+            availability: ParkingMutex::new(RealtimeAvailability::Connected),
+            reconnect_epoch: std::sync::atomic::AtomicU64::new(0),
         };
 
         // Execution of close() must complete quickly despite channel full & writer blocked
@@ -2748,5 +2917,269 @@ mod teardown_tests {
             elapsed
         );
         assert!(!session.connected.load(Ordering::SeqCst));
+    }
+}
+
+#[cfg(test)]
+mod reconnect_setup_tests {
+    use super::*;
+    use bytes::BytesMut;
+    use parking_lot::Mutex as ParkingMutex;
+    use std::sync::atomic::AtomicBool;
+    use tokio::sync::mpsc;
+    use tokio_tungstenite::tungstenite::Message;
+    use tokio_util::sync::CancellationToken;
+
+    /// Build a `GeminiRealtimeSession` wired to `ws_url`'s CURRENT connection,
+    /// with `original_config` set so a later reconnect has something real to
+    /// replay. Callers must accept this initial connection on the mock
+    /// server before doing anything else.
+    async fn session_for_reconnect(
+        ws_url: String,
+        config: RealtimeConfig,
+    ) -> GeminiRealtimeSession {
+        let (ws_client, _) = tokio_tungstenite::connect_async(&ws_url).await.unwrap();
+        let (sink, source) = ws_client.split();
+        let (tx, rx) = mpsc::channel(64);
+        let writer_task = tokio::spawn(async move {
+            let mut rx = rx;
+            let mut sink = sink;
+            while let Some(msg) = rx.recv().await {
+                if sink.send(msg).await.is_err() {
+                    break;
+                }
+            }
+        });
+
+        GeminiRealtimeSession {
+            session_id: "test-reconnect-session".into(),
+            connected: Arc::new(AtomicBool::new(true)),
+            cancel_token: Arc::new(Mutex::new(CancellationToken::new())),
+            outbound_tx: Arc::new(Mutex::new(tx)),
+            writer_task: Arc::new(Mutex::new(Some(writer_task))),
+            receiver: Arc::new(Mutex::new(source)),
+            audio_buffer: Arc::new(ParkingMutex::new(BytesMut::new())),
+            event_queue: Arc::new(Mutex::new(std::collections::VecDeque::new())),
+            schema_cache: Arc::new(adk_core::SchemaCache::new()),
+            adapter: Arc::new(adk_core::GenericSchemaAdapter),
+            frame_log: FrameLog::new(
+                "test-reconnect-session".into(),
+                "studio",
+                "models/gemini-3.1-flash-live-preview".into(),
+            ),
+            last_disconnect: Arc::new(ParkingMutex::new(None)),
+            reconnect_url: ReconnectUrl(ws_url),
+            reconnect_model: "models/gemini-3.1-flash-live-preview".into(),
+            last_resume_handle: Arc::new(ParkingMutex::new(None)),
+            original_config: config,
+            availability: ParkingMutex::new(RealtimeAvailability::Connected),
+            reconnect_epoch: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+
+    fn expect_text(msg: Message) -> Value {
+        let Message::Text(text) = msg else { panic!("expected text frame, got {msg:?}") };
+        serde_json::from_str(&text).unwrap()
+    }
+
+    /// D1: a reconnect setup frame must carry the ORIGINAL tools and system
+    /// instruction, not just the model id. Before the fix, `try_reconnect_once`
+    /// sent `tools: None, system_instruction: None` unconditionally, so a
+    /// resumed session could never call `submit_conversational_result` again.
+    #[tokio::test]
+    async fn reconnect_setup_frame_replays_tools_and_system_instruction() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let ws_url = format!("ws://{addr}");
+
+        let server = tokio::spawn(async move {
+            // Connection 1: the session's already-open socket. Accept and ignore.
+            let (stream1, _) = listener.accept().await.unwrap();
+            let _ws1 = tokio_tungstenite::accept_async(stream1).await.unwrap();
+
+            // Connection 2: the actual reconnect attempt.
+            let (stream2, _) = listener.accept().await.unwrap();
+            let mut ws2 = tokio_tungstenite::accept_async(stream2).await.unwrap();
+            let value = expect_text(ws2.next().await.unwrap().unwrap());
+            let setup = value.get("setup").expect("setup frame");
+            assert!(setup.get("tools").is_some(), "reconnect setup dropped tools: {setup}");
+            assert_eq!(
+                setup["tools"][0]["functionDeclarations"][0]["name"],
+                json!("submit_conversational_result")
+            );
+            assert_eq!(
+                setup["systemInstruction"]["parts"][0]["text"],
+                json!("Be a helpful assistant")
+            );
+            ws2.send(Message::Text(json!({ "setupComplete": {} }).to_string().into()))
+                .await
+                .unwrap();
+        });
+
+        let config = RealtimeConfig {
+            instruction: Some("Be a helpful assistant".to_string()),
+            tools: Some(vec![ToolDefinition::new("submit_conversational_result")]),
+            ..Default::default()
+        };
+        let session = session_for_reconnect(ws_url, config).await;
+
+        let result =
+            session.reconnect_with_backoff(crate::session::ReconnectOptions::default()).await;
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(session.availability(), RealtimeAvailability::Connected);
+        server.await.unwrap();
+    }
+
+    /// D3: the advertised budget must bound total elapsed time, including the
+    /// `setupComplete` wait — not just the delay between attempts. Before the
+    /// fix, each attempt had its own independent 5 s wait regardless of the
+    /// caller's budget, so three attempts could take ~15 s against a 3 s
+    /// advertised budget.
+    #[tokio::test]
+    async fn budget_bounds_a_server_that_never_completes_setup() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let ws_url = format!("ws://{addr}");
+
+        let server = tokio::spawn(async move {
+            let (stream1, _) = listener.accept().await.unwrap();
+            let _ws1 = tokio_tungstenite::accept_async(stream1).await.unwrap();
+
+            let (stream2, _) = listener.accept().await.unwrap();
+            let mut ws2 = tokio_tungstenite::accept_async(stream2).await.unwrap();
+            let _ = ws2.next().await; // accept the reconnect setup, never answer it
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+        });
+
+        let session = session_for_reconnect(ws_url, RealtimeConfig::default()).await;
+        let opts = crate::session::ReconnectOptions {
+            max_retries: 1,
+            backoff_budget_ms: 300,
+            ipv4_fallback: true,
+            resume_handle: None,
+        };
+
+        let start = std::time::Instant::now();
+        let result = session.reconnect_with_backoff(opts).await;
+        let elapsed = start.elapsed();
+
+        assert!(result.is_err(), "a server that never completes setup must not report success");
+        assert_eq!(session.availability(), RealtimeAvailability::Exhausted);
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "reconnect_with_backoff took {elapsed:?} against a 300ms budget — the old 5s per-attempt wait is back"
+        );
+        server.abort();
+    }
+
+    /// D4: `ReconnectOptions::resume_handle` must win over the session's
+    /// cached handle when the caller supplies one — before the fix the field
+    /// was parsed into `ReconnectOptions` and then never read anywhere.
+    #[tokio::test]
+    async fn caller_supplied_resume_handle_takes_precedence_over_cached() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let ws_url = format!("ws://{addr}");
+
+        let server = tokio::spawn(async move {
+            let (stream1, _) = listener.accept().await.unwrap();
+            let _ws1 = tokio_tungstenite::accept_async(stream1).await.unwrap();
+
+            let (stream2, _) = listener.accept().await.unwrap();
+            let mut ws2 = tokio_tungstenite::accept_async(stream2).await.unwrap();
+            let value = expect_text(ws2.next().await.unwrap().unwrap());
+            let handle = value["setup"]["sessionResumption"]["handle"].as_str().map(str::to_string);
+            ws2.send(Message::Text(json!({ "setupComplete": {} }).to_string().into()))
+                .await
+                .unwrap();
+            handle
+        });
+
+        let session = session_for_reconnect(ws_url, RealtimeConfig::default()).await;
+        *session.last_resume_handle.lock() = Some("cached-handle".to_string());
+
+        let opts = crate::session::ReconnectOptions {
+            max_retries: 1,
+            backoff_budget_ms: 3000,
+            ipv4_fallback: true,
+            resume_handle: Some("caller-supplied-handle".to_string()),
+        };
+        session.reconnect_with_backoff(opts).await.unwrap();
+
+        let seen_handle = server.await.unwrap();
+        assert_eq!(seen_handle.as_deref(), Some("caller-supplied-handle"));
+    }
+
+    /// D5: the API key must never appear in `{:?}` output.
+    #[test]
+    fn reconnect_url_debug_redacts_the_api_key() {
+        let url = ReconnectUrl(
+            "wss://generativelanguage.googleapis.com/ws/foo?key=SUPER_SECRET".to_string(),
+        );
+        let rendered = format!("{url:?}");
+        assert!(!rendered.contains("SUPER_SECRET"), "{rendered}");
+        assert!(rendered.contains("<redacted>"), "{rendered}");
+    }
+}
+
+#[cfg(test)]
+mod receive_error_classification_tests {
+    use super::*;
+    use tokio_tungstenite::tungstenite::Error as WsError;
+
+    #[test]
+    fn io_level_errors_stay_typed_as_io_error() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::ConnectionReset, "reset by peer");
+        let classified = classify_receive_error(WsError::Io(io_err));
+        assert!(matches!(classified, RealtimeError::IoError(_)));
+        assert!(classified.is_connection_reset());
+    }
+
+    /// Reading after the peer has already closed the connection is a dead
+    /// transport, not a protocol violation — worth a reconnect.
+    #[test]
+    fn a_dead_connection_close_is_a_transport_reset() {
+        for err in [WsError::ConnectionClosed, WsError::AlreadyClosed] {
+            let classified = classify_receive_error(err);
+            assert!(matches!(classified, RealtimeError::TransportReset(_)));
+            assert!(classified.is_connection_reset());
+        }
+    }
+
+    /// A genuine protocol violation must fail the call rather than being
+    /// retried as if the transport merely dropped — retrying a malformed
+    /// frame as a reset just repeats the same failure against a new socket.
+    #[test]
+    fn a_protocol_violation_is_not_a_reset() {
+        let classified = classify_receive_error(WsError::Utf8("invalid byte".to_string()));
+        assert!(!classified.is_connection_reset(), "{classified:?}");
+    }
+
+    /// This is the canonical shape tungstenite reports when Gemini's socket
+    /// dies mid-call without a Close frame: `Error::Protocol` wrapping
+    /// `ProtocolError::ResetWithoutClosingHandshake`. Before this test was
+    /// added, that variant fell into the catch-all `_` arm and was stamped
+    /// `ConnectionError("stream error: ...")`, whose Display text contains
+    /// none of `is_connection_reset`'s substrings — so the reconnect path
+    /// was unreachable for the exact event it exists to handle.
+    #[test]
+    fn a_reset_without_closing_handshake_is_a_transport_reset() {
+        use tokio_tungstenite::tungstenite::error::ProtocolError;
+        let classified =
+            classify_receive_error(WsError::Protocol(ProtocolError::ResetWithoutClosingHandshake));
+        assert!(matches!(classified, RealtimeError::TransportReset(_)), "{classified:?}");
+        assert!(classified.is_connection_reset(), "{classified:?}");
+    }
+
+    /// A handshake-shaped protocol violation must still NOT be treated as a
+    /// reset — only `ResetWithoutClosingHandshake` means "the peer went
+    /// away"; every other `ProtocolError` variant is a genuine violation
+    /// worth failing the call over.
+    #[test]
+    fn a_handshake_protocol_violation_is_still_not_a_reset() {
+        use tokio_tungstenite::tungstenite::error::ProtocolError;
+        let classified =
+            classify_receive_error(WsError::Protocol(ProtocolError::MissingSecWebSocketKey));
+        assert!(!classified.is_connection_reset(), "{classified:?}");
     }
 }

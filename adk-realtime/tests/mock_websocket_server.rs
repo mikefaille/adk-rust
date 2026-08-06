@@ -111,13 +111,14 @@ async fn test_mock_websocket_server_e2e_reconnect_resumption() {
         let (stream1, _) = listener.accept().await.unwrap();
         let mut ws1 = accept_async(stream1).await.unwrap();
 
-        // Expect BidiGenerateContentSetup
-        if let Some(Ok(Message::Text(msg))) = ws1.next().await {
+        // Expect BidiGenerateContentSetup, and keep it so connection 2's frame
+        // can be checked against it below.
+        let setup1 = if let Some(Ok(Message::Text(msg))) = ws1.next().await {
             let json: serde_json::Value = serde_json::from_str(&msg).unwrap();
-            assert!(json.get("setup").is_some());
+            json.get("setup").expect("setup frame on connection 1").clone()
         } else {
             panic!("Expected setup frame on connection 1");
-        }
+        };
 
         // Send setupComplete & sessionResumptionUpdate
         let setup_complete = json!({ "setupComplete": {} }).to_string();
@@ -141,17 +142,47 @@ async fn test_mock_websocket_server_e2e_reconnect_resumption() {
         let mut ws2 = accept_async(stream2).await.unwrap();
 
         // Expect fresh BidiGenerateContentSetup containing sessionResumption.handle
-        if let Some(Ok(Message::Text(msg))) = ws2.next().await {
+        let setup2 = if let Some(Ok(Message::Text(msg))) = ws2.next().await {
             let json: serde_json::Value = serde_json::from_str(&msg).unwrap();
-            let setup = json.get("setup").expect("Setup object present");
-            let handle = setup
-                .get("sessionResumption")
-                .and_then(|sr| sr.get("handle"))
-                .and_then(|h| h.as_str());
-            assert_eq!(handle, Some("mock_resume_handle_e2e_123"));
+            json.get("setup").expect("setup frame on connection 2").clone()
         } else {
             panic!("Expected setup frame on connection 2");
-        }
+        };
+        let handle = setup2
+            .get("sessionResumption")
+            .and_then(|sr| sr.get("handle"))
+            .and_then(|h| h.as_str());
+        assert_eq!(handle, Some("mock_resume_handle_e2e_123"));
+
+        // Session resumption restores a transport, not a contract: the
+        // reconnect frame must replay the SAME tools, system instruction, and
+        // generation config connection 1 sent, differing only by
+        // `sessionResumption`. Before the reconnect-setup-frame fix,
+        // `try_reconnect_once` sent a hardcoded skeleton with
+        // `tools: None, system_instruction: None, generation_config: None`,
+        // so a resumed session had no tools and `submit_conversational_result`
+        // — the sole conversational exit — became unreachable after any
+        // reconnect. These three assertions fail against that skeleton.
+        assert_eq!(
+            setup2.get("tools"),
+            setup1.get("tools"),
+            "reconnect setup frame must replay the original tools: {setup2}"
+        );
+        assert_eq!(
+            setup2.get("systemInstruction"),
+            setup1.get("systemInstruction"),
+            "reconnect setup frame must replay the original system instruction: {setup2}"
+        );
+        assert_eq!(
+            setup2.get("generationConfig"),
+            setup1.get("generationConfig"),
+            "reconnect setup frame must replay the original generation config: {setup2}"
+        );
+        assert_ne!(
+            setup2.get("sessionResumption"),
+            setup1.get("sessionResumption"),
+            "sessionResumption is the one field a reconnect frame must change"
+        );
 
         // Send setupComplete on reconnect socket
         let setup_complete_2 = json!({ "setupComplete": {} }).to_string();
@@ -161,8 +192,15 @@ async fn test_mock_websocket_server_e2e_reconnect_resumption() {
     // 3. Connect client session to mock server URL
     let _backend =
         adk_realtime::gemini::GeminiLiveBackend::Studio { api_key: "mock_api_key".into() };
-    let _config = adk_realtime::config::RealtimeConfig {
+    // This is also what gets passed as `original_config` to `new_for_test`
+    // below, so it is the single source of truth for what both connection 1
+    // (the frame sent right here) and the later reconnect (built from
+    // `original_config`) are expected to carry.
+    let config = adk_realtime::config::RealtimeConfig {
         instruction: Some("Test instructions".into()),
+        tools: Some(vec![adk_realtime::config::ToolDefinition::new(
+            "submit_conversational_result",
+        )]),
         ..Default::default()
     };
 
@@ -171,10 +209,27 @@ async fn test_mock_websocket_server_e2e_reconnect_resumption() {
     let (ws_client, _) = tokio_tungstenite::connect_async(&ws_url).await.unwrap();
     let (mut sink, source) = ws_client.split();
 
-    // Send initial setup frame
+    // Send initial setup frame. `new_for_test` wraps an already-open socket
+    // rather than running `connect_with_dialect`/`send_setup_with_compiled_tools`
+    // itself, so this hand-built frame stands in for what that real path
+    // sends for `config` above — matching the wire shape `convert_tools` and
+    // `build_setup` produce for a tool-less-parameters `ToolDefinition`
+    // (see the `tool_declarations` unit tests in `gemini/session.rs`).
     let setup_msg = json!({
         "setup": {
-            "model": "models/gemini-3.1-flash-live-preview"
+            "model": "models/gemini-3.1-flash-live-preview",
+            "systemInstruction": { "parts": [ { "text": "Test instructions" } ] },
+            "generationConfig": { "responseModalities": ["AUDIO"] },
+            "tools": [
+                {
+                    "functionDeclarations": [
+                        {
+                            "name": "submit_conversational_result",
+                            "parameters": { "type": "object", "properties": {} }
+                        }
+                    ]
+                }
+            ]
         }
     })
     .to_string();
@@ -199,6 +254,7 @@ async fn test_mock_websocket_server_e2e_reconnect_resumption() {
         tx,
         writer_task,
         source,
+        config,
     );
 
     // Read the server events (setupComplete and sessionResumptionUpdate) from session to cache resumeHandle

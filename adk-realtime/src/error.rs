@@ -69,6 +69,12 @@ pub enum RealtimeError {
     #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),
 
+    /// The transport was already gone when a read was attempted — the peer
+    /// closed the connection, not a protocol violation on an otherwise-live
+    /// socket. Always worth a reconnect; see `classify_receive_error`.
+    #[error("Transport reset: {0}")]
+    TransportReset(String),
+
     /// Opus codec error.
     #[error("Opus codec error: {0}")]
     OpusCodecError(String),
@@ -169,6 +175,10 @@ impl RealtimeError {
                     || err.kind() == std::io::ErrorKind::BrokenPipe
                     || err.kind() == std::io::ErrorKind::ConnectionAborted
             }
+            // Typed at construction (`classify_receive_error`): the peer had
+            // already closed the socket, unconditionally a reset regardless
+            // of message text.
+            RealtimeError::TransportReset(_) => true,
             _ => false,
         }
     }
