@@ -416,7 +416,7 @@ mod teardown_tests {
 
     #[tokio::test]
     async fn close_is_bounded_even_when_channel_is_full() {
-        let (outbound_tx, mut outbound_rx) = mpsc::channel::<Message>(1);
+        let (outbound_tx, _outbound_rx) = mpsc::channel::<Message>(1);
         // Fill channel to capacity
         outbound_tx.try_send(Message::Text("blocker".into())).unwrap();
 
@@ -424,9 +424,8 @@ mod teardown_tests {
         let cancel_token = CancellationToken::new();
         let writer_cancel = cancel_token.clone();
 
-        // Spawn a writer task that simulates being stuck on a slow/blocked socket send
+        // Spawn a writer task that simulates being stuck on a slow/blocked socket send without draining channel
         let writer_task = tokio::spawn(async move {
-            let _msg = outbound_rx.recv().await;
             tokio::select! {
                 _ = writer_cancel.cancelled() => {},
                 _ = tokio::time::sleep(Duration::from_secs(60)) => {},
@@ -448,6 +447,11 @@ mod teardown_tests {
         let elapsed = start.elapsed();
 
         assert!(close_result.is_ok());
+        assert!(
+            elapsed >= Duration::from_millis(450),
+            "close() should wait out channel send timeout (500ms), took {:?}",
+            elapsed
+        );
         assert!(
             elapsed < Duration::from_secs(3),
             "close() took too long ({:?}); must be bounded under 3s",

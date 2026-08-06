@@ -149,10 +149,52 @@ impl RealtimeError {
     pub fn livekit(msg: impl Into<String>) -> Self {
         Self::LiveKitError(msg.into())
     }
+
+    /// Returns true if this error represents a transient TCP connection reset, closed stream, or broken pipe.
+    pub fn is_connection_reset(&self) -> bool {
+        match self {
+            RealtimeError::ConnectionError(msg)
+            | RealtimeError::MessageError(msg)
+            | RealtimeError::ProviderError(msg)
+            | RealtimeError::Protocol(msg) => {
+                let lower = msg.to_lowercase();
+                lower.contains("connection reset by peer")
+                    || lower.contains("econnreset")
+                    || lower.contains("broken pipe")
+                    || lower.contains("connection closed")
+                    || lower.contains("receive error")
+            }
+            RealtimeError::IoError(err) => {
+                err.kind() == std::io::ErrorKind::ConnectionReset
+                    || err.kind() == std::io::ErrorKind::BrokenPipe
+                    || err.kind() == std::io::ErrorKind::ConnectionAborted
+            }
+            _ => false,
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_connection_reset_classification() {
+        let err1 = RealtimeError::ConnectionError("read tcp: connection reset by peer".to_string());
+        assert!(err1.is_connection_reset());
+
+        let err2 = RealtimeError::MessageError("ECONNRESET occurred".to_string());
+        assert!(err2.is_connection_reset());
+
+        let io_err = RealtimeError::IoError(std::io::Error::new(
+            std::io::ErrorKind::ConnectionReset,
+            "reset",
+        ));
+        assert!(io_err.is_connection_reset());
+
+        let config_err = RealtimeError::ConfigError("invalid param".to_string());
+        assert!(!config_err.is_connection_reset());
+    }
 
     #[cfg(feature = "livekit")]
     #[test]

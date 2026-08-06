@@ -152,20 +152,30 @@ impl SchemaAdapter for KimiSchemaAdapter {
     }
 
     fn compile_schema(&self, schema: &Value) -> Result<Value, SchemaCompileError> {
-        if !schema.is_object() {
+        let Some(obj) = schema.as_object() else {
             return Err(SchemaCompileError::new(
-                "Kimi tool parameter schema must be a JSON object",
+                "Kimi tool parameter schema root must be a JSON object",
             ));
+        };
+
+        // Reject root schema if explicit type is present and not 'object'
+        if let Some(root_type) = obj.get("type")
+            && root_type != "object"
+        {
+            return Err(SchemaCompileError::new(format!(
+                "Kimi tool parameter root type must be 'object', found {:?}",
+                root_type
+            )));
         }
 
-        // Validate that schema does not contain unsupported keywords for Kimi
+        // Validate that schema contains only supported MFJS keywords
         validate_kimi_supported_keywords(schema)?;
 
         let mut normalized = self.normalize_schema(schema.clone());
-        if let Some(obj) = normalized.as_object_mut()
-            && !obj.contains_key("type")
+        if let Some(norm_obj) = normalized.as_object_mut()
+            && !norm_obj.contains_key("type")
         {
-            obj.insert("type".to_string(), Value::String("object".to_string()));
+            norm_obj.insert("type".to_string(), Value::String("object".to_string()));
         }
         Ok(normalized)
     }
@@ -182,15 +192,31 @@ fn validate_kimi_supported_keywords(val: &Value) -> Result<(), SchemaCompileErro
     if let Some(obj) = val.as_object() {
         for (key, child) in obj {
             match key.as_str() {
-                "$ref" | "oneOf" | "anyOf" | "allOf" | "not" | "if" | "then" | "else" => {
+                "oneOf" | "allOf" | "not" | "if" | "then" | "else" => {
                     return Err(SchemaCompileError::new(format!(
                         "Kimi function calling schema does not support keyword '{key}'"
                     )));
+                }
+                "$ref" => {
+                    if let Some(s) = child.as_str()
+                        && !s.starts_with('#')
+                    {
+                        return Err(SchemaCompileError::new(format!(
+                            "Kimi function calling schema supports internal $ref only, found external '{s}'"
+                        )));
+                    }
                 }
                 "properties" => {
                     if let Some(props) = child.as_object() {
                         for prop_val in props.values() {
                             validate_kimi_supported_keywords(prop_val)?;
+                        }
+                    }
+                }
+                "anyOf" => {
+                    if let Some(arr) = child.as_array() {
+                        for item in arr {
+                            validate_kimi_supported_keywords(item)?;
                         }
                     }
                 }

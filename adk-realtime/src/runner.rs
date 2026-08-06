@@ -842,6 +842,24 @@ impl RealtimeRunner {
         self.session_handle().await.ok().and_then(|session| session.disconnect_reason())
     }
 
+    /// Check the provider-neutral availability state.
+    pub async fn availability(&self) -> crate::session::RealtimeAvailability {
+        if let Ok(session) = self.session_handle().await {
+            session.availability()
+        } else {
+            crate::session::RealtimeAvailability::Exhausted
+        }
+    }
+
+    /// Perform a sub-second TLS/WebSocket reconnect with exponential backoff on the inner session.
+    pub async fn reconnect_with_backoff(
+        &self,
+        options: crate::session::ReconnectOptions,
+    ) -> Result<()> {
+        let session = self.session_handle().await?;
+        session.reconnect_with_backoff(options).await
+    }
+
     pub async fn next_event(&self) -> Option<Result<ServerEvent>> {
         let session = match self.session_handle().await {
             Ok(session) => session,
@@ -1157,14 +1175,21 @@ impl RealtimeRunner {
                 return Ok(Some(PendingToolCall { call_id, name, arguments }));
             }
             ServerEvent::SessionUpdated { session, .. } => {
-                // Check if the generic session update contains a resumption token
-                if let Some(token) = session.get("resumeToken").and_then(|t| t.as_str()) {
+                // Check if generic session update contains a resumption token or handle
+                let token = session
+                    .get("resumeToken")
+                    .or_else(|| session.get("resumeHandle"))
+                    .and_then(|t| t.as_str());
+
+                if let Some(token) = token {
                     tracing::info!(
+                        token = %token,
                         "Received Gemini sessionResumption token, saving for future reconnects."
                     );
                     let mut config = self.config.write().await;
                     let mut extra = config.extra.clone().unwrap_or_else(|| serde_json::json!({}));
                     extra["resumeToken"] = serde_json::Value::String(token.to_string());
+                    extra["resumeHandle"] = serde_json::Value::String(token.to_string());
                     config.extra = Some(extra);
                 }
             }

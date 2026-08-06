@@ -7,6 +7,8 @@
 //!
 //! Re-capture it by running that call on [`source`] and pasting the result.
 
+use adk_core::{GenericSchemaAdapter, KimiSchemaAdapter, SchemaAdapter};
+use adk_gemini::GeminiSchemaAdapter;
 use adk_schema::{IngestionPolicy, InputSchema};
 use serde_json::{Value, json};
 
@@ -33,64 +35,24 @@ fn source() -> Value {
     })
 }
 
-/// Verbatim `GeminiSchemaAdapter::new().normalize_schema(source())`.
-///
-/// Step 6 of that adapter strips `if`/`then`/`else`, and step 5 collapses type
-/// arrays — so the whole `allOf` is gone and `caller_name` is no longer
-/// nullable.
+/// Verbatim invocation of `GeminiSchemaAdapter::new().normalize_schema(source())`.
 fn gemini_projection() -> Value {
-    json!({
-        "type": "object",
-        "properties": {
-            "caller_name": { "type": "string" },
-            "fulfillment_method": { "type": "string" },
-            "issue_description": { "type": "string" },
-            "request_kind": { "enum": ["order", "information"], "type": "string" }
-        },
-        "required": ["request_kind", "issue_description"]
-    })
+    GeminiSchemaAdapter::new().normalize_schema(source())
 }
 
-/// Normalized projection under OpenAI schema adapter.
+/// Verbatim invocation of `GenericSchemaAdapter.normalize_schema(source())` for OpenAI.
 fn openai_projection() -> Value {
-    json!({
-        "type": "object",
-        "properties": {
-            "request_kind": { "type": "string", "enum": ["order", "information"] },
-            "issue_description": { "type": "string" },
-            "caller_name": { "type": ["string", "null"] },
-            "fulfillment_method": { "type": "string" }
-        },
-        "required": ["request_kind", "issue_description"]
-    })
+    GenericSchemaAdapter.normalize_schema(source())
 }
 
-/// Normalized projection under Anthropic schema adapter.
+/// Verbatim invocation of `GenericSchemaAdapter.normalize_schema(source())` for Anthropic.
 fn anthropic_projection() -> Value {
-    json!({
-        "type": "object",
-        "properties": {
-            "request_kind": { "type": "string", "enum": ["order", "information"] },
-            "issue_description": { "type": "string" },
-            "caller_name": { "type": "string" },
-            "fulfillment_method": { "type": "string" }
-        },
-        "required": ["request_kind", "issue_description"]
-    })
+    GenericSchemaAdapter.normalize_schema(source())
 }
 
-/// Normalized projection under Kimi schema adapter.
+/// Verbatim invocation of `KimiSchemaAdapter.normalize_schema(source())` for Kimi.
 fn kimi_projection() -> Value {
-    json!({
-        "type": "object",
-        "properties": {
-            "request_kind": { "type": "string", "enum": ["order", "information"] },
-            "issue_description": { "type": "string" },
-            "caller_name": { "type": ["string", "null"] },
-            "fulfillment_method": { "type": "string" }
-        },
-        "required": ["request_kind", "issue_description"]
-    })
+    KimiSchemaAdapter.normalize_schema(source())
 }
 
 fn ingest(value: Value) -> InputSchema {

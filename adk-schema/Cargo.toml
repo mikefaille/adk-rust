@@ -40,6 +40,6 @@ required-features = ["adapters"]
 # with no validation, no schemars generation and no adapter projection — every
 # reason to reach for this crate, absent. Build the whole surface and label each
 # item with the feature it needs.
-[package.metadata.docs.rs]
-all-features = true
-rustdoc-args = ["--cfg", "docsrs"]
+[dev-dependencies]
+adk-core = { workspace = true }
+adk-gemini = { workspace = true }

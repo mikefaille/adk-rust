@@ -979,15 +979,14 @@ mod tests {
             "Overlong Kimi tool name (>64 chars) must fail request building before truncation"
         );
 
-        // 3. Kimi tool parameter schema with unsupported keyword (e.g., $ref) fails compilation
+        // 3. Kimi tool parameter schema with non-object root type or external $ref fails compilation
         let mut unsupported_schema_tools = std::collections::HashMap::new();
         unsupported_schema_tools.insert(
             "get_user_info".to_string(),
             serde_json::json!({
                 "description": "Get user info",
                 "parameters": {
-                    "type": "object",
-                    "$ref": "#/definitions/User"
+                    "type": "string", // Non-object root type
                 }
             }),
         );
@@ -1006,36 +1005,46 @@ mod tests {
             client.schema_adapter(),
             &client.cache,
         );
-        assert!(err_schema.is_err(), "Kimi tool schema containing $ref must fail compilation");
+        assert!(
+            err_schema.is_err(),
+            "Kimi tool schema with non-object root type must fail compilation"
+        );
 
-        // 4. Valid tool name succeeds
-        let mut valid_tools = std::collections::HashMap::new();
-        valid_tools.insert(
+        // 4. Kimi tool parameter schema with valid internal $ref and anyOf succeeds
+        let mut valid_mfjs_tools = std::collections::HashMap::new();
+        valid_mfjs_tools.insert(
             "get_weather".to_string(),
             serde_json::json!({
                 "description": "Get weather forecast",
                 "parameters": {
                     "type": "object",
-                    "properties": { "location": { "type": "string" } }
+                    "properties": {
+                        "location": {
+                            "anyOf": [
+                                { "type": "string" },
+                                { "$ref": "#/$defs/LocationObj" }
+                            ]
+                        }
+                    }
                 }
             }),
         );
-        let valid_request = LlmRequest {
+        let valid_mfjs_request = LlmRequest {
             model: "moonshot-v1-8k".to_string(),
             contents: vec![],
-            tools: valid_tools,
+            tools: valid_mfjs_tools,
             config: None,
             previous_response_id: None,
         };
         let body = build_request_json(
             "moonshot-v1-8k",
-            &valid_request,
+            &valid_mfjs_request,
             &None,
             false,
             client.schema_adapter(),
             &client.cache,
         )
-        .expect("Valid Kimi tool request must build");
+        .expect("Kimi tool request with internal $ref and anyOf must build under MFJS spec");
 
         let tools_json = body.get("tools").and_then(|t| t.as_array()).expect("tools array");
         assert_eq!(tools_json.len(), 1);

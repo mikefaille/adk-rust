@@ -34,7 +34,8 @@ impl GeminiRealtimeModel {
     /// Create a new Gemini Live model.
     pub fn new(backend: GeminiLiveBackend, model_id: impl Into<String>) -> Self {
         let schema_dialect = GeminiRealtimeSession::default_schema_dialect(&backend);
-        Self { backend, model_id: model_id.into(), schema_dialect }
+        let model_id = super::session::normalize_model_id(&model_id.into());
+        Self { backend, model_id, schema_dialect }
     }
 
     /// Create with the default Live model.

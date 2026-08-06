@@ -72,6 +72,34 @@ impl std::fmt::Display for DisconnectReason {
     }
 }
 
+/// Provider-neutral lifecycle availability state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RealtimeAvailability {
+    /// Transport is connected and operating normally.
+    Connected,
+    /// Transport auto-reconnect is active with the given attempt epoch.
+    Reconnecting { epoch: u64 },
+    /// Reconnect attempts have been exhausted (>3s or max retries exceeded).
+    Exhausted,
+    /// Session has been torn down gracefully.
+    Teardown,
+}
+
+/// Configuration options for session reconnect with exponential backoff.
+#[derive(Debug, Clone)]
+pub struct ReconnectOptions {
+    pub max_retries: u32,
+    pub backoff_budget_ms: u64,
+    pub ipv4_fallback: bool,
+    pub resume_handle: Option<String>,
+}
+
+impl Default for ReconnectOptions {
+    fn default() -> Self {
+        Self { max_retries: 3, backoff_budget_ms: 3000, ipv4_fallback: true, resume_handle: None }
+    }
+}
+
 #[async_trait]
 pub trait RealtimeSession: Send + Sync {
     /// Get the session ID.
@@ -79,6 +107,22 @@ pub trait RealtimeSession: Send + Sync {
 
     /// Check if the session is currently connected.
     fn is_connected(&self) -> bool;
+
+    /// Provider-neutral availability state.
+    fn availability(&self) -> RealtimeAvailability {
+        if self.is_connected() {
+            RealtimeAvailability::Connected
+        } else {
+            RealtimeAvailability::Exhausted
+        }
+    }
+
+    /// Perform a sub-second TLS/WebSocket reconnect with exponential backoff.
+    async fn reconnect_with_backoff(&self, _options: ReconnectOptions) -> Result<()> {
+        Err(crate::error::RealtimeError::config(
+            "reconnect_with_backoff not implemented for this session",
+        ))
+    }
 
     /// The audio format this provider emits in `ServerEvent::AudioDelta`.
     ///

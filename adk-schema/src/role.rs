@@ -72,12 +72,14 @@ impl InputSchema {
                 continue;
             };
 
-            // Only merge if the item contains ONLY static object keywords (properties, required, type, description, title)
-            let has_other_keywords = item_obj.keys().any(|k| {
-                !matches!(k.as_str(), "properties" | "required" | "type" | "description" | "title")
-            });
+            // A branch is statically mergeable into top-level properties/required ONLY if
+            // its keys consist exclusively of "properties" and/or "required".
+            // If the branch contains "type", "description", "title", "additionalProperties", etc.,
+            // merging would drop those fields, so the branch must be preserved in remaining_all_of.
+            let contains_unmergeable_keys =
+                item_obj.keys().any(|k| !matches!(k.as_str(), "properties" | "required"));
 
-            if has_other_keywords {
+            if contains_unmergeable_keys {
                 remaining_all_of.push(item);
                 continue;
             }
@@ -171,5 +173,31 @@ mod tests {
 
         let remaining = val.get("allOf").and_then(|a| a.as_array()).expect("allOf preserved");
         assert_eq!(remaining.len(), 2, "both non-mergeable allOf branches must remain");
+    }
+
+    #[test]
+    fn test_flatten_static_all_of_preserves_branches_with_type_or_annotations() {
+        let policy = IngestionPolicy::default();
+        let raw = serde_json::json!({
+            "type": "object",
+            "allOf": [
+                { "type": "string" },
+                {
+                    "properties": { "age": { "type": "integer" } },
+                    "description": "Person age block"
+                }
+            ]
+        });
+
+        let schema = InputSchema::from_value(raw, &policy).expect("valid schema");
+        let flattened = schema.flatten_static_all_of(&policy).expect("flatten succeeds");
+        let val = flattened.as_value();
+
+        let remaining = val.get("allOf").and_then(|a| a.as_array()).expect("allOf preserved");
+        assert_eq!(
+            remaining.len(),
+            2,
+            "branches containing type or description must be preserved in allOf"
+        );
     }
 }
