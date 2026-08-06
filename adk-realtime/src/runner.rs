@@ -1115,7 +1115,10 @@ impl RealtimeRunner {
                 self.event_handler.on_tool_calls_cancelled(&call_ids).await?;
             }
             ServerEvent::ResponseCancelled { .. } => {
-                // Clear any pending tool follow-up response state from the cancelled turn
+                // Clear any pending tool follow-up response state from the cancelled turn.
+                // When caller barge-in or turn cancellation occurs, in-flight tool calls from
+                // that turn may finish later. Resetting these flags prevents a stale create_response
+                // trigger from spilling over into subsequent user turns.
                 self.pending_tool_response.store(false, Ordering::Release);
                 self.response_closed_awaiting_tools.store(false, Ordering::Release);
                 // An abandoned generation must not leave the state machine
@@ -1712,6 +1715,8 @@ mod runner_tests {
             if let Some(ev) = event {
                 Some(Ok(ev))
             } else if self.stay_connected_when_empty {
+                // Pending indefinitely simulates an open WebSocket connection without populating
+                // Tokio timer wheels or waking up after artificial sleep timeouts.
                 std::future::pending::<()>().await;
                 None
             } else {

@@ -90,6 +90,10 @@ impl OpenAIRealtimeSession {
 
         let (mut sink, source) = ws_stream.split();
         let connected = Arc::new(AtomicBool::new(true));
+        // Single-writer pattern (Realtime Concurrency Rule 3): Sink ownership is moved to a
+        // dedicated writer task fed by a bounded MPSC channel. This prevents send_raw() from
+        // holding a Mutex guard across .await network calls, which previously caused
+        // session.close() to deadlock on slow socket teardown.
         let (outbound_tx, mut outbound_rx) = tokio::sync::mpsc::channel::<Message>(256);
         let writer_connected = Arc::clone(&connected);
         let writer_task = tokio::spawn(async move {
@@ -239,8 +243,10 @@ impl OpenAITransportLink for OpenAIRealtimeSession {
 
     async fn close(&self) -> Result<()> {
         self.connected.store(false, Ordering::SeqCst);
+        // Route close through the writer channel so message ordering is preserved.
         let _ = self.outbound_tx.send(Message::Close(None)).await;
 
+        // Ensure deterministic teardown: await writer task completion once the Close frame is flushed.
         let mut writer_task = self.writer_task.lock().await;
         if let Some(handle) = writer_task.take() {
             let _ = handle.await;
