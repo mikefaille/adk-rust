@@ -222,6 +222,15 @@ impl OpenAICompatibleConfig {
             .with_provider_name("cohere")
             .with_base_url("https://api.cohere.com/compatibility/v1")
     }
+
+    /// Preset for Moonshot / Kimi OpenAI-compatible API endpoints.
+    ///
+    /// Base URL: `https://api.moonshot.ai/v1`
+    pub fn kimi(api_key: impl Into<String>, model: impl Into<String>) -> Self {
+        Self::new(api_key, model)
+            .with_provider_name("kimi")
+            .with_base_url("https://api.moonshot.ai/v1")
+    }
 }
 
 /// Shared OpenAI-compatible client implementation.
@@ -235,12 +244,20 @@ pub struct OpenAICompatible {
     reasoning_effort: Option<ReasoningEffort>,
     organization_id: Option<String>,
     parallel_tool_calls: bool,
+    adapter: std::sync::Arc<dyn SchemaAdapter>,
+    cache: SchemaCache,
 }
 
 impl OpenAICompatible {
     /// Create a new OpenAI-compatible client.
     pub fn new(config: OpenAICompatibleConfig) -> Result<Self, AdkError> {
         let base_url = config.base_url.unwrap_or_else(|| "https://api.openai.com/v1".to_string());
+        let adapter: std::sync::Arc<dyn SchemaAdapter> = if config.provider_name == "kimi" {
+            std::sync::Arc::new(adk_core::KimiSchemaAdapter)
+        } else {
+            std::sync::Arc::new(GenericSchemaAdapter)
+        };
+        let cache = SchemaCache::for_adapter(std::sync::Arc::clone(&adapter));
 
         Ok(Self {
             http: reqwest::Client::new(),
@@ -252,7 +269,14 @@ impl OpenAICompatible {
             reasoning_effort: config.reasoning_effort,
             organization_id: config.organization_id,
             parallel_tool_calls: config.parallel_tool_calls,
+            adapter,
+            cache,
         })
+    }
+
+    /// Access the custom schema adapter for this provider.
+    pub fn schema_adapter(&self) -> &dyn SchemaAdapter {
+        self.adapter.as_ref()
     }
 
     /// Set the retry configuration (builder pattern).
@@ -483,18 +507,15 @@ impl Llm for OpenAICompatible {
         let reasoning_effort = self.reasoning_effort.clone();
         let organization_id = self.organization_id.clone();
 
-        // Normalize tool schemas at request time using the schema adapter.
+        // Normalize tool schemas at request time using the instance schema adapter and cache.
         let adapter = self.schema_adapter();
-        use std::sync::LazyLock;
-        static SCHEMA_CACHE: LazyLock<SchemaCache> =
-            LazyLock::new(|| SchemaCache::for_adapter(std::sync::Arc::new(GenericSchemaAdapter)));
         let request_body = build_request_json(
             &model,
             &request,
             &reasoning_effort,
             self.parallel_tool_calls,
             adapter,
-            &SCHEMA_CACHE,
+            &self.cache,
         )?;
 
         let usage_span = adk_telemetry::llm_generate_span(&provider_name, &model, stream);
@@ -871,5 +892,21 @@ mod tests {
         let config = OpenAICompatibleConfig::gemini("k", "gemini-3.5-flash");
         let client = OpenAICompatible::new(config).expect("client builds");
         assert_eq!(client.name(), "gemini-3.5-flash");
+    }
+
+    #[test]
+    fn kimi_preset_sets_endpoint_and_instantiates_adapter() {
+        let config = OpenAICompatibleConfig::kimi("test-kimi-key", "moonshot-v1-8k");
+        assert_eq!(config.provider_name, "kimi");
+        assert_eq!(config.model, "moonshot-v1-8k");
+        assert_eq!(config.base_url.as_deref(), Some("https://api.moonshot.ai/v1"));
+
+        let client = OpenAICompatible::new(config).expect("client builds");
+        assert_eq!(client.schema_adapter().identifier(), "kimi");
+        assert!(client.schema_adapter().validate_tool_name("valid_tool_name").is_ok());
+        assert!(
+            client.schema_adapter().validate_tool_name("ab").is_err(),
+            "tool name under 3 chars is invalid for Kimi"
+        );
     }
 }

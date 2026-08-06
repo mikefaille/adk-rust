@@ -114,3 +114,47 @@ impl SchemaAdapter for GenericSchemaAdapter {
         schema
     }
 }
+
+/// Schema adapter for Moonshot / Kimi OpenAI-compatible API endpoints.
+#[derive(Debug)]
+pub struct KimiSchemaAdapter;
+
+impl SchemaAdapter for KimiSchemaAdapter {
+    fn identifier(&self) -> &str {
+        "kimi"
+    }
+
+    fn validate_tool_name(&self, name: &str) -> Result<(), SchemaCompileError> {
+        if name.len() < 3 || name.len() > 64 {
+            return Err(SchemaCompileError::new(format!(
+                "Kimi tool name '{}' length {} is outside allowed range [3, 64]",
+                name,
+                name.len()
+            )));
+        }
+        let mut chars = name.chars();
+        if let Some(first) = chars.next()
+            && !first.is_ascii_alphabetic()
+            && first != '_'
+        {
+            return Err(SchemaCompileError::new(format!(
+                "Kimi tool name '{}' must start with an ASCII letter or underscore",
+                name
+            )));
+        }
+        if !chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+            return Err(SchemaCompileError::new(format!(
+                "Kimi tool name '{}' contains invalid characters (must be alphanumeric, '_' or '-')",
+                name
+            )));
+        }
+        Ok(())
+    }
+
+    fn normalize_schema(&self, mut schema: Value) -> Value {
+        schema_utils::strip_schema_keyword(&mut schema);
+        schema_utils::strip_conditional_keywords(&mut schema);
+        schema_utils::strip_unsupported_formats(&mut schema, GENERIC_ALLOWED_FORMATS);
+        schema
+    }
+}

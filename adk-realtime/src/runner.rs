@@ -410,6 +410,7 @@ impl RealtimeRunnerBuilder {
             outstanding_tools: Arc::new(AtomicUsize::new(0)),
             response_closed_awaiting_tools: Arc::new(AtomicBool::new(false)),
             consecutive_tool_failures: Arc::new(AtomicUsize::new(0)),
+            circuit_breaker_tripped: Arc::new(AtomicBool::new(false)),
         })
     }
 }
@@ -472,6 +473,8 @@ pub struct RealtimeRunner {
     response_closed_awaiting_tools: Arc<AtomicBool>,
     /// Tracks consecutive tool execution failures to enforce circuit breaking.
     consecutive_tool_failures: Arc<AtomicUsize>,
+    /// Set when the circuit breaker trips, putting tool execution into Open state.
+    circuit_breaker_tripped: Arc<AtomicBool>,
 }
 
 impl RealtimeRunner {
@@ -488,6 +491,8 @@ impl RealtimeRunner {
 
     /// Connect to the realtime provider.
     pub async fn connect(&self) -> Result<()> {
+        self.consecutive_tool_failures.store(0, Ordering::Release);
+        self.circuit_breaker_tripped.store(false, Ordering::Release);
         let config = self.config.read().await.clone();
         let session = self.model.connect(config).await?;
         let mut guard = self.session.write().await;
@@ -906,7 +911,6 @@ impl RealtimeRunner {
         if !self.runner_config.auto_respond_tools {
             return Ok(());
         }
-
         if let Ok(session) = self.session_handle().await {
             session.send_tool_output(ToolResponse { call_id: call_id.to_string(), output }).await?;
             self.pending_tool_response.store(true, Ordering::Release);
@@ -919,13 +923,29 @@ impl RealtimeRunner {
         &self,
         cancel_token: tokio_util::sync::CancellationToken,
     ) -> Result<()> {
+        self.run_loop(Some(cancel_token)).await
+    }
+
+    /// Run the event loop, processing events until disconnected.
+    pub async fn run(&self) -> Result<()> {
+        self.run_loop(None).await
+    }
+
+    /// Internal unified event loop supporting optional cancellation and clean session closure.
+    async fn run_loop(
+        &self,
+        cancel_token: Option<tokio_util::sync::CancellationToken>,
+    ) -> Result<()> {
         use futures::stream::{FuturesUnordered, StreamExt};
 
         let mut running_tools = FuturesUnordered::new();
 
         loop {
-            if cancel_token.is_cancelled() {
+            if let Some(token) = &cancel_token
+                && token.is_cancelled()
+            {
                 tracing::info!("RealtimeRunner run loop cancelled via cancellation token.");
+                self.close_active_session().await;
                 self.event_handler.on_disconnect().await?;
                 break;
             }
@@ -934,22 +954,37 @@ impl RealtimeRunner {
             let old_session_id = session.session_id().to_string();
 
             let event = if running_tools.is_empty() {
+                if let Some(token) = &cancel_token {
+                    tokio::select! {
+                        _ = token.cancelled() => {
+                            tracing::info!("RealtimeRunner run loop cancelled via cancellation token.");
+                            self.close_active_session().await;
+                            self.event_handler.on_disconnect().await?;
+                            return Ok(());
+                        }
+                        ev = session.next_event() => ev,
+                    }
+                } else {
+                    session.next_event().await
+                }
+            } else if let Some(token) = &cancel_token {
                 tokio::select! {
-                    _ = cancel_token.cancelled() => {
+                    biased;
+                    _ = token.cancelled() => {
                         tracing::info!("RealtimeRunner run loop cancelled via cancellation token.");
+                        self.close_active_session().await;
                         self.event_handler.on_disconnect().await?;
                         return Ok(());
                     }
-                    ev = session.next_event() => ev,
+                    Some(finished) = running_tools.next() => {
+                        let () = finished?;
+                        continue;
+                    }
+                    event = session.next_event() => event,
                 }
             } else {
                 tokio::select! {
                     biased;
-                    _ = cancel_token.cancelled() => {
-                        tracing::info!("RealtimeRunner run loop cancelled via cancellation token.");
-                        self.event_handler.on_disconnect().await?;
-                        return Ok(());
-                    }
                     Some(finished) = running_tools.next() => {
                         let () = finished?;
                         continue;
@@ -961,7 +996,6 @@ impl RealtimeRunner {
             match event {
                 Some(Ok(event)) => {
                     if let Some(call) = self.handle_event(event).await? {
-                        self.outstanding_tools.fetch_add(1, Ordering::AcqRel);
                         running_tools.push(self.run_tool_call(call));
                     }
                 }
@@ -987,67 +1021,15 @@ impl RealtimeRunner {
         Ok(())
     }
 
-    /// Run the event loop, processing events until disconnected.
-    pub async fn run(&self) -> Result<()> {
-        use futures::stream::{FuturesUnordered, StreamExt};
-
-        // Tool handlers run as futures on this set rather than inline, so reading the next
-        // provider event never waits for a tool. `max_concurrent_tools` bounds how many
-        // are past their permit acquisition at once.
-        let mut running_tools = FuturesUnordered::new();
-
-        loop {
-            let session = self.session_handle().await?;
-            let old_session_id = session.session_id().to_string();
-
-            // With no tools in flight there is nothing to drain, and polling an empty
-            // `FuturesUnordered` in a `select!` would spin.
-            let event = if running_tools.is_empty() {
-                session.next_event().await
-            } else {
-                tokio::select! {
-                    biased;
-                    Some(finished) = running_tools.next() => {
-                        let () = finished?;
-                        continue;
-                    }
-                    event = session.next_event() => event,
-                }
-            };
-
-            match event {
-                Some(Ok(event)) => {
-                    if let Some(call) = self.handle_event(event).await? {
-                        self.outstanding_tools.fetch_add(1, Ordering::AcqRel);
-                        running_tools.push(self.run_tool_call(call));
-                    }
-                }
-                Some(Err(e)) => {
-                    self.event_handler.on_error(&e).await?;
-                    return Err(e);
-                }
-                None => {
-                    // Session closed or swapped out. Check if a new session was installed (e.g., during reconnect).
-                    let current_session_id = self.session_id().await;
-                    if let Some(id) = current_session_id
-                        && id != old_session_id
-                    {
-                        // A new session handle was installed concurrently. Continue polling.
-                        continue;
-                    }
-                    // A real disconnect. Let dispatched tools finish so their output and
-                    // the follow-up response are not dropped mid-flight.
-                    while let Some(finished) = running_tools.next().await {
-                        finished?;
-                    }
-                    // Surfaced distinctly: `run` returning `Ok(())` alone cannot be told
-                    // apart from a graceful `close`.
-                    self.event_handler.on_disconnect().await?;
-                    break;
-                }
-            }
+    /// Internal helper to safely close and release active session on cancellation or shutdown.
+    async fn close_active_session(&self) {
+        let old_session = {
+            let mut guard = self.session.write().await;
+            guard.take()
+        };
+        if let Some(session) = old_session {
+            let _ = session.close().await;
         }
-        Ok(())
     }
 
     /// Run one dispatched tool call under the configured concurrency bound.
@@ -1055,19 +1037,30 @@ impl RealtimeRunner {
     /// The permit is acquired inside the future so queueing a call never blocks the event
     /// loop; the bound applies to execution, not to admission.
     async fn run_tool_call(&self, call: PendingToolCall) -> Result<()> {
+        struct ToolCounterGuard<'a>(&'a RealtimeRunner);
+        impl<'a> Drop for ToolCounterGuard<'a> {
+            fn drop(&mut self) {
+                self.0.outstanding_tools.fetch_sub(1, Ordering::AcqRel);
+            }
+        }
+
+        self.outstanding_tools.fetch_add(1, Ordering::AcqRel);
+        let guard = ToolCounterGuard(self);
+
         let permit = Arc::clone(&self.tool_permits).acquire_owned().await;
         let result = self.execute_tool_call(&call.call_id, &call.name, &call.arguments).await;
         drop(permit);
 
-        // The follow-up response is owed once *every* dispatched tool is in and the
-        // dispatching response has closed, whichever happens last. Before tools ran
-        // concurrently, ordering was implicit: `ResponseDone` could not arrive until the
-        // inline await returned. It can now, so the last tool to finish issues it.
-        if self.outstanding_tools.fetch_sub(1, Ordering::AcqRel) == 1
+        // Explicitly drop the guard here so outstanding_tools is decremented synchronously
+        drop(guard);
+
+        // Now check if this was the last tool to finish and a response is owed
+        if self.outstanding_tools.load(Ordering::Acquire) == 0
             && self.response_closed_awaiting_tools.swap(false, Ordering::AcqRel)
         {
             self.respond_after_tools().await?;
         }
+
         result
     }
 
@@ -1248,6 +1241,29 @@ impl RealtimeRunner {
         name: &str,
         arguments: &serde_json::Value,
     ) -> Result<()> {
+        // If circuit breaker has tripped (Open state), block execution and return deterministic rejection
+        if self.circuit_breaker_tripped.load(Ordering::Acquire) {
+            tracing::warn!(
+                call_id,
+                name,
+                "Circuit breaker is OPEN — rejecting tool execution call"
+            );
+            let result = serde_json::json!({
+                "status": "rejected",
+                "reason": "tool_unavailable",
+                "error": "circuit_breaker_open"
+            });
+            if self.runner_config.auto_respond_tools
+                && let Ok(session) = self.session_handle().await
+            {
+                session
+                    .send_tool_output(ToolResponse { call_id: call_id.to_string(), output: result })
+                    .await?;
+                self.pending_tool_response.store(true, Ordering::Release);
+            }
+            return Ok(());
+        }
+
         let handler = self.tools.get(name).map(|(_, h)| h.clone());
 
         let result = if let Some(handler) = handler {
@@ -1266,21 +1282,30 @@ impl RealtimeRunner {
                     let failures =
                         self.consecutive_tool_failures.fetch_add(1, Ordering::AcqRel) + 1;
                     if failures >= self.runner_config.max_consecutive_tool_failures {
-                        tracing::error!(
-                            call_id,
-                            name,
-                            failures,
-                            max = self.runner_config.max_consecutive_tool_failures,
-                            "Tool execution circuit breaker tripped: max consecutive failures reached"
-                        );
-                        let _ = self.event_handler.on_error(&RealtimeError::provider(format!(
-                            "Tool execution circuit breaker tripped after {} consecutive failures: {}",
-                            failures, e
-                        ))).await;
+                        // Atomic transition: notify error callback exactly ONCE when entering Open state
+                        if !self.circuit_breaker_tripped.swap(true, Ordering::AcqRel) {
+                            tracing::error!(
+                                call_id,
+                                name,
+                                failures,
+                                max = self.runner_config.max_consecutive_tool_failures,
+                                "Tool execution circuit breaker TRIPPED: entering Open state"
+                            );
+                            let _ = self.event_handler.on_error(&RealtimeError::provider(format!(
+                                "Tool execution circuit breaker tripped after {} consecutive failures: {}",
+                                failures, e
+                            ))).await;
+                        }
+                        serde_json::json!({
+                            "status": "rejected",
+                            "reason": "tool_unavailable",
+                            "error": format!("circuit_breaker_tripped: {}", e)
+                        })
+                    } else {
+                        serde_json::json!({
+                            "error": e.to_string()
+                        })
                     }
-                    serde_json::json!({
-                        "error": e.to_string()
-                    })
                 }
             }
         } else {
@@ -1991,23 +2016,47 @@ mod runner_tests {
     }
 
     #[tokio::test]
-    async fn circuit_breaker_trips_on_consecutive_tool_failures() {
+    async fn circuit_breaker_trips_and_blocks_subsequent_tool_calls() {
+        let calls_made = Arc::new(AtomicUsize::new(0));
+        let calls_made_clone = Arc::clone(&calls_made);
+
         let runner = RealtimeRunner::builder()
             .model(Arc::new(MockModel) as BoxedModel)
-            .tool_fn(tool_def("failing"), |_| Err(RealtimeError::provider("database failure")))
+            .tool_fn(tool_def("failing"), move |_| {
+                calls_made_clone.fetch_add(1, Ordering::SeqCst);
+                Err(RealtimeError::provider("database failure"))
+            })
             .build()
             .unwrap();
 
-        // 3 consecutive failures should trip the circuit breaker
-        for _ in 0..3 {
-            runner.execute_tool_call("call-fail", "failing", &serde_json::json!({})).await.unwrap();
+        // 3 consecutive failures trip the breaker into Open state
+        for i in 0..3 {
+            runner
+                .execute_tool_call(&format!("call-{}", i), "failing", &serde_json::json!({}))
+                .await
+                .unwrap();
         }
 
-        assert_eq!(
-            runner.consecutive_tool_failures.load(Ordering::Acquire),
-            3,
-            "consecutive tool failure counter reached threshold"
+        assert_eq!(calls_made.load(Ordering::SeqCst), 3, "handler was invoked 3 times");
+        assert!(
+            runner.circuit_breaker_tripped.load(Ordering::Acquire),
+            "circuit breaker is TRIPPED"
         );
+
+        // 4th call must be BLOCKED from calling the handler
+        runner.execute_tool_call("call-4", "failing", &serde_json::json!({})).await.unwrap();
+        assert_eq!(
+            calls_made.load(Ordering::SeqCst),
+            3,
+            "4th call was blocked by open circuit breaker"
+        );
+
+        // Reconnect resets breaker
+        runner.consecutive_tool_failures.store(0, Ordering::Release);
+        runner.circuit_breaker_tripped.store(false, Ordering::Release);
+
+        runner.execute_tool_call("call-5", "failing", &serde_json::json!({})).await.unwrap();
+        assert_eq!(calls_made.load(Ordering::SeqCst), 4, "handler invoked again after reset");
     }
 
     #[tokio::test]
