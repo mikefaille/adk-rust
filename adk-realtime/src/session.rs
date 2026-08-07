@@ -85,18 +85,51 @@ pub enum RealtimeAvailability {
     Teardown,
 }
 
-/// Configuration options for session reconnect with exponential backoff.
-#[derive(Debug, Clone)]
-pub struct ReconnectOptions {
-    pub max_retries: u32,
-    pub backoff_budget_ms: u64,
-    pub ipv4_fallback: bool,
-    pub resume_handle: Option<String>,
+/// Provider-neutral capability for session recovery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum RecoveryCapability {
+    Unsupported,
+    Reconnect,
+    Resume,
 }
 
-impl Default for ReconnectOptions {
+/// Truthful status of whether session continuity was fully resumed or just reconnected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum RecoveryContinuity {
+    Reconnected,
+    Resumed,
+}
+
+/// Recovery retry decision: whether to retry or abort immediately.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum RecoveryDisposition {
+    Retryable,
+    Fatal,
+}
+
+/// Outcome of a successful recovery attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RecoveryOutcome {
+    pub continuity: RecoveryContinuity,
+}
+
+/// Policy governing retry count, absolute timeout, and exponential delay.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoveryPolicy {
+    pub max_attempts: std::num::NonZeroU32,
+    pub deadline: std::time::Duration,
+    pub initial_delay: std::time::Duration,
+    pub max_delay: std::time::Duration,
+}
+
+impl Default for RecoveryPolicy {
     fn default() -> Self {
-        Self { max_retries: 3, backoff_budget_ms: 3000, ipv4_fallback: true, resume_handle: None }
+        Self {
+            max_attempts: std::num::NonZeroU32::new(3).unwrap(),
+            deadline: std::time::Duration::from_secs(10),
+            initial_delay: std::time::Duration::from_millis(50),
+            max_delay: std::time::Duration::from_millis(200),
+        }
     }
 }
 
@@ -117,11 +150,22 @@ pub trait RealtimeSession: Send + Sync {
         }
     }
 
-    /// Perform a sub-second TLS/WebSocket reconnect with exponential backoff.
-    async fn reconnect_with_backoff(&self, _options: ReconnectOptions) -> Result<()> {
-        Err(crate::error::RealtimeError::config(
-            "reconnect_with_backoff not implemented for this session",
-        ))
+    /// Get the recovery capability of this session adapter.
+    fn recovery_capability(&self) -> RecoveryCapability {
+        RecoveryCapability::Unsupported
+    }
+
+    /// Classify a session error into a recovery disposition (Retryable or Fatal).
+    fn recovery_disposition(&self, _error: &crate::error::RealtimeError) -> RecoveryDisposition {
+        RecoveryDisposition::Fatal
+    }
+
+    /// Perform a single transactional recovery attempt privately.
+    async fn recover_once(
+        &self,
+        _config: &crate::config::RealtimeConfig,
+    ) -> Result<RecoveryOutcome> {
+        Err(crate::error::RealtimeError::config("recover_once not implemented for this session"))
     }
 
     /// The audio format this provider emits in `ServerEvent::AudioDelta`.
@@ -285,6 +329,106 @@ impl<T: RealtimeSession> RealtimeSessionExt for T {}
 
 /// A boxed session type for dynamic dispatch.
 pub type BoxedSession = Box<dyn RealtimeSession>;
+
+/// Reusable, provider-neutral session recovery orchestrator with exponential backoff and absolute timeout.
+pub async fn recover_session(
+    session: &dyn RealtimeSession,
+    config: &crate::config::RealtimeConfig,
+    policy: &RecoveryPolicy,
+) -> Result<RecoveryOutcome> {
+    if session.recovery_capability() == RecoveryCapability::Unsupported {
+        return Err(crate::error::RealtimeError::config(
+            "Recovery is unsupported for this session",
+        ));
+    }
+
+    let deadline_instant = tokio::time::Instant::now() + policy.deadline;
+    let mut attempt = 1;
+    let mut delay = policy.initial_delay;
+
+    loop {
+        // Enforce the absolute whole-operation deadline
+        let now = tokio::time::Instant::now();
+        if now >= deadline_instant {
+            return Err(crate::error::RealtimeError::Timeout(format!(
+                "Session recovery timed out after reaching deadline of {:?}",
+                policy.deadline
+            )));
+        }
+
+        let time_remaining = deadline_instant - now;
+
+        tracing::info!(
+            attempt,
+            max_attempts = policy.max_attempts.get(),
+            "Attempting session recovery"
+        );
+
+        // Perform one transactional recovery attempt within the remaining budget
+        let outcome_result =
+            tokio::time::timeout(time_remaining, session.recover_once(config)).await;
+
+        match outcome_result {
+            Ok(Ok(outcome)) => {
+                tracing::info!(
+                    attempt,
+                    continuity = ?outcome.continuity,
+                    "Session recovery succeeded"
+                );
+                return Ok(outcome);
+            }
+            Ok(Err(err)) => {
+                // Check if the error is fatal or retryable
+                if session.recovery_disposition(&err) == RecoveryDisposition::Fatal {
+                    tracing::error!(attempt, error = %err, "Fatal error encountered; aborting recovery");
+                    return Err(err);
+                }
+
+                if attempt >= policy.max_attempts.get() {
+                    tracing::error!(
+                        attempt,
+                        error = %err,
+                        "Recovery attempts exhausted (max_attempts = {})",
+                        policy.max_attempts.get()
+                    );
+                    return Err(err);
+                }
+
+                tracing::warn!(
+                    attempt,
+                    error = %err,
+                    next_delay = ?delay,
+                    "Recovery attempt failed; sleeping before retry"
+                );
+
+                attempt += 1;
+
+                // Sleep for the delay, but don't sleep past the deadline
+                let sleep_now = tokio::time::Instant::now();
+                if sleep_now >= deadline_instant {
+                    return Err(crate::error::RealtimeError::Timeout(
+                        "Session recovery timed out during backoff sleep".to_string(),
+                    ));
+                }
+                let sleep_remaining = deadline_instant - sleep_now;
+                let actual_sleep = delay.min(sleep_remaining);
+
+                tokio::time::sleep(actual_sleep).await;
+
+                // Update delay with exponential backoff
+                delay = (delay * 2).min(policy.max_delay);
+            }
+            Err(_) => {
+                // Timeout occurred during recover_once
+                tracing::error!(attempt, "Recovery attempt timed out");
+                return Err(crate::error::RealtimeError::Timeout(format!(
+                    "Session recovery timed out after reaching deadline of {:?}",
+                    policy.deadline
+                )));
+            }
+        }
+    }
+}
 
 #[cfg(test)]
 mod disconnect_reason_tests {

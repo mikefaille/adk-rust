@@ -702,40 +702,29 @@ impl RealtimeRunner {
         new_config: crate::config::RealtimeConfig,
         bridge_message: Option<String>,
     ) -> Result<()> {
-        tracing::warn!("Executing transport resumption with new configuration.");
+        tracing::warn!(
+            "Executing transport resumption with new configuration via shared recovery primitive."
+        );
 
-        // 1. Extract the old session safely under the write lock.
-        let old_session = {
-            let mut write_guard = self.session.write().await;
-            write_guard.take()
+        let session = self.session_handle().await?;
+
+        // Define a low-latency, 1-attempt policy for context-driven rebind
+        let policy = crate::session::RecoveryPolicy {
+            max_attempts: std::num::NonZeroU32::new(1).unwrap(),
+            deadline: std::time::Duration::from_secs(10),
+            initial_delay: std::time::Duration::from_millis(50),
+            max_delay: std::time::Duration::from_millis(200),
         };
 
-        // 2. Explicitly tear down the old WebSocket connection to release upstream resources.
-        // Do this WITHOUT holding the lock across `.await`.
-        if let Some(session) = old_session
-            && let Err(e) = session.close().await
-        {
-            tracing::warn!("Failed to cleanly close old session during resumption: {}", e);
-        }
+        // Perform the recovery/rebind using the shared primitive!
+        crate::session::recover_session(session.as_ref(), &new_config, &policy).await?;
 
-        // 3. Establish a brand new connection using the provider-agnostic factory interface.
-        // If the provider supports resumption natively (like Gemini), the `new_config`
-        // payload already contains the cached `resumeToken`.
-        let new_session = self.model.connect(new_config).await?;
-
-        // 4. Overwrite the active session pointer with the newly connected transport.
-        {
-            let mut write_guard = self.session.write().await;
-            *write_guard = Some(new_session.into());
-        }
-
-        // 5. If the orchestrator provided a bridge message (e.g. to explain the domain shift),
-        // safely inject it into the new connection's context window.
+        // If the orchestrator provided a bridge message, safely inject it
         if let Some(msg) = bridge_message {
             self.inject_bridge_message(msg).await?;
         }
 
-        tracing::info!("Resumption complete. New transport established.");
+        tracing::info!("Resumption/rebind complete.");
         Ok(())
     }
 
@@ -851,13 +840,14 @@ impl RealtimeRunner {
         }
     }
 
-    /// Perform a sub-second TLS/WebSocket reconnect with exponential backoff on the inner session.
-    pub async fn reconnect_with_backoff(
+    /// Perform a session recovery using the shared orchestrator with the specified policy.
+    pub async fn recover(
         &self,
-        options: crate::session::ReconnectOptions,
-    ) -> Result<()> {
+        policy: &crate::session::RecoveryPolicy,
+    ) -> Result<crate::session::RecoveryOutcome> {
         let session = self.session_handle().await?;
-        session.reconnect_with_backoff(options).await
+        let config = self.config.read().await.clone();
+        crate::session::recover_session(session.as_ref(), &config, policy).await
     }
 
     pub async fn next_event(&self) -> Option<Result<ServerEvent>> {

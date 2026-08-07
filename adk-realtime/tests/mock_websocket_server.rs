@@ -4,7 +4,7 @@ use adk_realtime::RealtimeSession;
 use adk_realtime::error::RealtimeError;
 use adk_realtime::events::ServerEvent;
 use adk_realtime::gemini::normalize_model_id;
-use adk_realtime::session::{RealtimeAvailability, ReconnectOptions};
+use adk_realtime::session::{RealtimeAvailability, RecoveryPolicy};
 use serde_json::json;
 
 #[tokio::test]
@@ -86,11 +86,9 @@ async fn test_mock_resumption_token_alignment_and_lifecycle_transitions() {
 
 #[tokio::test]
 async fn test_reconnect_options_defaults() {
-    let opts = ReconnectOptions::default();
-    assert_eq!(opts.max_retries, 3);
-    assert_eq!(opts.backoff_budget_ms, 3000);
-    assert!(opts.ipv4_fallback);
-    assert!(opts.resume_handle.is_none());
+    let opts = RecoveryPolicy::default();
+    assert_eq!(opts.max_attempts.get(), 3);
+    assert_eq!(opts.deadline, std::time::Duration::from_secs(10));
 }
 
 #[tokio::test]
@@ -211,20 +209,17 @@ async fn test_mock_websocket_server_e2e_reconnect_resumption() {
     // Verify last_resume_handle is cached on session
     assert_eq!(session.last_resume_handle().as_deref(), Some("mock_resume_handle_e2e_123"));
 
-    // 4. Perform reconnect_with_backoff to mock server
-    let reconnect_opts = ReconnectOptions {
-        max_retries: 3,
-        backoff_budget_ms: 3000,
-        ipv4_fallback: true,
-        resume_handle: None,
+    // 4. Perform recover_session to mock server
+    let policy = RecoveryPolicy {
+        max_attempts: std::num::NonZeroU32::new(3).unwrap(),
+        deadline: std::time::Duration::from_secs(3),
+        initial_delay: std::time::Duration::from_millis(50),
+        max_delay: std::time::Duration::from_millis(200),
     };
 
-    let result = session.reconnect_with_backoff(reconnect_opts).await;
-    assert!(
-        result.is_ok(),
-        "reconnect_with_backoff should succeed against mock server: {:?}",
-        result
-    );
+    let config = adk_realtime::config::RealtimeConfig::default();
+    let result = adk_realtime::session::recover_session(&session, &config, &policy).await;
+    assert!(result.is_ok(), "recover_session should succeed against mock server: {:?}", result);
 
     server_task.await.unwrap();
 }

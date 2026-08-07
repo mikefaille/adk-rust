@@ -3,7 +3,7 @@
 use adk_realtime::error::RealtimeError;
 use adk_realtime::events::ServerEvent;
 use adk_realtime::gemini::normalize_model_id;
-use adk_realtime::session::{RealtimeAvailability, ReconnectOptions};
+use adk_realtime::session::{RealtimeAvailability, RecoveryPolicy};
 use serde_json::json;
 
 #[tokio::test]
@@ -121,22 +121,20 @@ async fn test_challenger_realtime_availability_transitions() {
 
 #[tokio::test]
 async fn test_challenger_reconnect_options_invariants() {
-    let opts = ReconnectOptions::default();
-    assert_eq!(opts.max_retries, 3);
-    assert_eq!(opts.backoff_budget_ms, 3000);
-    assert!(opts.ipv4_fallback);
-    assert!(opts.resume_handle.is_none());
+    let opts = RecoveryPolicy::default();
+    assert_eq!(opts.max_attempts.get(), 3);
+    assert_eq!(opts.deadline, std::time::Duration::from_secs(10));
 
-    let custom = ReconnectOptions {
-        max_retries: 5,
-        backoff_budget_ms: 5000,
-        ipv4_fallback: false,
-        resume_handle: Some("token_123".to_string()),
+    let custom = RecoveryPolicy {
+        max_attempts: std::num::NonZeroU32::new(5).unwrap(),
+        deadline: std::time::Duration::from_secs(5),
+        initial_delay: std::time::Duration::from_millis(100),
+        max_delay: std::time::Duration::from_millis(500),
     };
-    assert_eq!(custom.max_retries, 5);
-    assert_eq!(custom.backoff_budget_ms, 5000);
-    assert!(!custom.ipv4_fallback);
-    assert_eq!(custom.resume_handle.as_deref(), Some("token_123"));
+    assert_eq!(custom.max_attempts.get(), 5);
+    assert_eq!(custom.deadline, std::time::Duration::from_secs(5));
+    assert_eq!(custom.initial_delay, std::time::Duration::from_millis(100));
+    assert_eq!(custom.max_delay, std::time::Duration::from_millis(500));
 }
 
 #[tokio::test]
