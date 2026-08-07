@@ -982,32 +982,33 @@ impl GeminiRealtimeSession {
     }
 
     /// Receive and parse the next message.
+    ///
+    /// Loops on the underlying socket when a frame translates to zero
+    /// caller-visible events (`goAway`, a non-resumable
+    /// `sessionResumptionUpdate` — see `translate_event_logged`) instead of
+    /// returning `None`. `None` from this function is the sole signal every
+    /// caller (`RealtimeRunner`, the data-plane bridge) reads as end of
+    /// stream; before this fix an empty-vec translation and a genuinely
+    /// closed transport were indistinguishable, so a harmless warning frame
+    /// could end a live call. Each loop iteration still consumes exactly one
+    /// real socket frame via `receiver.next().await`, so this cannot spin —
+    /// it terminates the moment the socket yields a frame that translates to
+    /// a real event, an error, a Close, or is itself exhausted (`None`),
+    /// all of which are returned immediately and unchanged from before.
     async fn receive_raw(&self) -> Option<Result<ServerEvent>> {
-        // First check if there's anything in the queue
-        {
-            let mut queue = self.event_queue.lock().await;
-            if let Some(event) = queue.pop_front() {
-                return Some(Ok(event));
-            }
-        }
-
-        let mut receiver = self.receiver.lock().await;
-
-        match receiver.next().await {
-            Some(Ok(Message::Text(text))) => match self.translate_gemini_event(&text) {
-                Ok(events) => {
-                    let mut queue = self.event_queue.lock().await;
-                    let mut iter = events.into_iter();
-                    let first = iter.next();
-                    for event in iter {
-                        queue.push_back(event);
-                    }
-                    first.map(Ok)
+        loop {
+            // First check if there's anything in the queue
+            {
+                let mut queue = self.event_queue.lock().await;
+                if let Some(event) = queue.pop_front() {
+                    return Some(Ok(event));
                 }
-                Err(e) => Some(Err(e)),
-            },
-            Some(Ok(Message::Binary(bytes))) => match String::from_utf8(bytes.to_vec()) {
-                Ok(text) => match self.translate_gemini_event(&text) {
+            }
+
+            let mut receiver = self.receiver.lock().await;
+
+            match receiver.next().await {
+                Some(Ok(Message::Text(text))) => match self.translate_gemini_event(&text) {
                     Ok(events) => {
                         let mut queue = self.event_queue.lock().await;
                         let mut iter = events.into_iter();
@@ -1015,75 +1016,107 @@ impl GeminiRealtimeSession {
                         for event in iter {
                             queue.push_back(event);
                         }
-                        first.map(Ok)
+                        drop(queue);
+                        drop(receiver);
+                        match first {
+                            Some(event) => return Some(Ok(event)),
+                            // Translation legitimately produced no event for
+                            // this frame. Fall through to the next loop
+                            // iteration and read another socket frame rather
+                            // than reporting end-of-stream.
+                            None => continue,
+                        }
                     }
-                    Err(e) => Some(Err(e)),
+                    Err(e) => return Some(Err(e)),
                 },
-                Err(e) => Some(Err(RealtimeError::protocol(format!(
-                    "Invalid UTF-8 in binary message: {}",
-                    e
-                )))),
-            },
-            Some(Ok(Message::Close(close_frame))) => {
-                // Structured, because a server-initiated close and a dead
-                // transport both surface downstream as the same `None` and get
-                // the same terminal reason. The code and reason are the only
-                // thing distinguishing "the provider aborted an idle session"
-                // from "the network dropped", and `{:?}` on the whole frame
-                // buries both inside a Debug string nothing can filter on.
-                tracing::error!(
-                    close_code =
-                        close_frame.as_ref().map(|frame| u16::from(frame.code)).unwrap_or_default(),
-                    close_reason =
-                        close_frame.as_ref().map(|frame| frame.reason.as_ref()).unwrap_or(""),
-                    "WebSocket closed by server"
-                );
-                let disconnect = crate::session::DisconnectReason {
-                    code: close_frame.as_ref().map(|frame| u16::from(frame.code)),
-                    reason: close_frame
-                        .as_ref()
-                        .map(|frame| frame.reason.to_string())
-                        .unwrap_or_default(),
-                };
-                *self.last_disconnect.lock() = Some(disconnect.clone());
-                self.connected.store(false, Ordering::SeqCst);
+                Some(Ok(Message::Binary(bytes))) => match String::from_utf8(bytes.to_vec()) {
+                    Ok(text) => match self.translate_gemini_event(&text) {
+                        Ok(events) => {
+                            let mut queue = self.event_queue.lock().await;
+                            let mut iter = events.into_iter();
+                            let first = iter.next();
+                            for event in iter {
+                                queue.push_back(event);
+                            }
+                            drop(queue);
+                            drop(receiver);
+                            match first {
+                                Some(event) => return Some(Ok(event)),
+                                None => continue,
+                            }
+                        }
+                        Err(e) => return Some(Err(e)),
+                    },
+                    Err(e) => {
+                        return Some(Err(RealtimeError::protocol(format!(
+                            "Invalid UTF-8 in binary message: {}",
+                            e
+                        ))));
+                    }
+                },
+                Some(Ok(Message::Close(close_frame))) => {
+                    // Structured, because a server-initiated close and a dead
+                    // transport both surface downstream as the same `None` and get
+                    // the same terminal reason. The code and reason are the only
+                    // thing distinguishing "the provider aborted an idle session"
+                    // from "the network dropped", and `{:?}` on the whole frame
+                    // buries both inside a Debug string nothing can filter on.
+                    tracing::error!(
+                        close_code = close_frame
+                            .as_ref()
+                            .map(|frame| u16::from(frame.code))
+                            .unwrap_or_default(),
+                        close_reason =
+                            close_frame.as_ref().map(|frame| frame.reason.as_ref()).unwrap_or(""),
+                        "WebSocket closed by server"
+                    );
+                    let disconnect = crate::session::DisconnectReason {
+                        code: close_frame.as_ref().map(|frame| u16::from(frame.code)),
+                        reason: close_frame
+                            .as_ref()
+                            .map(|frame| frame.reason.to_string())
+                            .unwrap_or_default(),
+                    };
+                    *self.last_disconnect.lock() = Some(disconnect.clone());
+                    self.connected.store(false, Ordering::SeqCst);
 
-                // The defect this replaces: every server-sent Close returned
-                // `None`, which a polling caller cannot tell from "the stream
-                // is finished". Reconnect only ever ran on the `Err` path, so
-                // a provider hang-up could not reach it — and a third of pilot
-                // calls died that way without one reconnect being attempted.
-                //
-                // `None` is still returned for a close the policy calls
-                // terminal, so a genuinely finished or rejected stream is not
-                // turned into a spurious retry. End-of-stream from an
-                // exhausted receiver keeps its own `None` arm below.
-                if self.close_is_resumable(disconnect.code) {
-                    tracing::warn!(
-                        close_code = disconnect.code.unwrap_or_default(),
-                        "Server close judged resumable; surfacing as an error so the caller can reconnect"
-                    );
-                    Some(Err(RealtimeError::ServerClosed(disconnect)))
-                } else {
-                    tracing::info!(
-                        close_code = disconnect.code.unwrap_or_default(),
-                        established = self.session_established.load(Ordering::SeqCst),
-                        "Server close judged terminal; reporting end of stream"
-                    );
-                    None
+                    // The defect this replaces: every server-sent Close returned
+                    // `None`, which a polling caller cannot tell from "the stream
+                    // is finished". Reconnect only ever ran on the `Err` path, so
+                    // a provider hang-up could not reach it — and a third of pilot
+                    // calls died that way without one reconnect being attempted.
+                    //
+                    // `None` is still returned for a close the policy calls
+                    // terminal, so a genuinely finished or rejected stream is not
+                    // turned into a spurious retry. End-of-stream from an
+                    // exhausted receiver keeps its own `None` arm below.
+                    if self.close_is_resumable(disconnect.code) {
+                        tracing::warn!(
+                            close_code = disconnect.code.unwrap_or_default(),
+                            "Server close judged resumable; surfacing as an error so the caller can reconnect"
+                        );
+                        return Some(Err(RealtimeError::ServerClosed(disconnect)));
+                    } else {
+                        tracing::info!(
+                            close_code = disconnect.code.unwrap_or_default(),
+                            established = self.session_established.load(Ordering::SeqCst),
+                            "Server close judged terminal; reporting end of stream"
+                        );
+                        return None;
+                    }
                 }
-            }
-            Some(Ok(msg)) => {
-                tracing::warn!("Received unhandled tungstenite message: {:?}", msg);
-                Some(Ok(ServerEvent::Unknown))
-            }
-            Some(Err(e)) => {
-                self.connected.store(false, Ordering::SeqCst);
-                Some(Err(classify_receive_error(e)))
-            }
-            None => {
-                self.connected.store(false, Ordering::SeqCst);
-                None
+                Some(Ok(msg)) => {
+                    tracing::warn!("Received unhandled tungstenite message: {:?}", msg);
+                    return Some(Ok(ServerEvent::Unknown));
+                }
+                Some(Err(e)) => {
+                    self.connected.store(false, Ordering::SeqCst);
+                    return Some(Err(classify_receive_error(e)));
+                }
+                None => {
+                    self.connected.store(false, Ordering::SeqCst);
+                    return None;
+                }
             }
         }
     }

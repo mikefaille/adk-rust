@@ -284,3 +284,204 @@ async fn test_mock_websocket_server_e2e_reconnect_resumption() {
 
     server_task.await.unwrap();
 }
+
+/// Regression test for the empty-vec-means-end-of-stream defect fixed
+/// alongside commit `146259fec`. `translate_event_logged`'s `goAway` arm
+/// returns `Ok(vec![])` — legitimately, since a goAway frame carries no
+/// caller-visible event — but `receive_raw` used to read `first.map(Ok)` on
+/// that empty vec and hand the caller a bare `None`, which every caller in
+/// this codebase (`RealtimeRunner`, the data-plane bridge) treats as the
+/// transport having closed. A `goAway` is a documented pre-close *warning*,
+/// not a close; it must not end a live call on its own.
+///
+/// This asserts at the `next_event()` level, which is `receive_raw` with no
+/// intervening logic (`GeminiRealtimeSession::next_event` is a direct
+/// passthrough) — the layer the bug actually lived in, not
+/// `translate_event_static`, which already asserts (correctly) that `goAway`
+/// alone translates to zero events.
+#[tokio::test]
+async fn test_go_away_frame_does_not_end_the_stream() {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio::net::TcpListener;
+    use tokio_tungstenite::accept_async;
+    use tokio_tungstenite::tungstenite::Message;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let local_addr = listener.local_addr().unwrap();
+    let ws_url = format!("ws://{}", local_addr);
+
+    let server_task = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut ws = accept_async(stream).await.unwrap();
+
+        // Consume the client's setup frame.
+        let _ = ws.next().await;
+
+        ws.send(Message::Text(json!({ "setupComplete": {} }).to_string().into()))
+            .await
+            .unwrap();
+
+        // Carries no caller-visible event: translates to `Ok(vec![])`.
+        ws.send(Message::Text(
+            json!({ "goAway": { "timeLeft": "10s" } }).to_string().into(),
+        ))
+        .await
+        .unwrap();
+
+        // A real event immediately behind it on the wire. If `receive_raw`
+        // treated `goAway` as end-of-stream, the client's second
+        // `next_event()` call returns `None` and never observes this frame.
+        ws.send(Message::Text(
+            json!({
+                "sessionResumptionUpdate": {
+                    "resumable": true,
+                    "newHandle": "post_go_away_handle"
+                }
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+
+        // Give the client a beat to read both frames before the socket goes away.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    });
+
+    let (ws_client, _) = tokio_tungstenite::connect_async(&ws_url).await.unwrap();
+    let (mut sink, source) = ws_client.split();
+
+    let setup_msg = json!({
+        "setup": { "model": "models/gemini-3.1-flash-live-preview" }
+    })
+    .to_string();
+    sink.send(Message::Text(setup_msg.into())).await.unwrap();
+
+    let (tx, rx) = tokio::sync::mpsc::channel(256);
+    let writer_task = tokio::spawn(async move {
+        let mut rx = rx;
+        let mut sink = sink;
+        while let Some(msg) = rx.recv().await {
+            if sink.send(msg).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    let session = adk_realtime::gemini::GeminiRealtimeSession::new_for_test(
+        "test_go_away_session".into(),
+        ws_url.clone(),
+        "models/gemini-3.1-flash-live-preview".into(),
+        tx,
+        writer_task,
+        source,
+        adk_realtime::config::RealtimeConfig::default(),
+    );
+
+    let event1 = session.next_event().await;
+    assert!(
+        matches!(event1, Some(Ok(ServerEvent::SessionCreated { .. }))),
+        "expected SessionCreated first, got {event1:?}"
+    );
+
+    // The regression assertion: a single `next_event()` call must
+    // transparently skip the interleaved `goAway` frame and surface the
+    // event that followed it on the wire, not `None`.
+    let event2 = session.next_event().await;
+    assert!(
+        matches!(event2, Some(Ok(ServerEvent::SessionUpdated { .. }))),
+        "goAway must not end the stream: expected the event that followed it, got {event2:?}"
+    );
+
+    server_task.await.unwrap();
+}
+
+/// Regression test, same root cause as `test_go_away_frame_does_not_end_the_stream`.
+/// `translate_event_logged`'s `sessionResumptionUpdate` arm also returns
+/// `Ok(vec![])` when the server reports `resumable: false` — a state Google
+/// specifies ("no safe resume point right now"), not an error. Before the
+/// fix that frame alone ended a live call the same way `goAway` did.
+#[tokio::test]
+async fn test_non_resumable_session_resumption_update_does_not_end_the_stream() {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio::net::TcpListener;
+    use tokio_tungstenite::accept_async;
+    use tokio_tungstenite::tungstenite::Message;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let local_addr = listener.local_addr().unwrap();
+    let ws_url = format!("ws://{}", local_addr);
+
+    let server_task = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut ws = accept_async(stream).await.unwrap();
+
+        let _ = ws.next().await;
+
+        ws.send(Message::Text(json!({ "setupComplete": {} }).to_string().into()))
+            .await
+            .unwrap();
+
+        // `resumable: false`, no handle: translates to `Ok(vec![])`.
+        ws.send(Message::Text(
+            json!({ "sessionResumptionUpdate": { "resumable": false } }).to_string().into(),
+        ))
+        .await
+        .unwrap();
+
+        // A real event immediately behind it on the wire.
+        ws.send(Message::Text(
+            json!({ "serverContent": { "turnComplete": true } }).to_string().into(),
+        ))
+        .await
+        .unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    });
+
+    let (ws_client, _) = tokio_tungstenite::connect_async(&ws_url).await.unwrap();
+    let (mut sink, source) = ws_client.split();
+
+    let setup_msg = json!({
+        "setup": { "model": "models/gemini-3.1-flash-live-preview" }
+    })
+    .to_string();
+    sink.send(Message::Text(setup_msg.into())).await.unwrap();
+
+    let (tx, rx) = tokio::sync::mpsc::channel(256);
+    let writer_task = tokio::spawn(async move {
+        let mut rx = rx;
+        let mut sink = sink;
+        while let Some(msg) = rx.recv().await {
+            if sink.send(msg).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    let session = adk_realtime::gemini::GeminiRealtimeSession::new_for_test(
+        "test_non_resumable_session_resumption_update".into(),
+        ws_url.clone(),
+        "models/gemini-3.1-flash-live-preview".into(),
+        tx,
+        writer_task,
+        source,
+        adk_realtime::config::RealtimeConfig::default(),
+    );
+
+    let event1 = session.next_event().await;
+    assert!(
+        matches!(event1, Some(Ok(ServerEvent::SessionCreated { .. }))),
+        "expected SessionCreated first, got {event1:?}"
+    );
+
+    // The regression assertion: a `resumable: false` sessionResumptionUpdate
+    // must not surface as `None`.
+    let event2 = session.next_event().await;
+    assert!(
+        matches!(event2, Some(Ok(ServerEvent::ResponseDone { .. }))),
+        "a non-resumable sessionResumptionUpdate must not end the stream: expected the event that followed it, got {event2:?}"
+    );
+
+    server_task.await.unwrap();
+}
