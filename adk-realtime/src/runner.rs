@@ -851,13 +851,14 @@ impl RealtimeRunner {
         }
     }
 
-    /// Perform a sub-second TLS/WebSocket reconnect with exponential backoff on the inner session.
-    pub async fn reconnect_with_backoff(
+    /// Perform session recovery according to the given policy.
+    pub async fn recover(
         &self,
-        options: crate::session::ReconnectOptions,
-    ) -> Result<()> {
+        policy: &crate::session::RecoveryPolicy,
+    ) -> Result<crate::session::RecoveryOutcome> {
         let session = self.session_handle().await?;
-        session.reconnect_with_backoff(options).await
+        let config = self.config.read().await.clone();
+        crate::session::recover_session(session.as_ref(), policy, &config).await
     }
 
     pub async fn next_event(&self) -> Option<Result<ServerEvent>> {

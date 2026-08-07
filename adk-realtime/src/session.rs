@@ -1,7 +1,7 @@
 //! Core RealtimeSession trait definition.
 
 use crate::audio::AudioChunk;
-use crate::error::Result;
+use crate::error::{RealtimeError, Result};
 use crate::events::{ClientEvent, ServerEvent, ToolResponse};
 use async_trait::async_trait;
 use futures::Stream;
@@ -85,19 +85,100 @@ pub enum RealtimeAvailability {
     Teardown,
 }
 
-/// Configuration options for session reconnect with exponential backoff.
-#[derive(Debug, Clone)]
-pub struct ReconnectOptions {
-    pub max_retries: u32,
-    pub backoff_budget_ms: u64,
-    pub ipv4_fallback: bool,
-    pub resume_handle: Option<String>,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecoveryCapability {
+    Unsupported,
+    Reconnect,
+    Resume,
 }
 
-impl Default for ReconnectOptions {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecoveryContinuity {
+    Reconnected,
+    Resumed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecoveryDisposition {
+    Retryable,
+    Fatal,
+}
+
+#[derive(Debug, Clone)]
+pub struct RecoveryPolicy {
+    pub max_attempts: std::num::NonZeroU32,
+    pub deadline: std::time::Duration,
+    pub initial_delay: std::time::Duration,
+    pub max_delay: std::time::Duration,
+}
+
+impl Default for RecoveryPolicy {
     fn default() -> Self {
-        Self { max_retries: 3, backoff_budget_ms: 3000, ipv4_fallback: true, resume_handle: None }
+        Self {
+            max_attempts: std::num::NonZeroU32::new(3).unwrap(),
+            deadline: std::time::Duration::from_secs(5),
+            initial_delay: std::time::Duration::from_millis(50),
+            max_delay: std::time::Duration::from_millis(1000),
+        }
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct RecoveryOutcome {
+    pub continuity: RecoveryContinuity,
+}
+
+/// Helper to orchestrate session recovery with exponential backoff and absolute timeout.
+pub async fn recover_session(
+    session: &dyn RealtimeSession,
+    policy: &RecoveryPolicy,
+    config: &crate::config::RealtimeConfig,
+) -> Result<RecoveryOutcome> {
+    let capability = session.recovery_capability();
+    if capability == RecoveryCapability::Unsupported {
+        return Err(crate::error::RealtimeError::config("Session does not support recovery"));
+    }
+
+    tokio::time::timeout(policy.deadline, async {
+        let mut delay = policy.initial_delay;
+        let mut attempt = 0;
+
+        loop {
+            attempt += 1;
+            session.set_availability(RealtimeAvailability::Reconnecting { epoch: attempt as u64 });
+
+            match session.recover_once(config).await {
+                Ok(outcome) => {
+                    session.set_availability(RealtimeAvailability::Connected);
+                    return Ok(outcome);
+                }
+                Err(err) => {
+                    let disposition = session.recovery_disposition(&err);
+                    if disposition == RecoveryDisposition::Fatal
+                        || attempt >= policy.max_attempts.get()
+                    {
+                        session.set_availability(RealtimeAvailability::Exhausted);
+                        return Err(err);
+                    }
+
+                    tracing::warn!(
+                        attempt,
+                        error = %err,
+                        delay_ms = delay.as_millis(),
+                        "Recovery attempt failed, retrying after delay..."
+                    );
+
+                    tokio::time::sleep(delay).await;
+                    delay = (delay * 2).min(policy.max_delay);
+                }
+            }
+        }
+    })
+    .await
+    .map_err(|_| {
+        session.set_availability(RealtimeAvailability::Exhausted);
+        crate::error::RealtimeError::connection("Recovery timed out")
+    })?
 }
 
 #[async_trait]
@@ -117,12 +198,26 @@ pub trait RealtimeSession: Send + Sync {
         }
     }
 
-    /// Perform a sub-second TLS/WebSocket reconnect with exponential backoff.
-    async fn reconnect_with_backoff(&self, _options: ReconnectOptions) -> Result<()> {
-        Err(crate::error::RealtimeError::config(
-            "reconnect_with_backoff not implemented for this session",
-        ))
+    /// Get the recovery capability.
+    fn recovery_capability(&self) -> RecoveryCapability {
+        RecoveryCapability::Unsupported
     }
+
+    /// Check the disposition of a runtime error.
+    fn recovery_disposition(&self, _error: &RealtimeError) -> RecoveryDisposition {
+        RecoveryDisposition::Fatal
+    }
+
+    /// Perform a single recovery attempt.
+    async fn recover_once(
+        &self,
+        _config: &crate::config::RealtimeConfig,
+    ) -> Result<RecoveryOutcome> {
+        Err(crate::error::RealtimeError::config("recover_once not supported by this session"))
+    }
+
+    /// Set/update the session's availability state (used by the orchestrator).
+    fn set_availability(&self, _availability: RealtimeAvailability) {}
 
     /// The audio format this provider emits in `ServerEvent::AudioDelta`.
     ///
