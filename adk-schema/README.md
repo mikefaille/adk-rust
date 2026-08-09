@@ -6,6 +6,10 @@ Canonical JSON Schema documents and validation for ADK — bounded ingestion, co
 [![Documentation](https://docs.rs/adk-schema/badge.svg)](https://docs.rs/adk-schema)
 [![License](https://img.shields.io/crates/l/adk-schema.svg)](LICENSE)
 
+> **Project provenance and non-affiliation**
+>
+> `adk-schema` is an independent extension maintained in this fork of [ADK-Rust](https://github.com/zavora-ai/adk-rust). It is not an upstream ADK-Rust crate and is not maintained, sponsored, or endorsed by Zavora Technologies Ltd. or Google. References to ADK-Rust, Google, and Agent Development Kit are descriptive and identify the ecosystem and compatibility context only.
+
 ## Overview
 
 `adk-schema` owns provider-neutral Draft 2020-12 schema documents for the [ADK-Rust](https://github.com/zavora-ai/adk-rust) framework:
@@ -343,4 +347,6 @@ In complex agent workflows (e.g. Zenith call confirmation nodes), tool declarati
 
 ## License
 
-Licensed under the same terms as the ADK-Rust workspace. See [LICENSE](LICENSE).
+`adk-schema` is distributed under the Apache License 2.0, consistent with the ADK-Rust workspace. See [LICENSE](LICENSE).
+
+The license applies to the source code and does not grant rights to third-party names or branding. ADK-Rust, Google, and Agent Development Kit are referenced only to describe project provenance, compatibility, and ecosystem context; no affiliation, sponsorship, or endorsement is implied.
