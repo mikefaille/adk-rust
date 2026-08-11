@@ -1,44 +1,225 @@
 # adk-schema
 
-Canonical JSON Schema documents and validation for ADK — bounded ingestion, compile-time input/output roles, and content-addressed identity.
+A provider-neutral JSON Schema contract layer for LLM applications.
+
+`adk-schema` helps an application define structured-data rules once, progressively fulfill those rules through an interaction, adapt them to different LLM provider dialects, and validate the final result against the original contract.
 
 [![Crates.io](https://img.shields.io/crates/v/adk-schema.svg)](https://crates.io/crates/adk-schema)
 [![Documentation](https://docs.rs/adk-schema/badge.svg)](https://docs.rs/adk-schema)
 [![License](https://img.shields.io/crates/l/adk-schema.svg)](LICENSE)
 
-## Overview
+> **Project provenance and non-affiliation**
+>
+> `adk-schema` is an independent extension maintained in this fork of [ADK-Rust](https://github.com/zavora-ai/adk-rust). It is not an upstream ADK-Rust crate and is not maintained, sponsored, or endorsed by Zavora Technologies Ltd. or Google. References to ADK-Rust, Google, and Agent Development Kit are descriptive and identify the ecosystem and compatibility context only.
 
-`adk-schema` owns provider-neutral Draft 2020-12 schema documents for the [ADK-Rust](https://github.com/zavora-ai/adk-rust) framework:
+## Why this exists
 
-- **`SchemaDocument<Input>` / `SchemaDocument<Output>`** — input and output schemas are distinct types, so passing one where the other belongs fails to compile.
-- **Bounded ingestion** — source bytes, canonical bytes, depth, node count, and reference count are all capped, because schemas arrive from remote tool servers as well as from local code.
-- **Canonical bytes and a stable digest** — key order and integral-float spelling do not change a schema's identity.
-- **Local `$ref` only** — external file and network references are rejected, not resolved.
-- **Optional Schemars generation** — derive a schema from a Rust type, deserialize direction for inputs and serialize direction for outputs.
-- **Optional runtime validation** — compile once, validate many, with instance values masked out of error messages by default.
+LLM applications increasingly exchange structured data rather than only free-form text. A model may need to collect or produce:
 
-## Installation
+- a caller's name and callback number;
+- an order or reservation;
+- an appointment request;
+- a support case;
+- the arguments for a software tool;
+- a typed structured response.
 
-```toml
-[dependencies]
-adk-schema = "2.0.0"
+Those rules are often described with JSON Schema.
 
-# Generate schemas from Rust types and validate instances against them
-adk-schema = { version = "2.0.0", features = ["schemars", "runtime-validation"] }
+The hard part is not merely validating one finished JSON object. In a real application, the contract has a lifecycle:
+
+```text
+application rules
+      ↓
+canonical schema
+      ↓
+partial information collected over time
+      ↓
+requirements become satisfied, active, or still undecided
+      ↓
+provider-specific schema projection
+      ↓
+model/tool interaction
+      ↓
+final canonical validation
 ```
 
-`default-features = false` builds without any optional dependencies for zero-overhead, pure ingestion environments.
+Two different forms of evolution matter:
 
-| Feature | Description & Utility | Dependencies |
-| --- | --- | --- |
-| *(none)* | Ingestion, canonicalization, SHA-256 digests, reference policy | `serde`, `serde_json`, `sha2` |
-| `schemars` | Derive `SchemaDocument::for_type::<T>()` directly from Rust structs | `schemars` |
-| `runtime-validation` | High-performance zero-allocation instance validation via `compile()` | `jsonschema` |
-| `adapters` | Trait adapters for automatic projection onto provider dialects | `adk-core` (optional) |
+1. **The interaction evolves.** More information is collected, so conditional requirements become satisfied or newly applicable.
+2. **The contract evolves.** A later schema revision may change the rules, so the application needs a stable way to identify which contract it is using.
 
-## Quick Start
+`adk-schema` keeps those concerns explicit instead of treating a provider's wire schema as the application's source of truth.
 
-### Constrain an LLM response with a Rust type
+## A living contract during an interaction
+
+Consider a restaurant assistant. The initial contract may only need to know what kind of request the caller has:
+
+```text
+request_kind = ?
+```
+
+The caller says:
+
+```text
+"I'd like to order two lasagnas."
+```
+
+The application now has:
+
+```text
+request_kind = order
+order_details = two lasagnas
+```
+
+Because this is an order, the schema may activate additional obligations:
+
+```text
+caller_name       required
+callback_number   required
+```
+
+After the caller provides their name, the same contract can answer:
+
+```text
+fulfilled:
+  request_kind
+  order_details
+  caller_name
+
+outstanding:
+  callback_number
+```
+
+The application does not need a separate hard-coded conversational state machine for every combination of fields. The schema describes the obligations, and `adk-schema` can evaluate them against what has been interactively fulfilled so far.
+
+This pattern is business-agnostic. A dentist, restaurant, plumber, consultant, lawyer, accountant, retailer, or support desk can use different schemas while the runtime keeps the same contract-evaluation mechanism.
+
+## Provider-neutral authority
+
+Different model providers support different JSON Schema subsets and dialects. A provider projection can therefore be weaker or stricter than the application's canonical contract.
+
+That creates an important failure mode:
+
+```text
+canonical contract
+      │
+      ├──────────────► runtime still enforces the original rules
+      │
+      ▼
+provider projection
+      │
+      └──────────────► model sees a modified subset of those rules
+```
+
+If the projection drops a meaningful constraint, the model can produce something that looks valid according to the schema it saw but is later rejected by the application.
+
+`adk-schema` preserves the canonical document and treats provider schemas as projections of it. With the optional ADK adapter integration, a projection can be inspected for substantive differences and enforcement gaps instead of silently replacing the original contract.
+
+## Contract evolution
+
+The contract itself may also change over time.
+
+For example:
+
+```text
+revision A
+  order requires name + callback number
+
+revision B
+  delivery orders additionally require a service address
+```
+
+Canonical bytes and a content-derived digest give each canonical schema a stable identity. Equivalent serialization changes do not create a different identity just because object keys were reordered or formatting changed.
+
+`adk-schema` does not decide application migration policy. It provides the stable document identity and structured comparison primitives an application can use to make version changes explicit instead of silently changing the rules underneath an interaction.
+
+## What the crate provides
+
+The public API follows one schema-contract lifecycle rather than a collection of unrelated helpers.
+
+### 1. Safe ingestion
+
+Schemas can come from local Rust types, configuration, remote tool servers, MCP servers, or other runtime sources.
+
+`InputSchema::from_value`, `OutputSchema::from_value`, and `from_json_slice` ingest them under an `IngestionPolicy` that can bound:
+
+- source bytes;
+- canonical bytes;
+- nesting depth;
+- node count;
+- reference count;
+- reference behavior.
+
+External file and network `$ref` values are rejected by the default local-reference policy rather than resolved implicitly.
+
+### 2. Typed input and output roles
+
+`InputSchema` and `OutputSchema` are different Rust types.
+
+That lets APIs distinguish contracts describing data sent **into** a tool/model boundary from contracts describing structured data expected **out of** a model.
+
+Passing one role where the other is required can fail at compile time instead of becoming a runtime convention.
+
+### 3. Canonical identity
+
+Every ingested schema carries:
+
+- a canonical JSON value;
+- canonical UTF-8 bytes;
+- a `SchemaDigest`;
+- structural metrics;
+- its schema role and dialect.
+
+`canonical_bytes()` and `digest()` make schema identity independent of irrelevant serialization differences such as key order or whitespace.
+
+### 4. Interactive requirement analysis
+
+`outstanding()` answers a different question from final validation:
+
+> Given the information collected so far, what does this contract still require?
+
+It understands requirements carried by constructs such as:
+
+- `required`;
+- `dependentRequired`;
+- `dependentSchemas`;
+- nested `allOf`;
+- `if` / `then` / `else` conditions.
+
+When a condition cannot yet be decided, the result reports that state rather than silently waiving the obligation.
+
+### 5. Provider projection and semantic loss
+
+With the optional `adapters` feature, `SchemaAdapterExt::project()` applies an ADK-Rust `SchemaAdapter` while retaining the relationship between the canonical document and the projected document.
+
+A projection can then report:
+
+- structured differences;
+- substantive constraint losses;
+- whether the projection may leave an enforcement gap.
+
+This complements `SchemaAdapter::normalize_schema()`: normalization answers **"what should I send?"**, while projection analysis also asks **"what changed relative to what my application still enforces?"**
+
+### 6. Runtime validation
+
+With the `runtime-validation` feature, a canonical document can be compiled once into a `ValidatedSchemaDocument` and used to validate model- or caller-supplied instances.
+
+Validation issues include JSON pointers to the failing locations. Instance values are masked by default so validation diagnostics do not unnecessarily echo sensitive caller- or model-supplied data.
+
+### 7. Schema inspection and transformation
+
+The crate also exposes supporting operations such as:
+
+- `fields()` for flat field metadata;
+- `diff()` for structured schema comparisons;
+- `flatten_static_all_of()` for static `allOf` composition that can be safely merged;
+- structural metrics for observability and policy decisions.
+
+These operations support the same canonical contract rather than creating parallel schema representations.
+
+## Quick start
+
+### Constrain and validate an LLM response with a Rust type
 
 ```rust
 use adk_schema::OutputSchema;
@@ -53,18 +234,78 @@ struct ReservationDecision {
 }
 
 # fn main() -> Result<(), Box<dyn std::error::Error>> {
-# let model_json = serde_json::json!({"accepted": true, "time": null, "explanation": "ok"});
+# let model_json = serde_json::json!({
+#     "accepted": true,
+#     "time": null,
+#     "explanation": "ok"
+# });
 let schema = OutputSchema::for_type::<ReservationDecision>()?.compile()?;
 
 schema.validate(&model_json)?;
 let decision: ReservationDecision = serde_json::from_value(model_json)?;
+# let _ = decision;
 # Ok(())
 # }
 ```
 
-No separate hand-maintained JSON Schema is needed to constrain and validate the response.
+The Rust type generates the schema and the same contract validates the model's structured result.
 
-### Ingest a schema that arrives at runtime
+### Evaluate what is still owed in a multi-turn interaction
+
+```rust
+use adk_schema::{IngestionPolicy, InputSchema};
+use serde_json::json;
+
+# fn main() -> Result<(), Box<dyn std::error::Error>> {
+let schema = InputSchema::from_value(
+    json!({
+        "type": "object",
+        "properties": {
+            "request_kind": {
+                "type": "string",
+                "enum": ["information", "order"]
+            },
+            "order_details": { "type": "string" },
+            "caller_name": { "type": "string" },
+            "callback_number": { "type": "string" }
+        },
+        "required": ["request_kind"],
+        "allOf": [{
+            "if": {
+                "properties": {
+                    "request_kind": { "const": "order" }
+                },
+                "required": ["request_kind"]
+            },
+            "then": {
+                "required": [
+                    "order_details",
+                    "caller_name",
+                    "callback_number"
+                ]
+            }
+        }]
+    }),
+    &IngestionPolicy::default(),
+)?;
+
+let collected = json!({
+    "request_kind": "order",
+    "order_details": "two lasagnas",
+    "caller_name": "Ada"
+});
+
+let state = schema.outstanding(collected.as_object().unwrap());
+
+assert!(state.missing.contains("callback_number"));
+assert!(!state.is_complete());
+# Ok(())
+# }
+```
+
+The schema remains the source of truth for what the interaction has fulfilled and what it still owes.
+
+### Ingest a schema arriving at runtime
 
 ```rust
 use adk_schema::{IngestionPolicy, InputSchema};
@@ -73,274 +314,155 @@ use adk_schema::{IngestionPolicy, InputSchema};
 let schema = InputSchema::from_value(
     serde_json::json!({
         "type": "object",
-        "properties": { "query": { "type": "string" } },
+        "properties": {
+            "query": { "type": "string" }
+        },
         "required": ["query"]
     }),
     &IngestionPolicy::default(),
 )?;
 
-// Equivalent schemas share an identity regardless of key order or number form.
-println!("{}", schema.digest());
+println!("digest: {}", schema.digest());
+println!("nodes: {}", schema.metrics().node_count);
 # Ok(())
 # }
 ```
 
-### Determine "What To Ask Next" in Multi-Turn Conversations
+### Detect what a provider projection changed
 
 ```rust
-use adk_schema::{IngestionPolicy, InputSchema};
+use adk_schema::SchemaAdapterExt;
 
-# fn main() -> Result<(), Box<dyn std::error::Error>> {
-# let schema = InputSchema::from_value(
-#     serde_json::json!({
-#         "properties": {
-#             "kind": { "type": "string" },
-#             "name": { "type": "string" }
-#         },
-#         "required": ["kind"],
-#         "allOf": [{
-#             "if": { "properties": { "kind": { "const": "order" } }, "required": ["kind"] },
-#             "then": { "required": ["name"] }
-#         }]
-#     }),
-#     &IngestionPolicy::default(),
-# )?;
-let collected = serde_json::json!({ "kind": "order" });
-let collected_obj = collected.as_object().unwrap();
+# fn inspect(
+#     adapter: &impl adk_core::SchemaAdapter,
+#     canonical_schema: &adk_schema::InputSchema,
+#     policy: &adk_schema::IngestionPolicy,
+# ) -> Result<(), Box<dyn std::error::Error>> {
+let projection = adapter.project(canonical_schema, policy)?;
 
-// Evaluate missing obligations (including conditional ones)
-let state = schema.outstanding(collected_obj);
+for loss in projection.substantive_losses() {
+    println!(
+        "pointer={} keyword={} kind={:?}",
+        loss.pointer,
+        loss.keyword,
+        loss.kind
+    );
+}
 
-assert!(!state.is_complete());
-assert!(state.missing.contains("name")); // Asks for caller name because kind=="order"
+if projection.leaves_enforcement_gap() {
+    println!("provider projection may be weaker than canonical enforcement");
+}
 # Ok(())
 # }
 ```
 
-### Control what validation errors reveal
+## Installation
 
-Instance values are masked by default, because the instance is usually caller- or model-supplied:
-
-```rust
-use adk_schema::ValidationOptions;
-
-# fn main() -> Result<(), Box<dyn std::error::Error>> {
-# let schema = adk_schema::InputSchema::from_value(
-#     serde_json::json!({"properties": {"age": {"type": "integer"}}}),
-#     &adk_schema::IngestionPolicy::default(),
-# )?.compile()?;
-# let instance = serde_json::json!({"age": "not a number"});
-// Default: at most 100 issues, values masked.
-let masked = schema.validate(&instance);
-
-// Opt in where the instance is known not to carry user data.
-let verbose = schema.validate_with(
-    &instance,
-    &ValidationOptions { include_instance_values: true, ..Default::default() },
-);
-# let _ = (masked, verbose);
-# Ok(())
-# }
+```toml
+[dependencies]
+adk-schema = "2.0.0"
 ```
 
-Every issue carries the JSON pointer of the failing location either way. `SchemaError::InvalidInstance` reports `truncated` when collection stopped at the limit.
+Generate schemas from Rust types and validate instances:
 
-## Runnable Examples
+```toml
+adk-schema = {
+    version = "2.0.0",
+    features = ["schemars", "runtime-validation"]
+}
+```
 
-`adk-schema` includes executable examples demonstrating real-world agent orchestration and provider loss detection:
+Enable integration with ADK-Rust `SchemaAdapter` implementations:
+
+```toml
+adk-schema = {
+    version = "2.0.0",
+    features = ["adapters"]
+}
+```
+
+| Feature | Purpose | Optional dependency |
+| --- | --- | --- |
+| *(none)* | bounded ingestion, canonicalization, digest, diff, fields, outstanding requirements | none beyond the crate's core dependencies |
+| `schemars` | derive schemas from Rust types | `schemars` |
+| `runtime-validation` | compile and validate JSON instances | `jsonschema` |
+| `adapters` | project canonical schemas through ADK-Rust `SchemaAdapter` implementations | `adk-core` |
+
+## Runnable examples
 
 ```bash
-# 1. Multi-turn conversation state: determining what fields to ask the caller next
+# Multi-turn interaction state: determine what information is still owed
 cargo run -p adk-schema --example what_to_ask_next
 
-# 2. Provider projection loss: detecting what rules an LLM adapter silently stripped
+# Provider projection: report rules removed from the canonical contract
 cargo run -p adk-schema --features adapters --example what_the_provider_dropped
 ```
 
-## Key Public API & Capabilities Reference
+## Production motivation
 
-`adk-schema` exposes a rich set of strongly-typed public methods on `SchemaDocument<R>` (`InputSchema` / `OutputSchema`):
+This abstraction grew out of real downstream failures rather than only API design.
 
-### 1. Ingestion & Document Construction
-- **`InputSchema::from_value(value, &policy)`** / **`OutputSchema::from_value(value, &policy)`**  
-  Ingests raw JSON Schema values into a bounded, canonical document. Validates recursion depth, node count, byte budget, and rejects unsafe external `$ref` pointers.
-- **`SchemaDocument::for_type::<T>()`** *(requires feature `schemars`)*  
-  Generates a compile-time type-safe schema directly from any Rust struct implementing `schemars::JsonSchema`.
+In a Voice Gateway pilot, a Gemini Live provider projection removed constraints that the runtime still enforced. The model was therefore shown a weaker contract than the application used to validate its result, which contributed to a caller-visible repair turn.
 
-### 2. Schema Flattening & Normalization
-- **`schema.flatten_static_all_of()`**  
-  Infallibly flattens top-level static `allOf` composite branches into merged `properties` and `required` arrays. Essential for compatibility with strict models (e.g. Gemini Live, OpenAI Strict) that fail when given `allOf` arrays:
-  ```rust
-  let flattened_schema = input_schema.flatten_static_all_of();
-  ```
-- **`schema.canonical_bytes()`**  
-  Returns canonicalized UTF-8 JSON bytes with deterministic key ordering and standardized numeric representations.
+Keeping the canonical schema separate from the provider projection made that mismatch observable: the projection reported the constraints that had disappeared, while the canonical validator continued to represent the application's actual rules.
 
-### 3. Identity & Diffing
-- **`schema.digest()`**  
-  Computes a 32-byte content-addressed SHA-256 digest (`SchemaDigest`). Equivalent schemas produce identical digests regardless of whitespace, formatting, or key ordering.
-- **`schema_a.diff(&schema_b)`**  
-  Compares two schemas and produces structured diffs (`DifferenceKind`), identifying added/removed constraints, tightened types, or dropped required fields:
-  ```rust
-  let diffs = schema_a.diff(&schema_b);
-  for diff in diffs {
-      println!("Path: {}, Kind: {:?}", diff.path, diff.kind);
-  }
-  ```
+The lesson is broader than that provider-specific incident:
 
-### 4. Compilation & Runtime Validation
-- **`schema.compile()`** *(requires feature `runtime-validation`)*  
-  Compiles the schema document into a high-performance `ValidatedSchemaDocument` for zero-allocation instance validation.
-- **`compiled.validate(&instance)`** / **`compiled.validate_with(&instance, &options)`**  
-  Validates a JSON instance against the compiled schema. Supports value masking (to protect sensitive PII) and custom issue limits.
+> A provider wire schema is a transport representation of a contract, not necessarily the contract itself.
 
-### 5. Field Analysis & Outstanding Requirements
-- **`schema.fields()`**  
-  Extracts a flat list of `FieldEntry` items describing every property path, type, and unconditional requirement:
-  ```rust
-  let fields = schema.fields();
-  for field in fields {
-      println!("Field: {}, Type: {:?}", field.path, field.types);
-  }
-  ```
-- **`schema.outstanding(&present_fields)`**  
-  Calculates unfulfilled required fields given a set of currently provided keys, accounting for conditional `if/then/else` dependencies:
-  ```rust
-  let present = serde_json::json!({ "request_kind": "order" });
-  let state = schema.outstanding(present.as_object().unwrap());
-  println!("Missing: {:?}, Undecided: {:?}", state.missing, state.undecided);
-  ```
+`adk-schema` exists to preserve that distinction.
 
-### 6. Adapter Projection & Loss Detection
-*(requires feature `adapters`)*
-- **`adapter.project(&schema, &policy)`**  
-  Projects a canonical `InputSchema` through a provider adapter and detects dropped constraints:
-  ```rust
-  use adk_schema::SchemaAdapterExt;
-
-  let projection = adapter.project(&canonical_schema, &policy)?;
-  for loss in projection.substantive_losses() {
-      println!("Path: {}, Keyword: {}, Loss: {:?}", loss.pointer, loss.keyword, loss.kind);
-  }
-
-  if projection.leaves_enforcement_gap() {
-      println!("Warning: Provider adapter stripped enforcement rules!");
-  }
-  ```
-
-## Architecture & Design Rationale
-
-### The Core Problem: Multi-LLM Schema Divergence
-
-In multi-provider agent systems, LLMs treat tool parameter specifications and structured output schemas with wildly conflicting constraints:
-
-- **OpenAI Strict Mode**: Demands `additionalProperties: false` on every nested object, exact required arrays, and rejects conditional keywords like `allOf` or `oneOf`.
-- **Anthropic (Claude)**: Requires standard JSON Schema Draft 2020-12, but fails on specific OpenAPI format strings or top-level `$schema` keywords.
-- **Gemini (Studio & Vertex)**: Enforces an **OpenAPI subset** (or `parametersJsonSchema`) with a strict 64-byte tool name limit, rejecting `$schema` and unsupported formats like `int32`.
-- **Moonshot (Kimi)**: Exposes an OpenAI-compatible REST endpoint (`https://api.moonshot.ai/v1`), but enforces tool name length `3..=64` and rejects invalid starting characters.
-
-Without a centralized schema contract, agent frameworks degrade into fragile, ad-hoc `if provider == "gemini"` hacks scattered throughout tool handlers, execution loops, and network transport layers.
-
----
-
-### Design Principles of `adk-schema`
-
-`adk-schema` solves this by introducing a **three-tier schema abstraction**:
+## Architecture
 
 ```text
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                          1. Canonical Domain Schema                         │
-│   adk-schema::InputSchema / OutputSchema (Draft 2020-12 + Digest + Role)    │
-└─────────────────────────────────────────────────────────────────────────────┘
-                                       │
-                                       ▼  (Zero-Copy / Infallible Translation)
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                           2. Pluggable SchemaAdapter                         │
-│    GenericSchemaAdapter  │  GeminiSchemaAdapter  │  KimiSchemaAdapter, etc. │
-└─────────────────────────────────────────────────────────────────────────────┘
-                                       │
-                                       ▼  (Wire Projection)
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                         3. LLM Provider Wire Payload                         │
-│     OpenAI tools  │  Anthropic tool_choice  │  Gemini Live WebSocket        │
-└─────────────────────────────────────────────────────────────────────────────┘
+                     Application / business rules
+                               │
+                               ▼
+                     Canonical SchemaDocument
+                    /          |           \
+                   /           |            \
+                  ▼            ▼             ▼
+        partial interaction   stable       runtime
+             evaluation       identity     validation
+             outstanding()    digest()     compile()
+                  │                            ▲
+                  │                            │
+                  ▼                            │
+           information still owed             │
+                                               │
+                         provider projection   │
+                               │               │
+                               ▼               │
+                        LLM wire contract      │
+                               │               │
+                               ▼               │
+                          model/tool result ───┘
 ```
 
-#### 1. Zero Mandatory Coupling, Modular & Fully Optional
-`adk-schema` sits as a pure, focused utility crate with **zero mandatory dependencies on transport or models**. It is **100% optional and configurable**:
-- **Feature Flags**: Heavy features like `schemars` (type derivation) and `runtime-validation` (`jsonschema` engine) are optional feature flags. With `default-features = false`, it compiles down to lightweight, zero-overhead ingestion and canonicalization using only core `serde_json` and `sha2`.
-- **Pluggable Adapters**: Schema normalization policies are fully configurable. Applications can use `GenericSchemaAdapter`, provider presets (`GeminiSchemaAdapter`, `KimiSchemaAdapter`), or define custom domain adapters via `impl SchemaAdapter`.
-
-#### 2. Universal Schema Neutrality
-Instead of treating schema normalization as provider-specific hackery, `adk-schema` elevates schema handling to a first-class framework primitive—just like error handling, tracing, or context propagation.
-
-#### 3. Static `allOf` Flattening (`flatten_static_all_of`)
-Tool definitions derived from complex composite models or inheritance hierarchies often generate top-level `allOf` arrays. Models like Gemini Live or OpenAI Strict Mode fail or degrade when given `allOf` conditional structures.
-`adk-schema` provides static property and required-field merging (`InputSchema::flatten_static_all_of`), flattening nested static rules into clean, top-level `properties` and `required` arrays without losing field constraints or descriptions.
-
-#### 4. Content-Addressed Schema Identity (Canonical Digest)
-Remote tool servers (e.g. MCP / ADK Remote) and local tool registries dynamically register tool parameters. `adk-schema` computes a deterministic SHA-256 digest over canonicalized JSON bytes, guaranteeing that two schemas with different key orders or whitespace share identical content-addressed digests (`schema.digest()`).
-
----
-
-### Architectural Q&A: Framework Design & Maintainer Review
-
-#### Q1: "Is there tight coupling for non-standard functionality? Should cross-crate functionality live in `adk-core`?"
-**No tight coupling exists.** `adk-core` provides cross-crate interfaces like the `SchemaAdapter` trait, while `adk-schema` acts as a pure, lightweight utility crate. It does not import `tokio`, HTTP clients, WebSocket engines, or model implementations.
-- **Pure Utility**: `adk-schema` only parses, canonicalizes, flattens, and validates JSON Schema Draft 2020-12 documents.
-- **Configurable Cargo Features**: Heavy features (`schemars` type derivation, `runtime-validation` validation engine) are optional. With `default-features = false`, `adk-schema` compiles to zero-overhead ingestion with zero model or transport dependencies.
-- **Pluggable Integration**: Model clients (`adk-model`, `adk-realtime`, `adk-gemini`) consume `adk-schema` on an opt-in basis, keeping `adk-core` clean and preventing cross-crate coupling.
-
-#### Q2: "The Gemini serialization issue was real because Gemini changed spec goalposts twice and had difficult tool calling schemas. Is `adk-schema` just a Gemini workaround?"
-**No.** While Gemini's spec changes and strict WebSocket protocol exposed wire sensitivities first (abruptly closing live audio connections with WS 1007 on unhandled keywords), **schema handling is a universal requirement across all major providers**:
-- **OpenAI Strict Mode**: Rejects nested objects without `additionalProperties: false` or incomplete `required` arrays.
-- **Anthropic (Claude)**: Requires specific Draft 2020-12 keyword stripping and OpenAPI format sanitization.
-- **Moonshot (Kimi)**: Enforces strict 64-character tool name limits and character set validation.
-- **Ollama / Local LLMs**: Demand simplified OpenAPI schemas without `$schema` headers.
-
-Without `adk-schema`, tool definitions would be forced to carry fragile `if provider == "gemini"` hacks throughout application code.
-
-#### Q3: "Should schema handling be a standard framework primitive, just like error handling and tracing?"
-**Yes.** Schema handling is a foundational framework primitive. Just as `tracing` standardizes logs and `AdkError` standardizes error states, `adk-schema` standardizes tool parameter definitions. Tool authors write parameter contracts **once** in standard JSON Schema / Rust types, and `adk-schema` safely translates them onto whichever LLM provider is active at runtime.
-
-#### Q4: "Has this design been validated across all major LLM providers to avoid duplicate functionality?"
-**Yes.** `adk-schema` and `SchemaAdapter` have been validated across:
-1. **Gemini** (Studio REST & Vertex Multimodal Live WebSockets)
-2. **OpenAI** (Chat Completions & Realtime API)
-3. **Anthropic** (Messages API tool choice)
-4. **Moonshot / Kimi** (OpenAI-compatible endpoints)
-5. **Ollama / vLLM** (Local model execution)
-
-This single standard prevents duplicated schema translation logic across `adk-core`, `adk-model`, `adk-realtime`, and downstream application crates.
-
----
-
-### Critical Value in `adk-realtime` & Gemini Multimodal Live
-
-The integration of `adk-schema` into `adk-realtime` solves **three catastrophic operational risks** specifically for Gemini Live real-time audio streams:
-
-#### 1. Avoidance of Silent WebSocket Protocol Disconnects (WS 1007)
-The Gemini Multimodal Live WebSocket API rejects invalid tool parameter dialects. If a JSON Schema containing `$schema`, `allOf`, or forbidden formats (e.g., `int32`, `int64`) is transmitted inside a `session.update` frame, the Gemini server does not return a readable JSON error: **it abruptly closes the WebSocket connection with error code 1007 (Invalid Frame Payload Data)**.
-`adk-schema` cleans and normalizes tool parameter schemas before transmission, ensuring WebSocket connections remain open and stable.
-
-#### 2. Wire Field Name Purity (`parameters` vs `parametersJsonSchema`)
-Gemini supports two distinct schema dialects on the wire (`parameters` for OpenAPI subset, `parametersJsonSchema` for JSON Schema). Sending a dialect under the wrong JSON field name triggers an immediate WS 1007 disconnect.
-`adk-schema` binds the field name directly to the adapter via `adapter.parameters_field()`. This guarantees that the dialect selection and the wire field key are paired atomically in a single place.
-
-#### 3. Preserving Structured Obligations Across `allOf` Composition
-In complex agent workflows (e.g. Zenith call confirmation nodes), tool declarations use composite schemas (`allOf` containing properties, required lists, and conditional rules). Without `adk-schema`'s `flatten_static_all_of()`, sending `allOf` to Gemini causes Gemini Live to ignore tool arguments or omit parameter collection entirely. `adk-schema` flattens static `allOf` branches into top-level properties and required fields while preserving verbatim conditional obligations for runtime verification.
-
----
+The application owns the canonical rules. Provider adapters translate those rules for a model. The final result is still judged against the authoritative contract.
 
 ## Ownership boundary
 
 | `adk-schema` owns | `adk-schema` does not own |
 | --- | --- |
-| Canonical schema documents & Draft 2020-12 ingestion | Provider-specific wire transport |
-| Ingestion limits, depth bounds, reference policy | Tool execution loops |
-| Canonical bytes and content-addressed digests | Retries, callbacks, authorization |
-| Static `allOf` flattening & runtime validation | Application business logic |
+| canonical JSON Schema documents | application business policy |
+| bounded ingestion and reference policy | provider transport protocols |
+| input/output schema roles | tool execution and side effects |
+| canonical bytes and schema identity | authorization decisions |
+| interactive outstanding-requirement analysis | conversation wording or prompting strategy |
+| structured schema diffing and projection-loss analysis | retries and network lifecycle |
+| optional runtime instance validation | persistence and domain state |
+
+## Design rule
+
+The core rule is simple:
+
+> **Define the contract once, progressively fulfill it through interaction, adapt it safely to the provider, and validate the completed result against the original rules.**
+
+This turns JSON Schema from only a final validation document into an inspectable contract that can be evaluated continuously as an LLM interaction evolves.
 
 ## License
 
-Licensed under the same terms as the ADK-Rust workspace. See [LICENSE](LICENSE).
+`adk-schema` is distributed under the Apache License 2.0, consistent with the ADK-Rust workspace. See [LICENSE](LICENSE).
+
+The license applies to the source code and does not grant rights to third-party names or branding. ADK-Rust, Google, and Agent Development Kit are referenced only to describe project provenance, compatibility, and ecosystem context; no affiliation, sponsorship, or endorsement is implied.

@@ -69,6 +69,17 @@ pub enum RealtimeError {
     #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),
 
+    /// The transport was already gone when a read was attempted — the peer
+    /// closed the connection, not a protocol violation on an otherwise-live
+    /// socket. Always worth a reconnect; see `classify_receive_error`.
+    #[error("Transport reset: {0}")]
+    TransportReset(String),
+
+    /// The provider sent a WebSocket Close frame on a session that had already
+    /// completed setup, with a code the provider layer judged *resumable*.
+    #[error("Server closed the stream: {0}")]
+    ServerClosed(crate::session::DisconnectReason),
+
     /// Opus codec error.
     #[error("Opus codec error: {0}")]
     OpusCodecError(String),
@@ -169,8 +180,15 @@ impl RealtimeError {
                     || err.kind() == std::io::ErrorKind::BrokenPipe
                     || err.kind() == std::io::ErrorKind::ConnectionAborted
             }
+            RealtimeError::TransportReset(_) => true,
             _ => false,
         }
+    }
+
+    /// Whether a caller polling the event stream should attempt a reconnect
+    /// rather than terminate the session.
+    pub fn should_attempt_reconnect(&self) -> bool {
+        matches!(self, RealtimeError::ServerClosed(_)) || self.is_connection_reset()
     }
 }
 

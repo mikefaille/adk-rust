@@ -86,6 +86,11 @@ impl RealtimeSession for MockSession {
         Ok(RecoveryOutcome { continuity: self.continuity })
     }
 
+    fn set_availability(&self, availability: RealtimeAvailability) {
+        let mut guard = self.availability.lock().unwrap();
+        *guard = availability;
+    }
+
     async fn send_audio(&self, _audio: &AudioChunk) -> Result<()> {
         Ok(())
     }
