@@ -3,12 +3,12 @@
 //! This module defines the types and traits required to handle connection recovery
 //! across different realtime session providers.
 
+use crate::error::Result;
+use crate::session::RealtimeSession;
+use async_trait::async_trait;
 use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::Duration;
-use async_trait::async_trait;
-use crate::error::Result;
-use crate::session::RealtimeSession;
 
 /// Recovery continuity indicates whether the logical provider-level session history
 /// was preserved or if a clean reconnect occurred.
@@ -206,9 +206,7 @@ impl RecoveredSession {
 
 impl std::fmt::Debug for RecoveredSession {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RecoveredSession")
-            .field("continuity", &self.continuity)
-            .finish()
+        f.debug_struct("RecoveredSession").field("continuity", &self.continuity).finish()
     }
 }
 
@@ -226,8 +224,5 @@ pub trait RealtimeRecovery: Send + Sync {
     fn classify(&self, cause: &RecoveryCause) -> RecoveryDisposition;
 
     /// Attempt to recover the session once.
-    async fn recover(
-        &self,
-        context: RecoveryContext<'_>,
-    ) -> Result<RecoveredSession>;
+    async fn recover(&self, context: RecoveryContext<'_>) -> Result<RecoveredSession>;
 }

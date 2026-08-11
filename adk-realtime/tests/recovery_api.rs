@@ -1,16 +1,16 @@
+use async_trait::async_trait;
 use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::Duration;
-use async_trait::async_trait;
 
-use adk_realtime::session::RealtimeSession;
 use adk_realtime::audio::AudioChunk;
-use adk_realtime::events::{ClientEvent, ServerEvent, ToolResponse};
 use adk_realtime::error::Result;
+use adk_realtime::events::{ClientEvent, ServerEvent, ToolResponse};
 use adk_realtime::recovery::{
-    RecoveredSession, RecoveryCause, RecoveryContinuity,
-    RecoveryDisposition, RecoveryPolicy, RecoveryContext, RealtimeRecovery,
+    RealtimeRecovery, RecoveredSession, RecoveryCause, RecoveryContext, RecoveryContinuity,
+    RecoveryDisposition, RecoveryPolicy,
 };
+use adk_realtime::session::RealtimeSession;
 
 /// A completely mock session with no recovery capabilities.
 struct MockSessionNone;
@@ -65,7 +65,9 @@ impl RealtimeSession for MockSessionNone {
         None
     }
 
-    fn events(&self) -> std::pin::Pin<Box<dyn futures::Stream<Item = Result<ServerEvent>> + Send + '_>> {
+    fn events(
+        &self,
+    ) -> std::pin::Pin<Box<dyn futures::Stream<Item = Result<ServerEvent>> + Send + '_>> {
         Box::pin(futures::stream::empty())
     }
 
@@ -96,10 +98,7 @@ impl RealtimeRecovery for MockRecoveryImpl {
         }
     }
 
-    async fn recover(
-        &self,
-        context: RecoveryContext<'_>,
-    ) -> Result<RecoveredSession> {
+    async fn recover(&self, context: RecoveryContext<'_>) -> Result<RecoveredSession> {
         let session = Arc::new(MockSessionNone);
         // Ensure context fields are accessible through getters
         let _attempt = context.attempt();
@@ -170,7 +169,9 @@ impl RealtimeSession for MockSessionWithRecovery {
         None
     }
 
-    fn events(&self) -> std::pin::Pin<Box<dyn futures::Stream<Item = Result<ServerEvent>> + Send + '_>> {
+    fn events(
+        &self,
+    ) -> std::pin::Pin<Box<dyn futures::Stream<Item = Result<ServerEvent>> + Send + '_>> {
         Box::pin(futures::stream::empty())
     }
 
@@ -194,22 +195,16 @@ fn test_none_recovery_capability() {
 
 #[test]
 fn test_some_recovery_capability_dynamic_dispatch() {
-    let session = MockSessionWithRecovery {
-        recovery_impl: MockRecoveryImpl,
-    };
+    let session = MockSessionWithRecovery { recovery_impl: MockRecoveryImpl };
 
     let recovery_ref = session.recovery().expect("Expected recovery capability");
 
     // Validate classify API behavior
     let cause_eof = RecoveryCause::UnexpectedEof;
-    let cause_reset_1000 = RecoveryCause::ProviderReset {
-        code: 1000,
-        reason: "Normal closure".to_string(),
-    };
-    let cause_reset_fatal = RecoveryCause::ProviderReset {
-        code: 1008,
-        reason: "Policy violation".to_string(),
-    };
+    let cause_reset_1000 =
+        RecoveryCause::ProviderReset { code: 1000, reason: "Normal closure".to_string() };
+    let cause_reset_fatal =
+        RecoveryCause::ProviderReset { code: 1008, reason: "Policy violation".to_string() };
 
     assert_eq!(recovery_ref.classify(&cause_eof), RecoveryDisposition::Recoverable);
     assert_eq!(recovery_ref.classify(&cause_reset_1000), RecoveryDisposition::Recoverable);

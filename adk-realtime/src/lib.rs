@@ -123,8 +123,8 @@ pub use error::{RealtimeError, Result};
 pub use events::{ClientEvent, ServerEvent, ToolCall, ToolResponse};
 pub use model::{BoxedModel, RealtimeModel};
 pub use recovery::{
-    DeliveryCertainty, RecoveredSession, RecoveryCause, RecoveryContinuity, RecoveryDisposition,
-    RecoveryPolicy, RecoveryContext, RealtimeRecovery,
+    DeliveryCertainty, RealtimeRecovery, RecoveredSession, RecoveryCause, RecoveryContext,
+    RecoveryContinuity, RecoveryDisposition, RecoveryPolicy,
 };
 pub use runner::RealtimeRunner;
 pub use session::{BoxedSession, DisconnectReason, RealtimeSession, RealtimeSessionExt};
