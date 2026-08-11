@@ -1129,6 +1129,80 @@ impl GeminiRealtimeSession {
 
         Ok(vec![ServerEvent::Unknown])
     }
+
+    /// Perform a sub-second TLS/WebSocket reconnect with exponential backoff.
+    ///
+    /// Tears down the dead writer task and socket, opens a fresh WebSocket to
+    /// the same Gemini Live endpoint, and sends a new setup frame. When a
+    /// resumable handle was cached from a prior `sessionResumptionUpdate` it is
+    /// included in the setup so the server can restore conversation context.
+    ///
+    /// Back-off schedule (50 ms base, ×2 per attempt):
+    ///   attempt 1 → 50 ms, attempt 2 → 100 ms, attempt 3 → 200 ms, …
+    /// The loop exits as soon as either `max_retries` or `backoff_budget_ms` is
+    /// exhausted, whichever comes first.
+    pub async fn reconnect_with_backoff(
+        &self,
+        options: crate::session::ReconnectOptions,
+    ) -> Result<()> {
+        // Abort the stale writer task before replacing the socket internals.
+        {
+            let mut writer_task = self.writer_task.lock().await;
+            if let Some(handle) = writer_task.take() {
+                handle.abort();
+            }
+        }
+        self.cancel_token.lock().await.cancel();
+
+        // Retrieve the latest resumable handle (may be None on first call).
+        let resume_handle = self.last_resume_handle.lock().clone();
+
+        let mut delay_ms: u64 = 50;
+        let mut spent_ms: u64 = 0;
+        let mut last_err: Option<RealtimeError> = None;
+
+        for attempt in 1..=options.max_retries {
+            // Enforce overall time budget.
+            if spent_ms >= options.backoff_budget_ms {
+                break;
+            }
+
+            tracing::info!(
+                attempt,
+                delay_ms,
+                spent_ms,
+                resume_handle = resume_handle.as_deref().unwrap_or("<none>"),
+                "GeminiRealtimeSession: reconnect attempt"
+            );
+
+            match self.try_reconnect_once(&resume_handle).await {
+                Ok(()) => {
+                    tracing::info!(attempt, "GeminiRealtimeSession: reconnect succeeded");
+                    return Ok(());
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        attempt,
+                        error = %e,
+                        "GeminiRealtimeSession: reconnect attempt failed"
+                    );
+                    last_err = Some(e);
+                    // Sleep for `delay_ms`, bounded by remaining budget.
+                    let sleep = delay_ms.min(options.backoff_budget_ms.saturating_sub(spent_ms));
+                    tokio::time::sleep(std::time::Duration::from_millis(sleep)).await;
+                    spent_ms += sleep;
+                    delay_ms = delay_ms.saturating_mul(2);
+                }
+            }
+        }
+
+        Err(last_err.unwrap_or_else(|| {
+            RealtimeError::connection(format!(
+                "reconnect exhausted after {} ms / {} retries",
+                options.backoff_budget_ms, options.max_retries
+            ))
+        }))
+    }
 }
 
 #[async_trait]
@@ -1458,80 +1532,6 @@ impl RealtimeSession for GeminiRealtimeSession {
             handle.abort();
         }
         Ok(())
-    }
-
-    /// Perform a sub-second TLS/WebSocket reconnect with exponential backoff.
-    ///
-    /// Tears down the dead writer task and socket, opens a fresh WebSocket to
-    /// the same Gemini Live endpoint, and sends a new setup frame.  When a
-    /// resumable handle was cached from a prior `sessionResumptionUpdate` it is
-    /// included in the setup so the server can restore conversation context.
-    ///
-    /// Back-off schedule (50 ms base, ×2 per attempt):
-    ///   attempt 1 → 50 ms, attempt 2 → 100 ms, attempt 3 → 200 ms, …
-    /// The loop exits as soon as either `max_retries` or `backoff_budget_ms` is
-    /// exhausted, whichever comes first.
-    async fn reconnect_with_backoff(
-        &self,
-        options: crate::session::ReconnectOptions,
-    ) -> Result<()> {
-        // Abort the stale writer task before replacing the socket internals.
-        {
-            let mut writer_task = self.writer_task.lock().await;
-            if let Some(handle) = writer_task.take() {
-                handle.abort();
-            }
-        }
-        self.cancel_token.lock().await.cancel();
-
-        // Retrieve the latest resumable handle (may be None on first call).
-        let resume_handle = self.last_resume_handle.lock().clone();
-
-        let mut delay_ms: u64 = 50;
-        let mut spent_ms: u64 = 0;
-        let mut last_err: Option<RealtimeError> = None;
-
-        for attempt in 1..=options.max_retries {
-            // Enforce overall time budget.
-            if spent_ms >= options.backoff_budget_ms {
-                break;
-            }
-
-            tracing::info!(
-                attempt,
-                delay_ms,
-                spent_ms,
-                resume_handle = resume_handle.as_deref().unwrap_or("<none>"),
-                "GeminiRealtimeSession: reconnect attempt"
-            );
-
-            match self.try_reconnect_once(&resume_handle).await {
-                Ok(()) => {
-                    tracing::info!(attempt, "GeminiRealtimeSession: reconnect succeeded");
-                    return Ok(());
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        attempt,
-                        error = %e,
-                        "GeminiRealtimeSession: reconnect attempt failed"
-                    );
-                    last_err = Some(e);
-                    // Sleep for `delay_ms`, bounded by remaining budget.
-                    let sleep = delay_ms.min(options.backoff_budget_ms.saturating_sub(spent_ms));
-                    tokio::time::sleep(std::time::Duration::from_millis(sleep)).await;
-                    spent_ms += sleep;
-                    delay_ms = delay_ms.saturating_mul(2);
-                }
-            }
-        }
-
-        Err(last_err.unwrap_or_else(|| {
-            RealtimeError::connection(format!(
-                "reconnect exhausted after {} ms / {} retries",
-                options.backoff_budget_ms, options.max_retries
-            ))
-        }))
     }
 
     async fn mutate_context(

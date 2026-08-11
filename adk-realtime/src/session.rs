@@ -117,11 +117,11 @@ pub trait RealtimeSession: Send + Sync {
         }
     }
 
-    /// Perform a sub-second TLS/WebSocket reconnect with exponential backoff.
-    async fn reconnect_with_backoff(&self, _options: ReconnectOptions) -> Result<()> {
-        Err(crate::error::RealtimeError::config(
-            "reconnect_with_backoff not implemented for this session",
-        ))
+    /// Retrieve the recovery capability of the session if supported.
+    ///
+    /// By default, a session does not support recovery and returns `None`.
+    fn recovery(&self) -> Option<&dyn crate::recovery::RealtimeRecovery> {
+        None
     }
 
     /// The audio format this provider emits in `ServerEvent::AudioDelta`.

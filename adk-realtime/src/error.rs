@@ -85,6 +85,15 @@ pub enum RealtimeError {
     #[cfg(feature = "livekit")]
     #[error(transparent)]
     LiveKitNativeError(Box<crate::livekit::LiveKitError>),
+
+    /// Send operation failed with a specific delivery certainty.
+    #[error("Send failed: {message} (certainty: {certainty:?})")]
+    SendFailed {
+        /// Error message.
+        message: String,
+        /// Delivery certainty.
+        certainty: crate::recovery::DeliveryCertainty,
+    },
 }
 
 #[cfg(feature = "livekit")]
@@ -96,6 +105,14 @@ impl From<crate::livekit::LiveKitError> for RealtimeError {
 }
 
 impl RealtimeError {
+    /// Get the delivery certainty of the error if it represents a send failure.
+    pub fn delivery_certainty(&self) -> Option<crate::recovery::DeliveryCertainty> {
+        match self {
+            Self::SendFailed { certainty, .. } => Some(*certainty),
+            _ => None,
+        }
+    }
+
     /// Create a new connection error.
     pub fn connection<S: Into<String>>(msg: S) -> Self {
         Self::ConnectionError(msg.into())
