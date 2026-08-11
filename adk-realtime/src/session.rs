@@ -85,21 +85,6 @@ pub enum RealtimeAvailability {
     Teardown,
 }
 
-/// Configuration options for session reconnect with exponential backoff.
-#[derive(Debug, Clone)]
-pub struct ReconnectOptions {
-    pub max_retries: u32,
-    pub backoff_budget_ms: u64,
-    pub ipv4_fallback: bool,
-    pub resume_handle: Option<String>,
-}
-
-impl Default for ReconnectOptions {
-    fn default() -> Self {
-        Self { max_retries: 3, backoff_budget_ms: 3000, ipv4_fallback: true, resume_handle: None }
-    }
-}
-
 #[async_trait]
 pub trait RealtimeSession: Send + Sync {
     /// Get the session ID.

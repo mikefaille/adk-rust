@@ -17,7 +17,7 @@ use std::time::Duration;
 pub enum RecoveryContinuity {
     /// Provider-native logical continuity was actually preserved.
     Resumed,
-    /// Transport reconnected cleanly but previous conversation history was lost.
+    /// Transport reconnected cleanly but previous conversation state is not guaranteed.
     Reconnected,
 }
 
