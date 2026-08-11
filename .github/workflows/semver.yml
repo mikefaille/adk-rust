@@ -40,7 +40,7 @@ jobs:
       run: |
         echo "### Stable-tier crates (fail on breakage)" >> "$GITHUB_STEP_SUMMARY"
         FAILED=0
-        for crate in adk-core adk-agent adk-model adk-gemini adk-tool adk-runner adk-session adk-server adk-graph adk-memory adk-anthropic; do
+        for crate in adk-core adk-agent adk-model adk-runner adk-session adk-server adk-memory adk-anthropic; do
           echo "Checking $crate..."
           if cargo semver-checks check-release -p "$crate" --default-features; then
             echo "✅ $crate" >> "$GITHUB_STEP_SUMMARY"
@@ -69,7 +69,7 @@ jobs:
           adk-cli adk-realtime adk-browser adk-eval adk-audio \
           adk-acp adk-awp awp-types adk-action adk-code adk-deploy \
           adk-managed adk-enterprise adk-payments adk-rag adk-sandbox \
-          adk-retry-reflect adk-mistralrs adk-bench cargo-adk; do
+          adk-retry-reflect adk-mistralrs adk-bench cargo-adk adk-gemini adk-tool adk-graph; do
           echo "Checking $crate..."
           if cargo semver-checks check-release -p "$crate" --default-features; then
             echo "✅ $crate" >> "$GITHUB_STEP_SUMMARY"
