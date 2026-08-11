@@ -180,7 +180,6 @@ const UNSUPPORTED_KEYWORDS_VERTEX: &[&str] = &[
 /// Verified on Studio `v1beta` only. Do not assume it for Vertex or for
 /// `generateContent` without re-probing that surface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
 pub enum GeminiSchemaDialect {
     /// `parameters` on the Gemini Developer API. The historical default:
     /// everything outside the subset is stripped, silently loosening what the
@@ -195,6 +194,14 @@ pub enum GeminiSchemaDialect {
 }
 
 impl GeminiSchemaDialect {
+    /// Returns whether this dialect requires OpenAPI subset reduction.
+    pub const fn requires_openapi_reduction(self) -> bool {
+        match self {
+            Self::OpenApiSubset | Self::VertexOpenApiSubset => true,
+            Self::JsonSchema => false,
+        }
+    }
+
     /// The function-declaration field this dialect must be sent under.
     pub const fn parameters_field(self) -> &'static str {
         match self {
