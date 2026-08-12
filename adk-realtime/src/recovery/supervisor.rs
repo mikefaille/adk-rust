@@ -4,10 +4,10 @@ use crate::recovery::{
 };
 use crate::session::RealtimeSession;
 use std::num::NonZeroU32;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use tokio::sync::{RwLock, Mutex};
-use tokio::time::{sleep, Instant};
+use std::sync::atomic::{AtomicU64, Ordering};
+use tokio::sync::{Mutex, RwLock};
+use tokio::time::{Instant, sleep};
 
 /// A generic orchestrator for realtime session recovery.
 ///
@@ -43,9 +43,12 @@ impl RecoverySupervisor {
         let deadline = Instant::now() + self.policy.deadline();
 
         // Ensure single-flight per runner. Wait up to deadline to acquire lock.
-        let _guard = tokio::time::timeout_at(deadline, self.recovery_lock.lock())
-            .await
-            .map_err(|_| RealtimeError::connection("Recovery deadline exceeded while waiting for active recovery attempt."))?;
+        let _guard =
+            tokio::time::timeout_at(deadline, self.recovery_lock.lock()).await.map_err(|_| {
+                RealtimeError::connection(
+                    "Recovery deadline exceeded while waiting for active recovery attempt.",
+                )
+            })?;
 
         let (session, my_generation) = {
             let guard = self.active_session_ref.read().await;
@@ -97,7 +100,10 @@ impl RecoverySupervisor {
                     tracing::error!("Recovery attempt {} failed: {}", attempt, e);
 
                     if recovery.classify_attempt_error(&e) == RecoveryDisposition::Fatal {
-                        return Err(RealtimeError::connection(format!("Attempt {} failed fatally: {}", attempt, e)));
+                        return Err(RealtimeError::connection(format!(
+                            "Attempt {} failed fatally: {}",
+                            attempt, e
+                        )));
                     }
 
                     if attempt == max_attempts {
@@ -134,7 +140,9 @@ impl RecoverySupervisor {
                     }
                 }
                 Err(_) => {
-                    return Err(RealtimeError::connection("Recovery deadline exceeded during provider attempt."));
+                    return Err(RealtimeError::connection(
+                        "Recovery deadline exceeded during provider attempt.",
+                    ));
                 }
             }
         }
@@ -146,16 +154,14 @@ impl RecoverySupervisor {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::recovery::{
-        RealtimeRecovery, RecoveryContinuity, RecoveryDisposition,
-    };
+    use crate::audio::AudioChunk;
     use crate::error::RealtimeError;
     use crate::events::{ClientEvent, ServerEvent, ToolResponse};
-    use crate::audio::AudioChunk;
+    use crate::recovery::{RealtimeRecovery, RecoveryContinuity, RecoveryDisposition};
     use crate::session::ContextMutationOutcome;
     use async_trait::async_trait;
-    use std::pin::Pin;
     use futures::Stream;
+    use std::pin::Pin;
     use std::sync::atomic::{AtomicU32, Ordering};
 
     #[derive(Clone)]
@@ -166,25 +172,51 @@ pub(crate) mod tests {
 
     #[async_trait]
     impl RealtimeSession for MockSession {
-        fn session_id(&self) -> &str { &self.id }
-        fn is_connected(&self) -> bool { true }
+        fn session_id(&self) -> &str {
+            &self.id
+        }
+        fn is_connected(&self) -> bool {
+            true
+        }
         fn recovery(&self) -> Option<&dyn RealtimeRecovery> {
             self.recovery.as_deref()
         }
-        async fn send_audio(&self, _audio: &AudioChunk) -> Result<()> { Ok(()) }
-        async fn send_audio_base64(&self, _audio_base64: &str) -> Result<()> { Ok(()) }
-        async fn send_text(&self, _text: &str) -> Result<()> { Ok(()) }
-        async fn send_tool_response(&self, _response: ToolResponse) -> Result<()> { Ok(()) }
-        async fn commit_audio(&self) -> Result<()> { Ok(()) }
-        async fn clear_audio(&self) -> Result<()> { Ok(()) }
-        async fn create_response(&self) -> Result<()> { Ok(()) }
-        async fn interrupt(&self) -> Result<()> { Ok(()) }
-        async fn send_event(&self, _event: ClientEvent) -> Result<()> { Ok(()) }
-        async fn next_event(&self) -> Option<Result<ServerEvent>> { None }
+        async fn send_audio(&self, _audio: &AudioChunk) -> Result<()> {
+            Ok(())
+        }
+        async fn send_audio_base64(&self, _audio_base64: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn send_text(&self, _text: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn send_tool_response(&self, _response: ToolResponse) -> Result<()> {
+            Ok(())
+        }
+        async fn commit_audio(&self) -> Result<()> {
+            Ok(())
+        }
+        async fn clear_audio(&self) -> Result<()> {
+            Ok(())
+        }
+        async fn create_response(&self) -> Result<()> {
+            Ok(())
+        }
+        async fn interrupt(&self) -> Result<()> {
+            Ok(())
+        }
+        async fn send_event(&self, _event: ClientEvent) -> Result<()> {
+            Ok(())
+        }
+        async fn next_event(&self) -> Option<Result<ServerEvent>> {
+            None
+        }
         fn events(&self) -> Pin<Box<dyn Stream<Item = Result<ServerEvent>> + Send + '_>> {
             Box::pin(futures::stream::empty())
         }
-        async fn close(&self) -> Result<()> { Ok(()) }
+        async fn close(&self) -> Result<()> {
+            Ok(())
+        }
         async fn mutate_context(
             &self,
             _config: crate::config::RealtimeConfig,
@@ -195,7 +227,8 @@ pub(crate) mod tests {
 
     pub(crate) struct MockRecovery {
         disposition: RecoveryDisposition,
-        recover_result: Arc<tokio::sync::Mutex<Box<dyn FnMut() -> Result<RecoveredSession> + Send + Sync>>>,
+        recover_result:
+            Arc<tokio::sync::Mutex<Box<dyn FnMut() -> Result<RecoveredSession> + Send + Sync>>>,
         attempts: Arc<AtomicU32>,
         attempt_error_disposition: RecoveryDisposition,
     }
@@ -206,7 +239,10 @@ pub(crate) mod tests {
             self.disposition
         }
 
-        fn classify_attempt_error(&self, _error: &crate::error::RealtimeError) -> RecoveryDisposition {
+        fn classify_attempt_error(
+            &self,
+            _error: &crate::error::RealtimeError,
+        ) -> RecoveryDisposition {
             self.attempt_error_disposition
         }
 
@@ -226,7 +262,10 @@ pub(crate) mod tests {
 
         let supervisor = RecoverySupervisor::new(RecoveryPolicy::default(), active_session);
 
-        let err = supervisor.recover(&RecoveryCause::UnexpectedEof, &Default::default()).await.unwrap_err();
+        let err = supervisor
+            .recover(&RecoveryCause::UnexpectedEof, &Default::default())
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("does not support recovery capability"));
     }
 
@@ -247,7 +286,10 @@ pub(crate) mod tests {
 
         let supervisor = RecoverySupervisor::new(RecoveryPolicy::default(), active_session);
 
-        let err = supervisor.recover(&RecoveryCause::UnexpectedEof, &Default::default()).await.unwrap_err();
+        let err = supervisor
+            .recover(&RecoveryCause::UnexpectedEof, &Default::default())
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("fatal; aborting"));
         assert_eq!(attempts.load(Ordering::SeqCst), 0);
     }
@@ -260,10 +302,10 @@ pub(crate) mod tests {
             recovery: Some(Arc::new(MockRecovery {
                 disposition: RecoveryDisposition::Recoverable,
                 recover_result: Arc::new(tokio::sync::Mutex::new(Box::new(|| {
-                    Ok(RecoveredSession::new(Arc::new(MockSession {
-                        id: "new".to_string(),
-                        recovery: None,
-                    }), RecoveryContinuity::Reconnected))
+                    Ok(RecoveredSession::new(
+                        Arc::new(MockSession { id: "new".to_string(), recovery: None }),
+                        RecoveryContinuity::Reconnected,
+                    ))
                 }))),
                 attempts: Arc::clone(&attempts),
                 attempt_error_disposition: RecoveryDisposition::Recoverable,
@@ -302,7 +344,10 @@ pub(crate) mod tests {
 
         let supervisor = RecoverySupervisor::new(policy, active_session.clone());
 
-        let err = supervisor.recover(&RecoveryCause::UnexpectedEof, &Default::default()).await.unwrap_err();
+        let err = supervisor
+            .recover(&RecoveryCause::UnexpectedEof, &Default::default())
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("exhausted"));
         assert_eq!(attempts.load(Ordering::SeqCst), 2);
 
@@ -322,10 +367,10 @@ pub(crate) mod tests {
                     if attempts_clone.load(Ordering::SeqCst) == 1 {
                         Err(RealtimeError::connection("failed"))
                     } else {
-                        Ok(RecoveredSession::new(Arc::new(MockSession {
-                            id: "new".to_string(),
-                            recovery: None,
-                        }), RecoveryContinuity::Reconnected))
+                        Ok(RecoveredSession::new(
+                            Arc::new(MockSession { id: "new".to_string(), recovery: None }),
+                            RecoveryContinuity::Reconnected,
+                        ))
                     }
                 }))),
                 attempts: Arc::clone(&attempts),
@@ -370,7 +415,10 @@ pub(crate) mod tests {
 
         let supervisor = RecoverySupervisor::new(policy, active_session.clone());
 
-        let err = supervisor.recover(&RecoveryCause::UnexpectedEof, &Default::default()).await.unwrap_err();
+        let err = supervisor
+            .recover(&RecoveryCause::UnexpectedEof, &Default::default())
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("deadline"));
         // Should only be able to make 2 attempts (0ms, 30ms sleep) before hitting 50ms total, definitely not 100
         assert!(attempts.load(Ordering::SeqCst) < 10);
@@ -400,7 +448,10 @@ pub(crate) mod tests {
             supervisor_clone.generation.fetch_add(1, Ordering::SeqCst);
         });
 
-        let err = supervisor.recover(&RecoveryCause::UnexpectedEof, &Default::default()).await.unwrap_err();
+        let err = supervisor
+            .recover(&RecoveryCause::UnexpectedEof, &Default::default())
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("stale"));
 
         let active = active_session.read().await;
@@ -482,7 +533,10 @@ pub(crate) mod tests {
 
         let supervisor = Arc::new(RecoverySupervisor::new(policy, active_session.clone()));
 
-        let err = supervisor.recover(&RecoveryCause::UnexpectedEof, &Default::default()).await.unwrap_err();
+        let err = supervisor
+            .recover(&RecoveryCause::UnexpectedEof, &Default::default())
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("deadline"));
     }
 
@@ -501,12 +555,14 @@ pub(crate) mod tests {
             })),
         }) as Arc<dyn RealtimeSession>)));
 
-        let policy = RecoveryPolicy::new()
-            .with_max_attempts(NonZeroU32::new(3).unwrap());
+        let policy = RecoveryPolicy::new().with_max_attempts(NonZeroU32::new(3).unwrap());
 
         let supervisor = RecoverySupervisor::new(policy, active_session.clone());
 
-        let err = supervisor.recover(&RecoveryCause::UnexpectedEof, &Default::default()).await.unwrap_err();
+        let err = supervisor
+            .recover(&RecoveryCause::UnexpectedEof, &Default::default())
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("fatally"));
         assert_eq!(attempts.load(Ordering::SeqCst), 1);
     }
