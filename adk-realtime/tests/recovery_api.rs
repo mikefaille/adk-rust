@@ -115,9 +115,7 @@ impl RealtimeRecovery for MockRecoveryImpl {
 
     async fn recover(&self, context: RecoveryContext<'_>) -> Result<RecoveredSession> {
         // Validate that context.config() is applied and effective before the session is returned
-        let session = Arc::new(MockSessionNone {
-            config: context.config().clone(),
-        });
+        let session = Arc::new(MockSessionNone { config: context.config().clone() });
         Ok(RecoveredSession::new(session, RecoveryContinuity::Reconnected))
     }
 }
@@ -201,9 +199,7 @@ impl RealtimeSession for MockSessionWithRecovery {
 
 #[test]
 fn test_none_recovery_capability() {
-    let session = MockSessionNone {
-        config: adk_realtime::config::RealtimeConfig::default(),
-    };
+    let session = MockSessionNone { config: adk_realtime::config::RealtimeConfig::default() };
     assert!(session.recovery().is_none());
 }
 
@@ -233,7 +229,10 @@ fn test_recovery_attempt_error_classification() {
     let retryable_err = RealtimeError::ConnectionError("retryable connection failure".to_string());
     let fatal_err = RealtimeError::AuthError("unauthorized".to_string());
 
-    assert_eq!(recovery_ref.classify_attempt_error(&retryable_err), RecoveryDisposition::Recoverable);
+    assert_eq!(
+        recovery_ref.classify_attempt_error(&retryable_err),
+        RecoveryDisposition::Recoverable
+    );
     assert_eq!(recovery_ref.classify_attempt_error(&fatal_err), RecoveryDisposition::Fatal);
 }
 
