@@ -74,11 +74,6 @@ impl std::fmt::Display for DisconnectReason {
 
 #[async_trait]
 pub trait RealtimeSession: Send + Sync {
-    /// Get the active configuration of this session, if available.
-    fn config(&self) -> Option<&crate::config::RealtimeConfig> {
-        None
-    }
-
     /// Get the session ID.
     fn session_id(&self) -> &str;
 

@@ -36,7 +36,10 @@ pub enum RecoveryDisposition {
     Fatal,
 }
 
-/// Delivery certainty indicates if a sent payload actually reached the provider.
+/// Delivery certainty indicates what is known about whether a payload was sent.
+///
+/// Neither variant guarantees successful remote processing by the provider; they merely
+/// bound when retry or buffering is safe vs when it might cause duplicate execution.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeliveryCertainty {
@@ -58,13 +61,6 @@ pub enum RecoveryCause {
     WriteFailed(Arc<crate::error::RealtimeError>),
     /// Unexpected end-of-file on the connection stream.
     UnexpectedEof,
-    /// Provider reset with a specific close code and reason text.
-    ProviderReset {
-        /// Transport-specific close or reset code.
-        code: u16,
-        /// stated reason text from the provider.
-        reason: String,
-    },
 }
 
 /// Opaque/defaultable policy for scheduling recovery attempts.
