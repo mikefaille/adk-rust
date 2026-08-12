@@ -67,6 +67,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tokio-tungstenite",
+ "tokio-util",
  "tracing",
  "url",
  "uuid",

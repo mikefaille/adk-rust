@@ -842,24 +842,6 @@ impl RealtimeRunner {
         self.session_handle().await.ok().and_then(|session| session.disconnect_reason())
     }
 
-    /// Check the provider-neutral availability state.
-    pub async fn availability(&self) -> crate::session::RealtimeAvailability {
-        if let Ok(session) = self.session_handle().await {
-            session.availability()
-        } else {
-            crate::session::RealtimeAvailability::Exhausted
-        }
-    }
-
-    /// Perform a sub-second TLS/WebSocket reconnect with exponential backoff on the inner session.
-    pub async fn reconnect_with_backoff(
-        &self,
-        options: crate::session::ReconnectOptions,
-    ) -> Result<()> {
-        let session = self.session_handle().await?;
-        session.reconnect_with_backoff(options).await
-    }
-
     pub async fn next_event(&self) -> Option<Result<ServerEvent>> {
         let session = match self.session_handle().await {
             Ok(session) => session,

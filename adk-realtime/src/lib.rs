@@ -85,6 +85,7 @@ pub mod dispatch;
 pub mod error;
 pub mod events;
 pub mod model;
+pub mod recovery;
 pub mod runner;
 pub mod session;
 pub mod transport;
@@ -121,5 +122,9 @@ pub use config::{
 pub use error::{RealtimeError, Result};
 pub use events::{ClientEvent, ServerEvent, ToolCall, ToolResponse};
 pub use model::{BoxedModel, RealtimeModel};
+pub use recovery::{
+    DeliveryCertainty, RealtimeRecovery, RecoveredSession, RecoveryCause, RecoveryContext,
+    RecoveryContinuity, RecoveryDisposition, RecoveryPolicy,
+};
 pub use runner::RealtimeRunner;
 pub use session::{BoxedSession, DisconnectReason, RealtimeSession, RealtimeSessionExt};

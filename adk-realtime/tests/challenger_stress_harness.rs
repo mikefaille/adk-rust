@@ -3,7 +3,6 @@
 use adk_realtime::error::RealtimeError;
 use adk_realtime::events::ServerEvent;
 use adk_realtime::gemini::normalize_model_id;
-use adk_realtime::session::{RealtimeAvailability, ReconnectOptions};
 use serde_json::json;
 
 #[tokio::test]
@@ -101,42 +100,6 @@ fn test_challenger_tcp_reset_error_classification_exhaustive() {
             err
         );
     }
-}
-
-#[tokio::test]
-async fn test_challenger_realtime_availability_transitions() {
-    let connected = RealtimeAvailability::Connected;
-    let reconnecting1 = RealtimeAvailability::Reconnecting { epoch: 1 };
-    let reconnecting2 = RealtimeAvailability::Reconnecting { epoch: 2 };
-    let exhausted = RealtimeAvailability::Exhausted;
-    let teardown = RealtimeAvailability::Teardown;
-
-    assert_eq!(connected, RealtimeAvailability::Connected);
-    assert_ne!(connected, reconnecting1);
-    assert_ne!(reconnecting1, reconnecting2);
-    assert_eq!(reconnecting1, RealtimeAvailability::Reconnecting { epoch: 1 });
-    assert_eq!(exhausted, RealtimeAvailability::Exhausted);
-    assert_eq!(teardown, RealtimeAvailability::Teardown);
-}
-
-#[tokio::test]
-async fn test_challenger_reconnect_options_invariants() {
-    let opts = ReconnectOptions::default();
-    assert_eq!(opts.max_retries, 3);
-    assert_eq!(opts.backoff_budget_ms, 3000);
-    assert!(opts.ipv4_fallback);
-    assert!(opts.resume_handle.is_none());
-
-    let custom = ReconnectOptions {
-        max_retries: 5,
-        backoff_budget_ms: 5000,
-        ipv4_fallback: false,
-        resume_handle: Some("token_123".to_string()),
-    };
-    assert_eq!(custom.max_retries, 5);
-    assert_eq!(custom.backoff_budget_ms, 5000);
-    assert!(!custom.ipv4_fallback);
-    assert_eq!(custom.resume_handle.as_deref(), Some("token_123"));
 }
 
 #[tokio::test]
