@@ -200,11 +200,14 @@ fn test_none_recovery_capability() {
 fn test_some_recovery_capability_dynamic_dispatch() {
     let session = MockSessionWithRecovery { recovery_impl: MockRecoveryImpl };
 
-    let recovery_ref: &dyn RealtimeRecovery = session.recovery().expect("Expected recovery capability");
+    let recovery_ref: &dyn RealtimeRecovery =
+        session.recovery().expect("Expected recovery capability");
 
     // Validate classify API behavior
     let cause_eof = RecoveryCause::UnexpectedEof;
-    let cause_other = RecoveryCause::ReadFailed(Arc::new(RealtimeError::ConnectionError("lost socket".to_string())));
+    let cause_other = RecoveryCause::ReadFailed(Arc::new(RealtimeError::ConnectionError(
+        "lost socket".to_string(),
+    )));
 
     assert_eq!(recovery_ref.classify(&cause_eof), RecoveryDisposition::Recoverable);
     assert_eq!(recovery_ref.classify(&cause_other), RecoveryDisposition::Fatal);
@@ -213,7 +216,8 @@ fn test_some_recovery_capability_dynamic_dispatch() {
 #[test]
 fn test_recovery_attempt_error_classification() {
     let session = MockSessionWithRecovery { recovery_impl: MockRecoveryImpl };
-    let recovery_ref: &dyn RealtimeRecovery = session.recovery().expect("Expected recovery capability");
+    let recovery_ref: &dyn RealtimeRecovery =
+        session.recovery().expect("Expected recovery capability");
 
     let retryable_err = RealtimeError::ConnectionError("retryable connection failure".to_string());
     let fatal_err = RealtimeError::AuthError("unauthorized".to_string());
@@ -248,7 +252,8 @@ fn test_recovery_policy_getters_and_setters() {
 #[tokio::test]
 async fn test_recovery_execution_and_recovered_session_fields() {
     let session = MockSessionWithRecovery { recovery_impl: MockRecoveryImpl };
-    let recovery_ref: &dyn RealtimeRecovery = session.recovery().expect("Expected recovery capability");
+    let recovery_ref: &dyn RealtimeRecovery =
+        session.recovery().expect("Expected recovery capability");
 
     let config = adk_realtime::config::RealtimeConfig::default().with_instruction("travel agent");
     let cause = RecoveryCause::UnexpectedEof;

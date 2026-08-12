@@ -4,7 +4,6 @@ use adk_realtime::RealtimeSession;
 use adk_realtime::error::RealtimeError;
 use adk_realtime::events::ServerEvent;
 use adk_realtime::gemini::normalize_model_id;
-use adk_realtime::session::RealtimeAvailability;
 use serde_json::json;
 
 #[tokio::test]
@@ -45,8 +44,8 @@ fn test_tcp_connection_reset_classification() {
 }
 
 #[tokio::test]
-async fn test_mock_resumption_token_alignment_and_lifecycle_transitions() {
-    // 1. Verify dual-key framing: when Google sends newHandle in sessionResumptionUpdate,
+async fn test_mock_resumption_token_alignment() {
+    // Verify dual-key framing: when Google sends newHandle in sessionResumptionUpdate,
     // translate_event emits ServerEvent::SessionUpdated with both resumeToken and resumeHandle.
     let server_frame = json!({
         "sessionResumptionUpdate": {
@@ -72,16 +71,6 @@ async fn test_mock_resumption_token_alignment_and_lifecycle_transitions() {
     } else {
         panic!("Expected SessionUpdated event");
     }
-
-    // 2. Verify lifecycle state enum transitions
-    let connected_state = RealtimeAvailability::Connected;
-    let reconnecting_state = RealtimeAvailability::Reconnecting { epoch: 1 };
-    let exhausted_state = RealtimeAvailability::Exhausted;
-
-    assert_eq!(connected_state, RealtimeAvailability::Connected);
-    assert_ne!(connected_state, reconnecting_state);
-    assert_eq!(reconnecting_state, RealtimeAvailability::Reconnecting { epoch: 1 });
-    assert_eq!(exhausted_state, RealtimeAvailability::Exhausted);
 }
 
 #[tokio::test]

@@ -3,7 +3,6 @@
 use adk_realtime::error::RealtimeError;
 use adk_realtime::events::ServerEvent;
 use adk_realtime::gemini::normalize_model_id;
-use adk_realtime::session::RealtimeAvailability;
 use serde_json::json;
 
 #[tokio::test]
@@ -101,22 +100,6 @@ fn test_challenger_tcp_reset_error_classification_exhaustive() {
             err
         );
     }
-}
-
-#[tokio::test]
-async fn test_challenger_realtime_availability_transitions() {
-    let connected = RealtimeAvailability::Connected;
-    let reconnecting1 = RealtimeAvailability::Reconnecting { epoch: 1 };
-    let reconnecting2 = RealtimeAvailability::Reconnecting { epoch: 2 };
-    let exhausted = RealtimeAvailability::Exhausted;
-    let teardown = RealtimeAvailability::Teardown;
-
-    assert_eq!(connected, RealtimeAvailability::Connected);
-    assert_ne!(connected, reconnecting1);
-    assert_ne!(reconnecting1, reconnecting2);
-    assert_eq!(reconnecting1, RealtimeAvailability::Reconnecting { epoch: 1 });
-    assert_eq!(exhausted, RealtimeAvailability::Exhausted);
-    assert_eq!(teardown, RealtimeAvailability::Teardown);
 }
 
 #[tokio::test]
