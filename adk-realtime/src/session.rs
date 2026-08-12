@@ -72,35 +72,18 @@ impl std::fmt::Display for DisconnectReason {
     }
 }
 
-/// Provider-neutral lifecycle availability state.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RealtimeAvailability {
-    /// Transport is connected and operating normally.
-    Connected,
-    /// Transport auto-reconnect is active with the given attempt epoch.
-    Reconnecting { epoch: u64 },
-    /// Reconnect attempts have been exhausted (>3s or max retries exceeded).
-    Exhausted,
-    /// Session has been torn down gracefully.
-    Teardown,
-}
-
 #[async_trait]
 pub trait RealtimeSession: Send + Sync {
+    /// Get the active configuration of this session, if available.
+    fn config(&self) -> Option<&crate::config::RealtimeConfig> {
+        None
+    }
+
     /// Get the session ID.
     fn session_id(&self) -> &str;
 
     /// Check if the session is currently connected.
     fn is_connected(&self) -> bool;
-
-    /// Provider-neutral availability state.
-    fn availability(&self) -> RealtimeAvailability {
-        if self.is_connected() {
-            RealtimeAvailability::Connected
-        } else {
-            RealtimeAvailability::Exhausted
-        }
-    }
 
     /// Retrieve the recovery capability of the session if supported.
     ///

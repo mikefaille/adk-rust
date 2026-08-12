@@ -17,7 +17,12 @@ use std::time::Duration;
 pub enum RecoveryContinuity {
     /// Provider-native logical continuity was actually preserved.
     Resumed,
-    /// Transport reconnected cleanly but previous conversation state is not guaranteed.
+    /// Transport reconnected cleanly.
+    ///
+    /// Previous conversation state/history is not guaranteed to have survived.
+    /// However, a successful `recover(context)` returning `Reconnected` guarantees that
+    /// the current effective configuration (`context.config()`) has been successfully
+    /// applied and the session is fully ready to accept commands.
     Reconnected,
 }
 
@@ -53,11 +58,11 @@ pub enum RecoveryCause {
     WriteFailed(Arc<crate::error::RealtimeError>),
     /// Unexpected end-of-file on the connection stream.
     UnexpectedEof,
-    /// Provider reset with a specific websocket close code and reason text.
+    /// Provider reset with a specific close code and reason text.
     ProviderReset {
-        /// Close code.
+        /// Transport-specific close or reset code.
         code: u16,
-        /// Reason string.
+        /// stated reason text from the provider.
         reason: String,
     },
 }
@@ -217,11 +222,21 @@ impl std::fmt::Debug for RecoveredSession {
 /// those are managed by the supervisor.
 ///
 /// `recover()` returns only after the candidate satisfies the provider-specific readiness boundary
-/// (e.g. `setupComplete` for Gemini Live).
+/// (e.g. `setupComplete` for Gemini Live) and after the current effective configuration
+/// (`context.config()`) has been fully applied to the returned session.
 #[async_trait]
 pub trait RealtimeRecovery: Send + Sync {
     /// Classify whether the given cause is recoverable or fatal for this provider.
     fn classify(&self, cause: &RecoveryCause) -> RecoveryDisposition;
+
+    /// Classify whether an error returned by a `recover()` attempt is retryable or fatal.
+    ///
+    /// By default, returns `RecoveryDisposition::Fatal` (fail-closed) so that
+    /// any unexpected recovery attempt failures are not blindly retried unless
+    /// a provider explicitly opts into them.
+    fn classify_attempt_error(&self, _error: &crate::error::RealtimeError) -> RecoveryDisposition {
+        RecoveryDisposition::Fatal
+    }
 
     /// Attempt to recover the session once.
     async fn recover(&self, context: RecoveryContext<'_>) -> Result<RecoveredSession>;

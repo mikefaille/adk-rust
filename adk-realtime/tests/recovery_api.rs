@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use adk_realtime::audio::AudioChunk;
-use adk_realtime::error::Result;
+use adk_realtime::error::{RealtimeError, Result};
 use adk_realtime::events::{ClientEvent, ServerEvent, ToolResponse};
 use adk_realtime::recovery::{
     RealtimeRecovery, RecoveredSession, RecoveryCause, RecoveryContext, RecoveryContinuity,
@@ -13,10 +13,16 @@ use adk_realtime::recovery::{
 use adk_realtime::session::RealtimeSession;
 
 /// A completely mock session with no recovery capabilities.
-struct MockSessionNone;
+struct MockSessionNone {
+    config: adk_realtime::config::RealtimeConfig,
+}
 
 #[async_trait]
 impl RealtimeSession for MockSessionNone {
+    fn config(&self) -> Option<&adk_realtime::config::RealtimeConfig> {
+        Some(&self.config)
+    }
+
     fn session_id(&self) -> &str {
         "mock-none"
     }
@@ -98,15 +104,21 @@ impl RealtimeRecovery for MockRecoveryImpl {
         }
     }
 
-    async fn recover(&self, context: RecoveryContext<'_>) -> Result<RecoveredSession> {
-        let session = Arc::new(MockSessionNone);
-        // Ensure context fields are accessible through getters
-        let _attempt = context.attempt();
-        let _cause = context.cause();
-        let _config = context.config();
-        let _deadline = context.deadline();
+    fn classify_attempt_error(&self, error: &RealtimeError) -> RecoveryDisposition {
+        match error {
+            RealtimeError::ConnectionError(msg) if msg.contains("retryable") => {
+                RecoveryDisposition::Recoverable
+            }
+            _ => RecoveryDisposition::Fatal,
+        }
+    }
 
-        Ok(RecoveredSession::new(session, RecoveryContinuity::Resumed))
+    async fn recover(&self, context: RecoveryContext<'_>) -> Result<RecoveredSession> {
+        // Validate that context.config() is applied and effective before the session is returned
+        let session = Arc::new(MockSessionNone {
+            config: context.config().clone(),
+        });
+        Ok(RecoveredSession::new(session, RecoveryContinuity::Reconnected))
     }
 }
 
@@ -189,7 +201,9 @@ impl RealtimeSession for MockSessionWithRecovery {
 
 #[test]
 fn test_none_recovery_capability() {
-    let session = MockSessionNone;
+    let session = MockSessionNone {
+        config: adk_realtime::config::RealtimeConfig::default(),
+    };
     assert!(session.recovery().is_none());
 }
 
@@ -209,6 +223,18 @@ fn test_some_recovery_capability_dynamic_dispatch() {
     assert_eq!(recovery_ref.classify(&cause_eof), RecoveryDisposition::Recoverable);
     assert_eq!(recovery_ref.classify(&cause_reset_1000), RecoveryDisposition::Recoverable);
     assert_eq!(recovery_ref.classify(&cause_reset_fatal), RecoveryDisposition::Fatal);
+}
+
+#[test]
+fn test_recovery_attempt_error_classification() {
+    let session = MockSessionWithRecovery { recovery_impl: MockRecoveryImpl };
+    let recovery_ref = session.recovery().expect("Expected recovery capability");
+
+    let retryable_err = RealtimeError::ConnectionError("retryable connection failure".to_string());
+    let fatal_err = RealtimeError::AuthError("unauthorized".to_string());
+
+    assert_eq!(recovery_ref.classify_attempt_error(&retryable_err), RecoveryDisposition::Recoverable);
+    assert_eq!(recovery_ref.classify_attempt_error(&fatal_err), RecoveryDisposition::Fatal);
 }
 
 #[test]
@@ -234,7 +260,7 @@ fn test_recovery_policy_getters_and_setters() {
 #[tokio::test]
 async fn test_recovery_execution_and_recovered_session_fields() {
     let recovery = MockRecoveryImpl;
-    let config = adk_realtime::config::RealtimeConfig::default();
+    let config = adk_realtime::config::RealtimeConfig::default().with_instruction("travel agent");
     let cause = RecoveryCause::UnexpectedEof;
     let context = RecoveryContext::new(
         NonZeroU32::new(1).unwrap(),
@@ -244,8 +270,13 @@ async fn test_recovery_execution_and_recovered_session_fields() {
     );
 
     let recovered = recovery.recover(context).await.unwrap();
-    assert_eq!(recovered.continuity(), RecoveryContinuity::Resumed);
+    assert_eq!(recovered.continuity(), RecoveryContinuity::Reconnected);
 
     let session = recovered.session();
     assert_eq!(session.session_id(), "mock-none");
+
+    // Verify that context config is applied and effective before it is returned
+    // This proves the Reconnected success contract: config was applied and effective before readiness is reported.
+    let effective_config = session.config().expect("Expected config to be available");
+    assert_eq!(effective_config.instruction.as_deref(), Some("travel agent"));
 }
