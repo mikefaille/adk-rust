@@ -8,9 +8,9 @@
 ![Rust](https://img.shields.io/badge/rust-1.95%2B-orange.svg)
 [![GitHub Discussions](https://img.shields.io/github/discussions/zavora-ai/adk-rust?style=flat&logo=github&color=5865F2)](https://github.com/zavora-ai/adk-rust/discussions)
 
-> **v2.0.0 release candidate — unpublished.** The 41-crate v2 workspace is being stabilized; v2 has not been published to crates.io. The candidate targets the official `rmcp 2.2` MCP SDK (protocol `2025-11-25`) with effective HTTP configuration, official `agent-client-protocol` 1.2 for ACP with exact capability publication, the new `adk-computer-use` governed desktop-automation layer, `adk-devtools` coding-agent tools, and live async tool confirmation keyed by function-call ID. See the [migration guide](docs/official_docs/migration/1.0-to-2.0.md) for the planned breaking changes and [CHANGELOG](CHANGELOG.md) for full details.
+> **v3.0.0 release candidate — unpublished.** The 41-crate v2 workspace is being stabilized; v2 has not been published to crates.io. The candidate targets the official `rmcp 2.2` MCP SDK (protocol `2025-11-25`) with effective HTTP configuration, official `agent-client-protocol` 1.2 for ACP with exact capability publication, the new `adk-computer-use` governed desktop-automation layer, `adk-devtools` coding-agent tools, and live async tool confirmation keyed by function-call ID. See the [migration guide](docs/official_docs/migration/1.0-to-2.0.md) for the planned breaking changes and [CHANGELOG](CHANGELOG.md) for full details.
 >
-> **Release transition:** This banner changes to “Released” only after all 41 v2.0.0 crates are available on crates.io. The roadmap marker then changes from “release candidate” to “current.”
+> **Release transition:** This banner changes to “Released” only after all 41 v3.0.0 crates are available on crates.io. The roadmap marker then changes from “release candidate” to “current.”
 >
 > **Contributors:** Many thanks to [@mikefaille](https://github.com/mikefaille) — AdkIdentity design, realtime audio, LiveKit bridge, skill system. [@rohan-panickar](https://github.com/rohan-panickar) — OpenAI-compatible providers, xAI, multimodal content. [@dhruv-pant](https://github.com/dhruv-pant) — Gemini service account auth. [@tomtom215](https://github.com/tomtom215) — A2A Protocol v1.0.0 types crate ([a2a-protocol-types](https://crates.io/crates/a2a-protocol-types)), Foundation-verified wire types powering our A2A v1 layer. [@danielsan](https://github.com/danielsan) — Google deps issue & PR (#181, #203), RAG crash report (#205). [@CodingFlow](https://github.com/CodingFlow) — Gemini 3 thinking level, global endpoint, citationSources (#177, #178, #179). [@ctylx](https://github.com/ctylx) — skill discovery fix (#204). [@poborin](https://github.com/poborin) — project config proposal (#176). [@chillin-capybara](https://github.com/chillin-capybara) — ACP integration, adk-acp crate. [@baotao2006](https://github.com/baotao2006) — UTF-8 boundary audit, CJK search/skill/eval fixes (#349, #357). [Get started →](https://github.com/zavora-ai/adk-rust/wiki/quickstart)
 >
@@ -279,13 +279,13 @@ Requires Rust 1.95 or later (Rust 2024 edition). Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-adk-rust = "2.0.0"  # Minimal (default): Gemini + agent runtime + sessions
+adk-rust = "3.0.0"  # Minimal (default): Gemini + agent runtime + sessions
 
 # Need server, auth, graph workflows, eval?
-# adk-rust = { version = "2.0.0", features = ["standard"] }
+# adk-rust = { version = "3.0.0", features = ["standard"] }
 
 # Need everything (realtime, browser, RAG, payments, AWP)?
-# adk-rust = { version = "2.0.0", features = ["enterprise"] }
+# adk-rust = { version = "3.0.0", features = ["enterprise"] }
 ```
 
 **Feature tiers:**
@@ -388,7 +388,7 @@ async fn main() -> AnyhowResult<()> {
 
 ### OpenAI Example
 
-Enable OpenAI with `adk-rust = { version = "2.0.0", features = ["openai"] }`.
+Enable OpenAI with `adk-rust = { version = "3.0.0", features = ["openai"] }`.
 
 ```rust
 use adk_rust::prelude::*;
@@ -438,7 +438,7 @@ async fn main() -> AnyhowResult<()> {
 
 ### Anthropic Example
 
-Enable Anthropic with `adk-rust = { version = "2.0.0", features = ["anthropic"] }`.
+Enable Anthropic with `adk-rust = { version = "3.0.0", features = ["anthropic"] }`.
 
 ```rust
 use adk_rust::prelude::*;
@@ -462,7 +462,7 @@ async fn main() -> AnyhowResult<()> {
 
 ### DeepSeek Example
 
-Enable DeepSeek with `adk-rust = { version = "2.0.0", features = ["deepseek"] }`.
+Enable DeepSeek with `adk-rust = { version = "3.0.0", features = ["deepseek"] }`.
 
 ```rust
 use adk_rust::prelude::*;
@@ -491,7 +491,7 @@ async fn main() -> AnyhowResult<()> {
 
 ### Groq Example (Ultra-Fast)
 
-Enable Groq with `adk-rust = { version = "2.0.0", features = ["groq"] }`.
+Enable Groq with `adk-rust = { version = "3.0.0", features = ["groq"] }`.
 
 ```rust
 use adk_rust::prelude::*;
@@ -515,7 +515,7 @@ async fn main() -> AnyhowResult<()> {
 
 ### Ollama Example (Local)
 
-Enable Ollama with `adk-rust = { version = "2.0.0", features = ["ollama"] }`.
+Enable Ollama with `adk-rust = { version = "3.0.0", features = ["ollama"] }`.
 
 ```rust
 use adk_rust::prelude::*;
@@ -918,7 +918,7 @@ async fn main() -> anyhow::Result<()> {
 
 `adk-mistralrs` is published to crates.io as a workspace member. GPU features are opt-in:
 ```toml
-adk-mistralrs = { version = "2.0.0", features = ["metal"] }  # macOS Apple Silicon
+adk-mistralrs = { version = "3.0.0", features = ["metal"] }  # macOS Apple Silicon
 # Or: features = ["cuda"] for NVIDIA GPU
 ```
 
@@ -996,26 +996,26 @@ Add to your `Cargo.toml`:
 ```toml
 [dependencies]
 # Minimal (default) — Gemini, agents, runner, sessions
-adk-rust = "2.0.0"
+adk-rust = "3.0.0"
 
 # Add a provider explicitly when you need it
-adk-rust = { version = "2.0.0", features = ["openai"] }
+adk-rust = { version = "3.0.0", features = ["openai"] }
 
 # Production tier without CLI provider fan-out
-adk-rust = { version = "2.0.0", features = ["standard"] }
+adk-rust = { version = "3.0.0", features = ["standard"] }
 
 # Full — enterprise plus audio, code execution, sandbox
-adk-rust = { version = "2.0.0", features = ["full"] }
+adk-rust = { version = "3.0.0", features = ["full"] }
 
 # Minimal — just agents + Gemini + runner (fastest build)
-adk-rust = { version = "2.0.0", default-features = false, features = ["minimal"] }
+adk-rust = { version = "3.0.0", default-features = false, features = ["minimal"] }
 
 # Or individual crates for finer control
-adk-core = "2.0.0"
-adk-agent = "2.0.0"
-adk-model = { version = "2.0.0", features = ["openai", "anthropic"] }
-adk-tool = "2.0.0"
-adk-runner = "2.0.0"
+adk-core = "3.0.0"
+adk-agent = "3.0.0"
+adk-model = { version = "3.0.0", features = ["openai", "anthropic"] }
+adk-tool = "3.0.0"
+adk-runner = "3.0.0"
 ```
 
 ## Examples
@@ -1141,7 +1141,7 @@ Contributions welcome! Please open an issue or pull request on GitHub.
 
 ## Roadmap
 
-**v2.0.0** (release candidate) — production agent framework:
+**v3.0.0** (release candidate) — production agent framework:
 - **Composable Template System** — 12 templates, 9 add-ons, 5 enterprise patterns via `cargo adk new --addon`.
 - **Cargo Adk Build** — compile-without-deploy subcommand for pre-deployment verification.
 - **A2A Simple Scaffolding** — `A2aServer::quick_start`, `A2aServer::builder`, and `cargo adk new --template a2a-server`.

@@ -59,7 +59,7 @@ POST /api/agents (qa-agent) → 201 Created
 GET /api/agents → 200 OK
   Found 2 agent(s):
     - search-agent v1.0.0: An agent that searches the web for information
-    - qa-agent v2.0.0: A question-answering agent for technical support
+    - qa-agent v3.0.0: A question-answering agent for technical support
 
 ── Get Agent by Name ───────────────────────────
 GET /api/agents/search-agent → 200 OK
