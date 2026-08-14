@@ -237,3 +237,5 @@ pub trait RealtimeRecovery: Send + Sync {
     /// Attempt to recover the session once.
     async fn recover(&self, context: RecoveryContext<'_>) -> Result<RecoveredSession>;
 }
+
+pub(crate) mod supervisor;

@@ -12,7 +12,7 @@ This is a source and execution-evidence report, not a release announcement and n
 
 ## Release-baseline limitation
 
-The workspace declares version `2.0.0` in `Cargo.toml`, `CHANGELOG.md` contains a `2.0.0` entry dated 2026-07-16, and `README.md` calls v2 current. However, the inspected local repository has no `v2.0.0` tag. There is therefore no authoritative local Git object that identifies the exact source published as v2.0.0. Commit `2a4a85bec8c5b41a59b94d580a5c9e1684d8e2b3` is retained only as a provisional date-based comparison point; it is not treated as a release tag.
+The workspace declares version `3.0.0` in `Cargo.toml`, `CHANGELOG.md` contains a `3.0.0` entry dated 2026-07-16, and `README.md` calls v2 current. However, the inspected local repository has no `v3.0.0` tag. There is therefore no authoritative local Git object that identifies the exact source published as v3.0.0. Commit `2a4a85bec8c5b41a59b94d580a5c9e1684d8e2b3` is retained only as a provisional date-based comparison point; it is not treated as a release tag.
 
 Unless a finding explicitly says otherwise, its release attribution is **current HEAD only**. A current-HEAD finding must not be read as proof that the same behavior exists in a particular crates.io package or released source archive.
 
@@ -1462,12 +1462,12 @@ Capture tracing output for malformed frames and assert sensitive sentinel text i
 **Severity:** Medium
 **Affected capability:** release provenance and user decision-making
 **Evidence:** Source-confirmed and documentation mismatch
-**Affected code:** `Cargo.toml` — workspace version; `CHANGELOG.md` — `2.0.0` entry; `README.md` — release/current-status, graph, background, coding, sandbox, and managed-runtime claims; `adk-graph/README.md` — durable-resume claim
+**Affected code:** `Cargo.toml` — workspace version; `CHANGELOG.md` — `3.0.0` entry; `README.md` — release/current-status, graph, background, coding, sandbox, and managed-runtime claims; `adk-graph/README.md` — durable-resume claim
 **Release attribution:** metadata finding applies to the inspected repository; exact packaged-source attribution is unresolved
 
 #### Current behavior
 
-The workspace and installation snippets use `2.0.0`, the changelog dates 2.0.0, the README banner still announces v1, and the roadmap calls v2 current. No local `v2.0.0` tag identifies the exact release source. Separately, documentation says graph durable resume skips completed nodes, background runs execute workflows, coding workspaces are sandboxed, OS profiles include AppContainer, and managed execution is durable; the findings above establish narrower or placeholder behavior at current HEAD.
+The workspace and installation snippets use `3.0.0`, the changelog dates 3.0.0, the README banner still announces v1, and the roadmap calls v2 current. No local `v3.0.0` tag identifies the exact release source. Separately, documentation says graph durable resume skips completed nodes, background runs execute workflows, coding workspaces are sandboxed, OS profiles include AppContainer, and managed execution is durable; the findings above establish narrower or placeholder behavior at current HEAD.
 
 #### Failure mechanism
 

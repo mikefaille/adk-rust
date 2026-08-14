@@ -8,11 +8,11 @@ The purpose of this file is to provide transparency to consumers about the secur
 
 These accepted advisories are also configured in [`.cargo/audit.toml`](../../.cargo/audit.toml) so that `cargo audit` passes in CI while still surfacing new, unreviewed advisories.
 
-**Last reviewed:** 2026-08-01 (2.0.0 release review)
+**Last reviewed:** 2026-08-01 (3.0.0 release review)
 
 ---
 
-## Resolved in 2.0.0
+## Resolved in 3.0.0
 
 | Advisory | Crate | Resolution |
 |---|---|---|

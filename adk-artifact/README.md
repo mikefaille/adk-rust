@@ -23,14 +23,14 @@ Both implement the `ArtifactService` trait, so you can swap backends without cha
 
 ```toml
 [dependencies]
-adk-artifact = "2.0.0"
+adk-artifact = "3.0.0"
 ```
 
 Or via the umbrella crate:
 
 ```toml
 [dependencies]
-adk-rust = { version = "2.0.0", features = ["artifacts"] }
+adk-rust = { version = "3.0.0", features = ["artifacts"] }
 ```
 
 ## Quick Start

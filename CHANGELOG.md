@@ -3,7 +3,7 @@
 All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v3.0.0.html).
 
 ## [Unreleased]
 
@@ -141,7 +141,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (exceeding it raises `MemoryError` in the script). The crate stays
   `publish = false`.
 
-## [2.0.0] - 2026-07-25
+## [3.0.0] - 2026-07-25
 
 ### Breaking
 
@@ -1057,7 +1057,7 @@ before/after code is in
   `scripts/check-release-consistency.sh` derives all three from the workspace version and runs
   in the PR-tier `templates` job. Its `--release` mode additionally requires a `v<version>` tag so a
   published artifact can be attributed to an exact commit; outside release mode it reports the
-  commit a release would be cut from. There is currently **no `v2.0.0` tag**, which is why a
+  commit a release would be cut from. There is currently **no `v3.0.0` tag**, which is why a
   defect cannot be attributed to the published artifact from this repository alone.
 - **adk-managed no longer described as durable.** The crate README, crate docs, root README,
   and AGENTS.md called managed execution durable, and the README claimed sessions "survive
@@ -2231,7 +2231,7 @@ Five adoption fixes reported by a real-world integrator (zavora-cli):
 
 ### Changed
 
-- **Dependencies**: `wasmtime` 43.0.0 → 43.0.1, `rubato` 1.0.1 → 2.0.0.
+- **Dependencies**: `wasmtime` 43.0.0 → 43.0.1, `rubato` 1.0.1 → 3.0.0.
 
 ## [0.5.0] - 2026-03-26
 
@@ -2249,7 +2249,7 @@ Five adoption fixes reported by a real-world integrator (zavora-cli):
 
 ### Changed
 
-- **Dependencies**: `wasmtime` 43.0.0 → 43.0.1, `rubato` 1.0.1 → 2.0.0.
+- **Dependencies**: `wasmtime` 43.0.0 → 43.0.1, `rubato` 1.0.1 → 3.0.0.
 
 ### Added
 

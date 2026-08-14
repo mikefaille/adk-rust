@@ -55,8 +55,8 @@ The table below assigns one stability tier to every public `adk-*` crate in the 
 | `adk-acp` | **Beta** | Agent Client Protocol client and server (tracks the upstream ACP spec) |
 | `adk-awp` | **Beta** | Agentic Web Protocol implementation (tracks the upstream AWP spec) |
 | `awp-types` | **Beta** | AWP protocol types, zero `adk-*` dependencies |
-| `adk-devtools` | **Beta** | Coding-agent dev tools scoped to a `Workspace` (new in 2.0.0) |
-| `adk-computer-use` | **Beta** | Governed orchestration for the `computer-use-mcp` server (new in 2.0.0) |
+| `adk-devtools` | **Beta** | Coding-agent dev tools scoped to a `Workspace` (new in 3.0.0) |
+| `adk-computer-use` | **Beta** | Governed orchestration for the `computer-use-mcp` server (new in 3.0.0) |
 | `adk-schema` | **Beta** | Canonical JSON Schema documents, bounded ingestion, and role-typed identity |
 | `adk-enterprise` | **Experimental** | Enterprise client SDK for ADK-Rust Managed Agent Service |
 | `adk-managed` | **Experimental** | Managed agent runtime engine |
@@ -72,9 +72,9 @@ minor release. Every other crate was promoted to Stable in 1.0.0.
 | `adk-acp` | Agent Client Protocol is evolving upstream; capability negotiation follows the SDK | Stabilize once the ACP wire spec settles past v1 |
 | `adk-awp` | Agentic Web Protocol is a young specification | Stabilize when the AWP spec reaches a versioned release |
 | `awp-types` | Mirrors the AWP wire format, so it moves with the spec | Stabilize alongside `adk-awp` |
-| `adk-devtools` | New in 2.0.0; the coding-agent tool surface is still being shaped by use | Promote after 1-2 release cycles without breaking changes |
-| `adk-computer-use` | New in 2.0.0; tracks the `computer-use-mcp` wire contracts | Stabilize when the upstream contracts are versioned |
-| `adk-schema` | New in 2.0.0; the introspection surface over canonical documents is still being shaped by use | Promote once the document API absorbs a second consumer without breaking changes |
+| `adk-devtools` | New in 3.0.0; the coding-agent tool surface is still being shaped by use | Promote after 1-2 release cycles without breaking changes |
+| `adk-computer-use` | New in 3.0.0; tracks the `computer-use-mcp` wire contracts | Stabilize when the upstream contracts are versioned |
+| `adk-schema` | New in 3.0.0; the introspection surface over canonical documents is still being shaped by use | Promote once the document API absorbs a second consumer without breaking changes |
 
 ### Excluded from Workspace
 
@@ -139,13 +139,13 @@ ADK-Rust 1.0.0 was released on June 7, 2026. All Stable-tier crates commit to lo
 
 ### Post-1.0 Contract
 
-- Breaking changes to Stable-tier crates require a 2.0.0 release
+- Breaking changes to Stable-tier crates require a 3.0.0 release
 - Beta crates may have breaking changes in 1.x minor releases (with migration guides)
 - Experimental crates may change without notice
 
 ## 2.0 Milestone
 
-ADK-Rust 2.0.0 is the second major release. It keeps the Stable-tier commitment and
+ADK-Rust 3.0.0 is the second major release. It keeps the Stable-tier commitment and
 spends the major version on the breakage that had accumulated since 1.0.0.
 
 ### What the major version bought
@@ -166,7 +166,7 @@ The complete breaking-change list, generated with `cargo semver-checks`, is in
 
 | Criterion | Status | Notes |
 |-----------|--------|-------|
-| **Semver compliance** | ✅ Met | `cargo semver-checks check-release` accepts the 1.0.0 → 2.0.0 bump for every published crate. Because a major bump permits any change, the breaking-change inventory is generated separately with `--release-type minor` and recorded in the changelog. |
+| **Semver compliance** | ✅ Met | `cargo semver-checks check-release` accepts the 1.0.0 → 3.0.0 bump for every published crate. Because a major bump permits any change, the breaking-change inventory is generated separately with `--release-type minor` and recorded in the changelog. |
 | **Migration guide** | ✅ Met | [docs/official_docs/migration/1.0-to-2.0.md](docs/official_docs/migration/1.0-to-2.0.md) covers every breakage with before/after code. |
 | **Test coverage** | ✅ Met | 3700+ workspace tests plus 300+ doctests, all gated in CI. |
 | **CI enforcement** | ✅ Met | `fmt`, `clippy --all-targets -D warnings`, `nextest --workspace`, doctests, doc build, template scaffolding, and semver run per PR; supply-chain (`cargo audit` + `cargo deny`) and standalone-example compilation run nightly. |

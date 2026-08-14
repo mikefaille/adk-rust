@@ -118,7 +118,7 @@ async fn main() -> anyhow::Result<()> {
         .bind_addr("0.0.0.0:9090")
         .agent_card_name("My Production Agent")
         .agent_card_description("Handles customer queries via A2A")
-        .agent_card_version("2.0.0")
+        .agent_card_version("3.0.0")
         .streaming(true)
         .push_notifications(false)
         .build()?;
