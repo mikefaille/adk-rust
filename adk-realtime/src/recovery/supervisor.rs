@@ -13,6 +13,7 @@ use tokio::time::{Instant, sleep};
 ///
 /// It coordinates bounded retries, applies exponential backoff based on a policy,
 /// enforces an absolute deadline, and orchestrates exactly one active attempt at a time.
+#[allow(dead_code)]
 pub(crate) struct RecoverySupervisor {
     policy: RecoveryPolicy,
     active_session_ref: Arc<RwLock<Option<Arc<dyn RealtimeSession>>>>,
