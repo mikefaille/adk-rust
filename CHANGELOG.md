@@ -3,7 +3,7 @@
 All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v3.0.0.html).
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
@@ -141,7 +141,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v3.0.0
   (exceeding it raises `MemoryError` in the script). The crate stays
   `publish = false`.
 
-## [3.0.0] - 2026-07-25
+## [2.0.0] - 2026-07-25
 
 ### Breaking
 
@@ -2231,7 +2231,7 @@ Five adoption fixes reported by a real-world integrator (zavora-cli):
 
 ### Changed
 
-- **Dependencies**: `wasmtime` 43.0.0 → 43.0.1, `rubato` 1.0.1 → 3.0.0.
+- **Dependencies**: `wasmtime` 43.0.0 → 43.0.1, `rubato` 1.0.1 → 2.0.0.
 
 ## [0.5.0] - 2026-03-26
 
@@ -2249,7 +2249,7 @@ Five adoption fixes reported by a real-world integrator (zavora-cli):
 
 ### Changed
 
-- **Dependencies**: `wasmtime` 43.0.0 → 43.0.1, `rubato` 1.0.1 → 3.0.0.
+- **Dependencies**: `wasmtime` 43.0.0 → 43.0.1, `rubato` 1.0.1 → 2.0.0.
 
 ### Added
 

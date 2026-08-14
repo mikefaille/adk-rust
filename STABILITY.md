@@ -139,13 +139,13 @@ ADK-Rust 1.0.0 was released on June 7, 2026. All Stable-tier crates commit to lo
 
 ### Post-1.0 Contract
 
-- Breaking changes to Stable-tier crates require a 3.0.0 release
+- Breaking changes to Stable-tier crates require a 2.0.0 release
 - Beta crates may have breaking changes in 1.x minor releases (with migration guides)
 - Experimental crates may change without notice
 
 ## 2.0 Milestone
 
-ADK-Rust 3.0.0 is the second major release. It keeps the Stable-tier commitment and
+ADK-Rust 2.0.0 is the second major release. It keeps the Stable-tier commitment and
 spends the major version on the breakage that had accumulated since 1.0.0.
 
 ### What the major version bought
