@@ -5,6 +5,7 @@ use crate::recovery::{RecoveryCause, RecoveryContext, RecoveryDisposition, Recov
 use crate::session::RealtimeSession;
 use std::num::NonZeroU32;
 use std::sync::Arc;
+use std::time::Duration;
 
 #[cfg_attr(not(test), expect(dead_code, reason = "wired by managed-runner integration follow-up"))]
 pub(crate) struct SessionGeneration {
@@ -85,7 +86,10 @@ impl RecoverySupervisor {
     pub(crate) async fn report_failure(&self, report: FailureReport) -> Result<RecoveryOutcome> {
         let start_time = tokio::time::Instant::now();
         let deadline_duration = self.policy.deadline();
-        let deadline_instant = start_time.checked_add(deadline_duration).unwrap_or(start_time);
+        // Safe far-future fallback if overflow occurs
+        let deadline_instant = start_time
+            .checked_add(deadline_duration)
+            .unwrap_or_else(|| start_time + Duration::from_secs(86400 * 365));
 
         // 1. Check current state and validation
         {
@@ -129,18 +133,17 @@ impl RecoverySupervisor {
         }
 
         // 2. Lock wait capped by remaining deadline
-        let lock_guard = match tokio::time::timeout_at(deadline_instant, self.recovery_lock.lock())
-            .await
-        {
-            Ok(guard) => guard,
-            Err(_) => {
-                let err = RealtimeError::Timeout(
-                    "deadline expired waiting for recovery lock".to_string(),
-                );
-                tracing::warn!(generation = report.generation, err = %err, "recovery deadline expired waiting for lock");
-                return Err(err);
-            }
-        };
+        let lock_guard =
+            match tokio::time::timeout_at(deadline_instant, self.recovery_lock.lock()).await {
+                Ok(guard) => guard,
+                Err(_) => {
+                    let err = RealtimeError::Timeout(
+                        "deadline expired waiting for recovery lock".to_string(),
+                    );
+                    tracing::warn!(generation = report.generation, err = %err, "recovery deadline expired waiting for lock");
+                    return Err(err);
+                }
+            };
 
         // 3. Double-check state now that we hold the lock
         {
@@ -321,17 +324,12 @@ impl RecoverySupervisor {
                     }
 
                     if attempt_idx < max_attempts {
-                        // Apply deterministic backoff
                         let factor = 2u32.checked_pow(attempt_idx - 1).unwrap_or(u32::MAX);
                         let mut backoff = self.policy.initial_delay().saturating_mul(factor);
                         backoff = backoff.min(self.policy.max_delay());
 
                         let now_after_attempt = tokio::time::Instant::now();
-                        let remaining_after_attempt =
-                            deadline_instant.saturating_duration_since(now_after_attempt);
-                        backoff = backoff.min(remaining_after_attempt);
-
-                        if backoff.is_zero() {
+                        if now_after_attempt >= deadline_instant {
                             let timeout_err = RealtimeError::Timeout(
                                 "recovery deadline expired during backoff calculation".to_string(),
                             );
@@ -340,13 +338,19 @@ impl RecoverySupervisor {
                             break;
                         }
 
-                        tracing::info!(
-                            generation = report.generation,
-                            attempt = attempt_idx,
-                            delay_ms = backoff.as_millis(),
-                            "backing off before next attempt"
-                        );
-                        tokio::time::sleep(backoff).await;
+                        let remaining_after_attempt =
+                            deadline_instant.saturating_duration_since(now_after_attempt);
+                        backoff = backoff.min(remaining_after_attempt);
+
+                        if !backoff.is_zero() {
+                            tracing::info!(
+                                generation = report.generation,
+                                attempt = attempt_idx,
+                                delay_ms = backoff.as_millis(),
+                                "backing off before next attempt"
+                            );
+                            tokio::time::sleep(backoff).await;
+                        }
                     }
                 }
             }
@@ -959,6 +963,66 @@ mod tests {
             total_elapsed >= Duration::from_millis(150)
                 && total_elapsed < Duration::from_millis(170)
         );
+    }
+
+    #[tokio::test]
+    async fn test_zero_initial_delay_retries_immediately() {
+        let recover_count = Arc::new(AtomicUsize::new(0));
+
+        struct ZeroDelayRecovery {
+            recover_count: Arc<AtomicUsize>,
+        }
+
+        #[async_trait]
+        impl RealtimeRecovery for ZeroDelayRecovery {
+            fn classify(&self, _cause: &RecoveryCause) -> RecoveryDisposition {
+                RecoveryDisposition::Recoverable
+            }
+
+            fn classify_attempt_error(&self, _error: &RealtimeError) -> RecoveryDisposition {
+                RecoveryDisposition::Recoverable
+            }
+
+            async fn recover(&self, context: RecoveryContext<'_>) -> Result<RecoveredSession> {
+                self.recover_count.fetch_add(1, Ordering::SeqCst);
+                if context.attempt().get() == 3 {
+                    let session =
+                        Arc::new(MockSession { id: "recovered-zero-delay".to_string(), recovery: None });
+                    Ok(RecoveredSession::new(session, RecoveryContinuity::Resumed))
+                } else {
+                    Err(RealtimeError::ConnectionError("retry immediately".to_string()))
+                }
+            }
+        }
+
+        let mock_rec = Arc::new(ZeroDelayRecovery {
+            recover_count: Arc::clone(&recover_count),
+        });
+
+        let initial_session = Arc::new(MockSession {
+            id: "gen-0".to_string(),
+            recovery: Some(Arc::clone(&mock_rec) as Arc<dyn RealtimeRecovery>),
+        });
+
+        let policy = RecoveryPolicy::default()
+            .with_max_attempts(NonZeroU32::new(3).unwrap())
+            .with_initial_delay(Duration::ZERO)
+            .with_deadline(Duration::from_secs(5));
+
+        let config = Arc::new(tokio::sync::RwLock::new(crate::config::RealtimeConfig::default()));
+        let supervisor = RecoverySupervisor::new(policy, config, initial_session);
+
+        let report = FailureReport { generation: 0, cause: RecoveryCause::UnexpectedEof };
+
+        let res = supervisor.report_failure(report).await.unwrap();
+        match res {
+            RecoveryOutcome::Recovered(session) => {
+                assert_eq!(session.session_id(), "recovered-zero-delay");
+            }
+            _ => panic!("Expected Recovered outcome"),
+        }
+
+        assert_eq!(recover_count.load(Ordering::SeqCst), 3);
     }
 
     struct AlwaysFailingRecovery;
