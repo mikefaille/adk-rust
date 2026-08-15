@@ -129,21 +129,15 @@ impl RecoverySupervisor {
         }
 
         // 2. Lock wait capped by remaining deadline
-        let remaining = deadline_instant.saturating_duration_since(tokio::time::Instant::now());
-        if remaining.is_zero() {
-            let err =
-                RealtimeError::Timeout("deadline expired before lock acquisition".to_string());
-            tracing::warn!(generation = report.generation, err = %err, "recovery deadline expired");
-            return Err(err);
-        }
-
-        let lock_guard = match tokio::time::timeout(remaining, self.recovery_lock.lock()).await {
+        let lock_guard = match tokio::time::timeout_at(deadline_instant, self.recovery_lock.lock())
+            .await
+        {
             Ok(guard) => guard,
             Err(_) => {
                 let err = RealtimeError::Timeout(
                     "deadline expired waiting for recovery lock".to_string(),
                 );
-                tracing::warn!(generation = report.generation, err = %err, "recovery deadline expired");
+                tracing::warn!(generation = report.generation, err = %err, "recovery deadline expired waiting for lock");
                 return Err(err);
             }
         };
@@ -212,10 +206,9 @@ impl RecoverySupervisor {
         tracing::info!(generation = report.generation, "recovery episode started");
         let mut final_error: Option<RealtimeError> = None;
         let max_attempts = self.policy.max_attempts().get();
-        let mut attempts_made = 0;
+        let mut attempts_launched = 0;
 
         for attempt_idx in 1..=max_attempts {
-            attempts_made = attempt_idx;
             let now = tokio::time::Instant::now();
             if now >= deadline_instant {
                 let err =
@@ -225,17 +218,44 @@ impl RecoverySupervisor {
                 break;
             }
 
-            let attempt_remaining = deadline_instant.saturating_duration_since(now);
             let attempt_nz = NonZeroU32::new(attempt_idx).unwrap();
-            let remaining_dur =
-                deadline_instant.saturating_duration_since(tokio::time::Instant::now());
+
+            // Acquire config read lock bounded by absolute episode deadline_instant
+            let config_guard = match tokio::time::timeout_at(deadline_instant, self.config.read())
+                .await
+            {
+                Ok(guard) => guard,
+                Err(_) => {
+                    let err = RealtimeError::Timeout(format!(
+                        "recovery deadline expired after {} launched attempt(s) waiting for config",
+                        attempts_launched
+                    ));
+                    tracing::warn!(generation = report.generation, attempt = attempt_idx, err = %err, "recovery deadline expired waiting for config");
+                    final_error = Some(err);
+                    break;
+                }
+            };
+            let effective_config = config_guard.clone();
+            drop(config_guard);
+
+            let now_after_config = tokio::time::Instant::now();
+            if now_after_config >= deadline_instant {
+                let err = RealtimeError::Timeout(format!(
+                    "recovery deadline expired after {} launched attempt(s) before provider invocation",
+                    attempts_launched
+                ));
+                tracing::warn!(generation = report.generation, attempt = attempt_idx, err = %err, "recovery deadline expired before provider invocation");
+                final_error = Some(err);
+                break;
+            }
+
+            attempts_launched += 1;
+
+            let remaining_dur = deadline_instant.saturating_duration_since(now_after_config);
             let context_deadline = std::time::Instant::now()
                 .checked_add(remaining_dur)
                 .unwrap_or_else(std::time::Instant::now);
 
-            // Clone configuration dynamically before recovery invocation to preserve config authority
-            // and release the read lock on self.config during the async call to prevent deadlock.
-            let effective_config = self.config.read().await.clone();
             let context = RecoveryContext::new(
                 attempt_nz,
                 &report.cause,
@@ -250,7 +270,7 @@ impl RecoverySupervisor {
             );
 
             let recover_fut = recovery_impl.recover(context);
-            let attempt_res = match tokio::time::timeout(attempt_remaining, recover_fut).await {
+            let attempt_res = match tokio::time::timeout_at(deadline_instant, recover_fut).await {
                 Ok(res) => res,
                 Err(_) => {
                     let err =
@@ -337,15 +357,15 @@ impl RecoverySupervisor {
             match err {
                 RealtimeError::Timeout(_) => err,
                 other => {
-                    if attempts_made < max_attempts {
+                    if attempts_launched < max_attempts {
                         RealtimeError::ProviderError(format!(
                             "recovery aborted after {} attempt(s) due to fatal error; last error: {}",
-                            attempts_made, other
+                            attempts_launched, other
                         ))
                     } else {
                         RealtimeError::ProviderError(format!(
                             "recovery exhausted after {} attempt(s); last error: {}",
-                            attempts_made, other
+                            attempts_launched, other
                         ))
                     }
                 }
@@ -353,7 +373,7 @@ impl RecoverySupervisor {
         } else {
             RealtimeError::ProviderError(format!(
                 "recovery exhausted after {} attempt(s)",
-                attempts_made
+                attempts_launched
             ))
         };
 
@@ -1028,5 +1048,55 @@ mod tests {
         let report = FailureReport { generation: 0, cause: RecoveryCause::UnexpectedEof };
         let res = supervisor.report_failure(report).await;
         assert!(res.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_config_lock_timeout_bounds_episode_zero_attempts() {
+        let recover_count = Arc::new(AtomicUsize::new(0));
+        let mock_rec = Arc::new(CoalescingRecovery {
+            recover_count: Arc::clone(&recover_count),
+            active_recoveries: Arc::new(AtomicUsize::new(0)),
+            max_active_recoveries: Arc::new(AtomicUsize::new(0)),
+        });
+
+        let initial_session = Arc::new(MockSession {
+            id: "gen-0".to_string(),
+            recovery: Some(Arc::clone(&mock_rec) as Arc<dyn RealtimeRecovery>),
+        });
+
+        let policy = RecoveryPolicy::default()
+            .with_max_attempts(NonZeroU32::new(3).unwrap())
+            .with_deadline(Duration::from_millis(50));
+
+        let config = Arc::new(tokio::sync::RwLock::new(crate::config::RealtimeConfig::default()));
+
+        // Hold write lock on config longer than the 50ms deadline
+        let write_guard = config.write().await;
+
+        let supervisor = RecoverySupervisor::new(policy, Arc::clone(&config), initial_session);
+
+        let start = tokio::time::Instant::now();
+        let report = FailureReport { generation: 0, cause: RecoveryCause::UnexpectedEof };
+
+        let res = supervisor.report_failure(report).await;
+        let elapsed = start.elapsed();
+
+        drop(write_guard);
+
+        assert!(res.is_err());
+        let err = res.unwrap_err();
+        assert!(matches!(err, RealtimeError::Timeout(_)));
+        assert!(
+            err.to_string().contains("waiting for config"),
+            "Error message did not mention waiting for config! got: {}",
+            err
+        );
+
+        // Prove provider recover() count is 0
+        assert_eq!(recover_count.load(Ordering::SeqCst), 0);
+
+        // Prove the episode stays bounded by the absolute deadline
+        assert!(elapsed >= Duration::from_millis(50));
+        assert!(elapsed < Duration::from_millis(150));
     }
 }
