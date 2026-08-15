@@ -133,17 +133,18 @@ impl RecoverySupervisor {
         }
 
         // 2. Lock wait capped by remaining deadline
-        let lock_guard =
-            match tokio::time::timeout_at(deadline_instant, self.recovery_lock.lock()).await {
-                Ok(guard) => guard,
-                Err(_) => {
-                    let err = RealtimeError::Timeout(
-                        "deadline expired waiting for recovery lock".to_string(),
-                    );
-                    tracing::warn!(generation = report.generation, err = %err, "recovery deadline expired waiting for lock");
-                    return Err(err);
-                }
-            };
+        let lock_guard = match tokio::time::timeout_at(deadline_instant, self.recovery_lock.lock())
+            .await
+        {
+            Ok(guard) => guard,
+            Err(_) => {
+                let err = RealtimeError::Timeout(
+                    "deadline expired waiting for recovery lock".to_string(),
+                );
+                tracing::warn!(generation = report.generation, err = %err, "recovery deadline expired waiting for lock");
+                return Err(err);
+            }
+        };
 
         // 3. Double-check state now that we hold the lock
         {
@@ -986,8 +987,10 @@ mod tests {
             async fn recover(&self, context: RecoveryContext<'_>) -> Result<RecoveredSession> {
                 self.recover_count.fetch_add(1, Ordering::SeqCst);
                 if context.attempt().get() == 3 {
-                    let session =
-                        Arc::new(MockSession { id: "recovered-zero-delay".to_string(), recovery: None });
+                    let session = Arc::new(MockSession {
+                        id: "recovered-zero-delay".to_string(),
+                        recovery: None,
+                    });
                     Ok(RecoveredSession::new(session, RecoveryContinuity::Resumed))
                 } else {
                     Err(RealtimeError::ConnectionError("retry immediately".to_string()))
@@ -995,9 +998,7 @@ mod tests {
             }
         }
 
-        let mock_rec = Arc::new(ZeroDelayRecovery {
-            recover_count: Arc::clone(&recover_count),
-        });
+        let mock_rec = Arc::new(ZeroDelayRecovery { recover_count: Arc::clone(&recover_count) });
 
         let initial_session = Arc::new(MockSession {
             id: "gen-0".to_string(),
