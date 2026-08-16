@@ -1,36 +1,80 @@
 #![allow(unfulfilled_lint_expectations)]
 
 use crate::error::{RealtimeError, Result};
-use crate::recovery::{RecoveryCause, RecoveryContext, RecoveryDisposition, RecoveryPolicy};
+use crate::recovery::{
+    RecoveryCause, RecoveryContext, RecoveryContinuity, RecoveryDisposition, RecoveryPolicy,
+};
 use crate::session::RealtimeSession;
 use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::Duration;
 
-#[cfg_attr(not(test), expect(dead_code, reason = "wired by managed-runner integration follow-up"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TransportPhase {
+    Healthy,
+    Recovering,
+    Exhausted,
+}
+
+#[derive(Clone)]
 pub(crate) struct SessionGeneration {
     pub(crate) id: u64,
     pub(crate) session: Arc<dyn RealtimeSession>,
 }
 
-#[cfg_attr(not(test), expect(dead_code, reason = "wired by managed-runner integration follow-up"))]
+#[derive(Clone)]
+pub(crate) struct ActiveSessionHandle {
+    pub(crate) generation: u64,
+    pub(crate) session: Arc<dyn RealtimeSession>,
+}
+
 pub(crate) struct FailureReport {
     pub(crate) generation: u64,
     pub(crate) cause: RecoveryCause,
 }
 
-#[cfg_attr(not(test), expect(dead_code, reason = "wired by managed-runner integration follow-up"))]
 struct SupervisorState {
-    generation: SessionGeneration,
+    generation: Option<SessionGeneration>,
+    phase: TransportPhase,
     exhausted_generation: Option<u64>,
+    config_revision: u64,
+}
+
+/// RAII guard ensuring an unpublished candidate session is closed if recovery drops or fails before publication.
+struct CandidateGuard {
+    session: Option<Arc<dyn RealtimeSession>>,
+}
+
+impl CandidateGuard {
+    fn new(session: Arc<dyn RealtimeSession>) -> Self {
+        Self { session: Some(session) }
+    }
+
+    fn session(&self) -> &Arc<dyn RealtimeSession> {
+        self.session.as_ref().expect("candidate present")
+    }
+
+    fn disarm(mut self) -> Arc<dyn RealtimeSession> {
+        self.session.take().expect("candidate present")
+    }
+}
+
+impl Drop for CandidateGuard {
+    fn drop(&mut self) {
+        if let Some(session) = self.session.take() {
+            tracing::warn!(session_id = %session.session_id(), "Unpublished recovery candidate dropped; closing transport");
+            tokio::spawn(async move {
+                let _ = session.close().await;
+            });
+        }
+    }
 }
 
 /// The outcome of a recovery report.
-#[cfg_attr(not(test), expect(dead_code, reason = "wired by managed-runner integration follow-up"))]
 #[derive(Clone)]
 pub(crate) enum RecoveryOutcome {
     /// A newly recovered session was successfully established and published.
-    Recovered(Arc<dyn RealtimeSession>),
+    Recovered(Arc<dyn RealtimeSession>, RecoveryContinuity),
     /// A report for a stale/older generation than the currently active one.
     /// It performs zero provider attempts and leaves the newer active session running.
     Stale(Arc<dyn RealtimeSession>),
@@ -42,9 +86,11 @@ pub(crate) enum RecoveryOutcome {
 impl std::fmt::Debug for RecoveryOutcome {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Recovered(session) => {
-                f.debug_struct("Recovered").field("session_id", &session.session_id()).finish()
-            }
+            Self::Recovered(session, continuity) => f
+                .debug_struct("Recovered")
+                .field("session_id", &session.session_id())
+                .field("continuity", continuity)
+                .finish(),
             Self::Stale(session) => {
                 f.debug_struct("Stale").field("session_id", &session.session_id()).finish()
             }
@@ -54,31 +100,122 @@ impl std::fmt::Debug for RecoveryOutcome {
 }
 
 /// The private recovery supervisor.
-#[cfg_attr(not(test), expect(dead_code, reason = "wired by managed-runner integration follow-up"))]
 pub(crate) struct RecoverySupervisor {
     policy: RecoveryPolicy,
     config: Arc<tokio::sync::RwLock<crate::config::RealtimeConfig>>,
     state: tokio::sync::RwLock<SupervisorState>,
     recovery_lock: tokio::sync::Mutex<()>,
+    gen_tx: tokio::sync::watch::Sender<u64>,
 }
 
-#[cfg_attr(not(test), expect(dead_code, reason = "wired by managed-runner integration follow-up"))]
 impl RecoverySupervisor {
     /// Create a new recovery supervisor.
     pub(crate) fn new(
         policy: RecoveryPolicy,
         config: Arc<tokio::sync::RwLock<crate::config::RealtimeConfig>>,
-        initial_session: Arc<dyn RealtimeSession>,
+        initial_session: Option<Arc<dyn RealtimeSession>>,
     ) -> Self {
+        let (generation, phase) = match initial_session {
+            Some(session) => (Some(SessionGeneration { id: 0, session }), TransportPhase::Healthy),
+            None => (None, TransportPhase::Exhausted),
+        };
+
+        let (gen_tx, _) = tokio::sync::watch::channel(0);
+
         Self {
             policy,
             config,
             state: tokio::sync::RwLock::new(SupervisorState {
-                generation: SessionGeneration { id: 0, session: initial_session },
+                generation,
+                phase,
                 exhausted_generation: None,
+                config_revision: 0,
             }),
             recovery_lock: tokio::sync::Mutex::new(()),
+            gen_tx,
         }
+    }
+
+    /// Subscribe to generation change notifications.
+    pub(crate) fn subscribe_generation(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.gen_tx.subscribe()
+    }
+
+    /// Set the initial session (e.g. after initial connect).
+    pub(crate) async fn set_initial_session(&self, session: Arc<dyn RealtimeSession>) -> u64 {
+        let mut state = self.state.write().await;
+        state.generation = Some(SessionGeneration { id: 0, session });
+        state.phase = TransportPhase::Healthy;
+        state.exhausted_generation = None;
+        let _ = self.gen_tx.send(0);
+        0
+    }
+
+    /// Check send admission and acquire the current active session handle.
+    ///
+    /// Rejects operations if transport phase is `Recovering` or `Exhausted` before invoking the raw session.
+    pub(crate) async fn acquire_active_session(&self) -> Result<ActiveSessionHandle> {
+        let state = self.state.read().await;
+        match state.phase {
+            TransportPhase::Healthy => {
+                if let Some(active_gen) = &state.generation {
+                    Ok(ActiveSessionHandle {
+                        generation: active_gen.id,
+                        session: active_gen.session.clone(),
+                    })
+                } else {
+                    Err(RealtimeError::NotConnected)
+                }
+            }
+            TransportPhase::Recovering => Err(RealtimeError::connection(
+                "send rejected: transport is recovering (not admitted)",
+            )),
+            TransportPhase::Exhausted => Err(RealtimeError::connection(
+                "send rejected: transport recovery exhausted (not admitted)",
+            )),
+        }
+    }
+
+    /// Acquire the current active session without enforcing send admission gates
+    /// (e.g., for status checks like `is_connected()` or `session_id()`).
+    pub(crate) async fn active_session_raw(&self) -> Option<ActiveSessionHandle> {
+        let state = self.state.read().await;
+        state.generation.as_ref().map(|active_gen| ActiveSessionHandle {
+            generation: active_gen.id,
+            session: active_gen.session.clone(),
+        })
+    }
+
+    /// Notify the supervisor that the canonical configuration was mutated.
+    pub(crate) async fn notify_config_mutated(&self) {
+        let mut state = self.state.write().await;
+        state.config_revision = state.config_revision.wrapping_add(1);
+    }
+
+    /// Transactionally publish a new session (e.g., from context mutation or manual resumption) as generation N+1.
+    ///
+    /// The old generation N is retired asynchronously after N+1 publication is committed in state.
+    pub(crate) async fn publish_resumption(&self, new_session: Arc<dyn RealtimeSession>) -> u64 {
+        let (old_session, next_id) = {
+            let mut state = self.state.write().await;
+            let next_id = state.generation.as_ref().map(|g| g.id + 1).unwrap_or(0);
+            let old = state.generation.as_ref().map(|g| g.session.clone());
+            state.generation = Some(SessionGeneration { id: next_id, session: new_session });
+            state.phase = TransportPhase::Healthy;
+            state.exhausted_generation = None;
+            (old, next_id)
+        };
+
+        // Notify generation watchers BEFORE retiring old session so waiters wake up instantly
+        let _ = self.gen_tx.send(next_id);
+
+        if let Some(old) = old_session {
+            tokio::spawn(async move {
+                let _ = tokio::time::timeout(Duration::from_secs(3), old.close()).await;
+            });
+        }
+
+        next_id
     }
 
     /// Report a failure in the active session.
@@ -94,26 +231,30 @@ impl RecoverySupervisor {
         // 1. Check current state and validation
         {
             let state_guard = self.state.read().await;
+            let current_gen = match &state_guard.generation {
+                Some(g) => g,
+                None => return Err(RealtimeError::NotConnected),
+            };
 
             // Rule A: report < current  -> stale/coalesced, no recovery, return active
-            if report.generation < state_guard.generation.id {
+            if report.generation < current_gen.id {
                 tracing::info!(
                     report_gen = report.generation,
-                    current_gen = state_guard.generation.id,
+                    current_gen = current_gen.id,
                     "stale/coalesced failure report ignored"
                 );
-                return Ok(RecoveryOutcome::Stale(state_guard.generation.session.clone()));
+                return Ok(RecoveryOutcome::Stale(current_gen.session.clone()));
             }
 
             // Rule B: report > current  -> invalid future generation, zero attempts, reject
-            if report.generation > state_guard.generation.id {
+            if report.generation > current_gen.id {
                 let err = RealtimeError::provider(format!(
                     "invalid future generation report: reported {}, current is {}",
-                    report.generation, state_guard.generation.id
+                    report.generation, current_gen.id
                 ));
                 tracing::warn!(
                     report_gen = report.generation,
-                    current_gen = state_guard.generation.id,
+                    current_gen = current_gen.id,
                     err = %err,
                     "future generation report rejected"
                 );
@@ -146,20 +287,24 @@ impl RecoverySupervisor {
             }
         };
 
-        // 3. Double-check state now that we hold the lock
+        // 3. Double-check state now that we hold the lock, and transition phase to Recovering
         {
-            let state_guard = self.state.read().await;
+            let mut state_guard = self.state.write().await;
+            let current_gen = match &state_guard.generation {
+                Some(g) => g.clone(),
+                None => return Err(RealtimeError::NotConnected),
+            };
 
-            if report.generation < state_guard.generation.id {
+            if report.generation < current_gen.id {
                 tracing::info!(
                     report_gen = report.generation,
-                    current_gen = state_guard.generation.id,
+                    current_gen = current_gen.id,
                     "coalesced failure report ignored after lock acquisition"
                 );
-                return Ok(RecoveryOutcome::Stale(state_guard.generation.session.clone()));
+                return Ok(RecoveryOutcome::Stale(current_gen.session.clone()));
             }
 
-            if report.generation > state_guard.generation.id {
+            if report.generation > current_gen.id {
                 return Err(RealtimeError::provider(
                     "invalid future generation report after lock acquisition",
                 ));
@@ -174,12 +319,14 @@ impl RecoverySupervisor {
                     return Ok(RecoveryOutcome::Exhausted);
                 }
             }
+
+            state_guard.phase = TransportPhase::Recovering;
         }
 
         // 4. Determine recovery implementation
         let session_to_recover = {
             let state_guard = self.state.read().await;
-            state_guard.generation.session.clone()
+            state_guard.generation.as_ref().unwrap().session.clone()
         };
 
         let recovery_impl = match session_to_recover.recovery() {
@@ -190,6 +337,7 @@ impl RecoverySupervisor {
                 // Mark as terminally exhausted so subsequent reports are coalesced
                 let mut state_guard = self.state.write().await;
                 state_guard.exhausted_generation = Some(report.generation);
+                state_guard.phase = TransportPhase::Exhausted;
                 return Err(err);
             }
         };
@@ -203,6 +351,7 @@ impl RecoverySupervisor {
             // Mark as terminally exhausted so subsequent reports are coalesced
             let mut state_guard = self.state.write().await;
             state_guard.exhausted_generation = Some(report.generation);
+            state_guard.phase = TransportPhase::Exhausted;
             return Err(err);
         }
 
@@ -260,6 +409,11 @@ impl RecoverySupervisor {
                 .checked_add(remaining_dur)
                 .unwrap_or_else(std::time::Instant::now);
 
+            let initial_revision = {
+                let state_guard = self.state.read().await;
+                state_guard.config_revision
+            };
+
             let context = RecoveryContext::new(
                 attempt_nz,
                 &report.cause,
@@ -287,22 +441,57 @@ impl RecoverySupervisor {
 
             match attempt_res {
                 Ok(recovered) => {
+                    let candidate_guard = CandidateGuard::new(recovered.session());
+                    let continuity = recovered.continuity();
+
+                    // Fence publication against config revision changes during recovery attempt
+                    let mut state_guard = self.state.write().await;
+                    if state_guard.config_revision != initial_revision {
+                        tracing::warn!(
+                            generation = report.generation,
+                            attempt = attempt_idx,
+                            initial_rev = initial_revision,
+                            current_rev = state_guard.config_revision,
+                            "Canonical config revision changed during recovery attempt; discarding candidate and retrying"
+                        );
+                        drop(state_guard); // candidate_guard will drop and close stale candidate
+                        final_error = Some(RealtimeError::config("Canonical config revision changed during recovery attempt"));
+                        continue;
+                    }
+
                     tracing::info!(
                         generation = report.generation,
                         attempt = attempt_idx,
-                        continuity = ?recovered.continuity(),
+                        continuity = ?continuity,
                         "successful candidate published"
                     );
 
-                    let new_session = recovered.session();
-
-                    let mut state_guard = self.state.write().await;
                     // Atomically derive next generation ID from write-guarded active state
-                    let next_gen = state_guard.generation.id.saturating_add(1);
-                    state_guard.generation =
-                        SessionGeneration { id: next_gen, session: new_session.clone() };
+                    let current_gen_id = state_guard.generation.as_ref().map(|g| g.id).unwrap_or(0);
+                    let next_gen = current_gen_id.saturating_add(1);
+                    let old_session = state_guard.generation.as_ref().map(|g| g.session.clone());
 
-                    return Ok(RecoveryOutcome::Recovered(new_session));
+                    let published_session = candidate_guard.disarm();
+                    state_guard.generation = Some(SessionGeneration {
+                        id: next_gen,
+                        session: published_session.clone(),
+                    });
+                    state_guard.phase = TransportPhase::Healthy;
+                    state_guard.exhausted_generation = None;
+
+                    // Notify generation watchers
+                    let _ = self.gen_tx.send(next_gen);
+
+                    drop(state_guard);
+
+                    // Retire/close old generation AFTER N+1 publication is committed in state
+                    if let Some(old) = old_session {
+                        tokio::spawn(async move {
+                            let _ = tokio::time::timeout(Duration::from_secs(3), old.close()).await;
+                        });
+                    }
+
+                    return Ok(RecoveryOutcome::Recovered(published_session, continuity));
                 }
                 Err(err) => {
                     tracing::error!(
@@ -391,6 +580,7 @@ impl RecoverySupervisor {
         // Mark as terminally exhausted so subsequent reports are coalesced as normal outcomes
         let mut state_guard = self.state.write().await;
         state_guard.exhausted_generation = Some(report.generation);
+        state_guard.phase = TransportPhase::Exhausted;
 
         drop(lock_guard); // Release lock explicitly
         Err(final_err)
@@ -533,7 +723,7 @@ mod tests {
             .with_deadline(Duration::from_secs(5));
 
         let config = Arc::new(tokio::sync::RwLock::new(crate::config::RealtimeConfig::default()));
-        let supervisor = RecoverySupervisor::new(policy, config, initial_session);
+        let supervisor = RecoverySupervisor::new(policy, config, Some(initial_session));
 
         // Spawn 3 concurrent failure reports
         let mut join_handles = Vec::new();
@@ -563,7 +753,7 @@ mod tests {
         let mut stale_count = 0;
         for res in results {
             match res.unwrap() {
-                RecoveryOutcome::Recovered(session) => {
+                RecoveryOutcome::Recovered(session, _) => {
                     recovered_count += 1;
                     assert_eq!(session.session_id(), "gen-1-recovered");
                 }
@@ -599,17 +789,17 @@ mod tests {
 
         let policy = RecoveryPolicy::default();
         let config = Arc::new(tokio::sync::RwLock::new(crate::config::RealtimeConfig::default()));
-        let supervisor = RecoverySupervisor::new(policy, config, initial_session);
+        let supervisor = RecoverySupervisor::new(policy, config, Some(initial_session));
 
         // First, successfully recover generation 0 to publish generation 1
         let report = FailureReport { generation: 0, cause: RecoveryCause::UnexpectedEof };
         let res1 = supervisor.report_failure(report).await.unwrap();
-        assert!(matches!(res1, RecoveryOutcome::Recovered(_)));
+        assert!(matches!(res1, RecoveryOutcome::Recovered(_, _)));
 
         // Verify generation 1 is active
         {
             let state_guard = supervisor.state.read().await;
-            assert_eq!(state_guard.generation.id, 1);
+            assert_eq!(state_guard.generation.as_ref().unwrap().id, 1);
         }
 
         // Reset recover count to track any new attempts
@@ -629,7 +819,7 @@ mod tests {
         assert_eq!(recover_count.load(Ordering::SeqCst), 0);
 
         let state_guard = supervisor.state.read().await;
-        assert_eq!(state_guard.generation.id, 1);
+        assert_eq!(state_guard.generation.as_ref().unwrap().id, 1);
     }
 
     #[tokio::test]
@@ -650,7 +840,7 @@ mod tests {
 
         let policy = RecoveryPolicy::default();
         let config = Arc::new(tokio::sync::RwLock::new(crate::config::RealtimeConfig::default()));
-        let supervisor = RecoverySupervisor::new(policy, config, initial_session);
+        let supervisor = RecoverySupervisor::new(policy, config, Some(initial_session));
 
         // Report future generation 1 while current is 0
         let report = FailureReport { generation: 1, cause: RecoveryCause::UnexpectedEof };
@@ -662,7 +852,7 @@ mod tests {
         assert_eq!(recover_count.load(Ordering::SeqCst), 0);
         // Verify current generation remains 0
         let state_guard = supervisor.state.read().await;
-        assert_eq!(state_guard.generation.id, 0);
+        assert_eq!(state_guard.generation.as_ref().unwrap().id, 0);
     }
 
     #[tokio::test]
@@ -701,7 +891,7 @@ mod tests {
             .with_deadline(Duration::from_secs(5));
 
         let config = Arc::new(tokio::sync::RwLock::new(crate::config::RealtimeConfig::default()));
-        let supervisor = RecoverySupervisor::new(policy, config, initial_session);
+        let supervisor = RecoverySupervisor::new(policy, config, Some(initial_session));
 
         // 1. Report N once, which will fail on first attempt since it's fatal
         let report1 = FailureReport { generation: 0, cause: RecoveryCause::UnexpectedEof };
@@ -760,7 +950,7 @@ mod tests {
             .with_deadline(Duration::from_millis(50));
 
         let config = Arc::new(tokio::sync::RwLock::new(crate::config::RealtimeConfig::default()));
-        let supervisor = RecoverySupervisor::new(policy, config, initial_session);
+        let supervisor = RecoverySupervisor::new(policy, config, Some(initial_session));
 
         let report = FailureReport { generation: 0, cause: RecoveryCause::UnexpectedEof };
 
@@ -823,7 +1013,7 @@ mod tests {
             .with_deadline(Duration::from_secs(5));
 
         let config = Arc::new(tokio::sync::RwLock::new(crate::config::RealtimeConfig::default()));
-        let supervisor = RecoverySupervisor::new(policy, config, initial_session);
+        let supervisor = RecoverySupervisor::new(policy, config, Some(initial_session));
 
         let report = FailureReport { generation: 0, cause: RecoveryCause::UnexpectedEof };
 
@@ -867,7 +1057,7 @@ mod tests {
             .with_deadline(Duration::from_secs(5));
 
         let config = Arc::new(tokio::sync::RwLock::new(crate::config::RealtimeConfig::default()));
-        let supervisor = RecoverySupervisor::new(policy, config, initial_session);
+        let supervisor = RecoverySupervisor::new(policy, config, Some(initial_session));
 
         let report = FailureReport { generation: 0, cause: RecoveryCause::UnexpectedEof };
 
@@ -934,7 +1124,7 @@ mod tests {
             .with_deadline(Duration::from_secs(5));
 
         let config = Arc::new(tokio::sync::RwLock::new(crate::config::RealtimeConfig::default()));
-        let supervisor = RecoverySupervisor::new(policy, config, initial_session);
+        let supervisor = RecoverySupervisor::new(policy, config, Some(initial_session));
 
         let start_instant = tokio::time::Instant::now();
 
@@ -942,7 +1132,7 @@ mod tests {
 
         let res = supervisor.report_failure(report).await.unwrap();
         match res {
-            RecoveryOutcome::Recovered(session) => {
+            RecoveryOutcome::Recovered(session, _) => {
                 assert_eq!(session.session_id(), "gen-1-finally");
             }
             _ => panic!("Expected Recovered outcome"),
@@ -1011,13 +1201,13 @@ mod tests {
             .with_deadline(Duration::from_secs(5));
 
         let config = Arc::new(tokio::sync::RwLock::new(crate::config::RealtimeConfig::default()));
-        let supervisor = RecoverySupervisor::new(policy, config, initial_session);
+        let supervisor = RecoverySupervisor::new(policy, config, Some(initial_session));
 
         let report = FailureReport { generation: 0, cause: RecoveryCause::UnexpectedEof };
 
         let res = supervisor.report_failure(report).await.unwrap();
         match res {
-            RecoveryOutcome::Recovered(session) => {
+            RecoveryOutcome::Recovered(session, _) => {
                 assert_eq!(session.session_id(), "recovered-zero-delay");
             }
             _ => panic!("Expected Recovered outcome"),
@@ -1053,7 +1243,7 @@ mod tests {
             .with_deadline(Duration::from_secs(5));
 
         let config = Arc::new(tokio::sync::RwLock::new(crate::config::RealtimeConfig::default()));
-        let supervisor = RecoverySupervisor::new(policy, config, initial_session.clone());
+        let supervisor = RecoverySupervisor::new(policy, config, Some(initial_session.clone()));
 
         let report = FailureReport { generation: 0, cause: RecoveryCause::UnexpectedEof };
         let res = supervisor.report_failure(report).await;
@@ -1063,8 +1253,8 @@ mod tests {
 
         // Verify active session and generation remains unchanged
         let state_guard = supervisor.state.read().await;
-        assert_eq!(state_guard.generation.id, 0);
-        assert_eq!(state_guard.generation.session.session_id(), "gen-0-active");
+        assert_eq!(state_guard.generation.as_ref().unwrap().id, 0);
+        assert_eq!(state_guard.generation.as_ref().unwrap().session.session_id(), "gen-0-active");
     }
 
     struct ConfigVerifyingRecovery {
@@ -1101,7 +1291,7 @@ mod tests {
         let policy = RecoveryPolicy::default();
         let config = Arc::new(tokio::sync::RwLock::new(crate::config::RealtimeConfig::default()));
 
-        let supervisor = RecoverySupervisor::new(policy, Arc::clone(&config), initial_session);
+        let supervisor = RecoverySupervisor::new(policy, Arc::clone(&config), Some(initial_session));
 
         // Mutate the authoritative config before calling report_failure
         {
@@ -1138,7 +1328,7 @@ mod tests {
         // Hold write lock on config longer than the 50ms deadline
         let write_guard = config.write().await;
 
-        let supervisor = RecoverySupervisor::new(policy, Arc::clone(&config), initial_session);
+        let supervisor = RecoverySupervisor::new(policy, Arc::clone(&config), Some(initial_session));
 
         let start = tokio::time::Instant::now();
         let report = FailureReport { generation: 0, cause: RecoveryCause::UnexpectedEof };

@@ -7,6 +7,10 @@ use crate::config::{RealtimeConfig, SessionUpdateConfig, ToolDefinition};
 use crate::error::{RealtimeError, Result};
 use crate::events::{CallerActivitySource, ServerEvent, ToolCall, ToolResponse};
 use crate::model::BoxedModel;
+use crate::recovery::supervisor::{
+    ActiveSessionHandle, FailureReport, RecoveryOutcome, RecoverySupervisor,
+};
+use crate::recovery::{DeliveryCertainty, RecoveryCause, RecoveryPolicy};
 use crate::session::ContextMutationOutcome;
 use async_trait::async_trait;
 use std::collections::HashMap;
@@ -291,6 +295,7 @@ pub struct RealtimeRunnerBuilder {
     model: Option<BoxedModel>,
     config: RealtimeConfig,
     runner_config: RunnerConfig,
+    recovery_policy: RecoveryPolicy,
     tools: HashMap<String, (ToolDefinition, Arc<dyn ToolHandler>)>,
     event_handler: Option<Arc<dyn EventHandler>>,
 }
@@ -308,9 +313,16 @@ impl RealtimeRunnerBuilder {
             model: None,
             config: RealtimeConfig::default(),
             runner_config: RunnerConfig::default(),
+            recovery_policy: RecoveryPolicy::default(),
             tools: HashMap::new(),
             event_handler: None,
         }
+    }
+
+    /// Set the recovery policy.
+    pub fn recovery_policy(mut self, policy: RecoveryPolicy) -> Self {
+        self.recovery_policy = policy;
+        self
     }
 
     /// Set the realtime model.
@@ -396,14 +408,20 @@ impl RealtimeRunnerBuilder {
         }
 
         let max_concurrent_tools = self.runner_config.max_concurrent_tools.max(1);
+        let shared_config = Arc::new(RwLock::new(config));
+        let supervisor = Arc::new(RecoverySupervisor::new(
+            self.recovery_policy,
+            Arc::clone(&shared_config),
+            None,
+        ));
 
         Ok(RealtimeRunner {
             model,
-            config: Arc::new(RwLock::new(config)),
+            config: shared_config,
             runner_config: self.runner_config,
             tools: self.tools,
             event_handler: self.event_handler.unwrap_or_else(|| Arc::new(NoOpEventHandler)),
-            session: Arc::new(RwLock::new(None)),
+            supervisor,
             state: Arc::new(RwLock::new(RunnerState::Idle)),
             pending_tool_response: AtomicBool::new(false),
             tool_permits: Arc::new(tokio::sync::Semaphore::new(max_concurrent_tools)),
@@ -458,7 +476,7 @@ pub struct RealtimeRunner {
     runner_config: RunnerConfig,
     tools: HashMap<String, (ToolDefinition, Arc<dyn ToolHandler>)>,
     event_handler: Arc<dyn EventHandler>,
-    session: Arc<RwLock<Option<Arc<dyn crate::session::RealtimeSession>>>>,
+    supervisor: Arc<RecoverySupervisor>,
     state: Arc<RwLock<RunnerState>>,
     /// Set when tool output(s) have been sent for the in-flight response and a
     /// single follow-up `create_response` is owed once that response finishes.
@@ -478,10 +496,17 @@ pub struct RealtimeRunner {
 }
 
 impl RealtimeRunner {
-    /// Helper to safely acquire a cloned Arc of the current session, dropping the lock.
-    async fn session_handle(&self) -> Result<Arc<dyn crate::session::RealtimeSession>> {
-        let guard = self.session.read().await;
-        guard.as_ref().cloned().ok_or_else(|| RealtimeError::connection("Not connected"))
+    /// Helper to safely acquire active session handle enforcing send admission gate.
+    async fn active_session(&self) -> Result<ActiveSessionHandle> {
+        self.supervisor.acquire_active_session().await
+    }
+
+    /// Helper to safely acquire raw active session without send admission gate.
+    async fn active_session_raw(&self) -> Result<ActiveSessionHandle> {
+        self.supervisor
+            .active_session_raw()
+            .await
+            .ok_or_else(|| RealtimeError::connection("Not connected"))
     }
 
     /// Create a new builder.
@@ -495,21 +520,26 @@ impl RealtimeRunner {
         self.circuit_breaker_tripped.store(false, Ordering::Release);
         let config = self.config.read().await.clone();
         let session = self.model.connect(config).await?;
-        let mut guard = self.session.write().await;
-        *guard = Some(session.into());
+        self.supervisor.set_initial_session(Arc::from(session)).await;
         Ok(())
     }
 
     /// Check if currently connected.
     pub async fn is_connected(&self) -> bool {
-        let guard = self.session.read().await;
-        guard.as_ref().map(|s| s.is_connected()).unwrap_or(false)
+        if let Some(active) = self.supervisor.active_session_raw().await {
+            active.session.is_connected()
+        } else {
+            false
+        }
     }
 
     /// Get the session ID if connected.
     pub async fn session_id(&self) -> Option<String> {
-        let guard = self.session.read().await;
-        guard.as_ref().map(|s| s.session_id().to_string())
+        if let Some(active) = self.supervisor.active_session_raw().await {
+            Some(active.session.session_id().to_string())
+        } else {
+            None
+        }
     }
 
     /// The connected provider's native audio output format (see
@@ -517,11 +547,8 @@ impl RealtimeRunner {
     /// Returns an error if not connected — callers that need this are about to
     /// label live `AudioDelta` bytes and must not fall back to a guessed format.
     pub async fn native_audio_output_format(&self) -> Result<crate::audio::AudioFormat> {
-        let guard = self.session.read().await;
-        guard
-            .as_ref()
-            .map(|s| s.native_audio_output_format())
-            .ok_or_else(|| RealtimeError::connection("Not connected"))
+        let active = self.active_session_raw().await?;
+        Ok(active.session.native_audio_output_format())
     }
 
     /// Send a client event directly to the session.
@@ -542,8 +569,8 @@ impl RealtimeRunner {
                 self.update_session(update_config).await
             }
             other => {
-                let session = self.session_handle().await?;
-                session.send_event(other).await
+                let active = self.active_session().await?;
+                active.session.send_event(other).await
             }
         }
     }
@@ -624,32 +651,31 @@ impl RealtimeRunner {
         let cloned_config = full_config.clone();
         drop(full_config); // Free the write lock early to avoid deadlocks.
 
-        // 2. Safely obtain a cloned handle of the active session.
-        let session = self.session_handle().await?;
+        self.supervisor.notify_config_mutated().await;
+
+        // 2. Safely obtain handle of active session.
+        let active = self.active_session().await?;
 
         // 3. Delegate the mutation attempt to the provider-specific adapter.
-        match session.mutate_context(cloned_config).await? {
+        match active.session.mutate_context(cloned_config).await? {
             // PATH A: Native Mutability (e.g., OpenAI)
             // The provider natively updated the context over the active WebSocket.
             ContextMutationOutcome::Applied => {
                 tracing::info!("Context mutated natively mid-flight.");
 
-                // Since the transport wasn't dropped, we can inject the bridge message
-                // immediately as a standard user message to update the model's short-term memory.
                 if let Some(msg) = bridge_message {
                     let event = crate::events::ClientEvent::Message {
                         role: "user".to_string(),
                         parts: vec![adk_core::types::Part::Text { text: msg }],
                     };
-                    session.send_event(event).await?;
+                    active.session.send_event(event).await?;
                 }
                 Ok(())
             }
 
             // PATH B: Rigid Initialization (e.g., Gemini)
-            // The provider requires us to tear down the WebSocket and establish a new one (Phantom Reconnect).
             ContextMutationOutcome::RequiresResumption(new_config) => {
-                drop(session); // CRITICAL: Drop the cloned handle before attempting state mutation.
+                drop(active);
 
                 // 4. Check the Runner's internal state machine to ensure it is safe to tear down the socket.
                 let mut state_guard = self.state.write().await;
@@ -704,33 +730,9 @@ impl RealtimeRunner {
     ) -> Result<()> {
         tracing::warn!("Executing transport resumption with new configuration.");
 
-        // 1. Extract the old session safely under the write lock.
-        let old_session = {
-            let mut write_guard = self.session.write().await;
-            write_guard.take()
-        };
-
-        // 2. Explicitly tear down the old WebSocket connection to release upstream resources.
-        // Do this WITHOUT holding the lock across `.await`.
-        if let Some(session) = old_session
-            && let Err(e) = session.close().await
-        {
-            tracing::warn!("Failed to cleanly close old session during resumption: {}", e);
-        }
-
-        // 3. Establish a brand new connection using the provider-agnostic factory interface.
-        // If the provider supports resumption natively (like Gemini), the `new_config`
-        // payload already contains the cached `resumeToken`.
         let new_session = self.model.connect(new_config).await?;
+        let _new_gen = self.supervisor.publish_resumption(Arc::from(new_session)).await;
 
-        // 4. Overwrite the active session pointer with the newly connected transport.
-        {
-            let mut write_guard = self.session.write().await;
-            *write_guard = Some(new_session.into());
-        }
-
-        // 5. If the orchestrator provided a bridge message (e.g. to explain the domain shift),
-        // safely inject it into the new connection's context window.
         if let Some(msg) = bridge_message {
             self.inject_bridge_message(msg).await?;
         }
@@ -740,77 +742,61 @@ impl RealtimeRunner {
     }
 
     /// Internal helper to safely inject a bridge message directly into the active session.
-    ///
-    /// This intentionally bypasses the `send_client_event` router to avoid `E0733`
-    /// (un-Boxed async recursion) where `send_client_event` -> `update_session` ->
-    /// `execute_resumption` -> `send_client_event` creates an infinite compiler loop.
     async fn inject_bridge_message(&self, msg: String) -> Result<()> {
         tracing::info!("Injecting bridge message post-resumption.");
         let event = crate::events::ClientEvent::Message {
             role: "user".to_string(),
             parts: vec![adk_core::types::Part::Text { text: msg }],
         };
-        let session = self.session_handle().await?;
-        session.send_event(event).await
+        let active = self.active_session().await?;
+        active.session.send_event(event).await
     }
 
     /// Send a typed raw-audio chunk to the session.
-    ///
-    /// This preserves the audio format at the provider boundary and lets the
-    /// provider choose its native encoding path. Prefer this method when the
-    /// caller already owns raw audio bytes.
     pub async fn send_audio_chunk(&self, audio: &crate::audio::AudioChunk) -> Result<()> {
-        let session = self.session_handle().await?;
-        session.send_audio(audio).await
+        let active = self.active_session().await?;
+        active.session.send_audio(audio).await
     }
 
     /// Send base64-encoded audio to the session.
-    ///
-    /// This compatibility entry point is useful when the caller already has a
-    /// base64 payload. Raw-audio callers should use
-    /// [`send_audio_chunk`](Self::send_audio_chunk) to avoid forcing an encoding
-    /// decision at the provider-neutral runner boundary. This method forwards
-    /// to [`send_audio_base64`](Self::send_audio_base64).
     pub async fn send_audio(&self, audio_base64: &str) -> Result<()> {
         self.send_audio_base64(audio_base64).await
     }
 
     /// Send base64-encoded audio to the session.
     pub async fn send_audio_base64(&self, audio_base64: &str) -> Result<()> {
-        let session = self.session_handle().await?;
-        session.send_audio_base64(audio_base64).await
+        let active = self.active_session().await?;
+        active.session.send_audio_base64(audio_base64).await
     }
 
     /// Send text to the session.
     pub async fn send_text(&self, text: &str) -> Result<()> {
-        let session = self.session_handle().await?;
-        session.send_text(text).await
+        let active = self.active_session().await?;
+        active.session.send_text(text).await
     }
 
-    /// Send a base64-encoded video/image frame (e.g. `image/jpeg`) for
-    /// multimodal input, where the provider supports it (Gemini Live; OpenAI as
-    /// an image-in-context item).
+    /// Send a base64-encoded video/image frame for multimodal input.
     pub async fn send_video_frame(&self, mime_type: &str, data_base64: &str) -> Result<()> {
-        let session = self.session_handle().await?;
-        session.send_video_frame(mime_type, data_base64).await
+        let active = self.active_session().await?;
+        active.session.send_video_frame(mime_type, data_base64).await
     }
 
     /// Commit the audio buffer (for manual VAD mode).
     pub async fn commit_audio(&self) -> Result<()> {
-        let session = self.session_handle().await?;
-        session.commit_audio().await
+        let active = self.active_session().await?;
+        active.session.commit_audio().await
     }
 
     /// Trigger a response from the model.
     pub async fn create_response(&self) -> Result<()> {
-        let session = self.session_handle().await?;
-        session.create_response().await
+        let active = self.active_session().await?;
+        active.session.create_response().await
     }
 
     /// Interrupt the current response.
     pub async fn interrupt(&self) -> Result<()> {
-        let session = self.session_handle().await?;
-        session.interrupt().await
+        let active = self.active_session().await?;
+        active.session.interrupt().await
     }
 
     /// Get the next raw event from the session.
@@ -839,21 +825,20 @@ impl RealtimeRunner {
     /// session is indistinguishable from a dropped socket — and both get
     /// recorded as the same generic stream failure.
     pub async fn disconnect_reason(&self) -> Option<crate::session::DisconnectReason> {
-        self.session_handle().await.ok().and_then(|session| session.disconnect_reason())
+        self.active_session_raw().await.ok().and_then(|active| active.session.disconnect_reason())
     }
 
     pub async fn next_event(&self) -> Option<Result<ServerEvent>> {
-        let session = match self.session_handle().await {
-            Ok(session) => session,
+        let active = match self.active_session_raw().await {
+            Ok(active) => active,
             Err(_) => {
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                 return None;
             }
         };
 
-        // Some sessions might yield inside next_event, but just in case, yield here too
         tokio::task::yield_now().await;
-        session.next_event().await
+        active.session.next_event().await
     }
 
     /// Send a tool response to the session.
@@ -873,8 +858,8 @@ impl RealtimeRunner {
     /// }
     /// ```
     pub async fn send_tool_response(&self, response: ToolResponse) -> Result<()> {
-        let session = self.session_handle().await?;
-        session.send_tool_response(response).await
+        let active = self.active_session().await?;
+        active.session.send_tool_response(response).await
     }
 
     /// Execute a tool call against the registered handlers, sending the result
@@ -911,8 +896,8 @@ impl RealtimeRunner {
         if !self.runner_config.auto_respond_tools {
             return Ok(());
         }
-        if let Ok(session) = self.session_handle().await {
-            session.send_tool_output(ToolResponse { call_id: call_id.to_string(), output }).await?;
+        if let Ok(active) = self.active_session().await {
+            active.session.send_tool_output(ToolResponse { call_id: call_id.to_string(), output }).await?;
             self.pending_tool_response.store(true, Ordering::Release);
         }
         Ok(())
@@ -939,6 +924,7 @@ impl RealtimeRunner {
         use futures::stream::{FuturesUnordered, StreamExt};
 
         let mut running_tools = FuturesUnordered::new();
+        let mut gen_rx = self.supervisor.subscribe_generation();
 
         loop {
             if let Some(token) = &cancel_token
@@ -950,8 +936,35 @@ impl RealtimeRunner {
                 break;
             }
 
-            let session = self.session_handle().await?;
-            let old_session_id = session.session_id().to_string();
+            let active_handle = match self.active_session_raw().await {
+                Ok(h) => h,
+                Err(_) => {
+                    // Not connected yet; wait for generation change or cancellation
+                    if let Some(token) = &cancel_token {
+                        tokio::select! {
+                            _ = token.cancelled() => {
+                                self.event_handler.on_disconnect().await?;
+                                return Ok(());
+                            }
+                            res = gen_rx.changed() => {
+                                if res.is_err() {
+                                    self.event_handler.on_disconnect().await?;
+                                    return Ok(());
+                                }
+                                continue;
+                            }
+                        }
+                    } else if gen_rx.changed().await.is_err() {
+                        self.event_handler.on_disconnect().await?;
+                        return Ok(());
+                    } else {
+                        continue;
+                    }
+                }
+            };
+
+            let captured_gen = active_handle.generation;
+            let session = active_handle.session;
 
             let event = if running_tools.is_empty() {
                 if let Some(token) = &cancel_token {
@@ -962,10 +975,20 @@ impl RealtimeRunner {
                             self.event_handler.on_disconnect().await?;
                             return Ok(());
                         }
+                        _ = gen_rx.changed() => {
+                            tracing::info!(captured_gen, "Generation changed while waiting for next_event");
+                            continue;
+                        }
                         ev = session.next_event() => ev,
                     }
                 } else {
-                    session.next_event().await
+                    tokio::select! {
+                        _ = gen_rx.changed() => {
+                            tracing::info!(captured_gen, "Generation changed while waiting for next_event");
+                            continue;
+                        }
+                        ev = session.next_event() => ev,
+                    }
                 }
             } else if let Some(token) = &cancel_token {
                 tokio::select! {
@@ -980,6 +1003,10 @@ impl RealtimeRunner {
                         let () = finished?;
                         continue;
                     }
+                    _ = gen_rx.changed() => {
+                        tracing::info!(captured_gen, "Generation changed while waiting for next_event");
+                        continue;
+                    }
                     event = session.next_event() => event,
                 }
             } else {
@@ -987,6 +1014,10 @@ impl RealtimeRunner {
                     biased;
                     Some(finished) = running_tools.next() => {
                         let () = finished?;
+                        continue;
+                    }
+                    _ = gen_rx.changed() => {
+                        tracing::info!(captured_gen, "Generation changed while waiting for next_event");
                         continue;
                     }
                     event = session.next_event() => event,
@@ -1000,21 +1031,65 @@ impl RealtimeRunner {
                     }
                 }
                 Some(Err(e)) => {
-                    self.event_handler.on_error(&e).await?;
-                    return Err(e);
+                    let cause = RecoveryCause::ReadFailed(Arc::new(e));
+                    let report = FailureReport { generation: captured_gen, cause };
+                    match self.supervisor.report_failure(report).await {
+                        Ok(RecoveryOutcome::Recovered(_, continuity)) => {
+                            tracing::info!(captured_gen, continuity = ?continuity, "Managed recovery published recovered session");
+                            continue;
+                        }
+                        Ok(RecoveryOutcome::Stale(_)) => {
+                            tracing::info!(captured_gen, "Stale read error report ignored; continuing on active generation");
+                            continue;
+                        }
+                        Ok(RecoveryOutcome::Exhausted) => {
+                            tracing::warn!(captured_gen, "Recovery generation already exhausted");
+                            while let Some(finished) = running_tools.next().await {
+                                finished?;
+                            }
+                            self.event_handler.on_disconnect().await?;
+                            break;
+                        }
+                        Err(recovery_err) => {
+                            tracing::error!(captured_gen, err = %recovery_err, "Managed recovery episode failed/exhausted");
+                            self.event_handler.on_error(&recovery_err).await?;
+                            while let Some(finished) = running_tools.next().await {
+                                finished?;
+                            }
+                            self.event_handler.on_disconnect().await?;
+                            return Err(recovery_err);
+                        }
+                    }
                 }
                 None => {
-                    let current_session_id = self.session_id().await;
-                    if let Some(id) = current_session_id
-                        && id != old_session_id
-                    {
-                        continue;
+                    let cause = RecoveryCause::UnexpectedEof;
+                    let report = FailureReport { generation: captured_gen, cause };
+                    match self.supervisor.report_failure(report).await {
+                        Ok(RecoveryOutcome::Recovered(_, continuity)) => {
+                            tracing::info!(captured_gen, continuity = ?continuity, "Managed recovery published recovered session on EOF");
+                            continue;
+                        }
+                        Ok(RecoveryOutcome::Stale(_)) => {
+                            tracing::info!(captured_gen, "Stale EOF report ignored; continuing on active generation");
+                            continue;
+                        }
+                        Ok(RecoveryOutcome::Exhausted) => {
+                            tracing::warn!(captured_gen, "EOF recovery generation already exhausted");
+                            while let Some(finished) = running_tools.next().await {
+                                finished?;
+                            }
+                            self.event_handler.on_disconnect().await?;
+                            break;
+                        }
+                        Err(recovery_err) => {
+                            tracing::error!(captured_gen, err = %recovery_err, "EOF managed recovery failed/exhausted");
+                            while let Some(finished) = running_tools.next().await {
+                                finished?;
+                            }
+                            self.event_handler.on_disconnect().await?;
+                            break;
+                        }
                     }
-                    while let Some(finished) = running_tools.next().await {
-                        finished?;
-                    }
-                    self.event_handler.on_disconnect().await?;
-                    break;
                 }
             }
         }
@@ -1023,12 +1098,8 @@ impl RealtimeRunner {
 
     /// Internal helper to safely close and release active session on cancellation or shutdown.
     async fn close_active_session(&self) {
-        let old_session = {
-            let mut guard = self.session.write().await;
-            guard.take()
-        };
-        if let Some(session) = old_session {
-            let _ = session.close().await;
+        if let Ok(active) = self.active_session_raw().await {
+            let _ = active.session.close().await;
         }
     }
 
@@ -1266,9 +1337,10 @@ impl RealtimeRunner {
                 "error": "circuit_breaker_open"
             });
             if self.runner_config.auto_respond_tools
-                && let Ok(session) = self.session_handle().await
+                && let Ok(active) = self.active_session().await
             {
-                session
+                active
+                    .session
                     .send_tool_output(ToolResponse { call_id: call_id.to_string(), output: result })
                     .await?;
                 self.pending_tool_response.store(true, Ordering::Release);
@@ -1329,13 +1401,13 @@ impl RealtimeRunner {
         if self.runner_config.auto_respond_tools {
             let response = ToolResponse { call_id: call_id.to_string(), output: result };
 
-            if let Ok(session) = self.session_handle().await {
+            if let Ok(active) = self.active_session().await {
                 // Send the output now, but defer the response trigger: several
                 // parallel tool calls in one response must produce a *single*
                 // `create_response`, issued once the dispatch response finishes
                 // (see `respond_after_tools`). Firing one per output collides
                 // with the still-active response on OpenAI.
-                session.send_tool_output(response).await?;
+                active.session.send_tool_output(response).await?;
                 self.pending_tool_response.store(true, Ordering::Release);
             }
         }
@@ -1394,17 +1466,17 @@ impl RealtimeRunner {
         }
 
         if self.pending_tool_response.swap(false, Ordering::AcqRel)
-            && let Ok(session) = self.session_handle().await
+            && let Ok(active) = self.active_session().await
         {
-            session.create_response().await?;
+            active.session.create_response().await?;
         }
         Ok(())
     }
 
     /// Close the session.
     pub async fn close(&self) -> Result<()> {
-        if let Ok(session) = self.session_handle().await {
-            session.close().await?;
+        if let Ok(active) = self.active_session_raw().await {
+            active.session.close().await?;
         }
         Ok(())
     }
@@ -1547,9 +1619,7 @@ mod runner_tests {
             RealtimeRunner::builder().model(Arc::new(MockModel) as BoxedModel).build().unwrap();
         let session = Arc::new(RecordingSession { counts }) as Arc<dyn RealtimeSession>;
 
-        // The unit test owns the runner and installs the same session handle
-        // that `connect` would publish after provider setup.
-        *runner.session.write().await = Some(session);
+        runner.supervisor.set_initial_session(session).await;
         runner
     }
 
@@ -1592,12 +1662,7 @@ mod runner_tests {
             .tool(tool_def("get_time"), ok_tool())
             .build()
             .unwrap();
-        *runner.session.write().await =
-            Some(Arc::new(RecordingSession { counts: counts.clone() }) as Arc<dyn RealtimeSession>);
 
-        // One model response dispatching two tool calls, then ending. Driven through
-        // `run`, because dispatch is the run loop's job now — `handle_event` returns the
-        // call rather than awaiting it, so event intake is not blocked by a tool.
         let scripted = Arc::new(ScriptedSession::new(
             counts.clone(),
             vec![
@@ -1606,7 +1671,7 @@ mod runner_tests {
                 response_done(),
             ],
         ));
-        *runner.session.write().await = Some(scripted as Arc<dyn RealtimeSession>);
+        runner.supervisor.set_initial_session(scripted as Arc<dyn RealtimeSession>).await;
         runner.run().await.unwrap();
 
         assert_eq!(counts.tool_output.load(Ordering::SeqCst), 2, "both outputs sent");
@@ -1628,8 +1693,7 @@ mod runner_tests {
         let counts = Arc::new(Counts::default());
         let runner =
             RealtimeRunner::builder().model(Arc::new(MockModel) as BoxedModel).build().unwrap();
-        *runner.session.write().await =
-            Some(Arc::new(RecordingSession { counts: counts.clone() }) as Arc<dyn RealtimeSession>);
+        runner.supervisor.set_initial_session(Arc::new(RecordingSession { counts: counts.clone() }) as Arc<dyn RealtimeSession>).await;
 
         runner.handle_event(response_done()).await.unwrap();
         assert_eq!(counts.create_response.load(Ordering::SeqCst), 0);
@@ -1813,7 +1877,7 @@ mod runner_tests {
             Arc::clone(&counts),
             vec![function_call("c1", "a"), function_call("c2", "b"), function_call("c3", "c")],
         ));
-        *runner.session.write().await = Some(scripted as Arc<dyn RealtimeSession>);
+        runner.supervisor.set_initial_session(scripted as Arc<dyn RealtimeSession>).await;
 
         tokio::time::timeout(std::time::Duration::from_secs(5), runner.run())
             .await
@@ -1860,7 +1924,7 @@ mod runner_tests {
                 function_call("c4", "d"),
             ],
         ));
-        *runner.session.write().await = Some(scripted as Arc<dyn RealtimeSession>);
+        runner.supervisor.set_initial_session(scripted as Arc<dyn RealtimeSession>).await;
 
         runner.run().await.unwrap();
 
@@ -2046,7 +2110,7 @@ mod runner_tests {
             Arc::clone(&counts),
             vec![function_call("c1", "slow"), audio_delta(), response_done()],
         ));
-        *runner.session.write().await = Some(scripted as Arc<dyn RealtimeSession>);
+        runner.supervisor.set_initial_session(scripted as Arc<dyn RealtimeSession>).await;
 
         tokio::time::timeout(std::time::Duration::from_secs(5), runner.run())
             .await
@@ -2138,7 +2202,7 @@ mod runner_tests {
             vec![function_call("c1", "blocking_tool")],
             Arc::clone(&close_calls),
         ));
-        *runner.session.write().await = Some(scripted as Arc<dyn RealtimeSession>);
+        runner.supervisor.set_initial_session(scripted as Arc<dyn RealtimeSession>).await;
 
         let cancel_token = tokio_util::sync::CancellationToken::new();
         let cancel_token_clone = cancel_token.clone();
@@ -2204,7 +2268,7 @@ mod runner_tests {
             Arc::clone(&counts),
             vec![function_call("c1", "slow"), response_done(), audio_delta()],
         ));
-        *runner.session.write().await = Some(scripted as Arc<dyn RealtimeSession>);
+        runner.supervisor.set_initial_session(scripted as Arc<dyn RealtimeSession>).await;
 
         tokio::time::timeout(std::time::Duration::from_secs(5), runner.run())
             .await
@@ -2245,7 +2309,7 @@ mod runner_tests {
             .unwrap();
 
         let scripted = Arc::new(ScriptedSession::new(Arc::clone(&counts), vec![response_done()]));
-        *runner.session.write().await = Some(scripted as Arc<dyn RealtimeSession>);
+        runner.supervisor.set_initial_session(scripted as Arc<dyn RealtimeSession>).await;
 
         // `run` returns `Ok(())` on transport loss, which on its own is indistinguishable
         // from a graceful `close`.
