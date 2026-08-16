@@ -208,17 +208,23 @@ impl RecoverySupervisor {
 
         // 6. Recovery attempt loop
         tracing::info!(generation = report.generation, "recovery episode started");
-        let mut final_error: Option<RealtimeError> = None;
+        enum EpisodeStopReason {
+            Exhausted,
+            Fatal,
+            Timeout(String),
+        }
+
+        let mut stop_reason = EpisodeStopReason::Exhausted;
+        let mut last_provider_error: Option<RealtimeError> = None;
         let max_attempts = self.policy.max_attempts().get();
         let mut attempts_launched = 0;
 
         for attempt_idx in 1..=max_attempts {
             let now = tokio::time::Instant::now();
             if now >= deadline_instant {
-                let err =
-                    RealtimeError::Timeout("recovery deadline expired before attempt".to_string());
-                tracing::warn!(generation = report.generation, attempt = attempt_idx, err = %err, "recovery deadline expired");
-                final_error = Some(err);
+                let msg = "recovery deadline expired before attempt".to_string();
+                tracing::warn!(generation = report.generation, attempt = attempt_idx, err = %msg, "recovery deadline expired");
+                stop_reason = EpisodeStopReason::Timeout(msg);
                 break;
             }
 
@@ -230,12 +236,12 @@ impl RecoverySupervisor {
             {
                 Ok(guard) => guard,
                 Err(_) => {
-                    let err = RealtimeError::Timeout(format!(
+                    let msg = format!(
                         "recovery deadline expired after {} launched attempt(s) waiting for config",
                         attempts_launched
-                    ));
-                    tracing::warn!(generation = report.generation, attempt = attempt_idx, err = %err, "recovery deadline expired waiting for config");
-                    final_error = Some(err);
+                    );
+                    tracing::warn!(generation = report.generation, attempt = attempt_idx, err = %msg, "recovery deadline expired waiting for config");
+                    stop_reason = EpisodeStopReason::Timeout(msg);
                     break;
                 }
             };
@@ -244,12 +250,12 @@ impl RecoverySupervisor {
 
             let now_after_config = tokio::time::Instant::now();
             if now_after_config >= deadline_instant {
-                let err = RealtimeError::Timeout(format!(
+                let msg = format!(
                     "recovery deadline expired after {} launched attempt(s) before provider invocation",
                     attempts_launched
-                ));
-                tracing::warn!(generation = report.generation, attempt = attempt_idx, err = %err, "recovery deadline expired before provider invocation");
-                final_error = Some(err);
+                );
+                tracing::warn!(generation = report.generation, attempt = attempt_idx, err = %msg, "recovery deadline expired before provider invocation");
+                stop_reason = EpisodeStopReason::Timeout(msg);
                 break;
             }
 
@@ -277,10 +283,9 @@ impl RecoverySupervisor {
             let attempt_res = match tokio::time::timeout_at(deadline_instant, recover_fut).await {
                 Ok(res) => res,
                 Err(_) => {
-                    let err =
-                        RealtimeError::Timeout("provider recovery attempt timed out".to_string());
-                    tracing::warn!(generation = report.generation, attempt = attempt_idx, err = %err, "recovery attempt timed out");
-                    final_error = Some(err);
+                    let msg = "provider recovery attempt timed out".to_string();
+                    tracing::warn!(generation = report.generation, attempt = attempt_idx, err = %msg, "recovery attempt timed out");
+                    stop_reason = EpisodeStopReason::Timeout(msg);
                     break;
                 }
             };
@@ -291,7 +296,7 @@ impl RecoverySupervisor {
                         generation = report.generation,
                         attempt = attempt_idx,
                         continuity = ?recovered.continuity(),
-                        "successful candidate published"
+                        "successful candidate ready"
                     );
 
                     let new_session = recovered.session();
@@ -301,6 +306,12 @@ impl RecoverySupervisor {
                     let next_gen = state_guard.generation.id.saturating_add(1);
                     state_guard.generation =
                         SessionGeneration { id: next_gen, session: new_session.clone() };
+
+                    tracing::info!(
+                        generation = next_gen,
+                        session_id = %new_session.session_id(),
+                        "recovered session published"
+                    );
 
                     return Ok(RecoveryOutcome::Recovered(new_session));
                 }
@@ -313,7 +324,7 @@ impl RecoverySupervisor {
                     );
 
                     let disposition = recovery_impl.classify_attempt_error(&err);
-                    final_error = Some(err);
+                    last_provider_error = Some(err);
 
                     if disposition == RecoveryDisposition::Fatal {
                         tracing::warn!(
@@ -321,6 +332,7 @@ impl RecoverySupervisor {
                             attempt = attempt_idx,
                             "fatal attempt error classification; no retry"
                         );
+                        stop_reason = EpisodeStopReason::Fatal;
                         break;
                     }
 
@@ -331,11 +343,10 @@ impl RecoverySupervisor {
 
                         let now_after_attempt = tokio::time::Instant::now();
                         if now_after_attempt >= deadline_instant {
-                            let timeout_err = RealtimeError::Timeout(
-                                "recovery deadline expired during backoff calculation".to_string(),
-                            );
-                            tracing::warn!(generation = report.generation, err = %timeout_err, "recovery deadline expired");
-                            final_error = Some(timeout_err);
+                            let msg =
+                                "recovery deadline expired during backoff calculation".to_string();
+                            tracing::warn!(generation = report.generation, err = %msg, "recovery deadline expired");
+                            stop_reason = EpisodeStopReason::Timeout(msg);
                             break;
                         }
 
@@ -358,28 +369,41 @@ impl RecoverySupervisor {
         }
 
         // 7. Exhaustion / final failure
-        let final_err = if let Some(err) = final_error {
-            match err {
-                RealtimeError::Timeout(_) => err,
-                other => {
-                    if attempts_launched < max_attempts {
-                        RealtimeError::ProviderError(format!(
-                            "recovery aborted after {} attempt(s) due to fatal error; last error: {}",
-                            attempts_launched, other
-                        ))
-                    } else {
-                        RealtimeError::ProviderError(format!(
-                            "recovery exhausted after {} attempt(s); last error: {}",
-                            attempts_launched, other
-                        ))
-                    }
+        let final_err = match stop_reason {
+            EpisodeStopReason::Timeout(msg) => {
+                let full_msg = if let Some(ref provider_err) = last_provider_error {
+                    format!("{}; last provider error: {}", msg, provider_err)
+                } else {
+                    msg
+                };
+                RealtimeError::Timeout(full_msg)
+            }
+            EpisodeStopReason::Fatal => {
+                if let Some(ref provider_err) = last_provider_error {
+                    RealtimeError::ProviderError(format!(
+                        "recovery aborted after {} attempt(s) due to fatal error; last error: {}",
+                        attempts_launched, provider_err
+                    ))
+                } else {
+                    RealtimeError::ProviderError(format!(
+                        "recovery aborted after {} attempt(s) due to fatal error",
+                        attempts_launched
+                    ))
                 }
             }
-        } else {
-            RealtimeError::ProviderError(format!(
-                "recovery exhausted after {} attempt(s)",
-                attempts_launched
-            ))
+            EpisodeStopReason::Exhausted => {
+                if let Some(ref provider_err) = last_provider_error {
+                    RealtimeError::ProviderError(format!(
+                        "recovery exhausted after {} attempt(s); last error: {}",
+                        attempts_launched, provider_err
+                    ))
+                } else {
+                    RealtimeError::ProviderError(format!(
+                        "recovery exhausted after {} attempt(s)",
+                        attempts_launched
+                    ))
+                }
+            }
         };
 
         tracing::error!(
@@ -1163,5 +1187,141 @@ mod tests {
         // Prove the episode stays bounded by the absolute deadline
         assert!(elapsed >= Duration::from_millis(50));
         assert!(elapsed < Duration::from_millis(150));
+    }
+
+    #[tokio::test]
+    async fn test_fatal_error_on_final_allowed_attempt_reports_fatal_not_exhausted() {
+        struct FatalOnFinalRecovery {
+            recover_count: Arc<AtomicUsize>,
+        }
+
+        #[async_trait]
+        impl RealtimeRecovery for FatalOnFinalRecovery {
+            fn classify(&self, _cause: &RecoveryCause) -> RecoveryDisposition {
+                RecoveryDisposition::Recoverable
+            }
+
+            fn classify_attempt_error(&self, _error: &RealtimeError) -> RecoveryDisposition {
+                if self.recover_count.load(Ordering::SeqCst) == 3 {
+                    RecoveryDisposition::Fatal
+                } else {
+                    RecoveryDisposition::Recoverable
+                }
+            }
+
+            async fn recover(&self, _context: RecoveryContext<'_>) -> Result<RecoveredSession> {
+                let count = self.recover_count.fetch_add(1, Ordering::SeqCst) + 1;
+                if count == 3 {
+                    Err(RealtimeError::ConnectionError("fatal on 3rd attempt".to_string()))
+                } else {
+                    Err(RealtimeError::ConnectionError("retryable error".to_string()))
+                }
+            }
+        }
+
+        let recover_count = Arc::new(AtomicUsize::new(0));
+        let mock_rec = Arc::new(FatalOnFinalRecovery { recover_count: Arc::clone(&recover_count) });
+
+        let initial_session = Arc::new(MockSession {
+            id: "gen-0".to_string(),
+            recovery: Some(Arc::clone(&mock_rec) as Arc<dyn RealtimeRecovery>),
+        });
+
+        let policy = RecoveryPolicy::default()
+            .with_max_attempts(NonZeroU32::new(3).unwrap())
+            .with_initial_delay(Duration::ZERO)
+            .with_deadline(Duration::from_secs(5));
+
+        let config = Arc::new(tokio::sync::RwLock::new(crate::config::RealtimeConfig::default()));
+        let supervisor = RecoverySupervisor::new(policy, config, initial_session);
+
+        let report = FailureReport { generation: 0, cause: RecoveryCause::UnexpectedEof };
+
+        let res = supervisor.report_failure(report).await;
+        assert!(res.is_err());
+        assert_eq!(recover_count.load(Ordering::SeqCst), 3);
+
+        let err_msg = res.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("recovery aborted after 3 attempt(s) due to fatal error"),
+            "Error message should state fatal abortion after exactly 3 attempts, got: {}",
+            err_msg
+        );
+        assert!(
+            err_msg.contains("fatal on 3rd attempt"),
+            "Error message should contain last provider error, got: {}",
+            err_msg
+        );
+        assert!(
+            !err_msg.contains("recovery exhausted"),
+            "Fatal on 3rd attempt should NOT be formatted as ordinary exhaustion, got: {}",
+            err_msg
+        );
+    }
+
+    #[tokio::test]
+    async fn test_timeout_preserves_previous_provider_error() {
+        struct SlowTimeoutRecovery {
+            recover_count: Arc<AtomicUsize>,
+        }
+
+        #[async_trait]
+        impl RealtimeRecovery for SlowTimeoutRecovery {
+            fn classify(&self, _cause: &RecoveryCause) -> RecoveryDisposition {
+                RecoveryDisposition::Recoverable
+            }
+
+            fn classify_attempt_error(&self, _error: &RealtimeError) -> RecoveryDisposition {
+                RecoveryDisposition::Recoverable
+            }
+
+            async fn recover(&self, _context: RecoveryContext<'_>) -> Result<RecoveredSession> {
+                let count = self.recover_count.fetch_add(1, Ordering::SeqCst) + 1;
+                if count == 1 {
+                    Err(RealtimeError::ConnectionError("attempt 1 provider failure".to_string()))
+                } else {
+                    // Second attempt hangs past episode deadline
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    let session = Arc::new(MockSession {
+                        id: "should-not-reach".to_string(),
+                        recovery: None,
+                    });
+                    Ok(RecoveredSession::new(session, RecoveryContinuity::Resumed))
+                }
+            }
+        }
+
+        let recover_count = Arc::new(AtomicUsize::new(0));
+        let mock_rec = Arc::new(SlowTimeoutRecovery { recover_count: Arc::clone(&recover_count) });
+
+        let initial_session = Arc::new(MockSession {
+            id: "gen-0".to_string(),
+            recovery: Some(Arc::clone(&mock_rec) as Arc<dyn RealtimeRecovery>),
+        });
+
+        let policy = RecoveryPolicy::default()
+            .with_max_attempts(NonZeroU32::new(3).unwrap())
+            .with_initial_delay(Duration::ZERO)
+            .with_deadline(Duration::from_millis(100));
+
+        let config = Arc::new(tokio::sync::RwLock::new(crate::config::RealtimeConfig::default()));
+        let supervisor = RecoverySupervisor::new(policy, config, initial_session);
+
+        let report = FailureReport { generation: 0, cause: RecoveryCause::UnexpectedEof };
+
+        let res = supervisor.report_failure(report).await;
+        assert!(res.is_err());
+        let err = res.unwrap_err();
+
+        match err {
+            RealtimeError::Timeout(ref msg) => {
+                assert!(
+                    msg.contains("last provider error: WebSocket connection error: attempt 1 provider failure"),
+                    "Timeout message should contain the last provider error, got: {}",
+                    msg
+                );
+            }
+            other => panic!("expected RealtimeError::Timeout, got {:?}", other),
+        }
     }
 }
