@@ -29,6 +29,7 @@ struct MockRecoverySession {
     close_hangs: bool,
     send_fails: bool,
     mutate_fails: bool,
+    close_tx: Option<Arc<parking_lot::Mutex<Option<tokio::sync::oneshot::Sender<()>>>>>,
 }
 
 impl MockRecoverySession {
@@ -40,6 +41,23 @@ impl MockRecoverySession {
             close_hangs: false,
             send_fails: false,
             mutate_fails: false,
+            close_tx: None,
+        }
+    }
+
+    fn new_with_close_signal(
+        id: &str,
+        counters: Arc<TestCounters>,
+        close_tx: Arc<parking_lot::Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
+    ) -> Self {
+        Self {
+            id: id.to_string(),
+            counters,
+            recovery: None,
+            close_hangs: false,
+            send_fails: false,
+            mutate_fails: false,
+            close_tx: Some(close_tx),
         }
     }
 
@@ -55,6 +73,7 @@ impl MockRecoverySession {
             close_hangs: false,
             send_fails: false,
             mutate_fails: false,
+            close_tx: None,
         }
     }
 }
@@ -151,6 +170,11 @@ impl RealtimeSession for MockRecoverySession {
 
     async fn close(&self) -> Result<()> {
         self.counters.close_calls.fetch_add(1, Ordering::SeqCst);
+        if let Some(ref slot) = self.close_tx {
+            if let Some(tx) = slot.lock().take() {
+                let _ = tx.send(());
+            }
+        }
         if self.close_hangs {
             std::future::pending::<()>().await;
         }
@@ -566,15 +590,23 @@ async fn test_bridge_message_write_failure_returns_indeterminate_write_failed() 
 async fn test_cancellation_after_candidate_ready_cleans_unpublished_candidate() {
     let counters = Arc::new(TestCounters::default());
     let candidate_counters = Arc::new(TestCounters::default());
-    let candidate_session =
-        Arc::new(MockRecoverySession::new("candidate", candidate_counters.clone()));
+    let (candidate_close_tx, candidate_close_rx) = tokio::sync::oneshot::channel();
+    let candidate_close_tx_slot = Arc::new(parking_lot::Mutex::new(Some(candidate_close_tx)));
+
+    let candidate_session = Arc::new(MockRecoverySession::new_with_close_signal(
+        "candidate",
+        candidate_counters.clone(),
+        candidate_close_tx_slot,
+    ));
 
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel();
     let pause_notify = Arc::new(tokio::sync::Notify::new());
 
     struct SynchronizedCandidateRecovery {
         candidate: Arc<MockRecoverySession>,
         ready_tx: parking_lot::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+        done_tx: parking_lot::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
         pause_notify: Arc<tokio::sync::Notify>,
     }
 
@@ -592,6 +624,9 @@ async fn test_cancellation_after_candidate_ready_cleans_unpublished_candidate() 
                 let _ = tx.send(());
             }
             self.pause_notify.notified().await;
+            if let Some(tx) = self.done_tx.lock().take() {
+                let _ = tx.send(());
+            }
             Ok(RecoveredSession::new(self.candidate.clone(), RecoveryContinuity::Resumed))
         }
     }
@@ -599,6 +634,7 @@ async fn test_cancellation_after_candidate_ready_cleans_unpublished_candidate() 
     let mock_rec = Arc::new(SynchronizedCandidateRecovery {
         candidate: candidate_session,
         ready_tx: parking_lot::Mutex::new(Some(ready_tx)),
+        done_tx: parking_lot::Mutex::new(Some(done_tx)),
         pause_notify: pause_notify.clone(),
     });
 
@@ -624,10 +660,8 @@ async fn test_cancellation_after_candidate_ready_cleans_unpublished_candidate() 
         release_lock_clone.notified().await;
     });
 
-    tokio::time::sleep(Duration::from_millis(20)).await;
-
     pause_notify.notify_one();
-    tokio::time::sleep(Duration::from_millis(20)).await;
+    done_rx.await.expect("recover() must complete returning candidate");
 
     recovery_task.abort();
     let _ = recovery_task.await;
@@ -635,7 +669,7 @@ async fn test_cancellation_after_candidate_ready_cleans_unpublished_candidate() 
     release_lock.notify_one();
     let _ = lock_task.await;
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    candidate_close_rx.await.expect("CandidateSession::close() must complete on cancellation");
 
     assert_eq!(runner.session_id().await.as_deref(), Some("gen-0"));
     assert_eq!(
@@ -643,6 +677,49 @@ async fn test_cancellation_after_candidate_ready_cleans_unpublished_candidate() 
         1,
         "Unpublished candidate session must be closed on cancellation"
     );
+}
+
+#[tokio::test]
+async fn test_recovered_tool_failure_under_cancellation_runner_keeps_runner_alive() {
+    let counters = Arc::new(TestCounters::default());
+
+    let rec_attempts = Arc::new(AtomicUsize::new(0));
+    let gen1_session = Arc::new(MockRecoverySession::new("gen-1-recovered", counters.clone()));
+    let recovery_provider = Arc::new(RecoveringProvider {
+        attempts: rec_attempts.clone(),
+        recovered_session: gen1_session,
+        continuity: RecoveryContinuity::Reconnected,
+    });
+
+    let mut gen0_session =
+        MockRecoverySession::with_recovery("gen-0", counters.clone(), recovery_provider);
+    gen0_session.send_fails = true;
+
+    let runner = Arc::new(RealtimeRunner::builder().model(Arc::new(DummyModel)).build().unwrap());
+    let _ = runner.set_initial_session(Arc::new(gen0_session)).await.unwrap();
+
+    let cancel_token = tokio_util::sync::CancellationToken::new();
+    let cancel_token_clone = cancel_token.clone();
+
+    let runner_clone = runner.clone();
+    let run_task =
+        tokio::spawn(async move { runner_clone.run_with_cancellation(cancel_token_clone).await });
+
+    let err = runner.send_text("trigger tool write failure").await.unwrap_err();
+    assert_eq!(err.delivery_certainty(), Some(DeliveryCertainty::Indeterminate));
+
+    assert_eq!(runner.session_id().await.as_deref(), Some("gen-1-recovered"));
+
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    assert!(
+        !run_task.is_finished(),
+        "run_with_cancellation must stay alive after recovered tool write failure"
+    );
+
+    cancel_token.cancel();
+    let res = run_task.await.unwrap();
+    assert!(res.is_ok());
 }
 
 #[tokio::test]

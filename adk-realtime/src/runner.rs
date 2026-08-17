@@ -574,14 +574,15 @@ impl RealtimeRunner {
                                         "Newer resumption intent already queued; preserving newer intent."
                                     );
                                 }
-                                RunnerState::Idle => {
+                                RunnerState::Idle
+                                | RunnerState::Generating
+                                | RunnerState::ExecutingTool => {
                                     *fallback_state = RunnerState::PendingResumption {
                                         config: new_config,
                                         bridge_message,
                                         attempts: 1,
                                     };
                                 }
-                                _ => {}
                             }
                             return Err(e);
                         }
@@ -1125,7 +1126,9 @@ impl RealtimeRunner {
                                 "Newer resumption intent already queued while resumption failed; preserving newer intent."
                             );
                         }
-                        RunnerState::Idle => {
+                        RunnerState::Idle
+                        | RunnerState::Generating
+                        | RunnerState::ExecutingTool => {
                             if attempts + 1 >= 3 {
                                 tracing::error!(
                                     "Maximum resumption attempts reached (3). Dropping queued mutation to prevent infinite loop."
@@ -1138,12 +1141,6 @@ impl RealtimeRunner {
                                     attempts: attempts + 1,
                                 };
                             }
-                        }
-                        _ => {
-                            tracing::info!(
-                                current_state = ?*fallback_state,
-                                "Runner busy; preserving current state rather than overwriting with failed resumption intent."
-                            );
                         }
                     }
 
@@ -2181,6 +2178,45 @@ mod runner_tests {
         async fn on_disconnect(&self) -> Result<()> {
             self.disconnects.fetch_add(1, Ordering::SeqCst);
             Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_resumption_is_preserved_when_runner_is_generating_or_executing_tool() {
+        for busy_state in [RunnerState::Generating, RunnerState::ExecutingTool] {
+            let runner =
+                RealtimeRunner::builder().model(Arc::new(MockModel) as BoxedModel).build().unwrap();
+
+            let mut state_guard = runner.state.write().await;
+            *state_guard = busy_state.clone();
+            drop(state_guard);
+
+            let config_a = Box::new(RealtimeConfig::default().with_instruction("mutation A"));
+            let attempts = 0u8;
+
+            let mut fallback_state = runner.state.write().await;
+            match &*fallback_state {
+                RunnerState::PendingResumption { .. } => {
+                    panic!("Should not have PendingResumption initially");
+                }
+                RunnerState::Idle | RunnerState::Generating | RunnerState::ExecutingTool => {
+                    *fallback_state = RunnerState::PendingResumption {
+                        config: config_a,
+                        bridge_message: Some("message A".into()),
+                        attempts: attempts + 1,
+                    };
+                }
+            }
+            drop(fallback_state);
+
+            let check_state = runner.state.read().await;
+            match &*check_state {
+                RunnerState::PendingResumption { config, attempts, .. } => {
+                    assert_eq!(config.instruction.as_deref(), Some("mutation A"));
+                    assert_eq!(*attempts, 1);
+                }
+                other => panic!("Expected PendingResumption for {:?}, got {:?}", busy_state, other),
+            }
         }
     }
 

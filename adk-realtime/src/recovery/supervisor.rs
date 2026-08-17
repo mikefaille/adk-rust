@@ -1590,11 +1590,139 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_cancelled_episode_a_cannot_unlock_episode_b() {
+        let (ready_a_tx, ready_a_rx) = tokio::sync::oneshot::channel();
+        let (done_a_tx, done_a_rx) = tokio::sync::oneshot::channel();
+        let pause_a = Arc::new(tokio::sync::Notify::new());
+
+        struct SignallingRecoveryA {
+            ready_tx: parking_lot::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+            done_tx: parking_lot::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+            pause_notify: Arc<tokio::sync::Notify>,
+        }
+
+        #[async_trait]
+        impl RealtimeRecovery for SignallingRecoveryA {
+            fn classify(&self, _cause: &RecoveryCause) -> RecoveryDisposition {
+                RecoveryDisposition::Recoverable
+            }
+
+            async fn recover(&self, _context: RecoveryContext<'_>) -> Result<RecoveredSession> {
+                let session = Arc::new(MockSession { id: "gen-1-a".into(), recovery: None });
+                if let Some(tx) = self.ready_tx.lock().take() {
+                    let _ = tx.send(());
+                }
+                self.pause_notify.notified().await;
+                if let Some(tx) = self.done_tx.lock().take() {
+                    let _ = tx.send(());
+                }
+                Ok(RecoveredSession::new(session, RecoveryContinuity::Resumed))
+            }
+        }
+
+        let mock_rec_a = Arc::new(SignallingRecoveryA {
+            ready_tx: parking_lot::Mutex::new(Some(ready_a_tx)),
+            done_tx: parking_lot::Mutex::new(Some(done_a_tx)),
+            pause_notify: pause_a.clone(),
+        });
+
+        let initial_session = Arc::new(MockSession {
+            id: "gen-0".to_string(),
+            recovery: Some(Arc::clone(&mock_rec_a) as Arc<dyn RealtimeRecovery>),
+        });
+
+        let policy = RecoveryPolicy::default();
+        let config = Arc::new(tokio::sync::RwLock::new(crate::config::RealtimeConfig::default()));
+        let supervisor =
+            Arc::new(RecoverySupervisor::with_initial_session(policy, config, initial_session));
+
+        let sup_task_a = Arc::clone(&supervisor);
+        let report_task_a = tokio::spawn(async move {
+            let report = FailureReport { generation: 0, cause: RecoveryCause::UnexpectedEof };
+            sup_task_a.report_failure(report).await
+        });
+
+        ready_a_rx.await.expect("Episode A should yield ready signal");
+
+        let sup_clone = Arc::clone(&supervisor);
+        let write_guard = sup_clone.state.write().await;
+
+        pause_a.notify_one();
+        done_a_rx.await.expect("Episode A recover must finish");
+
+        report_task_a.abort();
+        let _ = report_task_a.await;
+
+        drop(write_guard);
+
+        let (ready_b_tx, ready_b_rx) = tokio::sync::oneshot::channel();
+        let pause_b = Arc::new(tokio::sync::Notify::new());
+
+        struct SignallingRecoveryB {
+            ready_tx: parking_lot::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+            pause_notify: Arc<tokio::sync::Notify>,
+        }
+
+        #[async_trait]
+        impl RealtimeRecovery for SignallingRecoveryB {
+            fn classify(&self, _cause: &RecoveryCause) -> RecoveryDisposition {
+                RecoveryDisposition::Recoverable
+            }
+
+            async fn recover(&self, _context: RecoveryContext<'_>) -> Result<RecoveredSession> {
+                let session = Arc::new(MockSession { id: "gen-1-b".into(), recovery: None });
+                if let Some(tx) = self.ready_tx.lock().take() {
+                    let _ = tx.send(());
+                }
+                self.pause_notify.notified().await;
+                Ok(RecoveredSession::new(session, RecoveryContinuity::Resumed))
+            }
+        }
+
+        let mock_rec_b = Arc::new(SignallingRecoveryB {
+            ready_tx: parking_lot::Mutex::new(Some(ready_b_tx)),
+            pause_notify: pause_b.clone(),
+        });
+
+        {
+            let mut state = supervisor.state.write().await;
+            if let Some(ref mut current_gen) = state.generation {
+                current_gen.session = Arc::new(MockSession {
+                    id: "gen-0".into(),
+                    recovery: Some(mock_rec_b as Arc<dyn RealtimeRecovery>),
+                });
+            }
+        }
+
+        let sup_task_b = Arc::clone(&supervisor);
+        let report_task_b = tokio::spawn(async move {
+            let report = FailureReport { generation: 0, cause: RecoveryCause::UnexpectedEof };
+            sup_task_b.report_failure(report).await
+        });
+
+        ready_b_rx.await.expect("Episode B should yield ready signal");
+
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        assert_eq!(supervisor.status().await, TransportStatus::Recovering);
+        assert!(supervisor.admit_write().await.is_err());
+
+        pause_b.notify_one();
+        let outcome_b = report_task_b.await.unwrap().unwrap();
+
+        assert!(matches!(outcome_b, RecoveryOutcome::Recovered { .. }));
+        assert_eq!(supervisor.status().await, TransportStatus::Healthy);
+    }
+
+    #[tokio::test]
     async fn test_candidate_ready_cancellation_cleans_unpublished_candidate_without_sleeps() {
         let candidate_close_calls = Arc::new(AtomicUsize::new(0));
+        let (close_tx, close_rx) = tokio::sync::oneshot::channel();
+        let close_tx_slot = Arc::new(parking_lot::Mutex::new(Some(close_tx)));
 
         struct CandidateSession {
             close_calls: Arc<AtomicUsize>,
+            close_tx: Arc<parking_lot::Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
         }
 
         #[async_trait]
@@ -1643,6 +1771,9 @@ mod tests {
             }
             async fn close(&self) -> Result<()> {
                 self.close_calls.fetch_add(1, Ordering::SeqCst);
+                if let Some(tx) = self.close_tx.lock().take() {
+                    let _ = tx.send(());
+                }
                 Ok(())
             }
             async fn mutate_context(
@@ -1659,6 +1790,7 @@ mod tests {
 
         struct ReadySignallingRecovery {
             candidate_close_calls: Arc<AtomicUsize>,
+            close_tx: Arc<parking_lot::Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
             ready_tx: parking_lot::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
             done_tx: parking_lot::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
             pause_notify: Arc<tokio::sync::Notify>,
@@ -1671,8 +1803,10 @@ mod tests {
             }
 
             async fn recover(&self, _context: RecoveryContext<'_>) -> Result<RecoveredSession> {
-                let session =
-                    Arc::new(CandidateSession { close_calls: self.candidate_close_calls.clone() });
+                let session = Arc::new(CandidateSession {
+                    close_calls: self.candidate_close_calls.clone(),
+                    close_tx: self.close_tx.clone(),
+                });
                 if let Some(tx) = self.ready_tx.lock().take() {
                     let _ = tx.send(());
                 }
@@ -1686,6 +1820,7 @@ mod tests {
 
         let mock_rec = Arc::new(ReadySignallingRecovery {
             candidate_close_calls: candidate_close_calls.clone(),
+            close_tx: close_tx_slot,
             ready_tx: parking_lot::Mutex::new(Some(ready_tx)),
             done_tx: parking_lot::Mutex::new(Some(done_tx)),
             pause_notify: pause_notify.clone(),
@@ -1727,8 +1862,8 @@ mod tests {
         // 6. Release supervisor state write lock
         drop(write_guard);
 
-        // 7. Sleep briefly so CandidateCleanupGuard's spawned background close task finishes
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        // 7. Await close_rx: proves CandidateCleanupGuard spawned close() and completed without sleeps
+        close_rx.await.expect("CandidateSession::close() must complete on cancellation");
 
         let sg_item = supervisor.get_active_generation().await.unwrap();
         assert_eq!(sg_item.id, 0);
