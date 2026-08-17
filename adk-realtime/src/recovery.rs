@@ -239,3 +239,4 @@ pub trait RealtimeRecovery: Send + Sync {
 }
 
 pub(crate) mod supervisor;
+pub use supervisor::SessionGeneration;

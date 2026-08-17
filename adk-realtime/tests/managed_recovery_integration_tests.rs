@@ -1,0 +1,414 @@
+use adk_realtime::audio::{AudioChunk, AudioFormat};
+use adk_realtime::config::{RealtimeConfig, SessionUpdateConfig};
+use adk_realtime::error::{RealtimeError, Result};
+use adk_realtime::events::{ClientEvent, ServerEvent, ToolResponse};
+use adk_realtime::model::RealtimeModel;
+use adk_realtime::recovery::{
+    DeliveryCertainty, RealtimeRecovery, RecoveredSession, RecoveryCause, RecoveryContinuity,
+    RecoveryDisposition,
+};
+use adk_realtime::runner::RealtimeRunner;
+use adk_realtime::session::{BoxedSession, ContextMutationOutcome, RealtimeSession};
+use async_trait::async_trait;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
+
+#[derive(Default)]
+struct TestCounters {
+    raw_sends: AtomicUsize,
+    close_calls: AtomicUsize,
+}
+
+#[derive(Clone)]
+struct MockRecoverySession {
+    id: String,
+    counters: Arc<TestCounters>,
+    recovery: Option<Arc<dyn RealtimeRecovery>>,
+    close_hangs: bool,
+    send_fails: bool,
+}
+
+impl MockRecoverySession {
+    fn new(id: &str, counters: Arc<TestCounters>) -> Self {
+        Self { id: id.to_string(), counters, recovery: None, close_hangs: false, send_fails: false }
+    }
+
+    fn with_recovery(
+        id: &str,
+        counters: Arc<TestCounters>,
+        recovery: Arc<dyn RealtimeRecovery>,
+    ) -> Self {
+        Self {
+            id: id.to_string(),
+            counters,
+            recovery: Some(recovery),
+            close_hangs: false,
+            send_fails: false,
+        }
+    }
+}
+
+#[async_trait]
+impl RealtimeSession for MockRecoverySession {
+    fn session_id(&self) -> &str {
+        &self.id
+    }
+
+    fn is_connected(&self) -> bool {
+        true
+    }
+
+    fn recovery(&self) -> Option<&dyn RealtimeRecovery> {
+        self.recovery.as_ref().map(|r| r.as_ref())
+    }
+
+    async fn send_audio(&self, _audio: &AudioChunk) -> Result<()> {
+        self.counters.raw_sends.fetch_add(1, Ordering::SeqCst);
+        if self.send_fails {
+            return Err(RealtimeError::connection("simulated send_audio write failure"));
+        }
+        Ok(())
+    }
+
+    async fn send_audio_base64(&self, _audio: &str) -> Result<()> {
+        self.counters.raw_sends.fetch_add(1, Ordering::SeqCst);
+        if self.send_fails {
+            return Err(RealtimeError::connection("simulated send_audio_base64 write failure"));
+        }
+        Ok(())
+    }
+
+    async fn send_text(&self, _text: &str) -> Result<()> {
+        self.counters.raw_sends.fetch_add(1, Ordering::SeqCst);
+        if self.send_fails {
+            return Err(RealtimeError::connection("simulated send_text write failure"));
+        }
+        Ok(())
+    }
+
+    async fn send_tool_response(&self, _response: ToolResponse) -> Result<()> {
+        self.counters.raw_sends.fetch_add(1, Ordering::SeqCst);
+        if self.send_fails {
+            return Err(RealtimeError::connection("simulated send_tool_response write failure"));
+        }
+        Ok(())
+    }
+
+    async fn commit_audio(&self) -> Result<()> {
+        self.counters.raw_sends.fetch_add(1, Ordering::SeqCst);
+        if self.send_fails {
+            return Err(RealtimeError::connection("simulated commit_audio write failure"));
+        }
+        Ok(())
+    }
+
+    async fn clear_audio(&self) -> Result<()> {
+        Ok(())
+    }
+
+    async fn create_response(&self) -> Result<()> {
+        self.counters.raw_sends.fetch_add(1, Ordering::SeqCst);
+        if self.send_fails {
+            return Err(RealtimeError::connection("simulated create_response write failure"));
+        }
+        Ok(())
+    }
+
+    async fn interrupt(&self) -> Result<()> {
+        self.counters.raw_sends.fetch_add(1, Ordering::SeqCst);
+        if self.send_fails {
+            return Err(RealtimeError::connection("simulated interrupt write failure"));
+        }
+        Ok(())
+    }
+
+    async fn send_event(&self, _event: ClientEvent) -> Result<()> {
+        self.counters.raw_sends.fetch_add(1, Ordering::SeqCst);
+        if self.send_fails {
+            return Err(RealtimeError::connection("simulated send_event write failure"));
+        }
+        Ok(())
+    }
+
+    async fn next_event(&self) -> Option<Result<ServerEvent>> {
+        std::future::pending().await
+    }
+
+    fn events(&self) -> Pin<Box<dyn futures::Stream<Item = Result<ServerEvent>> + Send + '_>> {
+        Box::pin(futures::stream::empty())
+    }
+
+    async fn close(&self) -> Result<()> {
+        self.counters.close_calls.fetch_add(1, Ordering::SeqCst);
+        if self.close_hangs {
+            std::future::pending::<()>().await;
+        }
+        Ok(())
+    }
+
+    async fn mutate_context(&self, config: RealtimeConfig) -> Result<ContextMutationOutcome> {
+        Ok(ContextMutationOutcome::RequiresResumption(Box::new(config)))
+    }
+}
+
+struct DummyModel;
+
+#[async_trait]
+impl RealtimeModel for DummyModel {
+    fn provider(&self) -> &str {
+        "dummy"
+    }
+    fn model_id(&self) -> &str {
+        "dummy"
+    }
+    fn supported_input_formats(&self) -> Vec<AudioFormat> {
+        vec![]
+    }
+    fn supported_output_formats(&self) -> Vec<AudioFormat> {
+        vec![]
+    }
+    fn available_voices(&self) -> Vec<&str> {
+        vec![]
+    }
+    async fn connect(&self, _config: RealtimeConfig) -> Result<BoxedSession> {
+        let counters = Arc::new(TestCounters::default());
+        Ok(Box::new(MockRecoverySession::new("dummy-connected", counters)))
+    }
+}
+
+#[tokio::test]
+async fn test_single_active_session_authority_and_no_reset() {
+    let runner = RealtimeRunner::builder().model(Arc::new(DummyModel)).build().unwrap();
+    let counters = Arc::new(TestCounters::default());
+    let session = Arc::new(MockRecoverySession::new("gen-0", counters.clone()));
+
+    let gen0 = runner.set_initial_session(session.clone()).await.unwrap();
+    assert_eq!(gen0.id, 0);
+    assert_eq!(gen0.session.session_id(), "gen-0");
+
+    let res = runner.set_initial_session(session).await;
+    assert!(res.is_err(), "set_initial_session must reject when active generation exists");
+
+    assert_eq!(runner.session_id().await.as_deref(), Some("gen-0"));
+}
+
+#[tokio::test]
+async fn test_write_delivery_certainty_not_attempted_vs_indeterminate() {
+    let runner = RealtimeRunner::builder().model(Arc::new(DummyModel)).build().unwrap();
+    let counters = Arc::new(TestCounters::default());
+
+    let err = runner.send_text("hello").await.unwrap_err();
+    assert_eq!(err.delivery_certainty(), DeliveryCertainty::NotAttempted);
+    assert_eq!(counters.raw_sends.load(Ordering::SeqCst), 0);
+
+    let mut failing_session = MockRecoverySession::new("gen-0-failing", counters.clone());
+    failing_session.send_fails = true;
+    let _ = runner.set_initial_session(Arc::new(failing_session)).await.unwrap();
+
+    let err2 = runner.send_text("hello").await.unwrap_err();
+    assert_eq!(err2.delivery_certainty(), DeliveryCertainty::Indeterminate);
+    assert_eq!(counters.raw_sends.load(Ordering::SeqCst), 1);
+}
+
+struct RecoveringProvider {
+    attempts: Arc<AtomicUsize>,
+    recovered_session: Arc<dyn RealtimeSession>,
+}
+
+#[async_trait]
+impl RealtimeRecovery for RecoveringProvider {
+    fn classify(&self, _cause: &RecoveryCause) -> RecoveryDisposition {
+        RecoveryDisposition::Recoverable
+    }
+
+    async fn recover(
+        &self,
+        _context: adk_realtime::recovery::RecoveryContext<'_>,
+    ) -> Result<RecoveredSession> {
+        self.attempts.fetch_add(1, Ordering::SeqCst);
+        Ok(RecoveredSession::new(self.recovered_session.clone(), RecoveryContinuity::Resumed))
+    }
+}
+
+#[tokio::test]
+async fn test_raw_write_failure_triggers_supervisor_recovery() {
+    let runner = RealtimeRunner::builder().model(Arc::new(DummyModel)).build().unwrap();
+    let counters = Arc::new(TestCounters::default());
+
+    let rec_attempts = Arc::new(AtomicUsize::new(0));
+    let replacement_session =
+        Arc::new(MockRecoverySession::new("gen-1-replacement", counters.clone()));
+    let recovery_provider = Arc::new(RecoveringProvider {
+        attempts: rec_attempts.clone(),
+        recovered_session: replacement_session,
+    });
+
+    let mut initial_session =
+        MockRecoverySession::with_recovery("gen-0-initial", counters.clone(), recovery_provider);
+    initial_session.send_fails = true;
+
+    let _ = runner.set_initial_session(Arc::new(initial_session)).await.unwrap();
+
+    let err = runner.send_text("hello").await.unwrap_err();
+    assert_eq!(err.delivery_certainty(), DeliveryCertainty::Indeterminate);
+    assert_eq!(rec_attempts.load(Ordering::SeqCst), 1);
+
+    assert_eq!(runner.session_id().await.as_deref(), Some("gen-1-replacement"));
+}
+
+#[derive(Clone)]
+struct HangingCloseSession {
+    counters: Arc<TestCounters>,
+    events: Arc<parking_lot::Mutex<Vec<ServerEvent>>>,
+}
+
+#[async_trait]
+impl RealtimeSession for HangingCloseSession {
+    fn session_id(&self) -> &str {
+        "same-session-id"
+    }
+
+    fn is_connected(&self) -> bool {
+        true
+    }
+
+    async fn send_audio(&self, _audio: &AudioChunk) -> Result<()> {
+        Ok(())
+    }
+    async fn send_audio_base64(&self, _audio: &str) -> Result<()> {
+        Ok(())
+    }
+    async fn send_text(&self, _text: &str) -> Result<()> {
+        Ok(())
+    }
+    async fn send_tool_response(&self, _response: ToolResponse) -> Result<()> {
+        Ok(())
+    }
+    async fn commit_audio(&self) -> Result<()> {
+        Ok(())
+    }
+    async fn clear_audio(&self) -> Result<()> {
+        Ok(())
+    }
+    async fn create_response(&self) -> Result<()> {
+        Ok(())
+    }
+    async fn interrupt(&self) -> Result<()> {
+        Ok(())
+    }
+    async fn send_event(&self, _event: ClientEvent) -> Result<()> {
+        Ok(())
+    }
+
+    async fn next_event(&self) -> Option<Result<ServerEvent>> {
+        let ev = self.events.lock().pop();
+        if let Some(ev) = ev { Some(Ok(ev)) } else { std::future::pending().await }
+    }
+
+    fn events(&self) -> Pin<Box<dyn futures::Stream<Item = Result<ServerEvent>> + Send + '_>> {
+        Box::pin(futures::stream::empty())
+    }
+
+    async fn close(&self) -> Result<()> {
+        self.counters.close_calls.fetch_add(1, Ordering::SeqCst);
+        std::future::pending::<()>().await;
+        Ok(())
+    }
+
+    async fn mutate_context(&self, config: RealtimeConfig) -> Result<ContextMutationOutcome> {
+        Ok(ContextMutationOutcome::RequiresResumption(Box::new(config)))
+    }
+}
+
+#[tokio::test]
+async fn test_generation_watcher_wakeup_even_if_close_hangs_and_same_session_id() {
+    let counters = Arc::new(TestCounters::default());
+
+    let gen1_session = Arc::new(HangingCloseSession {
+        counters: counters.clone(),
+        events: Arc::new(parking_lot::Mutex::new(vec![ServerEvent::TextDelta {
+            event_id: "evt".into(),
+            response_id: "resp".into(),
+            item_id: "item".into(),
+            output_index: 0,
+            content_index: 0,
+            delta: "from-gen-1".into(),
+        }])),
+    });
+
+    let update = SessionUpdateConfig(RealtimeConfig::default().with_instruction("new instruction"));
+
+    struct CustomModel(Arc<HangingCloseSession>);
+    #[async_trait]
+    impl RealtimeModel for CustomModel {
+        fn provider(&self) -> &str {
+            "c"
+        }
+        fn model_id(&self) -> &str {
+            "c"
+        }
+        fn supported_input_formats(&self) -> Vec<AudioFormat> {
+            vec![]
+        }
+        fn supported_output_formats(&self) -> Vec<AudioFormat> {
+            vec![]
+        }
+        fn available_voices(&self) -> Vec<&str> {
+            vec![]
+        }
+        async fn connect(&self, _config: RealtimeConfig) -> Result<BoxedSession> {
+            Ok(Box::new((*self.0).clone()) as BoxedSession)
+        }
+    }
+
+    let custom_runner =
+        RealtimeRunner::builder().model(Arc::new(CustomModel(gen1_session))).build().unwrap();
+    let _ = custom_runner
+        .set_initial_session(Arc::new(HangingCloseSession {
+            counters: counters.clone(),
+            events: Arc::new(parking_lot::Mutex::new(vec![])),
+        }))
+        .await
+        .unwrap();
+
+    let custom_runner = Arc::new(custom_runner);
+    let custom_runner_clone = custom_runner.clone();
+
+    let pull_task = tokio::spawn(async move { custom_runner_clone.next_event().await });
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    custom_runner.update_session(update).await.unwrap();
+
+    let pulled_event = tokio::time::timeout(Duration::from_secs(2), pull_task)
+        .await
+        .expect("next_event must wake immediately on generation change without waiting for hanging close")
+        .unwrap()
+        .unwrap()
+        .unwrap();
+
+    match pulled_event {
+        ServerEvent::TextDelta { delta, .. } => assert_eq!(delta, "from-gen-1"),
+        other => panic!("expected TextDelta from gen 1, got {:?}", other),
+    }
+}
+
+#[tokio::test]
+async fn test_explicit_close_leaves_no_admittable_session() {
+    let runner = RealtimeRunner::builder().model(Arc::new(DummyModel)).build().unwrap();
+    let counters = Arc::new(TestCounters::default());
+    let session = Arc::new(MockRecoverySession::new("gen-0", counters.clone()));
+
+    let _ = runner.set_initial_session(session).await.unwrap();
+    assert!(runner.is_connected().await);
+
+    runner.close().await.unwrap();
+
+    assert!(!runner.is_connected().await);
+
+    let err = runner.send_text("after close").await.unwrap_err();
+    assert_eq!(err.delivery_certainty(), DeliveryCertainty::NotAttempted);
+    assert_eq!(counters.raw_sends.load(Ordering::SeqCst), 0);
+}

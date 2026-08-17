@@ -7,6 +7,10 @@ use crate::config::{RealtimeConfig, SessionUpdateConfig, ToolDefinition};
 use crate::error::{RealtimeError, Result};
 use crate::events::{CallerActivitySource, ServerEvent, ToolCall, ToolResponse};
 use crate::model::BoxedModel;
+use crate::recovery::supervisor::{
+    FailureReport, RecoveryOutcome, RecoverySupervisor, SessionGeneration, TransportStatus,
+};
+use crate::recovery::{DeliveryCertainty, RecoveryCause, RecoveryPolicy};
 use crate::session::ContextMutationOutcome;
 use async_trait::async_trait;
 use std::collections::HashMap;
@@ -25,16 +29,6 @@ pub enum RunnerState {
     /// A tool is currently executing; teardown would cause tool loss.
     ExecutingTool,
     /// A context mutation was queued while the runner was busy, and must be executed once Idle.
-    ///
-    /// **Provider Context:** This state is only utilized by providers that do *not* support
-    /// native mid-flight mutability (e.g., Gemini Live), requiring a physical transport teardown
-    /// and rebuild (Phantom Reconnect). Providers like OpenAI natively apply `session.update`
-    /// frames instantly and will never enter this queued state.
-    ///
-    /// **Queue Policy:** The runner keeps only one pending resumption. If a new session update
-    /// arrives while a resumption is already pending, the previous pending resumption is replaced.
-    /// This is intentional: pending session updates represent desired end state, not an ordered
-    /// command queue. The policy is last write wins.
     PendingResumption {
         /// The new configuration to apply on reconnection.
         config: Box<crate::config::RealtimeConfig>,
@@ -102,10 +96,6 @@ where
 }
 
 /// Maps a server event to the caller-activity evidence it carries, if any.
-///
-/// The single place this question is answered. Adding a provider event that
-/// indicates caller activity means adding it here, and every consumer of the
-/// runner picks it up at once.
 pub fn caller_activity_source(event: &ServerEvent) -> Option<CallerActivitySource> {
     match event {
         ServerEvent::InputTranscriptDelta { .. } => Some(CallerActivitySource::TranscriptDelta),
@@ -113,9 +103,6 @@ pub fn caller_activity_source(event: &ServerEvent) -> Option<CallerActivitySourc
             Some(CallerActivitySource::TranscriptCompleted)
         }
         ServerEvent::SpeechStopped { .. } => Some(CallerActivitySource::SpeechStopped),
-        // `SpeechStarted` is deliberately absent: the caller starting to speak
-        // is a barge-in signal, not evidence that they said anything an
-        // application should act on.
         _ => None,
     }
 }
@@ -139,36 +126,11 @@ pub trait EventHandler: Send + Sync {
     }
 
     /// Called when the provider has finalized one caller-input transcript item.
-    ///
-    /// Consumers that only need a turn boundary should use `item_id` and avoid
-    /// retaining `transcript`; the callback includes both so applications that
-    /// explicitly own transcript persistence do not need a parallel event loop.
-    ///
-    /// Not every provider emits this. Gemini Live does not, so a handler that
-    /// treats it as its only caller-activity signal observes nothing at all on
-    /// that backend — use [`EventHandler::on_caller_activity`] instead.
     async fn on_input_transcript_completed(&self, _transcript: &str, _item_id: &str) -> Result<()> {
         Ok(())
     }
 
     /// Called whenever a server event indicates the caller was active.
-    ///
-    /// This exists because "the caller did something" was previously only
-    /// derivable by picking the right subset of events yourself, and two
-    /// consumers of the same runner picked different subsets: one observed
-    /// `InputTranscriptDelta` directly off the event stream and worked on
-    /// Gemini, the other used `on_input_transcript_completed` and — since
-    /// Gemini never emits it — silently observed nothing. Both were reading the
-    /// same session. Deriving activity in the runner, once, is what stops that
-    /// class of divergence: a provider event added to the mapping reaches every
-    /// consumer at the same time.
-    ///
-    /// Fires *in addition to* the specific callback for the same event, so a
-    /// handler implementing both sees both. Ordering between the two is not
-    /// part of the contract.
-    ///
-    /// See [`CallerActivitySource`] for what each source does and does not
-    /// establish; they are not interchangeable strengths of evidence.
     async fn on_caller_activity(&self, _source: CallerActivitySource) -> Result<()> {
         Ok(())
     }
@@ -188,60 +150,22 @@ pub trait EventHandler: Send + Sync {
         Ok(())
     }
 
-    /// Called when the provider withdraws function calls it already issued,
-    /// normally because the caller interrupted the turn that produced them.
-    ///
-    /// The ids match `call_id` values from earlier tool calls. A handler that
-    /// has not yet performed the effect should drop it; one that already has
-    /// must decide whether to compensate, because the provider considers the
-    /// call to have never been authorized.
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// async fn on_tool_calls_cancelled(&self, call_ids: &[ToolCallId]) -> Result<()> {
-    ///     for id in call_ids {
-    ///         if !self.pending.lock().remove(id.as_str()) {
-    ///             tracing::warn!(call_id = %id, "cancelled after the effect landed");
-    ///         }
-    ///     }
-    ///     Ok(())
-    /// }
-    /// ```
+    /// Called when function calls are cancelled.
     async fn on_tool_calls_cancelled(&self, _call_ids: &[crate::events::ToolCallId]) -> Result<()> {
         Ok(())
     }
 
-    /// Called when a response is cancelled or interrupted before completion
-    /// (e.g. caller barge-in). Distinct from [`EventHandler::on_error`]:
-    /// cancellation is a normal lifecycle boundary, not a failure, but like
-    /// the done/error boundaries it invalidates any partially received item
-    /// state a handler may be carrying.
+    /// Called when a response is cancelled or interrupted.
     async fn on_response_cancelled(&self) -> Result<()> {
         Ok(())
     }
 
-    /// Called on any error.
     /// Called when the provider transport ends and [`RealtimeRunner::run`] is returning.
-    ///
-    /// The runner does **not** reconnect automatically. Reconnection is deliberate: it
-    /// requires deciding what context to replay and, on Gemini, whether a resumption token
-    /// is still valid. Without this hook `run` returned `Ok(())` on transport loss, which a
-    /// caller could not tell apart from a graceful [`RealtimeRunner::close`].
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// async fn on_disconnect(&self) -> adk_realtime::Result<()> {
-    ///     tracing::warn!("realtime transport ended; reconnecting");
-    ///     self.reconnect.notify_one();
-    ///     Ok(())
-    /// }
-    /// ```
     async fn on_disconnect(&self) -> Result<()> {
         Ok(())
     }
 
+    /// Called on any error.
     async fn on_error(&self, _error: &RealtimeError) -> Result<()> {
         Ok(())
     }
@@ -291,6 +215,7 @@ pub struct RealtimeRunnerBuilder {
     model: Option<BoxedModel>,
     config: RealtimeConfig,
     runner_config: RunnerConfig,
+    recovery_policy: RecoveryPolicy,
     tools: HashMap<String, (ToolDefinition, Arc<dyn ToolHandler>)>,
     event_handler: Option<Arc<dyn EventHandler>>,
 }
@@ -308,6 +233,7 @@ impl RealtimeRunnerBuilder {
             model: None,
             config: RealtimeConfig::default(),
             runner_config: RunnerConfig::default(),
+            recovery_policy: RecoveryPolicy::default(),
             tools: HashMap::new(),
             event_handler: None,
         }
@@ -328,6 +254,12 @@ impl RealtimeRunnerBuilder {
     /// Set the runner configuration.
     pub fn runner_config(mut self, config: RunnerConfig) -> Self {
         self.runner_config = config;
+        self
+    }
+
+    /// Set the recovery policy.
+    pub fn recovery_policy(mut self, policy: RecoveryPolicy) -> Self {
+        self.recovery_policy = policy;
         self
     }
 
@@ -359,9 +291,6 @@ impl RealtimeRunnerBuilder {
     }
 
     /// Register a tool with an `Arc<dyn ToolHandler>` directly.
-    ///
-    /// This is useful when you already have a shared handler and want to avoid
-    /// an extra `Arc` wrapping that the `tool()` method would perform.
     pub fn tool_arc(mut self, definition: ToolDefinition, handler: Arc<dyn ToolHandler>) -> Self {
         let name = definition.name.clone();
         self.tools.insert(name, (definition, handler));
@@ -375,9 +304,6 @@ impl RealtimeRunnerBuilder {
     }
 
     /// Set the event handler from an `Arc<dyn EventHandler>` directly.
-    ///
-    /// This is useful when you already have a shared handler and want to avoid
-    /// an extra `Arc` wrapping that the `event_handler()` method would perform.
     pub fn event_handler_arc(mut self, handler: Arc<dyn EventHandler>) -> Self {
         self.event_handler = Some(handler);
         self
@@ -387,7 +313,6 @@ impl RealtimeRunnerBuilder {
     pub fn build(self) -> Result<RealtimeRunner> {
         let model = self.model.ok_or_else(|| RealtimeError::config("Model is required"))?;
 
-        // Add tool definitions to config
         let mut config = self.config;
         if !self.tools.is_empty() {
             let tool_defs: Vec<ToolDefinition> =
@@ -396,14 +321,14 @@ impl RealtimeRunnerBuilder {
         }
 
         let max_concurrent_tools = self.runner_config.max_concurrent_tools.max(1);
+        let supervisor = Arc::new(RecoverySupervisor::new(self.recovery_policy, config));
 
         Ok(RealtimeRunner {
             model,
-            config: Arc::new(RwLock::new(config)),
             runner_config: self.runner_config,
             tools: self.tools,
             event_handler: self.event_handler.unwrap_or_else(|| Arc::new(NoOpEventHandler)),
-            session: Arc::new(RwLock::new(None)),
+            supervisor,
             state: Arc::new(RwLock::new(RunnerState::Idle)),
             pending_tool_response: AtomicBool::new(false),
             tool_permits: Arc::new(tokio::sync::Semaphore::new(max_concurrent_tools)),
@@ -416,121 +341,99 @@ impl RealtimeRunnerBuilder {
 }
 
 /// A runner that manages a realtime session with tool execution.
-///
-/// RealtimeRunner provides a high-level interface for:
-/// - Connecting to realtime providers
-/// - Automatically executing tool calls
-/// - Routing events to handlers
-/// - Managing the session lifecycle
-///
-/// # Example
-///
-/// ```rust,ignore
-/// use adk_realtime::{RealtimeRunner, RealtimeConfig, ToolDefinition};
-/// use adk_realtime::openai::OpenAIRealtimeModel;
-///
-/// #[tokio::main]
-/// async fn main() -> Result<()> {
-///     let model = OpenAIRealtimeModel::new(api_key, "gpt-realtime");
-///
-///     let runner = RealtimeRunner::builder()
-///         .model(Box::new(model))
-///         .instruction("You are a helpful voice assistant.")
-///         .voice("alloy")
-///         .tool_fn(
-///             ToolDefinition::new("get_weather")
-///                 .with_description("Get weather for a location"),
-///             |call| {
-///                 Ok(serde_json::json!({"temperature": 72, "condition": "sunny"}))
-///             }
-///         )
-///         .build()?;
-///
-///     runner.connect().await?;
-///     runner.run().await?;
-///
-///     Ok(())
-/// }
-/// ```
 pub struct RealtimeRunner {
     model: BoxedModel,
-    config: Arc<RwLock<RealtimeConfig>>,
     runner_config: RunnerConfig,
     tools: HashMap<String, (ToolDefinition, Arc<dyn ToolHandler>)>,
     event_handler: Arc<dyn EventHandler>,
-    session: Arc<RwLock<Option<Arc<dyn crate::session::RealtimeSession>>>>,
+    supervisor: Arc<RecoverySupervisor>,
     state: Arc<RwLock<RunnerState>>,
-    /// Set when tool output(s) have been sent for the in-flight response and a
-    /// single follow-up `create_response` is owed once that response finishes.
     pending_tool_response: AtomicBool,
-    /// Bounds how many tool handlers run at once, from
-    /// [`RunnerConfig::max_concurrent_tools`].
     tool_permits: Arc<tokio::sync::Semaphore>,
-    /// Tool calls dispatched for the current response and not yet finished.
     outstanding_tools: Arc<AtomicUsize>,
-    /// Set when the dispatching response closed while tool calls were still running, so
-    /// the follow-up `create_response` is owed by whichever tool finishes last.
     response_closed_awaiting_tools: Arc<AtomicBool>,
-    /// Tracks consecutive tool execution failures to enforce circuit breaking.
     consecutive_tool_failures: Arc<AtomicUsize>,
-    /// Set when the circuit breaker trips, putting tool execution into Open state.
     circuit_breaker_tripped: Arc<AtomicBool>,
 }
 
 impl RealtimeRunner {
-    /// Helper to safely acquire a cloned Arc of the current session, dropping the lock.
-    async fn session_handle(&self) -> Result<Arc<dyn crate::session::RealtimeSession>> {
-        let guard = self.session.read().await;
-        guard.as_ref().cloned().ok_or_else(|| RealtimeError::connection("Not connected"))
-    }
-
     /// Create a new builder.
     pub fn builder() -> RealtimeRunnerBuilder {
         RealtimeRunnerBuilder::new()
+    }
+
+    /// Single managed write invocation boundary.
+    pub(crate) async fn invoke_write<F, Fut, T>(&self, op: F) -> Result<T>
+    where
+        F: FnOnce(Arc<dyn crate::session::RealtimeSession>) -> Fut,
+        Fut: std::future::Future<Output = Result<T>>,
+    {
+        let gen_item = match self.supervisor.admit_write().await {
+            Ok(g) => g,
+            Err(err) => return Err(err),
+        };
+
+        match op(gen_item.session).await {
+            Ok(res) => Ok(res),
+            Err(err) => {
+                let err_arc = Arc::new(err);
+                let report = FailureReport {
+                    generation: gen_item.id,
+                    cause: RecoveryCause::WriteFailed(err_arc.clone()),
+                };
+                let _ = self.supervisor.report_failure(report).await;
+                Err(RealtimeError::write_failed(err_arc, DeliveryCertainty::Indeterminate))
+            }
+        }
     }
 
     /// Connect to the realtime provider.
     pub async fn connect(&self) -> Result<()> {
         self.consecutive_tool_failures.store(0, Ordering::Release);
         self.circuit_breaker_tripped.store(false, Ordering::Release);
-        let config = self.config.read().await.clone();
-        let session = self.model.connect(config).await?;
-        let mut guard = self.session.write().await;
-        *guard = Some(session.into());
+
+        let config_snapshot = self.supervisor.get_config().await;
+        let session = self.model.connect(config_snapshot.config).await?;
+        let session_arc: Arc<dyn crate::session::RealtimeSession> = Arc::from(session);
+
+        if self.supervisor.status().await == TransportStatus::Uninitialized {
+            let _ = self.supervisor.set_initial_session(session_arc).await?;
+        } else {
+            let _ =
+                self.supervisor.publish_replacement(session_arc, config_snapshot.revision).await?;
+        }
         Ok(())
+    }
+
+    /// Install an initial session directly (valid only when uninitialized).
+    pub async fn set_initial_session(
+        &self,
+        session: Arc<dyn crate::session::RealtimeSession>,
+    ) -> Result<SessionGeneration> {
+        self.supervisor.set_initial_session(session).await
     }
 
     /// Check if currently connected.
     pub async fn is_connected(&self) -> bool {
-        let guard = self.session.read().await;
-        guard.as_ref().map(|s| s.is_connected()).unwrap_or(false)
+        self.supervisor.is_connected().await
     }
 
     /// Get the session ID if connected.
     pub async fn session_id(&self) -> Option<String> {
-        let guard = self.session.read().await;
-        guard.as_ref().map(|s| s.session_id().to_string())
+        self.supervisor
+            .get_active_generation()
+            .await
+            .ok()
+            .map(|g| g.session.session_id().to_string())
     }
 
-    /// The connected provider's native audio output format (see
-    /// [`RealtimeSession::native_audio_output_format`](crate::session::RealtimeSession::native_audio_output_format)).
-    /// Returns an error if not connected — callers that need this are about to
-    /// label live `AudioDelta` bytes and must not fall back to a guessed format.
+    /// The connected provider's native audio output format.
     pub async fn native_audio_output_format(&self) -> Result<crate::audio::AudioFormat> {
-        let guard = self.session.read().await;
-        guard
-            .as_ref()
-            .map(|s| s.native_audio_output_format())
-            .ok_or_else(|| RealtimeError::connection("Not connected"))
+        let gen_item = self.supervisor.get_active_generation().await?;
+        Ok(gen_item.session.native_audio_output_format())
     }
 
     /// Send a client event directly to the session.
-    ///
-    /// This method intercepts internal control-plane events (like `UpdateSession`) to route
-    /// them through the provider-agnostic orchestration layer instead of forwarding raw JSON
-    /// to the underlying WebSocket transport. This guarantees that `adk-realtime` never leaks
-    /// invalid event payloads to providers (e.g., OpenAI or Gemini) and universally bridges
-    /// the Cognitive Handoff mechanics transparently.
     pub async fn send_client_event(&self, event: crate::events::ClientEvent) -> Result<()> {
         match event {
             crate::events::ClientEvent::UpdateSession { instructions, tools } => {
@@ -541,25 +444,11 @@ impl RealtimeRunner {
                 });
                 self.update_session(update_config).await
             }
-            other => {
-                let session = self.session_handle().await?;
-                session.send_event(other).await
-            }
+            other => self.invoke_write(|s| async move { s.send_event(other).await }).await,
         }
     }
 
-    /// Internal helper to merge a `SessionUpdateConfig` delta into the canonical `RealtimeConfig` state.
-    ///
-    /// **Why this exists**: The `RealtimeRunner` must maintain an absolute, single source of truth
-    /// for its configuration (`self.config`). Orchestrators fire `SessionUpdateConfig`s as sparse
-    /// partial deltas (intents to hot-swap instructions or tools mid-flight). By accumulating
-    /// these sparse updates into the single `base` config, any subsequent "Phantom Reconnect"
-    /// (e.g., due to a Gemini domain shift or an unexpected network drop) natively inherits all
-    /// prior hot-swaps alongside the immutable transport parameters (like sample rates) defined at startup.
-    ///
-    /// Note: This is intentionally narrow and specifically scoped to merge only
-    /// hot-swappable cognitive fields (instruction, tools, voice, temperature, extra).
-    /// Transport-level attributes like sample rates and audio formats are not dynamically swappable.
+    /// Internal helper to merge a `SessionUpdateConfig` delta into config state.
     fn merge_config(base: &mut RealtimeConfig, update: &SessionUpdateConfig) {
         if let Some(instruction) = &update.0.instruction {
             base.instruction = Some(instruction.clone());
@@ -579,112 +468,61 @@ impl RealtimeRunner {
     }
 
     /// Update the session configuration.
-    ///
-    /// Delegates to [`Self::update_session_with_bridge`] with no bridge message.
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// use adk_realtime::config::{SessionUpdateConfig, RealtimeConfig};
-    ///
-    /// async fn example(runner: &adk_realtime::RealtimeRunner) {
-    ///     let update = SessionUpdateConfig(
-    ///         RealtimeConfig::default().with_instruction("You are now a pirate.")
-    ///     );
-    ///     runner.update_session(update).await.unwrap();
-    /// }
-    /// ```
     pub async fn update_session(&self, config: SessionUpdateConfig) -> Result<()> {
         self.update_session_with_bridge(config, None).await
     }
 
-    /// Update the session configuration, optionally injecting a bridge message if
-    /// a transport resumption (Phantom Reconnect) occurs.
-    ///
-    /// The RealtimeRunner will attempt to mutate the session natively if the underlying
-    /// API supports it (e.g., OpenAI). If it does not (e.g., Gemini), the Runner will
-    /// queue a transport resumption, executing it only when the session
-    /// is in a resumable state (Idle) to prevent data corruption.
-    ///
-    /// The runner keeps only one pending resumption. If a new session update arrives while
-    /// a resumption is already pending, the previous pending resumption is replaced. This is
-    /// intentional: pending session updates represent desired end state, not an ordered command queue.
-    /// The policy is last write wins.
+    /// Update the session configuration with optional bridge message.
     pub async fn update_session_with_bridge(
         &self,
         config: SessionUpdateConfig,
         bridge_message: Option<String>,
     ) -> Result<()> {
-        // 1. Merge the incoming delta into the runner's canonical, persisted configuration.
-        // This ensures that any future reconnects (e.g., due to network drops) naturally
-        // inherit this latest state.
-        let mut full_config = self.config.write().await;
-        Self::merge_config(&mut full_config, &config);
+        let snapshot =
+            self.supervisor.update_config(|base| Self::merge_config(base, &config)).await;
 
-        let cloned_config = full_config.clone();
-        drop(full_config); // Free the write lock early to avoid deadlocks.
+        let gen_item = self.supervisor.get_active_generation().await?;
 
-        // 2. Safely obtain a cloned handle of the active session.
-        let session = self.session_handle().await?;
-
-        // 3. Delegate the mutation attempt to the provider-specific adapter.
-        match session.mutate_context(cloned_config).await? {
-            // PATH A: Native Mutability (e.g., OpenAI)
-            // The provider natively updated the context over the active WebSocket.
+        match gen_item.session.mutate_context(snapshot.config.clone()).await? {
             ContextMutationOutcome::Applied => {
                 tracing::info!("Context mutated natively mid-flight.");
-
-                // Since the transport wasn't dropped, we can inject the bridge message
-                // immediately as a standard user message to update the model's short-term memory.
                 if let Some(msg) = bridge_message {
                     let event = crate::events::ClientEvent::Message {
                         role: "user".to_string(),
                         parts: vec![adk_core::types::Part::Text { text: msg }],
                     };
-                    session.send_event(event).await?;
+                    self.invoke_write(|s| async move { s.send_event(event).await }).await?;
                 }
                 Ok(())
             }
-
-            // PATH B: Rigid Initialization (e.g., Gemini)
-            // The provider requires us to tear down the WebSocket and establish a new one (Phantom Reconnect).
             ContextMutationOutcome::RequiresResumption(new_config) => {
-                drop(session); // CRITICAL: Drop the cloned handle before attempting state mutation.
-
-                // 4. Check the Runner's internal state machine to ensure it is safe to tear down the socket.
                 let mut state_guard = self.state.write().await;
 
                 if *state_guard == RunnerState::Idle {
-                    // Safe to reconnect: The model is neither generating audio nor executing a tool.
-                    drop(state_guard); // Free state lock before the heavy async network operation.
+                    drop(state_guard);
                     tracing::info!("Runner is idle. Executing resumption immediately.");
 
-                    if let Err(e) =
-                        self.execute_resumption((*new_config).clone(), bridge_message.clone()).await
+                    if let Err(e) = self
+                        .supervisor
+                        .execute_context_resumption(
+                            &self.model,
+                            *new_config.clone(),
+                            bridge_message.clone(),
+                            snapshot.revision,
+                        )
+                        .await
                     {
                         tracing::error!("Immediate resumption failed: {}. Queueing for retry.", e);
-                        // If the reconnect fails (e.g., transient network issue), we must not lose the mutation intent.
-                        // We push it back into the queue for the background loop to retry.
                         let mut fallback_state = self.state.write().await;
                         *fallback_state = RunnerState::PendingResumption {
-                            config: Box::new(*new_config),
+                            config: new_config,
                             bridge_message,
                             attempts: 1,
                         };
                         return Err(e);
                     }
                 } else {
-                    // Unsafe to reconnect: Tearing down the socket now would corrupt the in-flight context.
-                    // We must queue the mutation. The event loop will execute it once it returns to Idle.
-                    if let RunnerState::PendingResumption { .. } = *state_guard {
-                        tracing::warn!(
-                            "Runner already had a pending resumption. Overwriting with last-write-wins policy."
-                        );
-                    } else {
-                        tracing::info!("Runner is busy ({:?}). Queueing resumption.", *state_guard);
-                    }
-
-                    // Queue the intent using a last-write-wins policy.
+                    tracing::info!("Runner is busy ({:?}). Queueing resumption.", *state_guard);
                     *state_guard = RunnerState::PendingResumption {
                         config: new_config,
                         bridge_message,
@@ -696,195 +534,130 @@ impl RealtimeRunner {
         }
     }
 
-    /// Internal helper to execute a transport resumption (teardown and rebuild).
-    async fn execute_resumption(
-        &self,
-        new_config: crate::config::RealtimeConfig,
-        bridge_message: Option<String>,
-    ) -> Result<()> {
-        tracing::warn!("Executing transport resumption with new configuration.");
-
-        // 1. Extract the old session safely under the write lock.
-        let old_session = {
-            let mut write_guard = self.session.write().await;
-            write_guard.take()
-        };
-
-        // 2. Explicitly tear down the old WebSocket connection to release upstream resources.
-        // Do this WITHOUT holding the lock across `.await`.
-        if let Some(session) = old_session
-            && let Err(e) = session.close().await
-        {
-            tracing::warn!("Failed to cleanly close old session during resumption: {}", e);
-        }
-
-        // 3. Establish a brand new connection using the provider-agnostic factory interface.
-        // If the provider supports resumption natively (like Gemini), the `new_config`
-        // payload already contains the cached `resumeToken`.
-        let new_session = self.model.connect(new_config).await?;
-
-        // 4. Overwrite the active session pointer with the newly connected transport.
-        {
-            let mut write_guard = self.session.write().await;
-            *write_guard = Some(new_session.into());
-        }
-
-        // 5. If the orchestrator provided a bridge message (e.g. to explain the domain shift),
-        // safely inject it into the new connection's context window.
-        if let Some(msg) = bridge_message {
-            self.inject_bridge_message(msg).await?;
-        }
-
-        tracing::info!("Resumption complete. New transport established.");
-        Ok(())
-    }
-
-    /// Internal helper to safely inject a bridge message directly into the active session.
-    ///
-    /// This intentionally bypasses the `send_client_event` router to avoid `E0733`
-    /// (un-Boxed async recursion) where `send_client_event` -> `update_session` ->
-    /// `execute_resumption` -> `send_client_event` creates an infinite compiler loop.
-    async fn inject_bridge_message(&self, msg: String) -> Result<()> {
-        tracing::info!("Injecting bridge message post-resumption.");
-        let event = crate::events::ClientEvent::Message {
-            role: "user".to_string(),
-            parts: vec![adk_core::types::Part::Text { text: msg }],
-        };
-        let session = self.session_handle().await?;
-        session.send_event(event).await
-    }
-
-    /// Send a typed raw-audio chunk to the session.
-    ///
-    /// This preserves the audio format at the provider boundary and lets the
-    /// provider choose its native encoding path. Prefer this method when the
-    /// caller already owns raw audio bytes.
+    /// Send typed raw-audio chunk to the session.
     pub async fn send_audio_chunk(&self, audio: &crate::audio::AudioChunk) -> Result<()> {
-        let session = self.session_handle().await?;
-        session.send_audio(audio).await
+        let chunk = audio.clone();
+        self.invoke_write(|s| async move { s.send_audio(&chunk).await }).await
     }
 
-    /// Send base64-encoded audio to the session.
-    ///
-    /// This compatibility entry point is useful when the caller already has a
-    /// base64 payload. Raw-audio callers should use
-    /// [`send_audio_chunk`](Self::send_audio_chunk) to avoid forcing an encoding
-    /// decision at the provider-neutral runner boundary. This method forwards
-    /// to [`send_audio_base64`](Self::send_audio_base64).
+    /// Send base64-encoded audio.
     pub async fn send_audio(&self, audio_base64: &str) -> Result<()> {
         self.send_audio_base64(audio_base64).await
     }
 
-    /// Send base64-encoded audio to the session.
+    /// Send base64-encoded audio.
     pub async fn send_audio_base64(&self, audio_base64: &str) -> Result<()> {
-        let session = self.session_handle().await?;
-        session.send_audio_base64(audio_base64).await
+        let payload = audio_base64.to_string();
+        self.invoke_write(|s| async move { s.send_audio_base64(&payload).await }).await
     }
 
     /// Send text to the session.
     pub async fn send_text(&self, text: &str) -> Result<()> {
-        let session = self.session_handle().await?;
-        session.send_text(text).await
+        let payload = text.to_string();
+        self.invoke_write(|s| async move { s.send_text(&payload).await }).await
     }
 
-    /// Send a base64-encoded video/image frame (e.g. `image/jpeg`) for
-    /// multimodal input, where the provider supports it (Gemini Live; OpenAI as
-    /// an image-in-context item).
+    /// Send video frame.
     pub async fn send_video_frame(&self, mime_type: &str, data_base64: &str) -> Result<()> {
-        let session = self.session_handle().await?;
-        session.send_video_frame(mime_type, data_base64).await
+        let mime = mime_type.to_string();
+        let data = data_base64.to_string();
+        self.invoke_write(|s| async move { s.send_video_frame(&mime, &data).await }).await
     }
 
-    /// Commit the audio buffer (for manual VAD mode).
+    /// Commit audio buffer.
     pub async fn commit_audio(&self) -> Result<()> {
-        let session = self.session_handle().await?;
-        session.commit_audio().await
+        self.invoke_write(|s| async move { s.commit_audio().await }).await
     }
 
-    /// Trigger a response from the model.
+    /// Trigger model response.
     pub async fn create_response(&self) -> Result<()> {
-        let session = self.session_handle().await?;
-        session.create_response().await
+        self.invoke_write(|s| async move { s.create_response().await }).await
     }
 
-    /// Interrupt the current response.
+    /// Interrupt current response.
     pub async fn interrupt(&self) -> Result<()> {
-        let session = self.session_handle().await?;
-        session.interrupt().await
+        self.invoke_write(|s| async move { s.interrupt().await }).await
     }
 
-    /// Get the next raw event from the session.
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// use adk_realtime::events::ServerEvent;
-    /// use tracing::{info, error};
-    ///
-    /// async fn process_events(runner: &adk_realtime::RealtimeRunner) {
-    ///     while let Some(event) = runner.next_event().await {
-    ///         match event {
-    ///             Ok(ServerEvent::SpeechStarted { .. }) => info!("User is speaking"),
-    ///             Ok(_) => info!("Received other event"),
-    ///             Err(e) => error!("Error: {e}"),
-    ///         }
-    ///     }
-    /// }
-    /// ```
-    /// Why the provider ended the stream, once [`Self::next_event`] has returned
-    /// `None`.
-    ///
-    /// Callers that poll `next_event` never see the runner's `on_disconnect`
-    /// dispatch, so without this a provider that deliberately closed an idle
-    /// session is indistinguishable from a dropped socket — and both get
-    /// recorded as the same generic stream failure.
+    /// Why the provider ended the stream.
     pub async fn disconnect_reason(&self) -> Option<crate::session::DisconnectReason> {
-        self.session_handle().await.ok().and_then(|session| session.disconnect_reason())
+        self.supervisor
+            .get_active_generation()
+            .await
+            .ok()
+            .and_then(|g| g.session.disconnect_reason())
     }
 
+    /// Get the next managed event from the session with generation awareness and automatic recovery.
     pub async fn next_event(&self) -> Option<Result<ServerEvent>> {
-        let session = match self.session_handle().await {
-            Ok(session) => session,
-            Err(_) => {
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                return None;
+        loop {
+            let mut watcher = self.supervisor.subscribe_generation();
+            let gen_item = match self.supervisor.get_active_generation().await {
+                Ok(g) => g,
+                Err(RealtimeError::SessionClosed) | Err(RealtimeError::NotConnected) => {
+                    return None;
+                }
+                Err(err) => return Some(Err(err)),
+            };
+
+            let current_gen_id = gen_item.id;
+            let session = gen_item.session;
+
+            let event_res = tokio::select! {
+                biased;
+                _ = watcher.changed() => {
+                    if *watcher.borrow() != current_gen_id {
+                        tracing::info!(
+                            from = current_gen_id,
+                            to = *watcher.borrow(),
+                            "generation changed in next_event; switching to active generation"
+                        );
+                        continue;
+                    }
+                    session.next_event().await
+                }
+                ev = session.next_event() => ev,
+            };
+
+            match event_res {
+                Some(Ok(event)) => {
+                    self.handle_internal_event(&event).await;
+                    return Some(Ok(event));
+                }
+                Some(Err(e)) => {
+                    let report = FailureReport {
+                        generation: current_gen_id,
+                        cause: RecoveryCause::ReadFailed(Arc::new(e.clone())),
+                    };
+                    match self.supervisor.report_failure(report).await {
+                        Ok(RecoveryOutcome::Recovered(_)) | Ok(RecoveryOutcome::Stale(_)) => {
+                            continue;
+                        }
+                        _ => return Some(Err(e)),
+                    }
+                }
+                None => {
+                    let report = FailureReport {
+                        generation: current_gen_id,
+                        cause: RecoveryCause::UnexpectedEof,
+                    };
+                    match self.supervisor.report_failure(report).await {
+                        Ok(RecoveryOutcome::Recovered(_)) | Ok(RecoveryOutcome::Stale(_)) => {
+                            continue;
+                        }
+                        _ => return None,
+                    }
+                }
             }
-        };
-
-        // Some sessions might yield inside next_event, but just in case, yield here too
-        tokio::task::yield_now().await;
-        session.next_event().await
+        }
     }
 
-    /// Send a tool response to the session.
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// use adk_realtime::events::ToolResponse;
-    /// use serde_json::json;
-    ///
-    /// async fn example(runner: &adk_realtime::RealtimeRunner) {
-    ///     let response = ToolResponse {
-    ///         call_id: "call_123".to_string(),
-    ///         output: json!({"temperature": 72}),
-    ///     };
-    ///     runner.send_tool_response(response).await.unwrap();
-    /// }
-    /// ```
+    /// Send tool response.
     pub async fn send_tool_response(&self, response: ToolResponse) -> Result<()> {
-        let session = self.session_handle().await?;
-        session.send_tool_response(response).await
+        self.invoke_write(|s| async move { s.send_tool_response(response).await }).await
     }
 
-    /// Execute a tool call against the registered handlers, sending the result
-    /// back to the model when `auto_respond_tools` is enabled.
-    ///
-    /// This is the same dispatch the [`run`](Self::run) loop performs for a
-    /// `response.function_call_arguments.done` event, exposed so that callers
-    /// driving the session manually via [`next_event`](Self::next_event) — such
-    /// as `IntegratedRealtimeRunner` (available with the `integration` feature) —
-    /// can execute tools without re-implementing the lookup/respond logic.
+    /// Execute tool call.
     pub async fn dispatch_tool_call(
         &self,
         call_id: &str,
@@ -894,31 +667,18 @@ impl RealtimeRunner {
         self.execute_tool_call(call_id, name, arguments).await
     }
 
-    /// Sends a tool result the caller produced, honouring `auto_respond_tools`.
-    ///
-    /// Used by the integration layer, which runs ADK tools through its own policy pipeline and
-    /// then needs the result delivered exactly as `execute_tool_call` would deliver it: the
-    /// output is sent now, and the single follow-up `create_response` is deferred until the
-    /// dispatching response closes, so several parallel calls produce one response.
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// let result = my_policy_pipeline.run(&call).await?;
-    /// runner.send_tool_result(&call.call_id, result).await?;
-    /// ```
+    /// Send tool result.
     pub async fn send_tool_result(&self, call_id: &str, output: serde_json::Value) -> Result<()> {
         if !self.runner_config.auto_respond_tools {
             return Ok(());
         }
-        if let Ok(session) = self.session_handle().await {
-            session.send_tool_output(ToolResponse { call_id: call_id.to_string(), output }).await?;
-            self.pending_tool_response.store(true, Ordering::Release);
-        }
+        let response = ToolResponse { call_id: call_id.to_string(), output };
+        self.invoke_write(|s| async move { s.send_tool_output(response).await }).await?;
+        self.pending_tool_response.store(true, Ordering::Release);
         Ok(())
     }
 
-    /// Run the event loop, processing events until disconnected or until `cancel_token` is cancelled.
+    /// Run with cancellation token.
     pub async fn run_with_cancellation(
         &self,
         cancel_token: tokio_util::sync::CancellationToken,
@@ -926,12 +686,12 @@ impl RealtimeRunner {
         self.run_loop(Some(cancel_token)).await
     }
 
-    /// Run the event loop, processing events until disconnected.
+    /// Run the event loop.
     pub async fn run(&self) -> Result<()> {
         self.run_loop(None).await
     }
 
-    /// Internal unified event loop supporting optional cancellation and clean session closure.
+    /// Internal unified event loop.
     async fn run_loop(
         &self,
         cancel_token: Option<tokio_util::sync::CancellationToken>,
@@ -945,40 +705,75 @@ impl RealtimeRunner {
                 && token.is_cancelled()
             {
                 tracing::info!("RealtimeRunner run loop cancelled via cancellation token.");
-                self.close_active_session().await;
+                self.close().await?;
                 self.event_handler.on_disconnect().await?;
                 break;
             }
 
-            let session = self.session_handle().await?;
-            let old_session_id = session.session_id().to_string();
+            let mut watcher = self.supervisor.subscribe_generation();
+            let gen_item = match self.supervisor.get_active_generation().await {
+                Ok(g) => g,
+                Err(RealtimeError::SessionClosed) | Err(RealtimeError::NotConnected) => {
+                    self.event_handler.on_disconnect().await?;
+                    break;
+                }
+                Err(err) => return Err(err),
+            };
+
+            let current_gen_id = gen_item.id;
+            let session = gen_item.session;
 
             let event = if running_tools.is_empty() {
                 if let Some(token) = &cancel_token {
                     tokio::select! {
+                        biased;
                         _ = token.cancelled() => {
                             tracing::info!("RealtimeRunner run loop cancelled via cancellation token.");
-                            self.close_active_session().await;
+                            self.close().await?;
                             self.event_handler.on_disconnect().await?;
                             return Ok(());
+                        }
+                        _ = watcher.changed() => {
+                            if *watcher.borrow() != current_gen_id {
+                                tracing::info!(from = current_gen_id, to = *watcher.borrow(), "generation changed in run_loop; switching generation");
+                                continue;
+                            }
+                            session.next_event().await
                         }
                         ev = session.next_event() => ev,
                     }
                 } else {
-                    session.next_event().await
+                    tokio::select! {
+                        biased;
+                        _ = watcher.changed() => {
+                            if *watcher.borrow() != current_gen_id {
+                                tracing::info!(from = current_gen_id, to = *watcher.borrow(), "generation changed in run_loop; switching generation");
+                                continue;
+                            }
+                            session.next_event().await
+                        }
+                        ev = session.next_event() => ev,
+                    }
                 }
             } else if let Some(token) = &cancel_token {
                 tokio::select! {
                     biased;
                     _ = token.cancelled() => {
                         tracing::info!("RealtimeRunner run loop cancelled via cancellation token.");
-                        self.close_active_session().await;
+                        self.close().await?;
                         self.event_handler.on_disconnect().await?;
                         return Ok(());
                     }
                     Some(finished) = running_tools.next() => {
                         let () = finished?;
                         continue;
+                    }
+                    _ = watcher.changed() => {
+                        if *watcher.borrow() != current_gen_id {
+                            tracing::info!(from = current_gen_id, to = *watcher.borrow(), "generation changed in run_loop; switching generation");
+                            continue;
+                        }
+                        session.next_event().await
                     }
                     event = session.next_event() => event,
                 }
@@ -988,6 +783,13 @@ impl RealtimeRunner {
                     Some(finished) = running_tools.next() => {
                         let () = finished?;
                         continue;
+                    }
+                    _ = watcher.changed() => {
+                        if *watcher.borrow() != current_gen_id {
+                            tracing::info!(from = current_gen_id, to = *watcher.borrow(), "generation changed in run_loop; switching generation");
+                            continue;
+                        }
+                        session.next_event().await
                     }
                     event = session.next_event() => event,
                 }
@@ -1000,42 +802,44 @@ impl RealtimeRunner {
                     }
                 }
                 Some(Err(e)) => {
-                    self.event_handler.on_error(&e).await?;
-                    return Err(e);
+                    let report = FailureReport {
+                        generation: current_gen_id,
+                        cause: RecoveryCause::ReadFailed(Arc::new(e.clone())),
+                    };
+                    match self.supervisor.report_failure(report).await {
+                        Ok(RecoveryOutcome::Recovered(_)) | Ok(RecoveryOutcome::Stale(_)) => {
+                            continue;
+                        }
+                        _ => {
+                            self.event_handler.on_error(&e).await?;
+                            return Err(e);
+                        }
+                    }
                 }
                 None => {
-                    let current_session_id = self.session_id().await;
-                    if let Some(id) = current_session_id
-                        && id != old_session_id
-                    {
-                        continue;
-                    }
                     while let Some(finished) = running_tools.next().await {
                         finished?;
                     }
-                    self.event_handler.on_disconnect().await?;
-                    break;
+                    let report = FailureReport {
+                        generation: current_gen_id,
+                        cause: RecoveryCause::UnexpectedEof,
+                    };
+                    match self.supervisor.report_failure(report).await {
+                        Ok(RecoveryOutcome::Recovered(_)) | Ok(RecoveryOutcome::Stale(_)) => {
+                            continue;
+                        }
+                        _ => {
+                            self.event_handler.on_disconnect().await?;
+                            break;
+                        }
+                    }
                 }
             }
         }
         Ok(())
     }
 
-    /// Internal helper to safely close and release active session on cancellation or shutdown.
-    async fn close_active_session(&self) {
-        let old_session = {
-            let mut guard = self.session.write().await;
-            guard.take()
-        };
-        if let Some(session) = old_session {
-            let _ = session.close().await;
-        }
-    }
-
     /// Run one dispatched tool call under the configured concurrency bound.
-    ///
-    /// The permit is acquired inside the future so queueing a call never blocks the event
-    /// loop; the bound applies to execution, not to admission.
     async fn run_tool_call(&self, call: PendingToolCall) -> Result<()> {
         struct ToolCounterGuard<'a>(&'a RealtimeRunner);
         impl<'a> Drop for ToolCounterGuard<'a> {
@@ -1051,10 +855,8 @@ impl RealtimeRunner {
         let result = self.execute_tool_call(&call.call_id, &call.name, &call.arguments).await;
         drop(permit);
 
-        // Explicitly drop the guard here so outstanding_tools is decremented synchronously
         drop(guard);
 
-        // Now check if this was the last tool to finish and a response is owed
         if self.outstanding_tools.load(Ordering::Acquire) == 0
             && self.response_closed_awaiting_tools.swap(false, Ordering::AcqRel)
         {
@@ -1064,9 +866,34 @@ impl RealtimeRunner {
         result
     }
 
+    /// Helper to handle internal events such as resume token updates.
+    async fn handle_internal_event(&self, event: &ServerEvent) {
+        if let ServerEvent::SessionUpdated { session, .. } = event {
+            let token = session
+                .get("resumeToken")
+                .or_else(|| session.get("resumeHandle"))
+                .and_then(|t| t.as_str());
+
+            if let Some(token) = token {
+                tracing::info!(
+                    token = %token,
+                    "Received Gemini sessionResumption token, saving for future reconnects."
+                );
+                self.supervisor
+                    .update_config(|config| {
+                        let mut extra =
+                            config.extra.clone().unwrap_or_else(|| serde_json::json!({}));
+                        extra["resumeToken"] = serde_json::Value::String(token.to_string());
+                        extra["resumeHandle"] = serde_json::Value::String(token.to_string());
+                        config.extra = Some(extra);
+                    })
+                    .await;
+            }
+        }
+    }
+
     /// Process a single event.
     async fn handle_event(&self, event: ServerEvent) -> Result<Option<PendingToolCall>> {
-        // Track state transitions before forwarding the event
         match &event {
             ServerEvent::ResponseCreated { .. } => {
                 let mut state = self.state.write().await;
@@ -1083,11 +910,6 @@ impl RealtimeRunner {
             _ => {}
         }
 
-        // Derived ahead of the match below, and from the event rather than from
-        // inside an arm, so that caller-activity coverage cannot drift with
-        // whichever arms happen to exist. The match below ends in `_ => {}`, so
-        // a missing arm is silent — which is exactly how `InputTranscriptDelta`
-        // came to reach one consumer of this runner and not another.
         if let Some(source) = caller_activity_source(&event) {
             self.event_handler.on_caller_activity(source).await?;
         }
@@ -1115,83 +937,42 @@ impl RealtimeRunner {
                 self.event_handler.on_tool_calls_cancelled(&call_ids).await?;
             }
             ServerEvent::ResponseCancelled { .. } => {
-                // Both atomic flags must be reset on cancellation (caller barge-in):
-                // 1) `pending_tool_response`: Prevents completed tool outputs from firing create_response in a future turn.
-                // 2) `response_closed_awaiting_tools`: Prevents late-finishing tools from triggering a follow-up response mid-utterance.
                 self.pending_tool_response.store(false, Ordering::Release);
                 self.response_closed_awaiting_tools.store(false, Ordering::Release);
-                // An abandoned generation must not leave the state machine
-                // mid-turn: `Generating` blocks queued resumptions and teardown,
-                // and only `ResponseDone` clears it — which a cancelled turn
-                // never reaches.
-                //
-                // Latent rather than live today: this event is produced only by
-                // the Gemini translator, and Gemini never emits
-                // `ResponseCreated`, so that path's state never leaves `Idle`.
-                // It becomes reachable the moment another provider emits a
-                // cancellation, or Gemini starts reporting response starts.
                 {
                     let mut state = self.state.write().await;
                     if let RunnerState::Generating = *state {
                         *state = RunnerState::Idle;
                     }
                 }
-                // Until now nothing constructed this event, so
-                // `on_response_cancelled` was an orphan: declared on the trait,
-                // implemented by consumers, never called. Barge-in therefore
-                // never reached an audio sink on the Gemini backend.
                 self.event_handler.on_response_cancelled().await?;
             }
             ServerEvent::ResponseDone { .. } => {
                 self.event_handler.on_response_done().await?;
-                // If this response dispatched tool call(s), send the one owed
-                // follow-up response now that it's closed.
                 self.respond_after_tools().await?;
                 self.check_resumption_queue().await?;
             }
             ServerEvent::FunctionCallDone { call_id, name, arguments, .. }
                 if self.runner_config.auto_execute_tools =>
             {
-                // Returned rather than awaited: the run loop dispatches it so event
-                // intake — audio deltas included — continues while the tool runs.
                 return Ok(Some(PendingToolCall { call_id, name, arguments }));
             }
-            ServerEvent::SessionUpdated { session, .. } => {
-                // Check if generic session update contains a resumption token or handle
-                let token = session
-                    .get("resumeToken")
-                    .or_else(|| session.get("resumeHandle"))
-                    .and_then(|t| t.as_str());
-
-                if let Some(token) = token {
-                    tracing::info!(
-                        token = %token,
-                        "Received Gemini sessionResumption token, saving for future reconnects."
-                    );
-                    let mut config = self.config.write().await;
-                    let mut extra = config.extra.clone().unwrap_or_else(|| serde_json::json!({}));
-                    extra["resumeToken"] = serde_json::Value::String(token.to_string());
-                    extra["resumeHandle"] = serde_json::Value::String(token.to_string());
-                    config.extra = Some(extra);
-                }
+            ServerEvent::SessionUpdated { .. } => {
+                self.handle_internal_event(&event).await;
             }
             ServerEvent::Error { error, .. } => {
                 let err = RealtimeError::server(error.code.unwrap_or_default(), error.message);
                 self.event_handler.on_error(&err).await?;
             }
-            _ => {
-                // Ignore other events
-            }
+            _ => {}
         }
         Ok(None)
     }
 
     /// Safely transitions the runner back to Idle and executes any queued resumptions.
     async fn check_resumption_queue(&self) -> Result<()> {
-        // 1. Acquire the state lock to inspect the queue.
         let mut state = self.state.write().await;
 
-        // 2. Extract the pending configuration and attempt count if one exists.
         let pending =
             if let RunnerState::PendingResumption { config, bridge_message, attempts } = &*state {
                 Some((config.clone(), bridge_message.clone(), *attempts))
@@ -1205,22 +986,25 @@ impl RealtimeRunner {
                 attempts + 1
             );
 
-            // 3. Mark the state as Idle so the background loop is unblocked.
             *state = RunnerState::Idle;
-
-            // 4. Release the state lock *before* performing the heavy async socket connection.
             drop(state);
 
-            // 5. Attempt the actual transport teardown/rebuild.
-            if let Err(e) = self.execute_resumption((*config).clone(), bridge_message.clone()).await
+            let snapshot = self.supervisor.get_config().await;
+
+            if let Err(e) = self
+                .supervisor
+                .execute_context_resumption(
+                    &self.model,
+                    (*config).clone(),
+                    bridge_message.clone(),
+                    snapshot.revision,
+                )
+                .await
             {
                 tracing::error!("Resumption failed: {}.", e);
 
-                // 6. If the reconnect fails (e.g., transient network error), re-acquire the lock
-                // to safely handle the retry logic without crashing the event loop.
                 let mut fallback_state = self.state.write().await;
 
-                // 7. Enforce a maximum retry budget to prevent infinite "hot-looping"
                 if attempts + 1 >= 3 {
                     tracing::error!(
                         "Maximum resumption attempts reached (3). Dropping queued mutation to prevent infinite loop."
@@ -1235,12 +1019,9 @@ impl RealtimeRunner {
                     };
                 }
 
-                // 8. Do not return Err(e) here, as that would permanently kill the `run()` loop.
-                // Instead, report the error to the downstream handler and allow the event loop to continue spinning.
                 let _ = self.event_handler.on_error(&e).await;
             }
         } else {
-            // No resumptions were queued; simply mark as Idle.
             *state = RunnerState::Idle;
         }
         Ok(())
@@ -1253,7 +1034,6 @@ impl RealtimeRunner {
         name: &str,
         arguments: &serde_json::Value,
     ) -> Result<()> {
-        // If circuit breaker has tripped (Open state), block execution and return deterministic rejection
         if self.circuit_breaker_tripped.load(Ordering::Acquire) {
             tracing::warn!(
                 call_id,
@@ -1265,12 +1045,9 @@ impl RealtimeRunner {
                 "reason": "tool_unavailable",
                 "error": "circuit_breaker_open"
             });
-            if self.runner_config.auto_respond_tools
-                && let Ok(session) = self.session_handle().await
-            {
-                session
-                    .send_tool_output(ToolResponse { call_id: call_id.to_string(), output: result })
-                    .await?;
+            if self.runner_config.auto_respond_tools {
+                let response = ToolResponse { call_id: call_id.to_string(), output: result };
+                self.invoke_write(|s| async move { s.send_tool_output(response).await }).await?;
                 self.pending_tool_response.store(true, Ordering::Release);
             }
             return Ok(());
@@ -1294,7 +1071,6 @@ impl RealtimeRunner {
                     let failures =
                         self.consecutive_tool_failures.fetch_add(1, Ordering::AcqRel) + 1;
                     if failures >= self.runner_config.max_consecutive_tool_failures {
-                        // Atomic transition: notify error callback exactly ONCE when entering Open state
                         if !self.circuit_breaker_tripped.swap(true, Ordering::AcqRel) {
                             tracing::error!(
                                 call_id,
@@ -1328,85 +1104,54 @@ impl RealtimeRunner {
 
         if self.runner_config.auto_respond_tools {
             let response = ToolResponse { call_id: call_id.to_string(), output: result };
-
-            if let Ok(session) = self.session_handle().await {
-                // Send the output now, but defer the response trigger: several
-                // parallel tool calls in one response must produce a *single*
-                // `create_response`, issued once the dispatch response finishes
-                // (see `respond_after_tools`). Firing one per output collides
-                // with the still-active response on OpenAI.
-                session.send_tool_output(response).await?;
-                self.pending_tool_response.store(true, Ordering::Release);
+            if let Err(ref e) =
+                self.invoke_write(|s| async move { s.send_tool_output(response).await }).await
+            {
+                eprintln!("send_tool_output failed in execute_tool_call: {:?}", e);
             }
+            self.pending_tool_response.store(true, Ordering::Release);
         }
 
         Ok(())
     }
 
     /// The system instruction the next connection will use.
-    ///
-    /// Exposed so callers and tests can confirm what context a session was actually created
-    /// with, rather than inferring it from log lines.
     pub async fn instruction(&self) -> Option<String> {
-        self.config.read().await.instruction.clone()
+        self.supervisor.get_config().await.config.instruction.clone()
     }
 
     /// Prepends a context block to the system instruction before connecting.
-    ///
-    /// The integration layer uses this to carry prior conversation history and recalled memory
-    /// into the provider session. Call it before [`RealtimeRunner::connect`]: providers read
-    /// the instruction at session creation, so a later change needs `update_session`.
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// runner.prepend_instruction_context("Previously discussed: the refund policy.").await;
-    /// runner.connect().await?;
-    /// ```
     pub async fn prepend_instruction_context(&self, block: &str) {
         if block.is_empty() {
             return;
         }
 
-        let mut config = self.config.write().await;
-        config.instruction = Some(match config.instruction.take() {
-            Some(existing) if !existing.is_empty() => format!("{block}\n\n{existing}"),
-            _ => block.to_string(),
-        });
+        self.supervisor
+            .update_config(|config| {
+                config.instruction = Some(match config.instruction.take() {
+                    Some(existing) if !existing.is_empty() => format!("{block}\n\n{existing}"),
+                    _ => block.to_string(),
+                });
+            })
+            .await;
     }
 
     /// Trigger the single follow-up response owed after a tool-dispatching turn.
-    ///
-    /// Call this when a response finishes (`ResponseDone`). If tool output(s)
-    /// were sent back during that response (`auto_respond_tools`), the model now
-    /// needs one `create_response` to speak its answer — issued here, after the
-    /// dispatch response is closed and every parallel tool output is in, rather
-    /// than once per tool call. Gemini's `create_response` is a no-op, so this is
-    /// safely uniform across providers. No-op when nothing is pending.
     pub async fn respond_after_tools(&self) -> Result<()> {
-        // Tools run concurrently with event intake, so this can be reached before their
-        // output is in. Defer to the last tool to finish rather than firing a response the
-        // model cannot yet answer — or, worse, dropping it because
-        // `pending_tool_response` is not set yet.
         if self.outstanding_tools.load(Ordering::Acquire) > 0 {
             self.response_closed_awaiting_tools.store(true, Ordering::Release);
             return Ok(());
         }
 
-        if self.pending_tool_response.swap(false, Ordering::AcqRel)
-            && let Ok(session) = self.session_handle().await
-        {
-            session.create_response().await?;
+        if self.pending_tool_response.swap(false, Ordering::AcqRel) {
+            self.invoke_write(|s| async move { s.create_response().await }).await?;
         }
         Ok(())
     }
 
     /// Close the session.
     pub async fn close(&self) -> Result<()> {
-        if let Ok(session) = self.session_handle().await {
-            session.close().await?;
-        }
-        Ok(())
+        self.supervisor.close().await
     }
 }
 
@@ -1420,7 +1165,6 @@ mod runner_tests {
     use std::pin::Pin;
     use std::sync::atomic::AtomicUsize;
 
-    /// A model just good enough to satisfy the builder (never connects in tests).
     struct MockModel;
 
     #[async_trait]
@@ -1445,7 +1189,6 @@ mod runner_tests {
         }
     }
 
-    /// Records which provider-session entry points the runner calls.
     #[derive(Default)]
     struct Counts {
         raw_audio: AtomicUsize,
@@ -1546,10 +1289,7 @@ mod runner_tests {
         let runner =
             RealtimeRunner::builder().model(Arc::new(MockModel) as BoxedModel).build().unwrap();
         let session = Arc::new(RecordingSession { counts }) as Arc<dyn RealtimeSession>;
-
-        // The unit test owns the runner and installs the same session handle
-        // that `connect` would publish after provider setup.
-        *runner.session.write().await = Some(session);
+        let _ = runner.set_initial_session(session).await.unwrap();
         runner
     }
 
@@ -1580,9 +1320,6 @@ mod runner_tests {
         assert_eq!(counts.base64_audio.load(Ordering::SeqCst), 1);
     }
 
-    /// Two parallel tool calls in one response must produce exactly one
-    /// `create_response` — issued after the dispatch response finishes — not one
-    /// per tool (which collides with the still-active response on OpenAI).
     #[tokio::test]
     async fn parallel_tool_calls_trigger_a_single_response() {
         let counts = Arc::new(Counts::default());
@@ -1592,12 +1329,7 @@ mod runner_tests {
             .tool(tool_def("get_time"), ok_tool())
             .build()
             .unwrap();
-        *runner.session.write().await =
-            Some(Arc::new(RecordingSession { counts: counts.clone() }) as Arc<dyn RealtimeSession>);
 
-        // One model response dispatching two tool calls, then ending. Driven through
-        // `run`, because dispatch is the run loop's job now — `handle_event` returns the
-        // call rather than awaiting it, so event intake is not blocked by a tool.
         let scripted = Arc::new(ScriptedSession::new(
             counts.clone(),
             vec![
@@ -1606,7 +1338,7 @@ mod runner_tests {
                 response_done(),
             ],
         ));
-        *runner.session.write().await = Some(scripted as Arc<dyn RealtimeSession>);
+        let _ = runner.set_initial_session(scripted as Arc<dyn RealtimeSession>).await.unwrap();
         runner.run().await.unwrap();
 
         assert_eq!(counts.tool_output.load(Ordering::SeqCst), 2, "both outputs sent");
@@ -1617,33 +1349,27 @@ mod runner_tests {
             "auto path must use send_tool_output, not the output+create combo"
         );
 
-        // The follow-up (spoken-answer) response finishing creates nothing more.
         runner.handle_event(response_done()).await.unwrap();
         assert_eq!(counts.create_response.load(Ordering::SeqCst), 1, "no extra response");
     }
 
-    /// A response with no tool calls must not trigger an auto follow-up response.
     #[tokio::test]
     async fn plain_response_triggers_no_auto_response() {
         let counts = Arc::new(Counts::default());
         let runner =
             RealtimeRunner::builder().model(Arc::new(MockModel) as BoxedModel).build().unwrap();
-        *runner.session.write().await =
-            Some(Arc::new(RecordingSession { counts: counts.clone() }) as Arc<dyn RealtimeSession>);
+        let _ = runner
+            .set_initial_session(
+                Arc::new(RecordingSession { counts: counts.clone() }) as Arc<dyn RealtimeSession>
+            )
+            .await
+            .unwrap();
 
         runner.handle_event(response_done()).await.unwrap();
         assert_eq!(counts.create_response.load(Ordering::SeqCst), 0);
         assert_eq!(counts.tool_output.load(Ordering::SeqCst), 0);
     }
 
-    // ── Bounded concurrent tool dispatch ──────────────────────────────────
-    //
-    // `RunnerConfig::max_concurrent_tools` defaulted to four and was read by nothing: no
-    // semaphore, no scheduler. `FunctionCallDone` was awaited inline inside `handle_event`,
-    // which the run loop awaited before reading the next event, so tool calls ran strictly
-    // one at a time *and* stalled audio and every other event for the duration.
-
-    /// A session that replays a scripted event sequence, then reports disconnect.
     struct ScriptedSession {
         counts: Arc<Counts>,
         events: parking_lot::Mutex<std::collections::VecDeque<ServerEvent>>,
@@ -1721,8 +1447,6 @@ mod runner_tests {
             if let Some(ev) = event {
                 Some(Ok(ev))
             } else if self.stay_connected_when_empty {
-                // Pending indefinitely simulates an open WebSocket connection without populating
-                // Tokio timer wheels or waking up after artificial sleep timeouts.
                 std::future::pending::<()>().await;
                 None
             } else {
@@ -1741,7 +1465,6 @@ mod runner_tests {
         }
     }
 
-    /// A tool that reports how many copies of itself run at once.
     struct ConcurrencyProbe {
         in_flight: Arc<AtomicUsize>,
         peak: Arc<AtomicUsize>,
@@ -1755,8 +1478,6 @@ mod runner_tests {
             self.peak.fetch_max(now, Ordering::SeqCst);
 
             match &self.barrier {
-                // Every participant must be running for this to return, so it can only
-                // complete if the dispatcher truly overlaps them.
                 Some(barrier) => {
                     barrier.wait().await;
                 }
@@ -1786,7 +1507,6 @@ mod runner_tests {
         let counts = Arc::new(Counts::default());
         let in_flight = Arc::new(AtomicUsize::new(0));
         let peak = Arc::new(AtomicUsize::new(0));
-        // Only satisfiable if all three run at once, which serial dispatch cannot do.
         let barrier = Arc::new(tokio::sync::Barrier::new(3));
 
         let probe = || ConcurrencyProbe {
@@ -1813,7 +1533,7 @@ mod runner_tests {
             Arc::clone(&counts),
             vec![function_call("c1", "a"), function_call("c2", "b"), function_call("c3", "c")],
         ));
-        *runner.session.write().await = Some(scripted as Arc<dyn RealtimeSession>);
+        let _ = runner.set_initial_session(scripted as Arc<dyn RealtimeSession>).await.unwrap();
 
         tokio::time::timeout(std::time::Duration::from_secs(5), runner.run())
             .await
@@ -1860,7 +1580,7 @@ mod runner_tests {
                 function_call("c4", "d"),
             ],
         ));
-        *runner.session.write().await = Some(scripted as Arc<dyn RealtimeSession>);
+        let _ = runner.set_initial_session(scripted as Arc<dyn RealtimeSession>).await.unwrap();
 
         runner.run().await.unwrap();
 
@@ -1872,7 +1592,6 @@ mod runner_tests {
         assert_eq!(counts.tool_output.load(Ordering::SeqCst), 4, "all four still complete");
     }
 
-    /// A tool that blocks until an audio event has been handled.
     struct WaitsForAudio {
         audio_seen: Arc<tokio::sync::Notify>,
     }
@@ -1885,7 +1604,6 @@ mod runner_tests {
         }
     }
 
-    /// Signals the tool once audio is delivered.
     struct AudioSignaller {
         audio_seen: Arc<tokio::sync::Notify>,
         audio_events: Arc<AtomicUsize>,
@@ -1956,13 +1674,6 @@ mod runner_tests {
         }
     }
 
-    /// The event that reached one consumer of this runner and not another.
-    ///
-    /// Gemini Live emits `InputTranscriptDelta` and never
-    /// `InputTranscriptCompleted`, so a handler relying on the completed
-    /// callback observed no caller activity for an entire call while a consumer
-    /// reading the raw event stream observed it correctly. Both were reading the
-    /// same session.
     #[tokio::test]
     async fn input_transcript_delta_reaches_the_event_handler_as_caller_activity() {
         let sources = Arc::new(parking_lot::Mutex::new(Vec::new()));
@@ -1974,7 +1685,7 @@ mod runner_tests {
 
         runner
             .handle_event(ServerEvent::InputTranscriptDelta {
-                item_id: String::new(), // Gemini leaves this empty.
+                item_id: String::new(),
                 content_index: 0,
                 delta: "sensitive caller content".to_string(),
             })
@@ -1984,9 +1695,6 @@ mod runner_tests {
         assert_eq!(sources.lock().as_slice(), &[CallerActivitySource::TranscriptDelta]);
     }
 
-    /// Every source in the mapping must actually arrive, and be labelled for
-    /// what it is — the ranking is what lets a consumer refuse to act on the
-    /// weakest evidence.
     #[tokio::test]
     async fn every_caller_activity_source_is_delivered_and_labelled() {
         let sources = Arc::new(parking_lot::Mutex::new(Vec::new()));
@@ -2008,7 +1716,6 @@ mod runner_tests {
                 transcript: "whole".to_string(),
             },
             ServerEvent::SpeechStopped { event_id: "e1".to_string(), audio_end_ms: 10 },
-            // Not caller activity: starting to speak is barge-in.
             ServerEvent::SpeechStarted { event_id: "e2".to_string(), audio_start_ms: 0 },
         ] {
             runner.handle_event(event).await.unwrap();
@@ -2040,13 +1747,11 @@ mod runner_tests {
             .build()
             .unwrap();
 
-        // The tool can only finish once the audio delta *after* it has been handled, so
-        // this sequence completes only if event intake continues during tool execution.
         let scripted = Arc::new(ScriptedSession::new(
             Arc::clone(&counts),
             vec![function_call("c1", "slow"), audio_delta(), response_done()],
         ));
-        *runner.session.write().await = Some(scripted as Arc<dyn RealtimeSession>);
+        let _ = runner.set_initial_session(scripted as Arc<dyn RealtimeSession>).await.unwrap();
 
         tokio::time::timeout(std::time::Duration::from_secs(5), runner.run())
             .await
@@ -2071,7 +1776,13 @@ mod runner_tests {
             .build()
             .unwrap();
 
-        // 3 consecutive failures trip the breaker into Open state
+        let counts = Arc::new(Counts::default());
+        let scripted = RecordingSession { counts };
+        let _ = runner
+            .set_initial_session(Arc::new(scripted) as Arc<dyn RealtimeSession>)
+            .await
+            .unwrap();
+
         for i in 0..3 {
             runner
                 .execute_tool_call(&format!("call-{}", i), "failing", &serde_json::json!({}))
@@ -2085,7 +1796,6 @@ mod runner_tests {
             "circuit breaker is TRIPPED"
         );
 
-        // 4th call must be BLOCKED from calling the handler
         runner.execute_tool_call("call-4", "failing", &serde_json::json!({})).await.unwrap();
         assert_eq!(
             calls_made.load(Ordering::SeqCst),
@@ -2093,7 +1803,6 @@ mod runner_tests {
             "4th call was blocked by open circuit breaker"
         );
 
-        // Reconnect resets breaker
         runner.consecutive_tool_failures.store(0, Ordering::Release);
         runner.circuit_breaker_tripped.store(false, Ordering::Release);
 
@@ -2138,7 +1847,7 @@ mod runner_tests {
             vec![function_call("c1", "blocking_tool")],
             Arc::clone(&close_calls),
         ));
-        *runner.session.write().await = Some(scripted as Arc<dyn RealtimeSession>);
+        let _ = runner.set_initial_session(scripted as Arc<dyn RealtimeSession>).await.unwrap();
 
         let cancel_token = tokio_util::sync::CancellationToken::new();
         let cancel_token_clone = cancel_token.clone();
@@ -2151,7 +1860,6 @@ mod runner_tests {
                 async move { runner_clone.run_with_cancellation(cancel_token_clone).await },
             );
 
-        // Give the runner time to process the event and launch the in-flight tool call
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
         assert_eq!(
@@ -2160,7 +1868,6 @@ mod runner_tests {
             "one tool is in flight"
         );
 
-        // Cancel mid-flight
         cancel_token.cancel();
 
         let result = tokio::time::timeout(std::time::Duration::from_secs(5), task)
@@ -2197,14 +1904,11 @@ mod runner_tests {
             .build()
             .unwrap();
 
-        // `ResponseDone` arrives while the tool is still running — impossible before
-        // dispatch was concurrent, and the case that would silently drop the follow-up
-        // response, since `pending_tool_response` is only set once output is sent.
         let scripted = Arc::new(ScriptedSession::new(
             Arc::clone(&counts),
             vec![function_call("c1", "slow"), response_done(), audio_delta()],
         ));
-        *runner.session.write().await = Some(scripted as Arc<dyn RealtimeSession>);
+        let _ = runner.set_initial_session(scripted as Arc<dyn RealtimeSession>).await.unwrap();
 
         tokio::time::timeout(std::time::Duration::from_secs(5), runner.run())
             .await
@@ -2219,7 +1923,6 @@ mod runner_tests {
         );
     }
 
-    /// Records terminal disconnects.
     #[derive(Default)]
     struct DisconnectWatcher {
         disconnects: Arc<AtomicUsize>,
@@ -2245,10 +1948,8 @@ mod runner_tests {
             .unwrap();
 
         let scripted = Arc::new(ScriptedSession::new(Arc::clone(&counts), vec![response_done()]));
-        *runner.session.write().await = Some(scripted as Arc<dyn RealtimeSession>);
+        let _ = runner.set_initial_session(scripted as Arc<dyn RealtimeSession>).await.unwrap();
 
-        // `run` returns `Ok(())` on transport loss, which on its own is indistinguishable
-        // from a graceful `close`.
         runner.run().await.unwrap();
 
         assert_eq!(
