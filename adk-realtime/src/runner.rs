@@ -1104,11 +1104,7 @@ impl RealtimeRunner {
 
         if self.runner_config.auto_respond_tools {
             let response = ToolResponse { call_id: call_id.to_string(), output: result };
-            if let Err(ref e) =
-                self.invoke_write(|s| async move { s.send_tool_output(response).await }).await
-            {
-                eprintln!("send_tool_output failed in execute_tool_call: {:?}", e);
-            }
+            self.invoke_write(|s| async move { s.send_tool_output(response).await }).await?;
             self.pending_tool_response.store(true, Ordering::Release);
         }
 

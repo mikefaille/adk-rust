@@ -349,7 +349,6 @@ impl RecoverySupervisor {
             }
 
             if let Some(ref current_gen) = state_guard.generation {
-                // Rule A: report < current  -> stale/coalesced, no recovery, return active
                 if report.generation < current_gen.id {
                     tracing::info!(
                         report_gen = report.generation,
@@ -359,7 +358,6 @@ impl RecoverySupervisor {
                     return Ok(RecoveryOutcome::Stale(current_gen.session.clone()));
                 }
 
-                // Rule B: report > current  -> invalid future generation, zero attempts, reject
                 if report.generation > current_gen.id {
                     let err = RealtimeError::provider(format!(
                         "invalid future generation report: reported {}, current is {}",
@@ -375,7 +373,6 @@ impl RecoverySupervisor {
                 }
             }
 
-            // Rule C: terminal duplicates of exhausted generation -> AlreadyHandled outcome
             if let Some(exhausted) = state_guard.exhausted_generation {
                 if report.generation == exhausted {
                     tracing::info!(
@@ -643,7 +640,6 @@ impl RecoverySupervisor {
             }
         }
 
-        // 7. Exhaustion / final failure
         let final_err = match stop_reason {
             EpisodeStopReason::Timeout(msg) => {
                 let full_msg = if let Some(ref provider_err) = last_provider_error {
@@ -850,7 +846,6 @@ mod tests {
         let config = Arc::new(tokio::sync::RwLock::new(crate::config::RealtimeConfig::default()));
         let supervisor = RecoverySupervisor::with_initial_session(policy, config, initial_session);
 
-        // Spawn 3 concurrent failure reports
         let mut join_handles = Vec::new();
         let sup_arc = Arc::new(supervisor);
         for _ in 0..3 {
@@ -867,13 +862,9 @@ mod tests {
             results.push(handle.await.unwrap());
         }
 
-        // Verify exactly one recovery episode ran
         assert_eq!(recover_count.load(Ordering::SeqCst), 1);
-
-        // Verify maximum simultaneous provider recoveries is exactly 1
         assert_eq!(max_active_recoveries.load(Ordering::SeqCst), 1);
 
-        // Verify 1 task received Recovered, and the others received Stale
         let mut recovered_count = 0;
         let mut stale_count = 0;
         for res in results {
@@ -916,25 +907,20 @@ mod tests {
         let config = Arc::new(tokio::sync::RwLock::new(crate::config::RealtimeConfig::default()));
         let supervisor = RecoverySupervisor::with_initial_session(policy, config, initial_session);
 
-        // First, successfully recover generation 0 to publish generation 1
         let report = FailureReport { generation: 0, cause: RecoveryCause::UnexpectedEof };
         let res1 = supervisor.report_failure(report).await.unwrap();
         assert!(matches!(res1, RecoveryOutcome::Recovered(_)));
 
-        // Verify generation 1 is active
         {
             let sg_item = supervisor.get_active_generation().await.unwrap();
             assert_eq!(sg_item.id, 1);
         }
 
-        // Reset recover count to track any new attempts
         recover_count.store(0, Ordering::SeqCst);
 
-        // Now, report delayed failure for generation 0
         let delayed_report = FailureReport { generation: 0, cause: RecoveryCause::UnexpectedEof };
         let res2 = supervisor.report_failure(delayed_report).await.unwrap();
 
-        // Verify it returns Stale with the generation 1 session, performs 0 attempts, and leaves N+1 active
         match res2 {
             RecoveryOutcome::Stale(session) => {
                 assert_eq!(session.session_id(), "gen-1-recovered");
@@ -967,15 +953,11 @@ mod tests {
         let config = Arc::new(tokio::sync::RwLock::new(crate::config::RealtimeConfig::default()));
         let supervisor = RecoverySupervisor::with_initial_session(policy, config, initial_session);
 
-        // Report future generation 1 while current is 0
         let report = FailureReport { generation: 1, cause: RecoveryCause::UnexpectedEof };
 
         let res = supervisor.report_failure(report).await;
-        // Verify it failed/rejected
         assert!(res.is_err());
-        // Verify 0 provider attempts made
         assert_eq!(recover_count.load(Ordering::SeqCst), 0);
-        // Verify current generation remains 0
         let sg_item = supervisor.get_active_generation().await.unwrap();
         assert_eq!(sg_item.id, 0);
     }
@@ -1018,20 +1000,16 @@ mod tests {
         let config = Arc::new(tokio::sync::RwLock::new(crate::config::RealtimeConfig::default()));
         let supervisor = RecoverySupervisor::with_initial_session(policy, config, initial_session);
 
-        // 1. Report N once, which will fail on first attempt since it's fatal
         let report1 = FailureReport { generation: 0, cause: RecoveryCause::UnexpectedEof };
         let res1 = supervisor.report_failure(report1).await;
         assert!(res1.is_err());
         assert_eq!(recover_count.load(Ordering::SeqCst), 3);
 
-        // 2. Report N again. This must trigger ZERO new provider attempts and return Ok(RecoveryOutcome::Exhausted)
-        // treated as a normal AlreadyHandled outcome.
         let report2 = FailureReport { generation: 0, cause: RecoveryCause::UnexpectedEof };
         let res2 = supervisor.report_failure(report2).await;
         assert!(res2.is_ok());
         let outcome = res2.unwrap();
         assert!(matches!(outcome, RecoveryOutcome::Exhausted));
-        // Verify recover_count did not increase
         assert_eq!(recover_count.load(Ordering::SeqCst), 3);
     }
 
