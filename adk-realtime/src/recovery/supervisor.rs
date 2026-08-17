@@ -1,7 +1,9 @@
 #![allow(unfulfilled_lint_expectations)]
 
 use crate::error::{RealtimeError, Result};
-use crate::recovery::{RecoveryCause, RecoveryContext, RecoveryDisposition, RecoveryPolicy};
+use crate::recovery::{
+    RecoveryCause, RecoveryContext, RecoveryContinuity, RecoveryDisposition, RecoveryPolicy,
+};
 use crate::session::RealtimeSession;
 use std::num::NonZeroU32;
 use std::sync::Arc;
@@ -19,9 +21,9 @@ pub(crate) enum TransportStatus {
 
 /// A session generation paired with its monotonic ID.
 #[derive(Clone)]
-pub struct SessionGeneration {
-    pub id: u64,
-    pub session: Arc<dyn RealtimeSession>,
+pub(crate) struct SessionGeneration {
+    pub(crate) id: u64,
+    pub(crate) session: Arc<dyn RealtimeSession>,
 }
 
 impl std::fmt::Debug for SessionGeneration {
@@ -38,7 +40,7 @@ pub(crate) struct FailureReport {
     pub(crate) cause: RecoveryCause,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct ConfigSnapshot {
     pub(crate) config: crate::config::RealtimeConfig,
     pub(crate) revision: u64,
@@ -47,6 +49,7 @@ pub(crate) struct ConfigSnapshot {
 struct SupervisorState {
     status: TransportStatus,
     generation: Option<SessionGeneration>,
+    next_generation_id: u64,
     exhausted_generation: Option<u64>,
     config: ConfigSnapshot,
 }
@@ -55,7 +58,7 @@ struct SupervisorState {
 #[derive(Clone)]
 pub(crate) enum RecoveryOutcome {
     /// A newly recovered session was successfully established and published.
-    Recovered(Arc<dyn RealtimeSession>),
+    Recovered { session: Arc<dyn RealtimeSession>, continuity: RecoveryContinuity },
     /// A report for a stale/older generation than the currently active one.
     /// It performs zero provider attempts and leaves the newer active session running.
     Stale(Arc<dyn RealtimeSession>),
@@ -67,9 +70,11 @@ pub(crate) enum RecoveryOutcome {
 impl std::fmt::Debug for RecoveryOutcome {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Recovered(session) => {
-                f.debug_struct("Recovered").field("session_id", &session.session_id()).finish()
-            }
+            Self::Recovered { session, continuity } => f
+                .debug_struct("Recovered")
+                .field("session_id", &session.session_id())
+                .field("continuity", continuity)
+                .finish(),
             Self::Stale(session) => {
                 f.debug_struct("Stale").field("session_id", &session.session_id()).finish()
             }
@@ -98,6 +103,7 @@ impl RecoverySupervisor {
             state: tokio::sync::RwLock::new(SupervisorState {
                 status: TransportStatus::Uninitialized,
                 generation: None,
+                next_generation_id: 0,
                 exhausted_generation: None,
                 config: ConfigSnapshot { config: initial_config, revision: 0 },
             }),
@@ -123,6 +129,7 @@ impl RecoverySupervisor {
             state: tokio::sync::RwLock::new(SupervisorState {
                 status: TransportStatus::Healthy,
                 generation: Some(SessionGeneration { id: 0, session: initial_session }),
+                next_generation_id: 1,
                 exhausted_generation: None,
                 config: ConfigSnapshot { config: initial_cfg, revision: 0 },
             }),
@@ -133,21 +140,23 @@ impl RecoverySupervisor {
 
     /// Install the initial session (generation 0).
     ///
-    /// Valid ONLY when no active session generation exists.
+    /// Valid ONLY when supervisor status is strictly `Uninitialized`.
     pub(crate) async fn set_initial_session(
         &self,
         session: Arc<dyn RealtimeSession>,
     ) -> Result<SessionGeneration> {
         let mut state = self.state.write().await;
-        if state.generation.is_some() || state.status == TransportStatus::Healthy {
+        if state.status != TransportStatus::Uninitialized {
             return Err(RealtimeError::config(
-                "cannot set initial session when active session generation already exists",
+                "cannot set initial session unless supervisor status is strictly Uninitialized",
             ));
         }
-        let sg_item = SessionGeneration { id: 0, session };
+        let gen_id = state.next_generation_id;
+        state.next_generation_id = gen_id.saturating_add(1);
+        let sg_item = SessionGeneration { id: gen_id, session };
         state.generation = Some(sg_item.clone());
         state.status = TransportStatus::Healthy;
-        let _ = self.generation_tx.send(0);
+        let _ = self.generation_tx.send(gen_id);
         Ok(sg_item)
     }
 
@@ -236,7 +245,8 @@ impl RecoverySupervisor {
             return Err(RealtimeError::config("stale config revision during publication"));
         }
 
-        let next_gen = state.generation.as_ref().map(|g| g.id.saturating_add(1)).unwrap_or(0);
+        let next_gen = state.next_generation_id;
+        state.next_generation_id = next_gen.saturating_add(1);
         let old_session = state.generation.take().map(|g| g.session);
 
         let sg_item = SessionGeneration { id: next_gen, session: new_session.clone() };
@@ -258,9 +268,8 @@ impl RecoverySupervisor {
     pub(crate) async fn execute_context_resumption(
         &self,
         model: &crate::model::BoxedModel,
-        new_config: crate::config::RealtimeConfig,
+        queued_snapshot: ConfigSnapshot,
         bridge_message: Option<String>,
-        expected_revision: u64,
     ) -> Result<SessionGeneration> {
         let _lock = self.replacement_lock.lock().await;
 
@@ -270,7 +279,7 @@ impl RecoverySupervisor {
             {
                 return Err(RealtimeError::SessionClosed);
             }
-            if state.config.revision != expected_revision {
+            if state.config.revision != queued_snapshot.revision {
                 return Err(RealtimeError::config(
                     "stale config revision prior to resumption connect",
                 ));
@@ -280,7 +289,7 @@ impl RecoverySupervisor {
         tracing::info!(
             "Executing intentional context resumption under supervisor replacement lock."
         );
-        let new_session = model.connect(new_config).await?;
+        let new_session = model.connect(queued_snapshot.config).await?;
 
         let mut state = self.state.write().await;
         if state.status == TransportStatus::Closed || state.status == TransportStatus::Exhausted {
@@ -290,9 +299,9 @@ impl RecoverySupervisor {
             return Err(RealtimeError::SessionClosed);
         }
 
-        if state.config.revision != expected_revision {
+        if state.config.revision != queued_snapshot.revision {
             tracing::warn!(
-                expected = expected_revision,
+                expected = queued_snapshot.revision,
                 current = state.config.revision,
                 "rejecting context resumption publication due to stale config revision"
             );
@@ -302,7 +311,8 @@ impl RecoverySupervisor {
             return Err(RealtimeError::config("stale config revision post-resumption connect"));
         }
 
-        let next_gen = state.generation.as_ref().map(|g| g.id.saturating_add(1)).unwrap_or(0);
+        let next_gen = state.next_generation_id;
+        state.next_generation_id = next_gen.saturating_add(1);
         let old_session = state.generation.take().map(|g| g.session);
 
         let sg_item = SessionGeneration { id: next_gen, session: Arc::from(new_session) };
@@ -543,6 +553,7 @@ impl RecoverySupervisor {
                     );
 
                     let new_session = recovered.session();
+                    let continuity = recovered.continuity();
 
                     let mut state_guard = self.state.write().await;
                     if state_guard.config.revision != snapshot_revision {
@@ -560,11 +571,8 @@ impl RecoverySupervisor {
                         continue;
                     }
 
-                    let next_gen = state_guard
-                        .generation
-                        .as_ref()
-                        .map(|g| g.id.saturating_add(1))
-                        .unwrap_or(0);
+                    let next_gen = state_guard.next_generation_id;
+                    state_guard.next_generation_id = next_gen.saturating_add(1);
                     let old_session = state_guard.generation.take().map(|g| g.session);
 
                     let sg_item = SessionGeneration { id: next_gen, session: new_session.clone() };
@@ -582,10 +590,11 @@ impl RecoverySupervisor {
                     tracing::info!(
                         generation = next_gen,
                         session_id = %new_session.session_id(),
+                        continuity = ?continuity,
                         "recovered session published"
                     );
 
-                    return Ok(RecoveryOutcome::Recovered(new_session));
+                    return Ok(RecoveryOutcome::Recovered { session: new_session, continuity });
                 }
                 Err(err) => {
                     tracing::error!(
@@ -692,6 +701,8 @@ impl RecoverySupervisor {
 
     /// Close the session gracefully and mark supervisor as closed.
     pub(crate) async fn close(&self) -> Result<()> {
+        let _lock = self.replacement_lock.lock().await;
+
         let old_session = {
             let mut state = self.state.write().await;
             state.status = TransportStatus::Closed;
@@ -869,9 +880,10 @@ mod tests {
         let mut stale_count = 0;
         for res in results {
             match res.unwrap() {
-                RecoveryOutcome::Recovered(session) => {
+                RecoveryOutcome::Recovered { session, continuity } => {
                     recovered_count += 1;
                     assert_eq!(session.session_id(), "gen-1-recovered");
+                    assert_eq!(continuity, RecoveryContinuity::Resumed);
                 }
                 RecoveryOutcome::Stale(session) => {
                     stale_count += 1;
@@ -909,7 +921,7 @@ mod tests {
 
         let report = FailureReport { generation: 0, cause: RecoveryCause::UnexpectedEof };
         let res1 = supervisor.report_failure(report).await.unwrap();
-        assert!(matches!(res1, RecoveryOutcome::Recovered(_)));
+        assert!(matches!(res1, RecoveryOutcome::Recovered { .. }));
 
         {
             let sg_item = supervisor.get_active_generation().await.unwrap();
@@ -1234,8 +1246,9 @@ mod tests {
 
         let res = supervisor.report_failure(report).await.unwrap();
         match res {
-            RecoveryOutcome::Recovered(session) => {
+            RecoveryOutcome::Recovered { session, continuity } => {
                 assert_eq!(session.session_id(), "gen-1-finally");
+                assert_eq!(continuity, RecoveryContinuity::Resumed);
             }
             _ => panic!("Expected Recovered outcome"),
         }
@@ -1309,7 +1322,7 @@ mod tests {
 
         let res = supervisor.report_failure(report).await.unwrap();
         match res {
-            RecoveryOutcome::Recovered(session) => {
+            RecoveryOutcome::Recovered { session, .. } => {
                 assert_eq!(session.session_id(), "recovered-zero-delay");
             }
             _ => panic!("Expected Recovered outcome"),

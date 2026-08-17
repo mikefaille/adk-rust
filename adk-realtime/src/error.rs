@@ -173,11 +173,12 @@ impl RealtimeError {
         Self::WriteFailed { error: err, certainty }
     }
 
-    /// Returns the delivery certainty for this error if applicable, defaulting to `NotAttempted`.
-    pub fn delivery_certainty(&self) -> DeliveryCertainty {
+    /// Returns the delivery certainty for this error if applicable.
+    /// Returns `Some(DeliveryCertainty)` for write-related failures, and `None` for generic errors.
+    pub fn delivery_certainty(&self) -> Option<DeliveryCertainty> {
         match self {
-            RealtimeError::WriteFailed { certainty, .. } => *certainty,
-            _ => DeliveryCertainty::NotAttempted,
+            RealtimeError::WriteFailed { certainty, .. } => Some(*certainty),
+            _ => None,
         }
     }
 

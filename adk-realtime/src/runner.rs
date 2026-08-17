@@ -8,7 +8,7 @@ use crate::error::{RealtimeError, Result};
 use crate::events::{CallerActivitySource, ServerEvent, ToolCall, ToolResponse};
 use crate::model::BoxedModel;
 use crate::recovery::supervisor::{
-    FailureReport, RecoveryOutcome, RecoverySupervisor, SessionGeneration, TransportStatus,
+    ConfigSnapshot, FailureReport, RecoveryOutcome, RecoverySupervisor, TransportStatus,
 };
 use crate::recovery::{DeliveryCertainty, RecoveryCause, RecoveryPolicy};
 use crate::session::ContextMutationOutcome;
@@ -370,7 +370,12 @@ impl RealtimeRunner {
     {
         let gen_item = match self.supervisor.admit_write().await {
             Ok(g) => g,
-            Err(err) => return Err(err),
+            Err(err) => {
+                return Err(RealtimeError::write_failed(
+                    Arc::new(err),
+                    DeliveryCertainty::NotAttempted,
+                ));
+            }
         };
 
         match op(gen_item.session).await {
@@ -405,12 +410,13 @@ impl RealtimeRunner {
         Ok(())
     }
 
-    /// Install an initial session directly (valid only when uninitialized).
+    /// Install an initial session directly (valid only when uninitialized). Returns generation ID.
     pub async fn set_initial_session(
         &self,
         session: Arc<dyn crate::session::RealtimeSession>,
-    ) -> Result<SessionGeneration> {
-        self.supervisor.set_initial_session(session).await
+    ) -> Result<u64> {
+        let gen_item = self.supervisor.set_initial_session(session).await?;
+        Ok(gen_item.id)
     }
 
     /// Check if currently connected.
@@ -481,9 +487,12 @@ impl RealtimeRunner {
         let snapshot =
             self.supervisor.update_config(|base| Self::merge_config(base, &config)).await;
 
-        let gen_item = self.supervisor.get_active_generation().await?;
+        let snapshot_for_mutate = snapshot.clone();
+        let mutate_res = self
+            .invoke_write(|s| async move { s.mutate_context(snapshot_for_mutate.config).await })
+            .await?;
 
-        match gen_item.session.mutate_context(snapshot.config.clone()).await? {
+        match mutate_res {
             ContextMutationOutcome::Applied => {
                 tracing::info!("Context mutated natively mid-flight.");
                 if let Some(msg) = bridge_message {
@@ -498,6 +507,9 @@ impl RealtimeRunner {
             ContextMutationOutcome::RequiresResumption(new_config) => {
                 let mut state_guard = self.state.write().await;
 
+                let queued_snapshot =
+                    ConfigSnapshot { config: (*new_config).clone(), revision: snapshot.revision };
+
                 if *state_guard == RunnerState::Idle {
                     drop(state_guard);
                     tracing::info!("Runner is idle. Executing resumption immediately.");
@@ -506,9 +518,8 @@ impl RealtimeRunner {
                         .supervisor
                         .execute_context_resumption(
                             &self.model,
-                            *new_config.clone(),
+                            queued_snapshot.clone(),
                             bridge_message.clone(),
-                            snapshot.revision,
                         )
                         .await
                     {
@@ -630,7 +641,7 @@ impl RealtimeRunner {
                         cause: RecoveryCause::ReadFailed(Arc::new(e.clone())),
                     };
                     match self.supervisor.report_failure(report).await {
-                        Ok(RecoveryOutcome::Recovered(_)) | Ok(RecoveryOutcome::Stale(_)) => {
+                        Ok(RecoveryOutcome::Recovered { .. }) | Ok(RecoveryOutcome::Stale(_)) => {
                             continue;
                         }
                         _ => return Some(Err(e)),
@@ -642,7 +653,7 @@ impl RealtimeRunner {
                         cause: RecoveryCause::UnexpectedEof,
                     };
                     match self.supervisor.report_failure(report).await {
-                        Ok(RecoveryOutcome::Recovered(_)) | Ok(RecoveryOutcome::Stale(_)) => {
+                        Ok(RecoveryOutcome::Recovered { .. }) | Ok(RecoveryOutcome::Stale(_)) => {
                             continue;
                         }
                         _ => return None,
@@ -807,7 +818,7 @@ impl RealtimeRunner {
                         cause: RecoveryCause::ReadFailed(Arc::new(e.clone())),
                     };
                     match self.supervisor.report_failure(report).await {
-                        Ok(RecoveryOutcome::Recovered(_)) | Ok(RecoveryOutcome::Stale(_)) => {
+                        Ok(RecoveryOutcome::Recovered { .. }) | Ok(RecoveryOutcome::Stale(_)) => {
                             continue;
                         }
                         _ => {
@@ -825,7 +836,7 @@ impl RealtimeRunner {
                         cause: RecoveryCause::UnexpectedEof,
                     };
                     match self.supervisor.report_failure(report).await {
-                        Ok(RecoveryOutcome::Recovered(_)) | Ok(RecoveryOutcome::Stale(_)) => {
+                        Ok(RecoveryOutcome::Recovered { .. }) | Ok(RecoveryOutcome::Stale(_)) => {
                             continue;
                         }
                         _ => {
@@ -993,12 +1004,7 @@ impl RealtimeRunner {
 
             if let Err(e) = self
                 .supervisor
-                .execute_context_resumption(
-                    &self.model,
-                    (*config).clone(),
-                    bridge_message.clone(),
-                    snapshot.revision,
-                )
+                .execute_context_resumption(&self.model, snapshot, bridge_message.clone())
                 .await
             {
                 tracing::error!("Resumption failed: {}.", e);

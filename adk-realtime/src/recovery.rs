@@ -18,6 +18,11 @@ pub enum RecoveryContinuity {
     /// Provider-native logical continuity was actually preserved.
     Resumed,
     /// Transport reconnected cleanly.
+    ///
+    /// Previous conversation state/history is not guaranteed to have survived.
+    /// However, a successful `recover(context)` returning `Reconnected` guarantees that
+    /// the current effective configuration (`context.config()`) has been successfully
+    /// applied and the session is fully ready to accept commands.
     Reconnected,
 }
 
@@ -32,6 +37,9 @@ pub enum RecoveryDisposition {
 }
 
 /// Delivery certainty indicates what is known about whether a payload was sent.
+///
+/// Neither variant guarantees successful remote processing by the provider; they merely
+/// bound when retry or buffering is safe vs when it might cause duplicate execution.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeliveryCertainty {
@@ -65,6 +73,12 @@ pub struct RecoveryPolicy {
 }
 
 impl Default for RecoveryPolicy {
+    /// Recommended realtime defaults:
+    /// - max_attempts = 3
+    /// - total deadline around 5s
+    /// - initial_delay = 50ms
+    /// - max_delay = 500ms
+    /// - deterministic/no jitter by default
     fn default() -> Self {
         Self {
             max_attempts: NonZeroU32::new(3).unwrap(),
@@ -198,12 +212,24 @@ impl std::fmt::Debug for RecoveredSession {
 }
 
 /// Provider-facing recovery capability interface.
+///
+/// An individual call to `recover()` represents exactly one attempt to establish
+/// a fresh session. The provider does not own retry loops or the total recovery policy;
+/// those are managed by the supervisor.
+///
+/// `recover()` returns only after the candidate satisfies the provider-specific readiness boundary
+/// (e.g. `setupComplete` for Gemini Live) and after the current effective configuration
+/// (`context.config()`) has been fully applied to the returned session.
 #[async_trait]
 pub trait RealtimeRecovery: Send + Sync {
     /// Classify whether the given cause is recoverable or fatal for this provider.
     fn classify(&self, cause: &RecoveryCause) -> RecoveryDisposition;
 
     /// Classify whether an error returned by a `recover()` attempt is retryable or fatal.
+    ///
+    /// By default, returns `RecoveryDisposition::Fatal` (fail-closed) so that
+    /// any unexpected recovery attempt failures are not blindly retried unless
+    /// a provider explicitly opts into them.
     fn classify_attempt_error(&self, _error: &crate::error::RealtimeError) -> RecoveryDisposition {
         RecoveryDisposition::Fatal
     }
@@ -213,4 +239,3 @@ pub trait RealtimeRecovery: Send + Sync {
 }
 
 pub(crate) mod supervisor;
-pub use supervisor::SessionGeneration;
