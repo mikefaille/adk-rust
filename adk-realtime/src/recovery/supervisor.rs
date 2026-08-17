@@ -177,9 +177,7 @@ impl RecoverySupervisor {
             TransportStatus::Closed => Err(RealtimeError::SessionClosed),
             TransportStatus::Exhausted => Err(RealtimeError::provider("session exhausted")),
             TransportStatus::Uninitialized => Err(RealtimeError::NotConnected),
-            TransportStatus::Healthy => {
-                state.generation.clone().ok_or(RealtimeError::NotConnected)
-            }
+            TransportStatus::Healthy => state.generation.clone().ok_or(RealtimeError::NotConnected),
         }
     }
 
@@ -190,9 +188,7 @@ impl RecoverySupervisor {
             TransportStatus::Closed => Err(RealtimeError::SessionClosed),
             TransportStatus::Exhausted => Err(RealtimeError::provider("session exhausted")),
             TransportStatus::Uninitialized => Err(RealtimeError::NotConnected),
-            TransportStatus::Healthy => {
-                state.generation.clone().ok_or(RealtimeError::NotConnected)
-            }
+            TransportStatus::Healthy => state.generation.clone().ok_or(RealtimeError::NotConnected),
         }
     }
 
