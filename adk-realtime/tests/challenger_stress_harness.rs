@@ -43,7 +43,6 @@ fn test_challenger_tcp_reset_error_classification_exhaustive() {
         "econnreset occurred on stream",
         "Broken pipe on socket write",
         "broken pipe error during flush",
-        "Connection closed abruptly by remote endpoint",
         "Receive error: connection reset",
     ];
 
@@ -64,18 +63,22 @@ fn test_challenger_tcp_reset_error_classification_exhaustive() {
     }
 
     // 2. std::io::Error variants
-    let io_reset =
-        RealtimeError::IoError(std::io::Error::new(std::io::ErrorKind::ConnectionReset, "reset"));
+    let io_reset = RealtimeError::IoError(std::sync::Arc::new(std::io::Error::new(
+        std::io::ErrorKind::ConnectionReset,
+        "reset",
+    )));
     assert!(io_reset.is_connection_reset());
 
-    let io_broken =
-        RealtimeError::IoError(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "pipe"));
+    let io_broken = RealtimeError::IoError(std::sync::Arc::new(std::io::Error::new(
+        std::io::ErrorKind::BrokenPipe,
+        "pipe",
+    )));
     assert!(io_broken.is_connection_reset());
 
-    let io_aborted = RealtimeError::IoError(std::io::Error::new(
+    let io_aborted = RealtimeError::IoError(std::sync::Arc::new(std::io::Error::new(
         std::io::ErrorKind::ConnectionAborted,
         "aborted",
-    ));
+    )));
     assert!(io_aborted.is_connection_reset());
 
     // 3. Non-reset error variants
@@ -91,6 +94,12 @@ fn test_challenger_tcp_reset_error_classification_exhaustive() {
         RealtimeError::OpusCodecError("Frame corruption".into()),
         RealtimeError::WebRTCError("ICE disconnect".into()),
         RealtimeError::LiveKitError("Room disconnected".into()),
+        RealtimeError::Protocol("Connection closed abruptly by remote endpoint".into()),
+        RealtimeError::ProviderError("Broken pipe on socket write".into()),
+        RealtimeError::IoError(std::sync::Arc::new(std::io::Error::new(
+            std::io::ErrorKind::NotConnected,
+            "not connected",
+        ))),
     ];
 
     for err in &non_reset_errors {

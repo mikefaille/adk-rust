@@ -267,6 +267,8 @@ pub struct GeminiRealtimeSession {
     /// `reconnect_with_backoff` can open a fresh connection to the same endpoint
     /// without requiring the caller to repeat authentication parameters.
     reconnect_url: String,
+    /// The original setup frame used to connect, preserved for reconnects.
+    reconnect_setup: Arc<ParkingMutex<Option<GeminiClientMessage>>>,
     /// The normalized model ID sent in the initial setup frame, used to rebuild
     /// the setup message on reconnect.
     reconnect_model: String,
@@ -329,6 +331,7 @@ impl GeminiRealtimeSession {
             frame_log: FrameLog::new(session_id, "studio", reconnect_model.clone()),
             last_disconnect: Arc::new(ParkingMutex::new(None)),
             reconnect_url,
+            reconnect_setup: Arc::new(ParkingMutex::new(None)),
             reconnect_model,
             last_resume_handle: Arc::new(ParkingMutex::new(None)),
         }
@@ -531,6 +534,7 @@ impl GeminiRealtimeSession {
             adapter,
             frame_log,
             reconnect_url,
+            reconnect_setup: Arc::new(ParkingMutex::new(None)),
             reconnect_model: normalized_model.clone(),
             last_resume_handle: Arc::new(ParkingMutex::new(None)),
         };
@@ -637,6 +641,7 @@ impl GeminiRealtimeSession {
         };
 
         tracing::info!(model_id = %normalized_model, "Sending Gemini Live setup");
+        *self.reconnect_setup.lock() = Some(setup.clone());
         self.send_raw(&setup).await
     }
 
@@ -710,23 +715,30 @@ impl GeminiRealtimeSession {
         }
         self.connected.store(true, Ordering::SeqCst);
 
-        // Send a reconnect setup frame with the resume handle (if available).
-        let setup_msg = GeminiClientMessage {
-            setup: Some(GeminiSetup {
-                model: Some(self.reconnect_model.clone()),
-                system_instruction: None,
-                generation_config: None,
-                tools: None,
-                cached_content: None,
-                session_resumption: Some(SessionResumptionConfig { handle: resume_handle.clone() }),
-                input_audio_transcription: None,
-                output_audio_transcription: None,
-                realtime_input_config: None,
-            }),
-            realtime_input: None,
-            tool_response: None,
-            client_content: None,
-        };
+        let mut setup_msg = self.reconnect_setup.lock().clone().unwrap_or_else(|| {
+            tracing::warn!("reconnect_setup is empty, this should not happen");
+            GeminiClientMessage {
+                setup: Some(GeminiSetup {
+                    model: Some(self.reconnect_model.clone()),
+                    system_instruction: None,
+                    generation_config: None,
+                    tools: None,
+                    cached_content: None,
+                    session_resumption: None,
+                    input_audio_transcription: None,
+                    output_audio_transcription: None,
+                    realtime_input_config: None,
+                }),
+                realtime_input: None,
+                tool_response: None,
+                client_content: None,
+            }
+        });
+
+        if let Some(setup) = setup_msg.setup.as_mut() {
+            setup.session_resumption =
+                Some(SessionResumptionConfig { handle: resume_handle.clone() });
+        }
 
         tracing::info!(
             model = %self.reconnect_model,
@@ -1409,6 +1421,7 @@ impl RealtimeSession for GeminiRealtimeSession {
                     client_content: None,
                 };
 
+                *self.reconnect_setup.lock() = Some(setup.clone());
                 self.send_raw(&setup).await
             }
             ClientEvent::UpdateSession { .. } => {
@@ -2102,6 +2115,28 @@ mod tests {
     }
 
     #[test]
+    fn test_non_resumable_update_does_not_overwrite_cached_handle() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let session = GeminiRealtimeSession::new_for_test(
+            "id".into(),
+            "url".into(),
+            "model".into(),
+            tx,
+            tokio::spawn(async {}),
+            Box::pin(futures_util::stream::empty()),
+        );
+
+        // Cache an old handle
+        *session.last_resume_handle.lock() = Some("old-handle".to_string());
+
+        // Receive a non-resumable update with a new handle
+        let raw = r#"{"sessionResumptionUpdate":{"newHandle":"new-handle","resumable":false}}"#;
+        let _ = session.translate_event(raw).unwrap();
+
+        assert_eq!(session.last_resume_handle(), Some("old-handle".to_string()));
+    }
+
+    #[test]
     fn test_gemini_system_override_non_text_first() {
         let parts = vec![
             Part::inline_data("image/png", vec![0x1]),
@@ -2652,6 +2687,7 @@ mod teardown_tests {
                 "models/gemini-3.1-flash-live-preview".into(),
             ),
             last_disconnect: Arc::new(ParkingMutex::new(None)),
+            reconnect_setup: Arc::new(ParkingMutex::new(None)),
             reconnect_url: "wss://localhost/ws".into(),
             reconnect_model: "models/gemini-3.1-flash-live-preview".into(),
             last_resume_handle: Arc::new(ParkingMutex::new(None)),

@@ -95,6 +95,12 @@ async fn test_mock_websocket_server_e2e_reconnect_resumption() {
         if let Some(Ok(Message::Text(msg))) = ws1.next().await {
             let json: serde_json::Value = serde_json::from_str(&msg).unwrap();
             assert!(json.get("setup").is_some());
+            let setup = json.get("setup").unwrap();
+            assert!(setup.get("tools").is_some(), "Expected tools in initial setup");
+            assert!(
+                setup.get("systemInstruction").is_some(),
+                "Expected systemInstruction in initial setup"
+            );
         } else {
             panic!("Expected setup frame on connection 1");
         }
@@ -115,6 +121,36 @@ async fn test_mock_websocket_server_e2e_reconnect_resumption() {
         // Simulate abrupt disconnect / connection reset
         let _ = ws1.close(None).await;
         drop(ws1);
+
+        // --- Connection 2: Reconnect ---
+        let (stream2, _) = listener.accept().await.unwrap();
+        let mut ws2 = accept_async(stream2).await.unwrap();
+
+        // Expect Reconnect setup frame with identical config
+        if let Some(Ok(Message::Text(msg))) = ws2.next().await {
+            let json: serde_json::Value = serde_json::from_str(&msg).unwrap();
+            let setup = json.get("setup").expect("setup missing from reconnect");
+
+            // Assert the tool config survived
+            assert!(setup.get("tools").is_some(), "Expected tools in reconnect setup");
+
+            // Assert the system instruction survived
+            assert!(
+                setup.get("systemInstruction").is_some(),
+                "Expected systemInstruction in reconnect setup"
+            );
+
+            // Assert resume handle is present
+            let resumption = setup.get("sessionResumption").expect("Expected sessionResumption");
+            let handle = resumption.get("handle").expect("Expected handle");
+            assert_eq!(handle.as_str().unwrap(), "mock_resume_handle_e2e_123");
+
+            // Send setupComplete for reconnect
+            let setup_complete = json!({ "setupComplete": {} }).to_string();
+            ws2.send(Message::Text(setup_complete.into())).await.unwrap();
+        } else {
+            panic!("Expected setup frame on connection 2");
+        }
     });
 
     // 3. Connect client session to mock server URL
@@ -133,7 +169,9 @@ async fn test_mock_websocket_server_e2e_reconnect_resumption() {
     // Send initial setup frame
     let setup_msg = json!({
         "setup": {
-            "model": "models/gemini-3.1-flash-live-preview"
+            "model": "models/gemini-3.1-flash-live-preview",
+            "systemInstruction": { "parts": [{ "text": "Test instructions" }] },
+            "tools": [{ "functionDeclarations": [] }]
         }
     })
     .to_string();
@@ -168,6 +206,10 @@ async fn test_mock_websocket_server_e2e_reconnect_resumption() {
     assert!(matches!(event2, ServerEvent::SessionUpdated { .. }));
 
     // Verify last_resume_handle is cached on session
+
+    // Trigger reconnect
+    session.reconnect_with_backoff().await.unwrap();
+
     assert_eq!(session.last_resume_handle().as_deref(), Some("mock_resume_handle_e2e_123"));
 
     server_task.await.unwrap();

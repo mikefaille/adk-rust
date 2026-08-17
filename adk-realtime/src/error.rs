@@ -185,10 +185,7 @@ impl RealtimeError {
     /// Returns true if this error represents a transient TCP connection reset, closed stream, or broken pipe.
     pub fn is_connection_reset(&self) -> bool {
         match self {
-            RealtimeError::ConnectionError(msg)
-            | RealtimeError::MessageError(msg)
-            | RealtimeError::ProviderError(msg)
-            | RealtimeError::Protocol(msg) => {
+            RealtimeError::ConnectionError(msg) | RealtimeError::MessageError(msg) => {
                 let lower = msg.to_lowercase();
                 lower.contains("connection reset by peer")
                     || lower.contains("econnreset")
@@ -226,6 +223,12 @@ mod tests {
 
         let config_err = RealtimeError::ConfigError("invalid param".to_string());
         assert!(!config_err.is_connection_reset());
+
+        let protocol_err = RealtimeError::Protocol("Connection closed abruptly".to_string());
+        assert!(!protocol_err.is_connection_reset());
+
+        let provider_err = RealtimeError::ProviderError("Broken pipe on socket write".to_string());
+        assert!(!provider_err.is_connection_reset());
     }
 
     #[cfg(feature = "livekit")]
