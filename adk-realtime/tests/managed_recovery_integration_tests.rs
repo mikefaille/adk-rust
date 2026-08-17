@@ -450,6 +450,107 @@ async fn test_generation_watcher_wakeup_even_if_close_hangs_and_same_session_id(
 }
 
 #[tokio::test]
+async fn test_bridge_message_write_failure_returns_indeterminate_write_failed() {
+    let counters = Arc::new(TestCounters::default());
+
+    let mut resumed_session = MockRecoverySession::new("gen-1-resumed", counters.clone());
+    resumed_session.send_fails = true;
+    let resumed_session = Arc::new(resumed_session);
+
+    struct ResumptionModel(Arc<MockRecoverySession>);
+    #[async_trait]
+    impl RealtimeModel for ResumptionModel {
+        fn provider(&self) -> &str {
+            "res"
+        }
+        fn model_id(&self) -> &str {
+            "res"
+        }
+        fn supported_input_formats(&self) -> Vec<AudioFormat> {
+            vec![]
+        }
+        fn supported_output_formats(&self) -> Vec<AudioFormat> {
+            vec![]
+        }
+        fn available_voices(&self) -> Vec<&str> {
+            vec![]
+        }
+        async fn connect(&self, _config: RealtimeConfig) -> Result<BoxedSession> {
+            Ok(Box::new((*self.0).clone()) as BoxedSession)
+        }
+    }
+
+    let runner = RealtimeRunner::builder()
+        .model(Arc::new(ResumptionModel(resumed_session)))
+        .build()
+        .unwrap();
+    let initial_session = Arc::new(MockRecoverySession::new("gen-0", counters.clone()));
+    let _ = runner.set_initial_session(initial_session).await.unwrap();
+
+    let update = SessionUpdateConfig(RealtimeConfig::default().with_instruction("new instruction"));
+    let err =
+        runner.update_session_with_bridge(update, Some("bridge message".into())).await.unwrap_err();
+
+    assert_eq!(err.delivery_certainty(), Some(DeliveryCertainty::Indeterminate));
+}
+
+#[tokio::test]
+async fn test_cancellation_after_candidate_ready_cleans_unpublished_candidate() {
+    let counters = Arc::new(TestCounters::default());
+    let candidate_counters = Arc::new(TestCounters::default());
+    let candidate_session =
+        Arc::new(MockRecoverySession::new("candidate", candidate_counters.clone()));
+
+    struct StaleCandidateRecovery {
+        candidate: Arc<MockRecoverySession>,
+        runner_handle: Arc<parking_lot::Mutex<Option<Arc<RealtimeRunner>>>>,
+    }
+
+    #[async_trait]
+    impl RealtimeRecovery for StaleCandidateRecovery {
+        fn classify(&self, _cause: &RecoveryCause) -> RecoveryDisposition {
+            RecoveryDisposition::Recoverable
+        }
+
+        async fn recover(
+            &self,
+            _context: adk_realtime::recovery::RecoveryContext<'_>,
+        ) -> Result<RecoveredSession> {
+            let runner_opt = self.runner_handle.lock().clone();
+            if let Some(runner) = runner_opt {
+                // Prepend instruction context to update config revision atomically on supervisor
+                runner.prepend_instruction_context("context block").await;
+            }
+            Ok(RecoveredSession::new(self.candidate.clone(), RecoveryContinuity::Resumed))
+        }
+    }
+
+    let runner_slot = Arc::new(parking_lot::Mutex::new(None));
+    let mock_rec = Arc::new(StaleCandidateRecovery {
+        candidate: candidate_session,
+        runner_handle: runner_slot.clone(),
+    });
+
+    let mut initial_session = MockRecoverySession::with_recovery("gen-0", counters, mock_rec);
+    initial_session.send_fails = true;
+
+    let runner = Arc::new(RealtimeRunner::builder().model(Arc::new(DummyModel)).build().unwrap());
+    *runner_slot.lock() = Some(runner.clone());
+
+    let _ = runner.set_initial_session(Arc::new(initial_session)).await.unwrap();
+
+    let err = runner.send_text("trigger recovery").await.unwrap_err();
+    assert_eq!(err.delivery_certainty(), Some(DeliveryCertainty::Indeterminate));
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    assert!(
+        candidate_counters.close_calls.load(Ordering::SeqCst) >= 1,
+        "Unpublished candidate session must be closed on rejection or cancellation"
+    );
+}
+
+#[tokio::test]
 async fn test_explicit_close_leaves_no_admittable_session() {
     let runner = RealtimeRunner::builder().model(Arc::new(DummyModel)).build().unwrap();
     let counters = Arc::new(TestCounters::default());

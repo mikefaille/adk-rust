@@ -29,6 +29,10 @@ pub enum RunnerState {
     /// A tool is currently executing; teardown would cause tool loss.
     ExecutingTool,
     /// A context mutation was queued while the runner was busy, and must be executed once Idle.
+    ///
+    /// Semantics: Last-write-wins for pending mutations. If multiple mutations are requested
+    /// while busy, only the latest configuration and bridge message are retained and executed
+    /// when the runner transitions back to `Idle`.
     PendingResumption {
         /// The new configuration to apply on reconnection.
         config: Box<crate::config::RealtimeConfig>,
@@ -160,7 +164,11 @@ pub trait EventHandler: Send + Sync {
         Ok(())
     }
 
-    /// Called when the provider transport ends and [`RealtimeRunner::run`] is returning.
+    /// Called when the provider transport ends terminally and [`RealtimeRunner::run`] is returning.
+    ///
+    /// Under managed recovery, transient connection losses trigger automatic background recovery.
+    /// `on_disconnect` is invoked only when recovery has exhausted all attempts, encountered a fatal error,
+    /// or when the session is explicitly closed.
     async fn on_disconnect(&self) -> Result<()> {
         Ok(())
     }
@@ -340,7 +348,12 @@ impl RealtimeRunnerBuilder {
     }
 }
 
-/// A runner that manages a realtime session with tool execution.
+/// A runner that manages a realtime session with automatic recovery and tool execution.
+///
+/// `RealtimeRunner` coordinates bidirectional audio and text streams between an agent
+/// model and an application. It provides single-authority session generation fencing,
+/// managed write boundaries with explicit delivery certainty (`NotAttempted` vs `Indeterminate`),
+/// atomic configuration revision snapshotting, and automatic background connection recovery.
 pub struct RealtimeRunner {
     model: BoxedModel,
     runner_config: RunnerConfig,
@@ -433,13 +446,20 @@ impl RealtimeRunner {
             .map(|g| g.session.session_id().to_string())
     }
 
-    /// The connected provider's native audio output format.
+    /// Returns the connected provider's native audio output format.
+    ///
+    /// This format specifies the sample rate, channel count, and encoding (e.g. PCM16 24kHz)
+    /// emitted by the active session generation.
     pub async fn native_audio_output_format(&self) -> Result<crate::audio::AudioFormat> {
         let gen_item = self.supervisor.get_active_generation().await?;
         Ok(gen_item.session.native_audio_output_format())
     }
 
-    /// Send a client event directly to the session.
+    /// Send a client event directly to the active session generation.
+    ///
+    /// `ClientEvent::UpdateSession` events are intercepted and merged into the canonical
+    /// configuration revision state using [`RealtimeRunner::update_session`]. All other events
+    /// pass through the managed write boundary [`invoke_write`](Self::invoke_write).
     pub async fn send_client_event(&self, event: crate::events::ClientEvent) -> Result<()> {
         match event {
             crate::events::ClientEvent::UpdateSession { instructions, tools } => {
@@ -474,11 +494,19 @@ impl RealtimeRunner {
     }
 
     /// Update the session configuration.
+    ///
+    /// Merges the delta into the canonical configuration snapshot and increments the configuration revision.
+    /// If the runner is idle, context mutation is attempted immediately (natively or via resumption).
+    /// If the runner is busy generating a response or executing a tool, the resumption is queued in
+    /// [`RunnerState::PendingResumption`] and executed once the runner returns to `Idle`.
     pub async fn update_session(&self, config: SessionUpdateConfig) -> Result<()> {
         self.update_session_with_bridge(config, None).await
     }
 
-    /// Update the session configuration with optional bridge message.
+    /// Update the session configuration with an optional bridge message.
+    ///
+    /// Behaves like [`update_session`](Self::update_session), but injects the provided text message
+    /// into the conversation stream immediately after resumption completes.
     pub async fn update_session_with_bridge(
         &self,
         config: SessionUpdateConfig,
@@ -514,23 +542,37 @@ impl RealtimeRunner {
                     drop(state_guard);
                     tracing::info!("Runner is idle. Executing resumption immediately.");
 
-                    if let Err(e) = self
+                    match self
                         .supervisor
-                        .execute_context_resumption(
-                            &self.model,
-                            queued_snapshot.clone(),
-                            bridge_message.clone(),
-                        )
+                        .execute_context_resumption(&self.model, queued_snapshot.clone())
                         .await
                     {
-                        tracing::error!("Immediate resumption failed: {}. Queueing for retry.", e);
-                        let mut fallback_state = self.state.write().await;
-                        *fallback_state = RunnerState::PendingResumption {
-                            config: new_config,
-                            bridge_message,
-                            attempts: 1,
-                        };
-                        return Err(e);
+                        Ok(_) => {
+                            if let Some(msg) = bridge_message {
+                                tracing::info!(
+                                    "Sending bridge message post-resumption via invoke_write."
+                                );
+                                let event = crate::events::ClientEvent::Message {
+                                    role: "user".to_string(),
+                                    parts: vec![adk_core::types::Part::Text { text: msg }],
+                                };
+                                self.invoke_write(|s| async move { s.send_event(event).await })
+                                    .await?;
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                "Immediate resumption failed: {}. Queueing for retry.",
+                                e
+                            );
+                            let mut fallback_state = self.state.write().await;
+                            *fallback_state = RunnerState::PendingResumption {
+                                config: new_config,
+                                bridge_message,
+                                attempts: 1,
+                            };
+                            return Err(e);
+                        }
                     }
                 } else {
                     tracing::info!("Runner is busy ({:?}). Queueing resumption.", *state_guard);
@@ -545,47 +587,51 @@ impl RealtimeRunner {
         }
     }
 
-    /// Send typed raw-audio chunk to the session.
+    /// Send a typed raw-audio chunk to the active session generation.
+    ///
+    /// Routes through the managed write boundary. Admission rejection returns `DeliveryCertainty::NotAttempted`
+    /// without calling the raw session. Failures after raw invocation return `DeliveryCertainty::Indeterminate`
+    /// and report `RecoveryCause::WriteFailed` to trigger managed recovery.
     pub async fn send_audio_chunk(&self, audio: &crate::audio::AudioChunk) -> Result<()> {
         let chunk = audio.clone();
         self.invoke_write(|s| async move { s.send_audio(&chunk).await }).await
     }
 
-    /// Send base64-encoded audio.
+    /// Send base64-encoded audio to the active session generation.
     pub async fn send_audio(&self, audio_base64: &str) -> Result<()> {
         self.send_audio_base64(audio_base64).await
     }
 
-    /// Send base64-encoded audio.
+    /// Send base64-encoded audio to the active session generation.
     pub async fn send_audio_base64(&self, audio_base64: &str) -> Result<()> {
         let payload = audio_base64.to_string();
         self.invoke_write(|s| async move { s.send_audio_base64(&payload).await }).await
     }
 
-    /// Send text to the session.
+    /// Send text to the active session generation.
     pub async fn send_text(&self, text: &str) -> Result<()> {
         let payload = text.to_string();
         self.invoke_write(|s| async move { s.send_text(&payload).await }).await
     }
 
-    /// Send video frame.
+    /// Send video frame to the active session generation.
     pub async fn send_video_frame(&self, mime_type: &str, data_base64: &str) -> Result<()> {
         let mime = mime_type.to_string();
         let data = data_base64.to_string();
         self.invoke_write(|s| async move { s.send_video_frame(&mime, &data).await }).await
     }
 
-    /// Commit audio buffer.
+    /// Commit audio buffer for the active session generation.
     pub async fn commit_audio(&self) -> Result<()> {
         self.invoke_write(|s| async move { s.commit_audio().await }).await
     }
 
-    /// Trigger model response.
+    /// Trigger model response for the active session generation.
     pub async fn create_response(&self) -> Result<()> {
         self.invoke_write(|s| async move { s.create_response().await }).await
     }
 
-    /// Interrupt current response.
+    /// Interrupt current response for the active session generation.
     pub async fn interrupt(&self) -> Result<()> {
         self.invoke_write(|s| async move { s.interrupt().await }).await
     }
@@ -600,6 +646,10 @@ impl RealtimeRunner {
     }
 
     /// Get the next managed event from the session with generation awareness and automatic recovery.
+    ///
+    /// Provides pull-based reading parity with [`run`](Self::run). `next_event` subscribes to generation
+    /// change signals and automatically switches to newly published generations without blocking on
+    /// graceful closure of older sessions. Connection losses trigger background recovery automatically.
     pub async fn next_event(&self) -> Option<Result<ServerEvent>> {
         loop {
             let mut watcher = self.supervisor.subscribe_generation();
@@ -610,6 +660,15 @@ impl RealtimeRunner {
                 }
                 Err(err) => return Some(Err(err)),
             };
+
+            if *watcher.borrow_and_update() != gen_item.id {
+                tracing::info!(
+                    watch_gen = *watcher.borrow(),
+                    snapshot_gen = gen_item.id,
+                    "generation changed during subscription/snapshot in next_event; retrying"
+                );
+                continue;
+            }
 
             let current_gen_id = gen_item.id;
             let session = gen_item.session;
@@ -730,6 +789,15 @@ impl RealtimeRunner {
                 }
                 Err(err) => return Err(err),
             };
+
+            if *watcher.borrow_and_update() != gen_item.id {
+                tracing::info!(
+                    watch_gen = *watcher.borrow(),
+                    snapshot_gen = gen_item.id,
+                    "generation changed during subscription/snapshot in run_loop; retrying"
+                );
+                continue;
+            }
 
             let current_gen_id = gen_item.id;
             let session = gen_item.session;
@@ -1002,30 +1070,43 @@ impl RealtimeRunner {
 
             let snapshot = self.supervisor.get_config().await;
 
-            if let Err(e) = self
-                .supervisor
-                .execute_context_resumption(&self.model, snapshot, bridge_message.clone())
-                .await
-            {
-                tracing::error!("Resumption failed: {}.", e);
-
-                let mut fallback_state = self.state.write().await;
-
-                if attempts + 1 >= 3 {
-                    tracing::error!(
-                        "Maximum resumption attempts reached (3). Dropping queued mutation to prevent infinite loop."
-                    );
-                    *fallback_state = RunnerState::Idle;
-                } else {
-                    tracing::info!("Restoring pending queue state for retry.");
-                    *fallback_state = RunnerState::PendingResumption {
-                        config,
-                        bridge_message,
-                        attempts: attempts + 1,
-                    };
+            match self.supervisor.execute_context_resumption(&self.model, snapshot).await {
+                Ok(_) => {
+                    if let Some(msg) = bridge_message {
+                        tracing::info!("Sending bridge message post-resumption via invoke_write.");
+                        let event = crate::events::ClientEvent::Message {
+                            role: "user".to_string(),
+                            parts: vec![adk_core::types::Part::Text { text: msg }],
+                        };
+                        if let Err(e) =
+                            self.invoke_write(|s| async move { s.send_event(event).await }).await
+                        {
+                            tracing::warn!(error = %e, "failed to send bridge message after queued resumption");
+                            let _ = self.event_handler.on_error(&e).await;
+                        }
+                    }
                 }
+                Err(e) => {
+                    tracing::error!("Resumption failed: {}.", e);
 
-                let _ = self.event_handler.on_error(&e).await;
+                    let mut fallback_state = self.state.write().await;
+
+                    if attempts + 1 >= 3 {
+                        tracing::error!(
+                            "Maximum resumption attempts reached (3). Dropping queued mutation to prevent infinite loop."
+                        );
+                        *fallback_state = RunnerState::Idle;
+                    } else {
+                        tracing::info!("Restoring pending queue state for retry.");
+                        *fallback_state = RunnerState::PendingResumption {
+                            config,
+                            bridge_message,
+                            attempts: attempts + 1,
+                        };
+                    }
+
+                    let _ = self.event_handler.on_error(&e).await;
+                }
             }
         } else {
             *state = RunnerState::Idle;
@@ -1123,6 +1204,8 @@ impl RealtimeRunner {
     }
 
     /// Prepends a context block to the system instruction before connecting.
+    ///
+    /// Atomically updates the canonical configuration snapshot and increments the configuration revision.
     pub async fn prepend_instruction_context(&self, block: &str) {
         if block.is_empty() {
             return;
@@ -1139,6 +1222,8 @@ impl RealtimeRunner {
     }
 
     /// Trigger the single follow-up response owed after a tool-dispatching turn.
+    ///
+    /// Ensures exactly one follow-up response is created after all concurrent tool executions in a turn finish.
     pub async fn respond_after_tools(&self) -> Result<()> {
         if self.outstanding_tools.load(Ordering::Acquire) > 0 {
             self.response_closed_awaiting_tools.store(true, Ordering::Release);

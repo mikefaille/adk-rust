@@ -269,7 +269,6 @@ impl RecoverySupervisor {
         &self,
         model: &crate::model::BoxedModel,
         queued_snapshot: ConfigSnapshot,
-        bridge_message: Option<String>,
     ) -> Result<SessionGeneration> {
         let _lock = self.replacement_lock.lock().await;
 
@@ -327,17 +326,6 @@ impl RecoverySupervisor {
             });
         }
 
-        if let Some(msg) = bridge_message {
-            tracing::info!("Injecting bridge message post-resumption.");
-            let event = crate::events::ClientEvent::Message {
-                role: "user".to_string(),
-                parts: vec![adk_core::types::Part::Text { text: msg }],
-            };
-            if let Err(e) = sg_item.session.send_event(event).await {
-                tracing::warn!(error = %e, "failed to send bridge message on resumed session");
-            }
-        }
-
         Ok(sg_item)
     }
 
@@ -352,7 +340,18 @@ impl RecoverySupervisor {
 
         // 1. Check current state and validation
         {
-            let state_guard = self.state.read().await;
+            let state_guard = match tokio::time::timeout_at(deadline_instant, self.state.read())
+                .await
+            {
+                Ok(guard) => guard,
+                Err(_) => {
+                    let err = RealtimeError::Timeout(
+                        "deadline expired acquiring state read snapshot".to_string(),
+                    );
+                    tracing::warn!(generation = report.generation, err = %err, "recovery deadline expired");
+                    return Err(err);
+                }
+            };
 
             if state_guard.status == TransportStatus::Closed {
                 return Err(RealtimeError::SessionClosed);
@@ -413,7 +412,18 @@ impl RecoverySupervisor {
 
         // 3. Double-check state now that we hold the lock
         {
-            let state_guard = self.state.read().await;
+            let state_guard = match tokio::time::timeout_at(deadline_instant, self.state.read())
+                .await
+            {
+                Ok(guard) => guard,
+                Err(_) => {
+                    let err = RealtimeError::Timeout(
+                        "deadline expired acquiring state read snapshot".to_string(),
+                    );
+                    tracing::warn!(generation = report.generation, err = %err, "recovery deadline expired");
+                    return Err(err);
+                }
+            };
 
             if state_guard.status == TransportStatus::Closed {
                 return Err(RealtimeError::SessionClosed);
@@ -449,7 +459,18 @@ impl RecoverySupervisor {
 
         // 4. Determine recovery implementation
         let session_to_recover = {
-            let state_guard = self.state.read().await;
+            let state_guard = match tokio::time::timeout_at(deadline_instant, self.state.read())
+                .await
+            {
+                Ok(guard) => guard,
+                Err(_) => {
+                    let err = RealtimeError::Timeout(
+                        "deadline expired acquiring state read snapshot".to_string(),
+                    );
+                    tracing::warn!(generation = report.generation, err = %err, "recovery deadline expired");
+                    return Err(err);
+                }
+            };
             match &state_guard.generation {
                 Some(gen_item) => gen_item.session.clone(),
                 None => {
@@ -506,10 +527,28 @@ impl RecoverySupervisor {
 
             let attempt_nz = NonZeroU32::new(attempt_idx).unwrap();
 
-            let (effective_config, snapshot_revision) = {
-                let state_guard = self.state.read().await;
-                (state_guard.config.config.clone(), state_guard.config.revision)
+            let state_read_res = tokio::time::timeout_at(deadline_instant, self.state.read()).await;
+
+            let state_guard = match state_read_res {
+                Ok(guard) => guard,
+                Err(_) => {
+                    let msg = "recovery deadline expired acquiring state read snapshot".to_string();
+                    tracing::warn!(generation = report.generation, attempt = attempt_idx, err = %msg, "recovery deadline expired");
+                    stop_reason = EpisodeStopReason::Timeout(msg);
+                    break;
+                }
             };
+
+            let effective_config = state_guard.config.config.clone();
+            let snapshot_revision = state_guard.config.revision;
+            drop(state_guard);
+
+            if tokio::time::Instant::now() >= deadline_instant {
+                let msg = "recovery deadline expired after acquiring state snapshot".to_string();
+                tracing::warn!(generation = report.generation, attempt = attempt_idx, err = %msg, "recovery deadline expired");
+                stop_reason = EpisodeStopReason::Timeout(msg);
+                break;
+            }
 
             attempts_launched += 1;
 
@@ -555,18 +594,44 @@ impl RecoverySupervisor {
                     let new_session = recovered.session();
                     let continuity = recovered.continuity();
 
-                    let mut state_guard = self.state.write().await;
+                    struct CandidateCleanupGuard(Option<Arc<dyn RealtimeSession>>);
+                    impl Drop for CandidateCleanupGuard {
+                        fn drop(&mut self) {
+                            if let Some(session) = self.0.take() {
+                                tokio::spawn(async move {
+                                    let _ = tokio::time::timeout(
+                                        Duration::from_secs(2),
+                                        session.close(),
+                                    )
+                                    .await;
+                                });
+                            }
+                        }
+                    }
+
+                    let mut candidate_guard = CandidateCleanupGuard(Some(new_session.clone()));
+
+                    let mut state_guard = match tokio::time::timeout_at(
+                        deadline_instant,
+                        self.state.write(),
+                    )
+                    .await
+                    {
+                        Ok(guard) => guard,
+                        Err(_) => {
+                            let msg = "recovery deadline expired acquiring state write lock for candidate publication".to_string();
+                            tracing::warn!(generation = report.generation, attempt = attempt_idx, err = %msg, "recovery deadline expired");
+                            stop_reason = EpisodeStopReason::Timeout(msg);
+                            break;
+                        }
+                    };
+
                     if state_guard.config.revision != snapshot_revision {
                         tracing::warn!(
                             expected = snapshot_revision,
                             current = state_guard.config.revision,
                             "recovery candidate rejected due to stale config revision during attempt"
                         );
-                        tokio::spawn(async move {
-                            let _ =
-                                tokio::time::timeout(Duration::from_secs(2), new_session.close())
-                                    .await;
-                        });
                         last_provider_error = Some(RealtimeError::config("stale config revision"));
                         continue;
                     }
@@ -580,6 +645,8 @@ impl RecoverySupervisor {
                     state_guard.status = TransportStatus::Healthy;
 
                     let _ = self.generation_tx.send(next_gen);
+
+                    candidate_guard.0.take();
 
                     if let Some(old) = old_session {
                         tokio::spawn(async move {
@@ -1485,6 +1552,69 @@ mod tests {
             !err_msg.contains("recovery exhausted"),
             "Fatal on 3rd attempt should NOT be formatted as ordinary exhaustion, got: {}",
             err_msg
+        );
+    }
+
+    #[tokio::test]
+    async fn test_deadline_expiry_during_snapshot_launches_zero_attempts() {
+        struct CountingRecovery {
+            recover_count: Arc<AtomicUsize>,
+        }
+
+        #[async_trait]
+        impl RealtimeRecovery for CountingRecovery {
+            fn classify(&self, _cause: &RecoveryCause) -> RecoveryDisposition {
+                RecoveryDisposition::Recoverable
+            }
+
+            async fn recover(&self, _context: RecoveryContext<'_>) -> Result<RecoveredSession> {
+                self.recover_count.fetch_add(1, Ordering::SeqCst);
+                Err(RealtimeError::ConnectionError("should not be called".to_string()))
+            }
+        }
+
+        let recover_count = Arc::new(AtomicUsize::new(0));
+        let mock_rec = Arc::new(CountingRecovery { recover_count: Arc::clone(&recover_count) });
+
+        let initial_session = Arc::new(MockSession {
+            id: "gen-0".to_string(),
+            recovery: Some(Arc::clone(&mock_rec) as Arc<dyn RealtimeRecovery>),
+        });
+
+        let policy = RecoveryPolicy::default()
+            .with_max_attempts(NonZeroU32::new(3).unwrap())
+            .with_deadline(Duration::from_millis(50));
+
+        let config = Arc::new(tokio::sync::RwLock::new(crate::config::RealtimeConfig::default()));
+        let supervisor =
+            Arc::new(RecoverySupervisor::with_initial_session(policy, config, initial_session));
+
+        let sup_clone = Arc::clone(&supervisor);
+        let write_guard = sup_clone.state.write().await;
+
+        let report = FailureReport { generation: 0, cause: RecoveryCause::UnexpectedEof };
+
+        let res = sup_clone.report_failure(report).await;
+
+        drop(write_guard);
+
+        assert!(res.is_err());
+        let err = res.unwrap_err();
+        match err {
+            RealtimeError::Timeout(ref msg) => {
+                assert!(
+                    msg.contains("deadline expired acquiring state read snapshot"),
+                    "Expected snapshot timeout message, got: {}",
+                    msg
+                );
+            }
+            other => panic!("expected RealtimeError::Timeout, got {:?}", other),
+        }
+
+        assert_eq!(
+            recover_count.load(Ordering::SeqCst),
+            0,
+            "Zero provider attempts must be launched"
         );
     }
 
