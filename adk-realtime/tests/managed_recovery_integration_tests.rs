@@ -501,13 +501,17 @@ async fn test_cancellation_after_candidate_ready_cleans_unpublished_candidate() 
     let candidate_session =
         Arc::new(MockRecoverySession::new("candidate", candidate_counters.clone()));
 
-    struct StaleCandidateRecovery {
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+    let pause_notify = Arc::new(tokio::sync::Notify::new());
+
+    struct SynchronizedCandidateRecovery {
         candidate: Arc<MockRecoverySession>,
-        runner_handle: Arc<parking_lot::Mutex<Option<Arc<RealtimeRunner>>>>,
+        ready_tx: parking_lot::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+        pause_notify: Arc<tokio::sync::Notify>,
     }
 
     #[async_trait]
-    impl RealtimeRecovery for StaleCandidateRecovery {
+    impl RealtimeRecovery for SynchronizedCandidateRecovery {
         fn classify(&self, _cause: &RecoveryCause) -> RecoveryDisposition {
             RecoveryDisposition::Recoverable
         }
@@ -516,37 +520,60 @@ async fn test_cancellation_after_candidate_ready_cleans_unpublished_candidate() 
             &self,
             _context: adk_realtime::recovery::RecoveryContext<'_>,
         ) -> Result<RecoveredSession> {
-            let runner_opt = self.runner_handle.lock().clone();
-            if let Some(runner) = runner_opt {
-                // Prepend instruction context to update config revision atomically on supervisor
-                runner.prepend_instruction_context("context block").await;
+            if let Some(tx) = self.ready_tx.lock().take() {
+                let _ = tx.send(());
             }
+            self.pause_notify.notified().await;
             Ok(RecoveredSession::new(self.candidate.clone(), RecoveryContinuity::Resumed))
         }
     }
 
-    let runner_slot = Arc::new(parking_lot::Mutex::new(None));
-    let mock_rec = Arc::new(StaleCandidateRecovery {
+    let mock_rec = Arc::new(SynchronizedCandidateRecovery {
         candidate: candidate_session,
-        runner_handle: runner_slot.clone(),
+        ready_tx: parking_lot::Mutex::new(Some(ready_tx)),
+        pause_notify: pause_notify.clone(),
     });
 
     let mut initial_session = MockRecoverySession::with_recovery("gen-0", counters, mock_rec);
     initial_session.send_fails = true;
 
     let runner = Arc::new(RealtimeRunner::builder().model(Arc::new(DummyModel)).build().unwrap());
-    *runner_slot.lock() = Some(runner.clone());
-
     let _ = runner.set_initial_session(Arc::new(initial_session)).await.unwrap();
 
-    let err = runner.send_text("trigger recovery").await.unwrap_err();
-    assert_eq!(err.delivery_certainty(), Some(DeliveryCertainty::Indeterminate));
+    let runner_clone = runner.clone();
+    let recovery_task = tokio::spawn(async move {
+        let _ = runner_clone.send_text("trigger recovery").await;
+    });
+
+    ready_rx.await.expect("recover() should reach candidate-ready");
+
+    let runner_for_lock = runner.clone();
+    let release_lock = Arc::new(tokio::sync::Notify::new());
+    let release_lock_clone = release_lock.clone();
+
+    let lock_task = tokio::spawn(async move {
+        runner_for_lock.prepend_instruction_context("blocking lock").await;
+        release_lock_clone.notified().await;
+    });
+
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    pause_notify.notify_one();
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    recovery_task.abort();
+    let _ = recovery_task.await;
+
+    release_lock.notify_one();
+    let _ = lock_task.await;
 
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    assert!(
-        candidate_counters.close_calls.load(Ordering::SeqCst) >= 1,
-        "Unpublished candidate session must be closed on rejection or cancellation"
+    assert_eq!(runner.session_id().await.as_deref(), Some("gen-0"));
+    assert_eq!(
+        candidate_counters.close_calls.load(Ordering::SeqCst),
+        1,
+        "Unpublished candidate session must be closed on cancellation"
     );
 }
 

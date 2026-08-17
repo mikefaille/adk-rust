@@ -339,6 +339,7 @@ impl RealtimeRunnerBuilder {
             supervisor,
             state: Arc::new(RwLock::new(RunnerState::Idle)),
             pending_tool_response: AtomicBool::new(false),
+            tool_output_failed: Arc::new(AtomicBool::new(false)),
             tool_permits: Arc::new(tokio::sync::Semaphore::new(max_concurrent_tools)),
             outstanding_tools: Arc::new(AtomicUsize::new(0)),
             response_closed_awaiting_tools: Arc::new(AtomicBool::new(false)),
@@ -362,6 +363,7 @@ pub struct RealtimeRunner {
     supervisor: Arc<RecoverySupervisor>,
     state: Arc<RwLock<RunnerState>>,
     pending_tool_response: AtomicBool,
+    tool_output_failed: Arc<AtomicBool>,
     tool_permits: Arc<tokio::sync::Semaphore>,
     outstanding_tools: Arc<AtomicUsize>,
     response_closed_awaiting_tools: Arc<AtomicBool>,
@@ -459,7 +461,7 @@ impl RealtimeRunner {
     ///
     /// `ClientEvent::UpdateSession` events are intercepted and merged into the canonical
     /// configuration revision state using [`RealtimeRunner::update_session`]. All other events
-    /// pass through the managed write boundary [`invoke_write`](Self::invoke_write).
+    /// pass through the managed write boundary `invoke_write`.
     pub async fn send_client_event(&self, event: crate::events::ClientEvent) -> Result<()> {
         match event {
             crate::events::ClientEvent::UpdateSession { instructions, tools } => {
@@ -743,7 +745,12 @@ impl RealtimeRunner {
             return Ok(());
         }
         let response = ToolResponse { call_id: call_id.to_string(), output };
-        self.invoke_write(|s| async move { s.send_tool_output(response).await }).await?;
+        if let Err(e) =
+            self.invoke_write(|s| async move { s.send_tool_output(response).await }).await
+        {
+            self.tool_output_failed.store(true, Ordering::Release);
+            return Err(e);
+        }
         self.pending_tool_response.store(true, Ordering::Release);
         Ok(())
     }
@@ -1134,7 +1141,12 @@ impl RealtimeRunner {
             });
             if self.runner_config.auto_respond_tools {
                 let response = ToolResponse { call_id: call_id.to_string(), output: result };
-                self.invoke_write(|s| async move { s.send_tool_output(response).await }).await?;
+                if let Err(e) =
+                    self.invoke_write(|s| async move { s.send_tool_output(response).await }).await
+                {
+                    self.tool_output_failed.store(true, Ordering::Release);
+                    return Err(e);
+                }
                 self.pending_tool_response.store(true, Ordering::Release);
             }
             return Ok(());
@@ -1191,7 +1203,12 @@ impl RealtimeRunner {
 
         if self.runner_config.auto_respond_tools {
             let response = ToolResponse { call_id: call_id.to_string(), output: result };
-            self.invoke_write(|s| async move { s.send_tool_output(response).await }).await?;
+            if let Err(e) =
+                self.invoke_write(|s| async move { s.send_tool_output(response).await }).await
+            {
+                self.tool_output_failed.store(true, Ordering::Release);
+                return Err(e);
+            }
             self.pending_tool_response.store(true, Ordering::Release);
         }
 
@@ -1227,6 +1244,14 @@ impl RealtimeRunner {
     pub async fn respond_after_tools(&self) -> Result<()> {
         if self.outstanding_tools.load(Ordering::Acquire) > 0 {
             self.response_closed_awaiting_tools.store(true, Ordering::Release);
+            return Ok(());
+        }
+
+        if self.tool_output_failed.swap(false, Ordering::AcqRel) {
+            tracing::warn!(
+                "Tool output delivery failed during turn; suppressing automatic follow-up response creation."
+            );
+            self.pending_tool_response.store(false, Ordering::Release);
             return Ok(());
         }
 
@@ -1405,6 +1430,107 @@ mod runner_tests {
 
         assert_eq!(counts.raw_audio.load(Ordering::SeqCst), 0);
         assert_eq!(counts.base64_audio.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn mixed_success_concurrent_tool_outputs_suppresses_create_response() {
+        struct SelectiveFailingSession {
+            counts: Arc<Counts>,
+            events: parking_lot::Mutex<std::collections::VecDeque<ServerEvent>>,
+        }
+
+        #[async_trait]
+        impl RealtimeSession for SelectiveFailingSession {
+            fn session_id(&self) -> &str {
+                "failing-tool-output-session"
+            }
+            fn is_connected(&self) -> bool {
+                true
+            }
+            async fn send_audio(&self, _audio: &AudioChunk) -> Result<()> {
+                Ok(())
+            }
+            async fn send_audio_base64(&self, _audio: &str) -> Result<()> {
+                Ok(())
+            }
+            async fn send_text(&self, _text: &str) -> Result<()> {
+                Ok(())
+            }
+            async fn send_tool_response(&self, _response: ToolResponse) -> Result<()> {
+                Ok(())
+            }
+            async fn send_tool_output(&self, response: ToolResponse) -> Result<()> {
+                self.counts.tool_output.fetch_add(1, Ordering::SeqCst);
+                if response.call_id == "c2" {
+                    Err(RealtimeError::connection("simulated output delivery failure for c2"))
+                } else {
+                    Ok(())
+                }
+            }
+            async fn commit_audio(&self) -> Result<()> {
+                Ok(())
+            }
+            async fn clear_audio(&self) -> Result<()> {
+                Ok(())
+            }
+            async fn create_response(&self) -> Result<()> {
+                self.counts.create_response.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+            async fn interrupt(&self) -> Result<()> {
+                Ok(())
+            }
+            async fn send_event(&self, _event: ClientEvent) -> Result<()> {
+                Ok(())
+            }
+            async fn next_event(&self) -> Option<Result<ServerEvent>> {
+                self.events.lock().pop_front().map(Ok)
+            }
+            fn events(
+                &self,
+            ) -> Pin<Box<dyn futures::Stream<Item = Result<ServerEvent>> + Send + '_>> {
+                Box::pin(futures::stream::empty())
+            }
+            async fn close(&self) -> Result<()> {
+                Ok(())
+            }
+            async fn mutate_context(
+                &self,
+                _config: RealtimeConfig,
+            ) -> Result<ContextMutationOutcome> {
+                Ok(ContextMutationOutcome::Applied)
+            }
+        }
+
+        let counts = Arc::new(Counts::default());
+        let runner = RealtimeRunner::builder()
+            .model(Arc::new(MockModel) as BoxedModel)
+            .tool(tool_def("tool_a"), ok_tool())
+            .tool(tool_def("tool_b"), ok_tool())
+            .build()
+            .unwrap();
+
+        let session = Arc::new(SelectiveFailingSession {
+            counts: counts.clone(),
+            events: parking_lot::Mutex::new(
+                vec![function_call("c1", "tool_a"), function_call("c2", "tool_b"), response_done()]
+                    .into(),
+            ),
+        });
+
+        let _ = runner.set_initial_session(session as Arc<dyn RealtimeSession>).await.unwrap();
+        let _ = runner.run().await;
+
+        assert_eq!(
+            counts.tool_output.load(Ordering::SeqCst),
+            2,
+            "both tool outputs were attempted"
+        );
+        assert_eq!(
+            counts.create_response.load(Ordering::SeqCst),
+            0,
+            "zero create_response sent when any output delivery fails"
+        );
     }
 
     #[tokio::test]
