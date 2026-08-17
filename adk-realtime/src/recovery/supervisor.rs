@@ -1590,6 +1590,158 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_candidate_ready_cancellation_cleans_unpublished_candidate_without_sleeps() {
+        let candidate_close_calls = Arc::new(AtomicUsize::new(0));
+
+        struct CandidateSession {
+            close_calls: Arc<AtomicUsize>,
+        }
+
+        #[async_trait]
+        impl RealtimeSession for CandidateSession {
+            fn session_id(&self) -> &str {
+                "candidate-session"
+            }
+            fn is_connected(&self) -> bool {
+                true
+            }
+            async fn send_audio(&self, _audio: &AudioChunk) -> Result<()> {
+                Ok(())
+            }
+            async fn send_audio_base64(&self, _audio_base64: &str) -> Result<()> {
+                Ok(())
+            }
+            async fn send_text(&self, _text: &str) -> Result<()> {
+                Ok(())
+            }
+            async fn send_tool_response(&self, _response: ToolResponse) -> Result<()> {
+                Ok(())
+            }
+            async fn commit_audio(&self) -> Result<()> {
+                Ok(())
+            }
+            async fn clear_audio(&self) -> Result<()> {
+                Ok(())
+            }
+            async fn create_response(&self) -> Result<()> {
+                Ok(())
+            }
+            async fn interrupt(&self) -> Result<()> {
+                Ok(())
+            }
+            async fn send_event(&self, _event: ClientEvent) -> Result<()> {
+                Ok(())
+            }
+            async fn next_event(&self) -> Option<Result<ServerEvent>> {
+                None
+            }
+            fn events(
+                &self,
+            ) -> std::pin::Pin<Box<dyn futures::Stream<Item = Result<ServerEvent>> + Send + '_>>
+            {
+                Box::pin(futures::stream::empty())
+            }
+            async fn close(&self) -> Result<()> {
+                self.close_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+            async fn mutate_context(
+                &self,
+                _config: crate::config::RealtimeConfig,
+            ) -> Result<crate::session::ContextMutationOutcome> {
+                Ok(crate::session::ContextMutationOutcome::Applied)
+            }
+        }
+
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        let pause_notify = Arc::new(tokio::sync::Notify::new());
+
+        struct ReadySignallingRecovery {
+            candidate_close_calls: Arc<AtomicUsize>,
+            ready_tx: parking_lot::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+            done_tx: parking_lot::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+            pause_notify: Arc<tokio::sync::Notify>,
+        }
+
+        #[async_trait]
+        impl RealtimeRecovery for ReadySignallingRecovery {
+            fn classify(&self, _cause: &RecoveryCause) -> RecoveryDisposition {
+                RecoveryDisposition::Recoverable
+            }
+
+            async fn recover(&self, _context: RecoveryContext<'_>) -> Result<RecoveredSession> {
+                let session =
+                    Arc::new(CandidateSession { close_calls: self.candidate_close_calls.clone() });
+                if let Some(tx) = self.ready_tx.lock().take() {
+                    let _ = tx.send(());
+                }
+                self.pause_notify.notified().await;
+                if let Some(tx) = self.done_tx.lock().take() {
+                    let _ = tx.send(());
+                }
+                Ok(RecoveredSession::new(session, RecoveryContinuity::Resumed))
+            }
+        }
+
+        let mock_rec = Arc::new(ReadySignallingRecovery {
+            candidate_close_calls: candidate_close_calls.clone(),
+            ready_tx: parking_lot::Mutex::new(Some(ready_tx)),
+            done_tx: parking_lot::Mutex::new(Some(done_tx)),
+            pause_notify: pause_notify.clone(),
+        });
+
+        let initial_session = Arc::new(MockSession {
+            id: "gen-0".to_string(),
+            recovery: Some(Arc::clone(&mock_rec) as Arc<dyn RealtimeRecovery>),
+        });
+
+        let policy = RecoveryPolicy::default();
+        let config = Arc::new(tokio::sync::RwLock::new(crate::config::RealtimeConfig::default()));
+        let supervisor =
+            Arc::new(RecoverySupervisor::with_initial_session(policy, config, initial_session));
+
+        let sup_task_clone = Arc::clone(&supervisor);
+        let report_task = tokio::spawn(async move {
+            let report = FailureReport { generation: 0, cause: RecoveryCause::UnexpectedEof };
+            sup_task_clone.report_failure(report).await
+        });
+
+        // 1. Wait until recover() prepares candidate and sends ready signal
+        ready_rx.await.expect("recover() should yield candidate ready");
+
+        // 2. Acquire supervisor state write lock to block report_failure at candidate publication
+        let sup_clone = Arc::clone(&supervisor);
+        let write_guard = sup_clone.state.write().await;
+
+        // 3. Unblock recover() so it completes
+        pause_notify.notify_one();
+
+        // 4. Wait until recover() finishes returning Ok(RecoveredSession), ensuring CandidateCleanupGuard is constructed in report_failure
+        done_rx.await.expect("recover() must complete returning candidate");
+
+        // 5. Abort report_failure task while it is blocked waiting for publication write lock
+        report_task.abort();
+        let _ = report_task.await;
+
+        // 6. Release supervisor state write lock
+        drop(write_guard);
+
+        // 7. Sleep briefly so CandidateCleanupGuard's spawned background close task finishes
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let sg_item = supervisor.get_active_generation().await.unwrap();
+        assert_eq!(sg_item.id, 0);
+        assert_eq!(sg_item.session.session_id(), "gen-0");
+
+        assert_eq!(
+            candidate_close_calls.load(Ordering::SeqCst),
+            1,
+            "Candidate session must be closed exactly once when report_failure is cancelled before publication"
+        );
+    }
+
+    #[tokio::test]
     async fn test_deadline_expiry_during_snapshot_launches_zero_attempts() {
         struct CountingRecovery {
             recover_count: Arc<AtomicUsize>,
