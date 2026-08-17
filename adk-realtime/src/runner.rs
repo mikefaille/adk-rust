@@ -867,7 +867,12 @@ impl RealtimeRunner {
                 tokio::select! {
                     biased;
                     Some(finished) = running_tools.next() => {
-                        let () = finished?;
+                        if let Err(e) = finished {
+                            self.event_handler.on_error(&e).await?;
+                            if !self.supervisor.is_connected().await {
+                                return Err(e);
+                            }
+                        }
                         continue;
                     }
                     _ = watcher.changed() => {
@@ -904,7 +909,12 @@ impl RealtimeRunner {
                 }
                 None => {
                     while let Some(finished) = running_tools.next().await {
-                        finished?;
+                        if let Err(e) = finished {
+                            self.event_handler.on_error(&e).await?;
+                            if !self.supervisor.is_connected().await {
+                                return Err(e);
+                            }
+                        }
                     }
                     let report = FailureReport {
                         generation: current_gen_id,
@@ -1024,6 +1034,7 @@ impl RealtimeRunner {
             }
             ServerEvent::ResponseCancelled { .. } => {
                 self.pending_tool_response.store(false, Ordering::Release);
+                self.tool_output_failed.store(false, Ordering::Release);
                 self.response_closed_awaiting_tools.store(false, Ordering::Release);
                 {
                     let mut state = self.state.write().await;

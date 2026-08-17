@@ -15,6 +15,7 @@ pub(crate) enum TransportStatus {
     #[default]
     Uninitialized,
     Healthy,
+    Recovering,
     Closed,
     Exhausted,
 }
@@ -86,7 +87,7 @@ impl std::fmt::Debug for RecoveryOutcome {
 /// The private recovery supervisor.
 pub(crate) struct RecoverySupervisor {
     policy: RecoveryPolicy,
-    state: tokio::sync::RwLock<SupervisorState>,
+    state: Arc<tokio::sync::RwLock<SupervisorState>>,
     replacement_lock: tokio::sync::Mutex<()>,
     generation_tx: tokio::sync::watch::Sender<u64>,
 }
@@ -100,13 +101,13 @@ impl RecoverySupervisor {
         let (generation_tx, _) = tokio::sync::watch::channel(0);
         Self {
             policy,
-            state: tokio::sync::RwLock::new(SupervisorState {
+            state: Arc::new(tokio::sync::RwLock::new(SupervisorState {
                 status: TransportStatus::Uninitialized,
                 generation: None,
                 next_generation_id: 0,
                 exhausted_generation: None,
                 config: ConfigSnapshot { config: initial_config, revision: 0 },
-            }),
+            })),
             replacement_lock: tokio::sync::Mutex::new(()),
             generation_tx,
         }
@@ -126,13 +127,13 @@ impl RecoverySupervisor {
         let (generation_tx, _) = tokio::sync::watch::channel(0);
         Self {
             policy,
-            state: tokio::sync::RwLock::new(SupervisorState {
+            state: Arc::new(tokio::sync::RwLock::new(SupervisorState {
                 status: TransportStatus::Healthy,
                 generation: Some(SessionGeneration { id: 0, session: initial_session }),
                 next_generation_id: 1,
                 exhausted_generation: None,
                 config: ConfigSnapshot { config: initial_cfg, revision: 0 },
-            }),
+            })),
             replacement_lock: tokio::sync::Mutex::new(()),
             generation_tx,
         }
@@ -185,7 +186,9 @@ impl RecoverySupervisor {
         match state.status {
             TransportStatus::Closed => Err(RealtimeError::SessionClosed),
             TransportStatus::Exhausted => Err(RealtimeError::provider("session exhausted")),
-            TransportStatus::Uninitialized => Err(RealtimeError::NotConnected),
+            TransportStatus::Uninitialized | TransportStatus::Recovering => {
+                Err(RealtimeError::NotConnected)
+            }
             TransportStatus::Healthy => state.generation.clone().ok_or(RealtimeError::NotConnected),
         }
     }
@@ -196,7 +199,9 @@ impl RecoverySupervisor {
         match state.status {
             TransportStatus::Closed => Err(RealtimeError::SessionClosed),
             TransportStatus::Exhausted => Err(RealtimeError::provider("session exhausted")),
-            TransportStatus::Uninitialized => Err(RealtimeError::NotConnected),
+            TransportStatus::Uninitialized | TransportStatus::Recovering => {
+                Err(RealtimeError::NotConnected)
+            }
             TransportStatus::Healthy => state.generation.clone().ok_or(RealtimeError::NotConnected),
         }
     }
@@ -410,15 +415,18 @@ impl RecoverySupervisor {
             }
         };
 
-        // 3. Double-check state now that we hold the lock
+        // 3. Double-check state now that we hold the lock and transition to Recovering
         {
-            let state_guard = match tokio::time::timeout_at(deadline_instant, self.state.read())
-                .await
+            let mut state_guard = match tokio::time::timeout_at(
+                deadline_instant,
+                self.state.write(),
+            )
+            .await
             {
                 Ok(guard) => guard,
                 Err(_) => {
                     let err = RealtimeError::Timeout(
-                        "deadline expired acquiring state read snapshot".to_string(),
+                        "deadline expired acquiring state write snapshot".to_string(),
                     );
                     tracing::warn!(generation = report.generation, err = %err, "recovery deadline expired");
                     return Err(err);
@@ -455,7 +463,31 @@ impl RecoverySupervisor {
                     return Ok(RecoveryOutcome::Exhausted);
                 }
             }
+
+            state_guard.status = TransportStatus::Recovering;
         }
+
+        struct RecoveryEpisodeGuard {
+            state: Arc<tokio::sync::RwLock<SupervisorState>>,
+            disarmed: bool,
+        }
+        impl Drop for RecoveryEpisodeGuard {
+            fn drop(&mut self) {
+                if !self.disarmed {
+                    let state_lock = Arc::clone(&self.state);
+                    tokio::spawn(async move {
+                        let mut state = state_lock.write().await;
+                        if state.status == TransportStatus::Recovering && state.generation.is_some()
+                        {
+                            state.status = TransportStatus::Healthy;
+                        }
+                    });
+                }
+            }
+        }
+
+        let mut episode_guard =
+            RecoveryEpisodeGuard { state: Arc::clone(&self.state), disarmed: false };
 
         // 4. Determine recovery implementation
         let session_to_recover = {
@@ -661,6 +693,7 @@ impl RecoverySupervisor {
                         "recovered session published"
                     );
 
+                    episode_guard.disarmed = true;
                     return Ok(RecoveryOutcome::Recovered { session: new_session, continuity });
                 }
                 Err(err) => {
@@ -759,6 +792,7 @@ impl RecoverySupervisor {
             "recovery exhausted or fatal"
         );
 
+        episode_guard.disarmed = true;
         let mut state_guard = self.state.write().await;
         state_guard.exhausted_generation = Some(report.generation);
         state_guard.status = TransportStatus::Exhausted;

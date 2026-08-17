@@ -254,6 +254,74 @@ impl RealtimeRecovery for RecoveringProvider {
 }
 
 #[tokio::test]
+async fn test_recovery_admission_rejects_concurrent_writes_as_not_attempted() {
+    let counters = Arc::new(TestCounters::default());
+    let gen1_counters = Arc::new(TestCounters::default());
+
+    let (active_tx, active_rx) = tokio::sync::oneshot::channel();
+    let unblock_notify = Arc::new(tokio::sync::Notify::new());
+
+    struct ActiveRecoveryProvider {
+        recovered_session: Arc<dyn RealtimeSession>,
+        active_tx: parking_lot::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+        unblock_notify: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait]
+    impl RealtimeRecovery for ActiveRecoveryProvider {
+        fn classify(&self, _cause: &RecoveryCause) -> RecoveryDisposition {
+            RecoveryDisposition::Recoverable
+        }
+
+        async fn recover(
+            &self,
+            _context: adk_realtime::recovery::RecoveryContext<'_>,
+        ) -> Result<RecoveredSession> {
+            if let Some(tx) = self.active_tx.lock().take() {
+                let _ = tx.send(());
+            }
+            self.unblock_notify.notified().await;
+            Ok(RecoveredSession::new(
+                self.recovered_session.clone(),
+                RecoveryContinuity::Reconnected,
+            ))
+        }
+    }
+
+    let gen1_session = Arc::new(MockRecoverySession::new("gen-1-recovered", gen1_counters.clone()));
+    let recovery_provider = Arc::new(ActiveRecoveryProvider {
+        recovered_session: gen1_session,
+        active_tx: parking_lot::Mutex::new(Some(active_tx)),
+        unblock_notify: unblock_notify.clone(),
+    });
+
+    let mut gen0_session =
+        MockRecoverySession::with_recovery("gen-0", counters.clone(), recovery_provider);
+    gen0_session.send_fails = true;
+
+    let runner = Arc::new(RealtimeRunner::builder().model(Arc::new(DummyModel)).build().unwrap());
+    let _ = runner.set_initial_session(Arc::new(gen0_session)).await.unwrap();
+
+    let runner_clone = runner.clone();
+    let write1_task = tokio::spawn(async move { runner_clone.send_text("write 1 on gen 0").await });
+
+    active_rx.await.expect("recovery episode must become active");
+
+    let write2_err = runner.send_text("write 2 during recovery").await.unwrap_err();
+    assert_eq!(write2_err.delivery_certainty(), Some(DeliveryCertainty::NotAttempted));
+
+    assert_eq!(counters.raw_sends.load(Ordering::SeqCst), 1);
+
+    unblock_notify.notify_one();
+    let _ = write1_task.await;
+
+    assert_eq!(runner.session_id().await.as_deref(), Some("gen-1-recovered"));
+
+    runner.send_text("write 3 on gen 1").await.unwrap();
+    assert_eq!(gen1_counters.raw_sends.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
 async fn test_raw_write_failure_triggers_supervisor_recovery() {
     let runner = RealtimeRunner::builder().model(Arc::new(DummyModel)).build().unwrap();
     let counters = Arc::new(TestCounters::default());
