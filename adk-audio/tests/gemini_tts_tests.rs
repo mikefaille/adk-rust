@@ -195,6 +195,86 @@ async fn test_gemini_tts_metadata_mismatch_error() {
 }
 
 #[tokio::test]
+async fn test_gemini_tts_l16_sample_split_across_deltas() {
+    let mock_server = MockServer::start().await;
+
+    // A 16-bit big-endian PCM sample [0x01, 0x02] -> swap to LE [0x02, 0x01]
+    // A second sample [0x03, 0x04] -> swap to LE [0x04, 0x03]
+    // Split 3 bytes into delta 1 ([0x01, 0x02, 0x03]) and 1 byte into delta 2 ([0x04])
+    let b64_delta1 =
+        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, [0x01, 0x02, 0x03]);
+    let b64_delta2 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, [0x04]);
+
+    let sse_body = format!(
+        "data: {{\"event_type\":\"step.delta\",\"index\":0,\"delta\":{{\"type\":\"audio\",\"data\":\"{}\",\"mime_type\":\"audio/l16;rate=24000\",\"sample_rate\":24000,\"channels\":1}}}}\n\n\
+         data: {{\"event_type\":\"step.delta\",\"index\":0,\"delta\":{{\"type\":\"audio\",\"data\":\"{}\",\"mime_type\":\"audio/l16;rate=24000\",\"sample_rate\":24000,\"channels\":1}}}}\n\n\
+         data: {{\"event_type\":\"interaction.completed\",\"interaction\":{{\"id\":\"int_123\",\"status\":\"completed\"}}}}\n\n",
+        b64_delta1, b64_delta2
+    );
+
+    Mock::given(method("POST"))
+        .and(path("/interactions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(sse_body)
+                .append_header("content-type", "text/event-stream"),
+        )
+        .mount(&mock_server)
+        .await;
+
+    let tts = test_tts_with_mock_url(format!("{}/interactions", mock_server.uri()));
+    let request = TtsRequest { text: "Split L16 test".to_string(), ..Default::default() };
+
+    let mut stream = tts.synthesize_stream(&request).await.expect("stream creation failed");
+
+    let f1 = stream.next().await.unwrap().unwrap();
+    // Delta 1 had 3 bytes: 1 sample emitted (bytes [0x02, 0x01]), 1 byte held in remainder
+    assert_eq!(f1.data.as_ref(), &[0x02, 0x01]);
+
+    let f2 = stream.next().await.unwrap().unwrap();
+    // Delta 2 has 1 byte [0x04]: combined with remainder [0x03, 0x04] -> swapped to [0x04, 0x03]
+    assert_eq!(f2.data.as_ref(), &[0x04, 0x03]);
+}
+
+#[tokio::test]
+async fn test_gemini_tts_dangling_l16_byte_error() {
+    let mock_server = MockServer::start().await;
+
+    // Odd number of bytes (3 bytes = 1 sample + 1 dangling byte)
+    let b64_delta =
+        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, [0x01, 0x02, 0x03]);
+
+    let sse_body = format!(
+        "data: {{\"event_type\":\"step.delta\",\"index\":0,\"delta\":{{\"type\":\"audio\",\"data\":\"{}\",\"mime_type\":\"audio/l16;rate=24000\",\"sample_rate\":24000,\"channels\":1}}}}\n\n\
+         data: {{\"event_type\":\"interaction.completed\",\"interaction\":{{\"id\":\"int_123\",\"status\":\"completed\"}}}}\n\n",
+        b64_delta
+    );
+
+    Mock::given(method("POST"))
+        .and(path("/interactions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(sse_body)
+                .append_header("content-type", "text/event-stream"),
+        )
+        .mount(&mock_server)
+        .await;
+
+    let tts = test_tts_with_mock_url(format!("{}/interactions", mock_server.uri()));
+    let request = TtsRequest { text: "Dangling L16 byte test".to_string(), ..Default::default() };
+
+    let mut stream = tts.synthesize_stream(&request).await.expect("stream creation failed");
+
+    let f1 = stream.next().await.unwrap().unwrap();
+    assert_eq!(f1.data.as_ref(), &[0x02, 0x01]);
+
+    let err_item = stream.next().await.unwrap();
+    assert!(err_item.is_err(), "Dangling L16 byte at completion must fail");
+    let err_msg = err_item.err().unwrap().to_string();
+    assert!(err_msg.contains("dangling L16 sample byte"), "Error message was: {}", err_msg);
+}
+
+#[tokio::test]
 async fn test_gemini_tts_malformed_base64_error() {
     let mock_server = MockServer::start().await;
 

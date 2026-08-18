@@ -44,7 +44,6 @@ dependencies = [
  "bytemuck",
  "bytes",
  "cpal",
- "eventsource-stream",
  "futures",
  "pin-project-lite",
  "reqwest",
@@ -54,6 +53,7 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
  "tracing",
+ "url",
 ]
 
 [[package]]

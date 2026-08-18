@@ -73,7 +73,6 @@ dependencies = [
  "base64",
  "bytemuck",
  "bytes",
- "eventsource-stream",
  "futures",
  "pin-project-lite",
  "reqwest 0.12.28",
@@ -83,6 +82,7 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
  "tracing",
+ "url",
 ]
 
 [[package]]

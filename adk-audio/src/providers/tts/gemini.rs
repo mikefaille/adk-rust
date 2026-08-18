@@ -404,6 +404,7 @@ impl TtsProvider for GeminiTts {
             let mut expected_sample_rate: Option<u32> = None;
             let mut expected_channels: Option<u8> = None;
             let mut completed_successfully = false;
+            let mut l16_remainder: Option<u8> = None;
 
             while let Some(event_res) = event_stream.next().await {
                 let sse_event = event_res.map_err(|e| AudioError::Tts {
@@ -451,16 +452,24 @@ impl TtsProvider for GeminiTts {
                                 continue;
                             }
 
-                            // Normalize audio/l16 (big-endian 16-bit PCM) to canonical PCM16 Little-Endian
+                            // Handle audio/l16 big-endian PCM framing across deltas
                             if mime_type.as_deref().is_some_and(|m| m.starts_with("audio/l16")) {
+                                if let Some(rem) = l16_remainder.take() {
+                                    decoded.insert(0, rem);
+                                }
+                                if decoded.len() % 2 != 0 {
+                                    l16_remainder = decoded.pop();
+                                }
                                 for chunk in decoded.chunks_exact_mut(2) {
                                     chunk.swap(0, 1);
                                 }
                             }
 
-                            audio_chunks_received += 1;
-                            let frame = AudioFrame::new(Bytes::from(decoded), sample_rate_val, channels_val);
-                            yield frame;
+                            if !decoded.is_empty() {
+                                audio_chunks_received += 1;
+                                let frame = AudioFrame::new(Bytes::from(decoded), sample_rate_val, channels_val);
+                                yield frame;
+                            }
                         }
                     }
                     InteractionSseEvent::Error { error, .. } => {
@@ -487,6 +496,13 @@ impl TtsProvider for GeminiTts {
                 Err(AudioError::Tts {
                     provider: "gemini".into(),
                     message: "Stream terminated abruptly without interaction.completed event".into(),
+                })?;
+            }
+
+            if l16_remainder.is_some() {
+                Err(AudioError::Tts {
+                    provider: "gemini".into(),
+                    message: "Stream completed with dangling L16 sample byte".into(),
                 })?;
             }
 
