@@ -43,8 +43,8 @@ fn test_challenger_tcp_reset_error_classification_exhaustive() {
         "econnreset occurred on stream",
         "Broken pipe on socket write",
         "broken pipe error during flush",
-        "Connection closed abruptly by remote endpoint",
-        "Receive error: connection reset",
+        "connection aborted by local host",
+        "ECONNABORTED in transport",
     ];
 
     for msg in reset_strings {
@@ -78,7 +78,7 @@ fn test_challenger_tcp_reset_error_classification_exhaustive() {
     ));
     assert!(io_aborted.is_connection_reset());
 
-    // 3. Non-reset error variants
+    // 3. Non-reset error variants & generic/protocol/provider text
     let non_reset_errors = vec![
         RealtimeError::ConfigError("Invalid model ID".into()),
         RealtimeError::AuthError("Unauthorized 401".into()),
@@ -87,10 +87,22 @@ fn test_challenger_tcp_reset_error_classification_exhaustive() {
         RealtimeError::AudioFormatError("Unsupported sample rate".into()),
         RealtimeError::ToolError("Execution panic".into()),
         RealtimeError::ServerError { code: "400".into(), message: "Bad request".into() },
+        RealtimeError::ServerError {
+            code: "429".into(),
+            message: "RESOURCE_EXHAUSTED / Quota exceeded".into(),
+        },
         RealtimeError::Timeout("Request timed out".into()),
         RealtimeError::OpusCodecError("Frame corruption".into()),
         RealtimeError::WebRTCError("ICE disconnect".into()),
         RealtimeError::LiveKitError("Room disconnected".into()),
+        // Broad string phrases in ConnectionError / MessageError without reset evidence
+        RealtimeError::ConnectionError("connection closed gracefully".into()),
+        RealtimeError::MessageError("receive error on websocket channel".into()),
+        // Protocol and Provider errors must NEVER be classified as transport resets merely from strings
+        RealtimeError::Protocol("connection reset by peer in payload".into()),
+        RealtimeError::Protocol("broken pipe in protocol framing".into()),
+        RealtimeError::ProviderError("connection reset reported by provider".into()),
+        RealtimeError::ProviderError("broken pipe on provider session".into()),
     ];
 
     for err in &non_reset_errors {
