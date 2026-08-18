@@ -507,6 +507,54 @@ async fn test_event_queue_cancellation_safety_zero_lost_messages() {
 }
 
 #[tokio::test]
+async fn test_empty_event_translation_loop_does_not_signal_eof() {
+    let (addr, _s) = spawn_mock_ws_server(|mut ws| async move {
+        let _setup = ws.next().await;
+        // 1. Send setupComplete
+        let setup_complete = json!({ "setupComplete": {} });
+        ws.send(Message::Text(setup_complete.to_string().into())).await.unwrap();
+
+        // 2. Send non-resumable sessionResumptionUpdate (translates to Ok(vec![]))
+        let non_resumable = json!({
+            "sessionResumptionUpdate": {
+                "newHandle": "unusable-handle",
+                "resumable": false
+            }
+        });
+        ws.send(Message::Text(non_resumable.to_string().into())).await.unwrap();
+
+        // 3. Send subsequent normal event
+        let content = json!({
+            "serverContent": {
+                "inputTranscription": { "text": "Subsequent Hello" }
+            }
+        });
+        ws.send(Message::Text(content.to_string().into())).await.unwrap();
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    })
+    .await;
+
+    let backend = GeminiLiveBackend::studio("test-key").with_endpoint_url(format!("ws://{}", addr));
+    let config = RealtimeConfig::default();
+
+    let session =
+        GeminiRealtimeSession::connect(backend, "models/gemini-live", config).await.unwrap();
+
+    // 1. Consume setupComplete
+    let ev1 = session.next_event().await.unwrap().unwrap();
+    assert!(matches!(ev1, ServerEvent::SessionCreated { .. }));
+
+    // 2. Next call must NOT return None / EOF on the non-resumable update frame, but loop and return the subsequent content event!
+    let ev2 =
+        session.next_event().await.expect("Must not return None on empty control frame").unwrap();
+    if let ServerEvent::InputTranscriptDelta { delta, .. } = ev2 {
+        assert_eq!(delta, "Subsequent Hello");
+    } else {
+        panic!("Expected InputTranscriptDelta 'Subsequent Hello', got {:?}", ev2);
+    }
+}
+
+#[tokio::test]
 async fn test_gemini_backend_studio_and_vertex() {
     let b1 = GeminiLiveBackend::studio("my-key").with_endpoint_url("wss://example.com/ws");
     match b1 {

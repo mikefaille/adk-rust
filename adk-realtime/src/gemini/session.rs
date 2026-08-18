@@ -319,7 +319,7 @@ impl GeminiRealtimeSession {
     }
 
     /// Constructs a mock `GeminiRealtimeSession` for testing connection lifecycle & recovery.
-    #[cfg(any(test, feature = "integration", feature = "gemini"))]
+    #[cfg(any(test, feature = "integration"))]
     pub fn new_for_test(
         session_id: String,
         reconnect_url: String,
@@ -673,72 +673,82 @@ impl GeminiRealtimeSession {
 
         let mut receiver = self.receiver.lock().await;
 
-        match receiver.next().await {
-            Some(Ok(Message::Text(text))) => match self.translate_gemini_event(&text) {
-                Ok(events) => {
-                    let mut queue = self.event_queue.lock();
-                    let mut iter = events.into_iter();
-                    let first = iter.next();
-                    for event in iter {
-                        queue.push_back(event);
-                    }
-                    first.map(Ok)
-                }
-                Err(e) => Some(Err(e)),
-            },
-            Some(Ok(Message::Binary(bytes))) => match String::from_utf8(bytes.to_vec()) {
-                Ok(text) => match self.translate_gemini_event(&text) {
+        loop {
+            match receiver.next().await {
+                Some(Ok(Message::Text(text))) => match self.translate_gemini_event(&text) {
                     Ok(events) => {
                         let mut queue = self.event_queue.lock();
                         let mut iter = events.into_iter();
-                        let first = iter.next();
-                        for event in iter {
-                            queue.push_back(event);
+                        if let Some(first) = iter.next() {
+                            for event in iter {
+                                queue.push_back(event);
+                            }
+                            return Some(Ok(first));
                         }
-                        first.map(Ok)
+                        // Control frame produced no public events (e.g. non-resumable SessionResumptionUpdate); continue reading
                     }
-                    Err(e) => Some(Err(e)),
+                    Err(e) => return Some(Err(e)),
                 },
-                Err(e) => Some(Err(RealtimeError::protocol(format!(
-                    "Invalid UTF-8 in binary message: {}",
-                    e
-                )))),
-            },
-            Some(Ok(Message::Close(close_frame))) => {
-                // Structured, because a server-initiated close and a dead
-                // transport both surface downstream as the same `None` and get
-                // the same terminal reason. The code and reason are the only
-                // thing distinguishing "the provider aborted an idle session"
-                // from "the network dropped", and `{:?}` on the whole frame
-                // buries both inside a Debug string nothing can filter on.
-                tracing::error!(
-                    close_code =
-                        close_frame.as_ref().map(|frame| u16::from(frame.code)).unwrap_or_default(),
-                    close_reason =
-                        close_frame.as_ref().map(|frame| frame.reason.as_ref()).unwrap_or(""),
-                    "WebSocket closed by server"
-                );
-                *self.last_disconnect.lock() = Some(crate::session::DisconnectReason {
-                    code: close_frame.as_ref().map(|frame| u16::from(frame.code)),
-                    reason: close_frame
-                        .as_ref()
-                        .map(|frame| frame.reason.to_string())
-                        .unwrap_or_default(),
-                });
-                self.connected.store(false, Ordering::SeqCst);
-                None
-            }
-            Some(Ok(msg)) => {
-                tracing::warn!("Received unhandled tungstenite message: {:?}", msg);
-                Some(Ok(ServerEvent::Unknown))
-            }
-            Some(Err(e)) => {
-                self.connected.store(false, Ordering::SeqCst);
-                Some(Err(RealtimeError::connection(format!("Receive error: {}", e))))
-            }
-            None => {
-                self.connected.store(false, Ordering::SeqCst);
-                None
+                Some(Ok(Message::Binary(bytes))) => match String::from_utf8(bytes.to_vec()) {
+                    Ok(text) => match self.translate_gemini_event(&text) {
+                        Ok(events) => {
+                            let mut queue = self.event_queue.lock();
+                            let mut iter = events.into_iter();
+                            if let Some(first) = iter.next() {
+                                for event in iter {
+                                    queue.push_back(event);
+                                }
+                                return Some(Ok(first));
+                            }
+                            // Control frame produced no public events; continue reading
+                        }
+                        Err(e) => return Some(Err(e)),
+                    },
+                    Err(e) => {
+                        return Some(Err(RealtimeError::protocol(format!(
+                            "Invalid UTF-8 in binary message: {}",
+                            e
+                        ))));
+                    }
+                },
+                Some(Ok(Message::Close(close_frame))) => {
+                    // Structured, because a server-initiated close and a dead
+                    // transport both surface downstream as the same `None` and get
+                    // the same terminal reason. The code and reason are the only
+                    // thing distinguishing "the provider aborted an idle session"
+                    // from "the network dropped", and `{:?}` on the whole frame
+                    // buries both inside a Debug string nothing can filter on.
+                    tracing::error!(
+                        close_code = close_frame
+                            .as_ref()
+                            .map(|frame| u16::from(frame.code))
+                            .unwrap_or_default(),
+                        close_reason =
+                            close_frame.as_ref().map(|frame| frame.reason.as_ref()).unwrap_or(""),
+                        "WebSocket closed by server"
+                    );
+                    *self.last_disconnect.lock() = Some(crate::session::DisconnectReason {
+                        code: close_frame.as_ref().map(|frame| u16::from(frame.code)),
+                        reason: close_frame
+                            .as_ref()
+                            .map(|frame| frame.reason.to_string())
+                            .unwrap_or_default(),
+                    });
+                    self.connected.store(false, Ordering::SeqCst);
+                    return None;
+                }
+                Some(Ok(msg)) => {
+                    tracing::warn!("Received unhandled tungstenite message: {:?}", msg);
+                    return Some(Ok(ServerEvent::Unknown));
+                }
+                Some(Err(e)) => {
+                    self.connected.store(false, Ordering::SeqCst);
+                    return Some(Err(RealtimeError::connection(format!("Receive error: {}", e))));
+                }
+                None => {
+                    self.connected.store(false, Ordering::SeqCst);
+                    return None;
+                }
             }
         }
     }
