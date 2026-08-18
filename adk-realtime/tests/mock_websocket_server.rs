@@ -27,8 +27,10 @@ fn test_tcp_connection_reset_classification() {
     let reset_errors = vec![
         RealtimeError::ConnectionError("read tcp 127.0.0.1:443: connection reset by peer".into()),
         RealtimeError::MessageError("ECONNRESET: connection lost".into()),
-        RealtimeError::ProviderError("Broken pipe on socket write".into()),
-        RealtimeError::Protocol("Connection closed abruptly".into()),
+        RealtimeError::IoError(std::sync::Arc::new(std::io::Error::new(
+            std::io::ErrorKind::ConnectionReset,
+            "reset",
+        ))),
     ];
 
     for err in &reset_errors {
@@ -39,8 +41,245 @@ fn test_tcp_connection_reset_classification() {
         );
     }
 
-    let non_reset_err = RealtimeError::ConfigError("Invalid model ID".into());
-    assert!(!non_reset_err.is_connection_reset());
+    let non_reset_errs = vec![
+        RealtimeError::ConfigError("Invalid model ID".into()),
+        RealtimeError::ProviderError("Broken pipe on socket write".into()),
+        RealtimeError::Protocol("Connection closed abruptly".into()),
+    ];
+
+    for err in &non_reset_errs {
+        assert!(
+            !err.is_connection_reset(),
+            "Error {:?} should NOT be classified as connection reset",
+            err
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_gemini_recovery_transaction_lifecycle() {
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    use adk_realtime::recovery::{RecoveryCause, RecoveryContext};
+    use futures_util::{SinkExt, StreamExt};
+    use std::num::NonZeroU32;
+    use tokio::net::TcpListener;
+    use tokio_tungstenite::accept_async;
+    use tokio_tungstenite::tungstenite::Message;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let local_addr = listener.local_addr().unwrap();
+    let ws_url = format!("ws://{}", local_addr);
+
+    let server_task = tokio::spawn(async move {
+        // Active session connection 0
+        let (stream0, _) = listener.accept().await.unwrap();
+        let _ws0 = accept_async(stream0).await.unwrap();
+
+        // Candidate connection 1
+        let (stream1, _) = listener.accept().await.unwrap();
+        let mut ws1 = accept_async(stream1).await.unwrap();
+
+        // Verify setup frame is sent FIRST on candidate connection
+        let first_msg = ws1.next().await.unwrap().unwrap();
+        if let Message::Text(text) = first_msg {
+            let val: serde_json::Value = serde_json::from_str(&text).unwrap();
+            assert!(val.get("setup").is_some(), "Setup frame MUST be sent as first frame");
+            assert_eq!(val["setup"]["sessionResumption"]["handle"], "resume_token_123");
+        } else {
+            panic!("Expected text frame with setup");
+        }
+
+        // Send setupComplete with resumed: true
+        let setup_complete = json!({
+            "setupComplete": {
+                "resumed": true
+            }
+        })
+        .to_string();
+        ws1.send(Message::Text(setup_complete.into())).await.unwrap();
+
+        // Keep connection open briefly
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let _ = ws1.close(None).await;
+    });
+
+    let (ws_client, _) = tokio_tungstenite::connect_async(&ws_url).await.unwrap();
+    let (sink, source) = ws_client.split();
+    let (tx, rx) = tokio::sync::mpsc::channel(256);
+    let writer_task = tokio::spawn(async move {
+        let mut rx = rx;
+        let mut sink = sink;
+        while let Some(msg) = rx.recv().await {
+            if sink.send(msg).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    let active_session =
+        std::sync::Arc::new(adk_realtime::gemini::GeminiRealtimeSession::new_for_test(
+            "active_session_id".into(),
+            ws_url.clone(),
+            "models/gemini-3.1-flash-live-preview".into(),
+            tx,
+            writer_task,
+            source,
+        ));
+
+    let recovery_capability =
+        active_session.recovery().expect("Gemini session must expose recovery");
+
+    let cause = RecoveryCause::UnexpectedEof;
+    let disposition = recovery_capability.classify(&cause);
+    assert_eq!(disposition, adk_realtime::recovery::RecoveryDisposition::Recoverable);
+
+    let mut config = adk_realtime::config::RealtimeConfig::default();
+    config.instruction = Some("Recovered instruction context".to_string());
+    config.extra = Some(json!({ "resumeHandle": "resume_token_123" }));
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    let context = RecoveryContext::new(NonZeroU32::new(1).unwrap(), &cause, &config, deadline);
+
+    let recovered = recovery_capability.recover(context).await.unwrap();
+    assert_eq!(recovered.continuity(), adk_realtime::recovery::RecoveryContinuity::Resumed);
+    assert!(recovered.session().is_connected());
+
+    // Verify active session remains unaffected and retains its own session_id
+    assert_eq!(active_session.session_id(), "active_session_id");
+
+    server_task.await.unwrap();
+}
+
+#[tokio::test]
+async fn test_gemini_recovery_cold_reconnect_returns_reconnected() {
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    use adk_realtime::recovery::{RecoveryCause, RecoveryContext};
+    use futures_util::{SinkExt, StreamExt};
+    use std::num::NonZeroU32;
+    use tokio::net::TcpListener;
+    use tokio_tungstenite::accept_async;
+    use tokio_tungstenite::tungstenite::Message;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let local_addr = listener.local_addr().unwrap();
+    let ws_url = format!("ws://{}", local_addr);
+
+    let server_task = tokio::spawn(async move {
+        // Active session connection 0
+        let (stream0, _) = listener.accept().await.unwrap();
+        let _ws0 = accept_async(stream0).await.unwrap();
+
+        // Candidate connection 1
+        let (stream1, _) = listener.accept().await.unwrap();
+        let mut ws1 = accept_async(stream1).await.unwrap();
+
+        let first_msg = ws1.next().await.unwrap().unwrap();
+        if let Message::Text(text) = first_msg {
+            let val: serde_json::Value = serde_json::from_str(&text).unwrap();
+            assert!(val.get("setup").is_some());
+            assert!(val["setup"]["sessionResumption"]["handle"].is_null());
+        }
+
+        // Send setupComplete without resumed flag
+        let setup_complete = json!({ "setupComplete": {} }).to_string();
+        ws1.send(Message::Text(setup_complete.into())).await.unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    });
+
+    let (ws_client, _) = tokio_tungstenite::connect_async(&ws_url).await.unwrap();
+    let (sink, source) = ws_client.split();
+    let (tx, rx) = tokio::sync::mpsc::channel(256);
+    let writer_task = tokio::spawn(async move {
+        let mut rx = rx;
+        let mut sink = sink;
+        while let Some(msg) = rx.recv().await {
+            if sink.send(msg).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    let session = adk_realtime::gemini::GeminiRealtimeSession::new_for_test(
+        "test_session".into(),
+        ws_url.clone(),
+        "models/gemini-3.1-flash-live-preview".into(),
+        tx,
+        writer_task,
+        source,
+    );
+
+    let recovery_capability = session.recovery().unwrap();
+    let cause = RecoveryCause::UnexpectedEof;
+    let config = adk_realtime::config::RealtimeConfig::default();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    let context = RecoveryContext::new(NonZeroU32::new(1).unwrap(), &cause, &config, deadline);
+
+    let recovered = recovery_capability.recover(context).await.unwrap();
+    assert_eq!(recovered.continuity(), adk_realtime::recovery::RecoveryContinuity::Reconnected);
+
+    server_task.await.unwrap();
+}
+
+#[tokio::test]
+async fn test_gemini_recovery_setup_rejection_cleans_candidate() {
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    use adk_realtime::recovery::{RecoveryCause, RecoveryContext};
+    use futures_util::{SinkExt, StreamExt};
+    use std::num::NonZeroU32;
+    use tokio::net::TcpListener;
+    use tokio_tungstenite::accept_async;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let local_addr = listener.local_addr().unwrap();
+    let ws_url = format!("ws://{}", local_addr);
+
+    let server_task = tokio::spawn(async move {
+        // Active session connection 0
+        let (stream0, _) = listener.accept().await.unwrap();
+        let _ws0 = accept_async(stream0).await.unwrap();
+
+        // Candidate connection 1
+        let (stream1, _) = listener.accept().await.unwrap();
+        let mut ws1 = accept_async(stream1).await.unwrap();
+
+        let _ = ws1.next().await; // Read setup
+        // Reject immediately by closing connection
+        let _ = ws1.close(None).await;
+    });
+
+    let (ws_client, _) = tokio_tungstenite::connect_async(&ws_url).await.unwrap();
+    let (sink, source) = ws_client.split();
+    let (tx, rx) = tokio::sync::mpsc::channel(256);
+    let writer_task = tokio::spawn(async move {
+        let mut rx = rx;
+        let mut sink = sink;
+        while let Some(msg) = rx.recv().await {
+            if sink.send(msg).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    let session = adk_realtime::gemini::GeminiRealtimeSession::new_for_test(
+        "test_session".into(),
+        ws_url.clone(),
+        "models/gemini-3.1-flash-live-preview".into(),
+        tx,
+        writer_task,
+        source,
+    );
+
+    let recovery_capability = session.recovery().unwrap();
+    let cause = RecoveryCause::UnexpectedEof;
+    let config = adk_realtime::config::RealtimeConfig::default();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    let context = RecoveryContext::new(NonZeroU32::new(1).unwrap(), &cause, &config, deadline);
+
+    let res = recovery_capability.recover(context).await;
+    assert!(res.is_err());
+
+    server_task.await.unwrap();
 }
 
 #[tokio::test]

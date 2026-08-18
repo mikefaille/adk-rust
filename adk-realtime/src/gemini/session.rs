@@ -7,6 +7,10 @@ use crate::audio::{AudioChunk, AudioFormat};
 use crate::config::{RealtimeConfig, ToolDefinition};
 use crate::error::{RealtimeError, Result};
 use crate::events::{ClientEvent, ServerEvent, ToolResponse};
+use crate::recovery::{
+    RealtimeRecovery, RecoveredSession, RecoveryCause, RecoveryContext, RecoveryContinuity,
+    RecoveryDisposition,
+};
 use crate::session::{ContextMutationOutcome, RealtimeSession};
 use adk_gemini::schema_adapter::GeminiSchemaDialect;
 use async_trait::async_trait;
@@ -39,6 +43,9 @@ pub enum GeminiLiveBackend {
     /// AI Studio with API key authentication.
     Studio { api_key: String },
 
+    /// Custom WebSocket endpoint URL for testing or custom proxies.
+    CustomUrl { url: String },
+
     /// Vertex AI with OAuth2/ADC authentication.
     #[cfg(feature = "vertex-live")]
     Vertex {
@@ -55,6 +62,11 @@ impl GeminiLiveBackend {
     /// Create a Studio backend with API key authentication.
     pub fn studio(api_key: impl Into<String>) -> Self {
         Self::Studio { api_key: api_key.into() }
+    }
+
+    /// Create a custom backend connecting directly to the specified WebSocket URL.
+    pub fn custom_url(url: impl Into<String>) -> Self {
+        Self::CustomUrl { url: url.into() }
     }
 
     /// Create a Vertex AI backend using Application Default Credentials (ADC).
@@ -253,7 +265,7 @@ pub struct GeminiRealtimeSession {
     writer_task: Arc<Mutex<Option<JoinHandle<()>>>>,
     receiver: Arc<Mutex<WsSource>>,
     audio_buffer: Arc<ParkingMutex<BytesMut>>,
-    event_queue: Arc<Mutex<std::collections::VecDeque<ServerEvent>>>,
+    event_queue: Arc<ParkingMutex<std::collections::VecDeque<ServerEvent>>>,
     schema_cache: Arc<adk_core::SchemaCache>,
     adapter: Arc<dyn adk_core::SchemaAdapter>,
     frame_log: FrameLog,
@@ -263,10 +275,6 @@ pub struct GeminiRealtimeSession {
     /// close and a dead socket as the same `None`, so a polling caller cannot
     /// tell an aborted session from a broken one without it.
     last_disconnect: Arc<ParkingMutex<Option<crate::session::DisconnectReason>>>,
-    /// The full WebSocket URL used to establish this session, stored so that
-    /// `reconnect_with_backoff` can open a fresh connection to the same endpoint
-    /// without requiring the caller to repeat authentication parameters.
-    reconnect_url: String,
     /// The normalized model ID sent in the initial setup frame, used to rebuild
     /// the setup message on reconnect.
     reconnect_model: String,
@@ -277,6 +285,76 @@ pub struct GeminiRealtimeSession {
     /// overwrite the last safe point (the previous resumable handle remains the
     /// best reconnect anchor).
     last_resume_handle: Arc<ParkingMutex<Option<String>>>,
+    /// Stored backend configuration used to construct independent recovery candidates.
+    backend: GeminiLiveBackend,
+    /// Stored schema dialect used for tool compilation on recovery candidates.
+    schema_dialect: GeminiSchemaDialect,
+}
+
+/// Helper to connect a WebSocket stream based on backend configuration.
+async fn connect_ws_stream(backend: &GeminiLiveBackend, url: &str) -> Result<WsStream> {
+    match backend {
+        GeminiLiveBackend::Studio { .. } | GeminiLiveBackend::CustomUrl { .. } => {
+            let request = url.into_client_request().map_err(|e| {
+                RealtimeError::connection(format!("Failed to create request: {}", e))
+            })?;
+            let (ws, response) = connect_async(request).await.map_err(|e| {
+                RealtimeError::connection(format!("WebSocket connect error: {}", e))
+            })?;
+            tracing::info!(status = ?response.status(), "Gemini WebSocket handshake successful");
+            Ok(ws)
+        }
+        #[cfg(feature = "vertex-live")]
+        GeminiLiveBackend::Vertex { credentials, .. } => {
+            let header_map = match credentials.headers(Default::default()).await.map_err(|e| {
+                RealtimeError::AuthError(format!(
+                    "Failed to obtain OAuth2 token from ADC credentials: {e}"
+                ))
+            })? {
+                google_cloud_auth::credentials::CacheableResource::New { data, .. } => data,
+                google_cloud_auth::credentials::CacheableResource::NotModified => {
+                    return Err(RealtimeError::AuthError(
+                        "ADC credentials returned NotModified with no cached token available"
+                            .to_string(),
+                    ));
+                }
+            };
+
+            let auth_value = header_map
+                .get("authorization")
+                .ok_or_else(|| {
+                    RealtimeError::AuthError(
+                        "ADC credentials did not produce an Authorization header".to_string(),
+                    )
+                })?
+                .to_str()
+                .map_err(|e| {
+                    RealtimeError::AuthError(format!(
+                        "Authorization header contains non-ASCII characters: {e}"
+                    ))
+                })?
+                .to_string();
+
+            let mut request = url
+                .into_client_request()
+                .map_err(|e| RealtimeError::connection(format!("Failed to create request: {e}")))?;
+            request.headers_mut().insert(
+                "Authorization",
+                auth_value.parse().map_err(
+                    |e: tokio_tungstenite::tungstenite::http::header::InvalidHeaderValue| {
+                        RealtimeError::AuthError(format!(
+                            "Failed to parse Authorization header value: {e}"
+                        ))
+                    },
+                )?,
+            );
+
+            let (ws, _) = connect_async(request).await.map_err(|e| {
+                RealtimeError::connection(format!("Vertex AI Live WebSocket connect error: {e}"))
+            })?;
+            Ok(ws)
+        }
+    }
 }
 
 /// Ensure the model ID is prefixed with "models/" as required by Gemini Live setup frames.
@@ -323,14 +401,15 @@ impl GeminiRealtimeSession {
             writer_task: Arc::new(Mutex::new(Some(writer_task))),
             receiver: Arc::new(Mutex::new(receiver)),
             audio_buffer: Arc::new(ParkingMutex::new(BytesMut::new())),
-            event_queue: Arc::new(Mutex::new(std::collections::VecDeque::new())),
+            event_queue: Arc::new(ParkingMutex::new(std::collections::VecDeque::new())),
             schema_cache: Arc::new(adk_core::SchemaCache::new()),
             adapter: Arc::new(adk_core::GenericSchemaAdapter),
             frame_log: FrameLog::new(session_id, "studio", reconnect_model.clone()),
             last_disconnect: Arc::new(ParkingMutex::new(None)),
-            reconnect_url,
             reconnect_model,
             last_resume_handle: Arc::new(ParkingMutex::new(None)),
+            backend: GeminiLiveBackend::custom_url(reconnect_url),
+            schema_dialect: GeminiSchemaDialect::OpenApiSubset,
         }
     }
 
@@ -344,7 +423,9 @@ impl GeminiRealtimeSession {
     /// strength of that; opting in is one call.
     pub fn default_schema_dialect(backend: &GeminiLiveBackend) -> GeminiSchemaDialect {
         match backend {
-            GeminiLiveBackend::Studio { .. } => GeminiSchemaDialect::OpenApiSubset,
+            GeminiLiveBackend::Studio { .. } | GeminiLiveBackend::CustomUrl { .. } => {
+                GeminiSchemaDialect::OpenApiSubset
+            }
             #[cfg(feature = "vertex-live")]
             GeminiLiveBackend::Vertex { .. } => GeminiSchemaDialect::VertexOpenApiSubset,
         }
@@ -381,95 +462,18 @@ impl GeminiRealtimeSession {
         // If any tool fails to compile (semantic loss), we abort early.
         let tools = convert_tools(config.tools.clone(), &schema_cache, adapter.as_ref())?;
 
-        let ws_stream = match &backend {
-            GeminiLiveBackend::Studio { api_key } => {
-                // `GEMINI_LIVE_URL` is v1beta. On the Studio surface the
-                // endpoint version is coupled to the auth method, not the
-                // model: API-key auth is served on v1beta, and v1alpha is for
-                // ephemeral-token auth. This was hardcoded to v1alpha while
-                // the constant went unused — see the Gemini surface table in
-                // `zenith/data_plane/AGENTS.md`.
-                let url = format!("{}?key={}", super::GEMINI_LIVE_URL, api_key);
-                let request = url.into_client_request().map_err(|e| {
-                    RealtimeError::connection(format!("Failed to create request: {}", e))
-                })?;
-                let (ws, response) = connect_async(request).await.map_err(|e| {
-                    RealtimeError::connection(format!("WebSocket connect error: {}", e))
-                })?;
-                tracing::info!(status = ?response.status(), "Gemini WebSocket handshake successful");
-                ws
-            }
-            #[cfg(feature = "vertex-live")]
-            GeminiLiveBackend::Vertex { credentials, region, project_id } => {
-                let url = build_vertex_live_url(region, project_id)?;
-
-                // Obtain OAuth2 bearer token from ADC credentials
-                let header_map =
-                    match credentials.headers(Default::default()).await.map_err(|e| {
-                        RealtimeError::AuthError(format!(
-                            "Failed to obtain OAuth2 token from ADC credentials: {e}"
-                        ))
-                    })? {
-                        google_cloud_auth::credentials::CacheableResource::New { data, .. } => data,
-                        google_cloud_auth::credentials::CacheableResource::NotModified => {
-                            return Err(RealtimeError::AuthError(
-                            "ADC credentials returned NotModified with no cached token available"
-                                .to_string(),
-                        ));
-                        }
-                    };
-
-                // Extract the Authorization header value
-                let auth_value = header_map
-                    .get("authorization")
-                    .ok_or_else(|| {
-                        RealtimeError::AuthError(
-                            "ADC credentials did not produce an Authorization header".to_string(),
-                        )
-                    })?
-                    .to_str()
-                    .map_err(|e| {
-                        RealtimeError::AuthError(format!(
-                            "Authorization header contains non-ASCII characters: {e}"
-                        ))
-                    })?
-                    .to_string();
-
-                // Build a WebSocket request with the Authorization header
-                let mut request = url.into_client_request().map_err(|e| {
-                    RealtimeError::connection(format!("Failed to create request: {e}"))
-                })?;
-                request.headers_mut().insert(
-                    "Authorization",
-                    auth_value.parse().map_err(
-                        |e: tokio_tungstenite::tungstenite::http::header::InvalidHeaderValue| {
-                            RealtimeError::AuthError(format!(
-                                "Failed to parse Authorization header value: {e}"
-                            ))
-                        },
-                    )?,
-                );
-
-                let (ws, _) = connect_async(request).await.map_err(|e| {
-                    RealtimeError::connection(format!(
-                        "Vertex AI Live WebSocket connect error: {e}"
-                    ))
-                })?;
-                ws
-            }
-        };
-
-        // Capture the WS URL before the connection is consumed so that
-        // `reconnect_with_backoff` can open a fresh socket to the same endpoint.
-        let reconnect_url = match &backend {
+        let url = match &backend {
             GeminiLiveBackend::Studio { api_key } => {
                 format!("{}?key={}", super::GEMINI_LIVE_URL, api_key)
             }
+            GeminiLiveBackend::CustomUrl { url } => url.clone(),
             #[cfg(feature = "vertex-live")]
             GeminiLiveBackend::Vertex { region, project_id, .. } => {
                 build_vertex_live_url(region, project_id)?.to_string()
             }
         };
+
+        let ws_stream = connect_ws_stream(&backend, &url).await?;
 
         let (mut sink, source) = ws_stream.split();
         let connected = Arc::new(AtomicBool::new(true));
@@ -510,7 +514,7 @@ impl GeminiRealtimeSession {
         let frame_log = FrameLog::new(
             session_id.clone(),
             match &backend {
-                GeminiLiveBackend::Studio { .. } => "studio",
+                GeminiLiveBackend::Studio { .. } | GeminiLiveBackend::CustomUrl { .. } => "studio",
                 #[cfg(feature = "vertex-live")]
                 GeminiLiveBackend::Vertex { .. } => "vertex",
             },
@@ -526,13 +530,14 @@ impl GeminiRealtimeSession {
             receiver: Arc::new(Mutex::new(source)),
             audio_buffer: Arc::new(ParkingMutex::new(BytesMut::new())),
             last_disconnect: Arc::new(ParkingMutex::new(None)),
-            event_queue: Arc::new(Mutex::new(std::collections::VecDeque::new())),
+            event_queue: Arc::new(ParkingMutex::new(std::collections::VecDeque::new())),
             schema_cache,
             adapter,
             frame_log,
-            reconnect_url,
             reconnect_model: normalized_model.clone(),
             last_resume_handle: Arc::new(ParkingMutex::new(None)),
+            backend,
+            schema_dialect: dialect,
         };
 
         session.send_setup_with_compiled_tools(&normalized_model, config, tools).await?;
@@ -640,131 +645,6 @@ impl GeminiRealtimeSession {
         self.send_raw(&setup).await
     }
 
-    /// Open a fresh WebSocket connection to the same endpoint, swap internal
-    /// socket handles in place, and send a reconnect setup frame.
-    ///
-    /// Called by `reconnect_with_backoff`; should not be called directly.
-    /// The `resume_handle` is the last resumable token received from the server;
-    /// pass `None` when no handle was ever received (the server will start a
-    /// fresh session context).
-    async fn try_reconnect_once(&self, resume_handle: &Option<String>) -> Result<()> {
-        // Open a new WebSocket connection to the same URL.
-        let request = self.reconnect_url.clone().into_client_request().map_err(|e| {
-            RealtimeError::connection(format!("reconnect: failed to build request: {e}"))
-        })?;
-        let (ws_stream, response) = connect_async(request).await.map_err(|e| {
-            RealtimeError::connection(format!("reconnect: WebSocket connect failed: {e}"))
-        })?;
-        tracing::debug!(status = ?response.status(), "GeminiRealtimeSession: reconnect handshake complete");
-
-        let (mut new_sink, new_source) = ws_stream.split();
-
-        // Spin up a fresh writer task that drains from a new outbound channel.
-        let new_cancel = tokio_util::sync::CancellationToken::new();
-        let writer_cancel = new_cancel.clone();
-        let (new_tx, mut new_rx) = mpsc::channel::<Message>(WRITER_CHANNEL_CAPACITY);
-        let writer_connected = Arc::clone(&self.connected);
-        let new_writer = tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    _ = writer_cancel.cancelled() => {
-                        tracing::info!("gemini reconnect writer task cancelled");
-                        break;
-                    }
-                    msg = new_rx.recv() => {
-                        match msg {
-                            Some(message) => {
-                                let should_close = matches!(message, Message::Close(_));
-                                if let Err(e) = new_sink.send(message).await {
-                                    writer_connected.store(false, Ordering::SeqCst);
-                                    tracing::warn!(error = %e, "gemini reconnect writer send failed");
-                                    break;
-                                }
-                                if should_close { break; }
-                            }
-                            None => break,
-                        }
-                    }
-                }
-            }
-            writer_connected.store(false, Ordering::SeqCst);
-        });
-
-        // Acquire all locks in a consistent order to prevent deadlock:
-        //   receiver → writer_task → cancel_token → outbound_tx
-        {
-            let mut recv = self.receiver.lock().await;
-            *recv = new_source;
-        }
-        {
-            let mut wt = self.writer_task.lock().await;
-            *wt = Some(new_writer);
-        }
-        {
-            let mut token = self.cancel_token.lock().await;
-            *token = new_cancel;
-        }
-        {
-            let mut tx = self.outbound_tx.lock().await;
-            *tx = new_tx;
-        }
-        self.connected.store(true, Ordering::SeqCst);
-
-        // Send a reconnect setup frame with the resume handle (if available).
-        let setup_msg = GeminiClientMessage {
-            setup: Some(GeminiSetup {
-                model: Some(self.reconnect_model.clone()),
-                system_instruction: None,
-                generation_config: None,
-                tools: None,
-                cached_content: None,
-                session_resumption: Some(SessionResumptionConfig { handle: resume_handle.clone() }),
-                input_audio_transcription: None,
-                output_audio_transcription: None,
-                realtime_input_config: None,
-            }),
-            realtime_input: None,
-            tool_response: None,
-            client_content: None,
-        };
-
-        tracing::info!(
-            model = %self.reconnect_model,
-            has_resume_handle = resume_handle.is_some(),
-            "GeminiRealtimeSession: sending reconnect setup frame"
-        );
-        self.send_raw(&setup_msg).await?;
-
-        // Wait for `setupComplete` from the server (up to 5 s).
-        let deadline = std::time::Duration::from_secs(5);
-        let setup_result = tokio::time::timeout(deadline, async {
-            loop {
-                match self.receive_raw().await {
-                    Some(Ok(ServerEvent::SessionCreated { .. })) => return Ok(()),
-                    Some(Ok(_)) => continue, // other events before setupComplete
-                    Some(Err(e)) => return Err(e),
-                    None => {
-                        return Err(RealtimeError::connection(
-                            "reconnect: server closed before setupComplete",
-                        ));
-                    }
-                }
-            }
-        })
-        .await;
-
-        match setup_result {
-            Ok(Ok(())) => {
-                tracing::info!("GeminiRealtimeSession: setupComplete received after reconnect");
-                Ok(())
-            }
-            Ok(Err(e)) => Err(e),
-            Err(_) => Err(RealtimeError::connection(
-                "reconnect: timed out waiting for setupComplete (5 s)",
-            )),
-        }
-    }
-
     /// Send a raw message.
     async fn send_raw<T: Serialize>(&self, value: &T) -> Result<()> {
         let msg = serde_json::to_string(value)
@@ -784,7 +664,7 @@ impl GeminiRealtimeSession {
     async fn receive_raw(&self) -> Option<Result<ServerEvent>> {
         // First check if there's anything in the queue
         {
-            let mut queue = self.event_queue.lock().await;
+            let mut queue = self.event_queue.lock();
             if let Some(event) = queue.pop_front() {
                 return Some(Ok(event));
             }
@@ -792,10 +672,18 @@ impl GeminiRealtimeSession {
 
         let mut receiver = self.receiver.lock().await;
 
+        // Double-check queue under lock after acquiring receiver lock
+        {
+            let mut queue = self.event_queue.lock();
+            if let Some(event) = queue.pop_front() {
+                return Some(Ok(event));
+            }
+        }
+
         match receiver.next().await {
             Some(Ok(Message::Text(text))) => match self.translate_gemini_event(&text) {
                 Ok(events) => {
-                    let mut queue = self.event_queue.lock().await;
+                    let mut queue = self.event_queue.lock();
                     let mut iter = events.into_iter();
                     let first = iter.next();
                     for event in iter {
@@ -808,7 +696,7 @@ impl GeminiRealtimeSession {
             Some(Ok(Message::Binary(bytes))) => match String::from_utf8(bytes.to_vec()) {
                 Ok(text) => match self.translate_gemini_event(&text) {
                     Ok(events) => {
-                        let mut queue = self.event_queue.lock().await;
+                        let mut queue = self.event_queue.lock();
                         let mut iter = events.into_iter();
                         let first = iter.next();
                         for event in iter {
@@ -1141,6 +1029,10 @@ impl RealtimeSession for GeminiRealtimeSession {
         self.connected.load(Ordering::SeqCst)
     }
 
+    fn recovery(&self) -> Option<&dyn RealtimeRecovery> {
+        Some(self)
+    }
+
     fn disconnect_reason(&self) -> Option<crate::session::DisconnectReason> {
         self.last_disconnect.lock().clone()
     }
@@ -1468,6 +1360,142 @@ impl RealtimeSession for GeminiRealtimeSession {
             "Gemini API does not support native mid-flight context swaps; signalling resumption needed."
         );
         Ok(ContextMutationOutcome::RequiresResumption(Box::new(config)))
+    }
+}
+
+#[async_trait]
+impl RealtimeRecovery for GeminiRealtimeSession {
+    fn classify(&self, cause: &RecoveryCause) -> RecoveryDisposition {
+        match cause {
+            RecoveryCause::UnexpectedEof => RecoveryDisposition::Recoverable,
+            RecoveryCause::ReadFailed(err) | RecoveryCause::WriteFailed(err) => {
+                if err.is_connection_reset() {
+                    RecoveryDisposition::Recoverable
+                } else {
+                    RecoveryDisposition::Fatal
+                }
+            }
+        }
+    }
+
+    fn classify_attempt_error(&self, error: &RealtimeError) -> RecoveryDisposition {
+        if error.is_connection_reset() {
+            RecoveryDisposition::Recoverable
+        } else {
+            RecoveryDisposition::Fatal
+        }
+    }
+
+    async fn recover(&self, context: RecoveryContext<'_>) -> Result<RecoveredSession> {
+        let deadline = context.deadline();
+        if std::time::Instant::now() >= deadline {
+            return Err(RealtimeError::Timeout(
+                "recovery deadline expired before candidate attempt".to_string(),
+            ));
+        }
+
+        // Prepare candidate config with stored resume handle if available
+        let mut candidate_config = context.config().clone();
+        let resume_handle = self.last_resume_handle().or_else(|| {
+            candidate_config
+                .extra
+                .as_ref()
+                .and_then(|ext| ext.get("resumeToken").or_else(|| ext.get("resumeHandle")))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        });
+        if let Some(ref handle) = resume_handle {
+            let mut extra = candidate_config.extra.unwrap_or_else(|| json!({}));
+            if let Some(obj) = extra.as_object_mut() {
+                obj.insert("resumeHandle".to_string(), json!(handle));
+                obj.insert("resumeToken".to_string(), json!(handle));
+            }
+            candidate_config.extra = Some(extra);
+        }
+
+        // Bounded connect of independent candidate
+        let connect_fut = Self::connect_with_dialect(
+            self.backend.clone(),
+            &self.reconnect_model,
+            candidate_config,
+            self.schema_dialect,
+        );
+
+        let candidate_session =
+            match tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), connect_fut)
+                .await
+            {
+                Ok(Ok(session)) => Arc::new(session),
+                Ok(Err(e)) => return Err(e),
+                Err(_) => {
+                    return Err(RealtimeError::Timeout(
+                        "timed out connecting candidate WebSocket during recovery".to_string(),
+                    ));
+                }
+            };
+
+        struct CandidateCleanupGuard(Option<Arc<GeminiRealtimeSession>>);
+        impl Drop for CandidateCleanupGuard {
+            fn drop(&mut self) {
+                if let Some(session) = self.0.take() {
+                    tokio::spawn(async move {
+                        let _ = tokio::time::timeout(
+                            std::time::Duration::from_secs(2),
+                            session.close(),
+                        )
+                        .await;
+                    });
+                }
+            }
+        }
+
+        let mut candidate_guard = CandidateCleanupGuard(Some(candidate_session.clone()));
+
+        // Wait for setupComplete (surfaced as ServerEvent::SessionCreated) on candidate
+        let setup_res = tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), async {
+            loop {
+                match candidate_session.receive_raw().await {
+                    Some(Ok(ServerEvent::SessionCreated { session, .. })) => {
+                        return Ok(session);
+                    }
+                    Some(Ok(_)) => continue,
+                    Some(Err(e)) => return Err(e),
+                    None => {
+                        return Err(RealtimeError::connection(
+                            "recovery candidate closed before setupComplete",
+                        ));
+                    }
+                }
+            }
+        })
+        .await;
+
+        let setup_session_val = match setup_res {
+            Ok(Ok(val)) => val,
+            Ok(Err(e)) => return Err(e),
+            Err(_) => {
+                return Err(RealtimeError::Timeout(
+                    "timed out waiting for candidate setupComplete".to_string(),
+                ));
+            }
+        };
+
+        // Confirm continuity truthfully
+        let is_resumed = resume_handle.is_some()
+            && (setup_session_val
+                .get("setupComplete")
+                .and_then(|s| s.get("resumed"))
+                .and_then(|r| r.as_bool())
+                .unwrap_or(false)
+                || setup_session_val.get("resumed").and_then(|r| r.as_bool()).unwrap_or(false));
+
+        let continuity =
+            if is_resumed { RecoveryContinuity::Resumed } else { RecoveryContinuity::Reconnected };
+
+        // Readiness reached! Disarm cleanup guard and return RecoveredSession
+        candidate_guard.0.take();
+
+        Ok(RecoveredSession::new(candidate_session, continuity))
     }
 }
 
@@ -2643,7 +2671,7 @@ mod teardown_tests {
             writer_task: Arc::new(Mutex::new(Some(writer_task))),
             receiver: Arc::new(Mutex::new(source)),
             audio_buffer: Arc::new(ParkingMutex::new(BytesMut::new())),
-            event_queue: Arc::new(Mutex::new(std::collections::VecDeque::new())),
+            event_queue: Arc::new(ParkingMutex::new(std::collections::VecDeque::new())),
             schema_cache: Arc::new(adk_core::SchemaCache::new()),
             adapter: Arc::new(adk_core::GenericSchemaAdapter),
             frame_log: FrameLog::new(
@@ -2652,9 +2680,10 @@ mod teardown_tests {
                 "models/gemini-3.1-flash-live-preview".into(),
             ),
             last_disconnect: Arc::new(ParkingMutex::new(None)),
-            reconnect_url: "wss://localhost/ws".into(),
             reconnect_model: "models/gemini-3.1-flash-live-preview".into(),
             last_resume_handle: Arc::new(ParkingMutex::new(None)),
+            backend: GeminiLiveBackend::studio("test_key"),
+            schema_dialect: GeminiSchemaDialect::OpenApiSubset,
         };
 
         // Execution of close() must complete quickly despite channel full & writer blocked

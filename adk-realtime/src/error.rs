@@ -236,10 +236,7 @@ impl RealtimeError {
     /// Returns true if this error represents a transient TCP connection reset, closed stream, or broken pipe.
     pub fn is_connection_reset(&self) -> bool {
         match self {
-            RealtimeError::ConnectionError(msg)
-            | RealtimeError::MessageError(msg)
-            | RealtimeError::ProviderError(msg)
-            | RealtimeError::Protocol(msg) => {
+            RealtimeError::ConnectionError(msg) | RealtimeError::MessageError(msg) => {
                 let lower = msg.to_lowercase();
                 lower.contains("connection reset by peer")
                     || lower.contains("econnreset")
