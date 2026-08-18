@@ -239,6 +239,19 @@ impl RealtimeError {
     /// This is a transport-fact predicate ("did the transport actually reset?"), NOT a provider
     /// recovery policy ("should this error cause retry?"). Provider recovery policy belongs in
     /// `RealtimeRecovery::classify` / `classify_attempt_error`.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use adk_realtime::RealtimeError;
+    ///
+    /// let reset_err = RealtimeError::connection("read tcp: connection reset by peer");
+    /// assert!(reset_err.is_connection_reset());
+    ///
+    /// // Non-transport error variants or broad strings return false
+    /// let protocol_err = RealtimeError::protocol("connection reset by peer in payload");
+    /// assert!(!protocol_err.is_connection_reset());
+    /// ```
     pub fn is_connection_reset(&self) -> bool {
         match self {
             RealtimeError::ConnectionError(msg) => {
