@@ -170,10 +170,10 @@ impl RealtimeSession for MockRecoverySession {
 
     async fn close(&self) -> Result<()> {
         self.counters.close_calls.fetch_add(1, Ordering::SeqCst);
-        if let Some(ref slot) = self.close_tx {
-            if let Some(tx) = slot.lock().take() {
-                let _ = tx.send(());
-            }
+        if let Some(ref slot) = self.close_tx
+            && let Some(tx) = slot.lock().take()
+        {
+            let _ = tx.send(());
         }
         if self.close_hangs {
             std::future::pending::<()>().await;

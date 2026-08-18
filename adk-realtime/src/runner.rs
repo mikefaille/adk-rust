@@ -862,7 +862,12 @@ impl RealtimeRunner {
                         return Ok(());
                     }
                     Some(finished) = running_tools.next() => {
-                        let () = finished?;
+                        if let Err(e) = finished {
+                            self.event_handler.on_error(&e).await?;
+                            if !self.supervisor.is_connected().await {
+                                return Err(e);
+                            }
+                        }
                         continue;
                     }
                     _ = watcher.changed() => {

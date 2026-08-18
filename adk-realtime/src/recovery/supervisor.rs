@@ -51,6 +51,7 @@ struct SupervisorState {
     status: TransportStatus,
     generation: Option<SessionGeneration>,
     next_generation_id: u64,
+    recovery_epoch: u64,
     exhausted_generation: Option<u64>,
     config: ConfigSnapshot,
 }
@@ -105,6 +106,7 @@ impl RecoverySupervisor {
                 status: TransportStatus::Uninitialized,
                 generation: None,
                 next_generation_id: 0,
+                recovery_epoch: 0,
                 exhausted_generation: None,
                 config: ConfigSnapshot { config: initial_config, revision: 0 },
             })),
@@ -131,6 +133,7 @@ impl RecoverySupervisor {
                 status: TransportStatus::Healthy,
                 generation: Some(SessionGeneration { id: 0, session: initial_session }),
                 next_generation_id: 1,
+                recovery_epoch: 0,
                 exhausted_generation: None,
                 config: ConfigSnapshot { config: initial_cfg, revision: 0 },
             })),
@@ -465,19 +468,26 @@ impl RecoverySupervisor {
             }
 
             state_guard.status = TransportStatus::Recovering;
+            state_guard.recovery_epoch = state_guard.recovery_epoch.wrapping_add(1);
         }
+
+        let recovery_epoch = { self.state.read().await.recovery_epoch };
 
         struct RecoveryEpisodeGuard {
             state: Arc<tokio::sync::RwLock<SupervisorState>>,
+            epoch: u64,
             disarmed: bool,
         }
         impl Drop for RecoveryEpisodeGuard {
             fn drop(&mut self) {
                 if !self.disarmed {
                     let state_lock = Arc::clone(&self.state);
+                    let epoch = self.epoch;
                     tokio::spawn(async move {
                         let mut state = state_lock.write().await;
-                        if state.status == TransportStatus::Recovering && state.generation.is_some()
+                        if state.status == TransportStatus::Recovering
+                            && state.recovery_epoch == epoch
+                            && state.generation.is_some()
                         {
                             state.status = TransportStatus::Healthy;
                         }
@@ -486,8 +496,11 @@ impl RecoverySupervisor {
             }
         }
 
-        let mut episode_guard =
-            RecoveryEpisodeGuard { state: Arc::clone(&self.state), disarmed: false };
+        let mut episode_guard = RecoveryEpisodeGuard {
+            state: Arc::clone(&self.state),
+            epoch: recovery_epoch,
+            disarmed: false,
+        };
 
         // 4. Determine recovery implementation
         let session_to_recover = {
