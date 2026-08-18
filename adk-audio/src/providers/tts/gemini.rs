@@ -181,8 +181,46 @@ impl GeminiTts {
     }
 }
 
+/// Validate MIME type and enforce audio/l16 / raw PCM encoding contract.
+fn validate_audio_mime_type(mime_type: Option<&str>) -> AudioResult<()> {
+    let Some(mime) = mime_type else {
+        return Ok(());
+    };
+    let base_mime = mime.split(';').next().unwrap_or(mime).trim();
+    if base_mime.is_empty() {
+        return Ok(());
+    }
+
+    if base_mime.starts_with("audio/wav")
+        || base_mime.starts_with("audio/mp3")
+        || base_mime.starts_with("audio/mpeg")
+        || base_mime.starts_with("audio/ogg")
+        || base_mime.starts_with("audio/aac")
+    {
+        return Err(AudioError::Tts {
+            provider: "gemini".into(),
+            message: format!("Container/encoded audio format not supported for TTS stream: {mime}"),
+        });
+    }
+
+    if !base_mime.starts_with("audio/l16")
+        && !base_mime.starts_with("audio/pcm")
+        && !base_mime.starts_with("audio/raw")
+        && base_mime != "audio/x-raw"
+    {
+        return Err(AudioError::Tts {
+            provider: "gemini".into(),
+            message: format!("Unsupported audio MIME type for TTS stream: {mime}"),
+        });
+    }
+
+    Ok(())
+}
+
 /// Helper function to validate MIME type and parse sample rate
 fn parse_sample_rate(mime_type: Option<&str>, sample_rate: Option<i64>) -> AudioResult<u32> {
+    validate_audio_mime_type(mime_type)?;
+
     if let Some(sr) = sample_rate {
         if sr <= 0 {
             return Err(AudioError::Tts {
@@ -193,20 +231,6 @@ fn parse_sample_rate(mime_type: Option<&str>, sample_rate: Option<i64>) -> Audio
         return Ok(sr as u32);
     }
     if let Some(mime) = mime_type {
-        let base_mime = mime.split(';').next().unwrap_or(mime).trim();
-        if !base_mime.is_empty()
-            && !base_mime.starts_with("audio/pcm")
-            && !base_mime.starts_with("audio/raw")
-            && !base_mime.starts_with("audio/l16")
-            && !base_mime.starts_with("audio/wav")
-            && base_mime != "audio/x-raw"
-        {
-            return Err(AudioError::Tts {
-                provider: "gemini".into(),
-                message: format!("Unsupported audio MIME type: {mime}"),
-            });
-        }
-
         for part in mime.split(';') {
             let part = part.trim();
             if let Some(val) = part.strip_prefix("rate=")
@@ -221,18 +245,13 @@ fn parse_sample_rate(mime_type: Option<&str>, sample_rate: Option<i64>) -> Audio
                 return Ok(rate);
             }
         }
-        if mime.starts_with("audio/pcm")
-            || mime.starts_with("audio/raw")
-            || mime.starts_with("audio/l16")
-            || mime.starts_with("audio/wav")
-        {
-            return Ok(24000);
-        }
     }
     Ok(24000)
 }
 
 fn parse_channels(mime_type: Option<&str>, channels: Option<i64>) -> AudioResult<u8> {
+    validate_audio_mime_type(mime_type)?;
+
     if let Some(ch) = channels {
         if ch <= 0 || ch > 2 {
             return Err(AudioError::Tts {
@@ -243,20 +262,6 @@ fn parse_channels(mime_type: Option<&str>, channels: Option<i64>) -> AudioResult
         return Ok(ch as u8);
     }
     if let Some(mime) = mime_type {
-        let base_mime = mime.split(';').next().unwrap_or(mime).trim();
-        if !base_mime.is_empty()
-            && !base_mime.starts_with("audio/pcm")
-            && !base_mime.starts_with("audio/raw")
-            && !base_mime.starts_with("audio/l16")
-            && !base_mime.starts_with("audio/wav")
-            && base_mime != "audio/x-raw"
-        {
-            return Err(AudioError::Tts {
-                provider: "gemini".into(),
-                message: format!("Unsupported audio MIME type: {mime}"),
-            });
-        }
-
         for part in mime.split(';') {
             let part = part.trim();
             if let Some(val) = part.strip_prefix("channels=")

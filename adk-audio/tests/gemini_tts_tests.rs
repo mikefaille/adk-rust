@@ -5,7 +5,7 @@ use adk_audio::providers::tts::{CloudTtsConfig, GeminiTts};
 use adk_audio::traits::{TtsProvider, TtsRequest};
 use futures::StreamExt;
 use std::sync::Arc;
-use wiremock::matchers::{header, method, path};
+use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn test_tts_with_mock_url(mock_url: String) -> GeminiTts {
@@ -16,71 +16,83 @@ fn test_tts_with_mock_url(mock_url: String) -> GeminiTts {
 
 #[tokio::test]
 async fn test_gemini_tts_streaming_delayed_stream_and_first_audio() {
-    let mock_server = MockServer::start().await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
 
-    // Base64 for 4 bytes of PCM audio (2 samples of 16-bit PCM: [0x01, 0x02, 0x03, 0x04])
-    let b64_chunk1 =
-        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, [1, 2, 3, 4]);
-    let b64_chunk2 =
-        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, [5, 6, 7, 8]);
+    let (frame1_tx, frame1_rx) = tokio::sync::oneshot::channel::<()>();
 
-    let sse_body = format!(
-        "data: {{\"event_type\":\"interaction.created\",\"interaction\":{{\"id\":\"int_123\",\"status\":\"in_progress\"}}}}\n\n\
-         data: {{\"event_type\":\"step.start\",\"index\":0,\"step\":{{\"type\":\"model_output\"}}}}\n\n\
-         data: {{\"event_type\":\"step.delta\",\"index\":0,\"delta\":{{\"type\":\"audio\",\"data\":\"{}\",\"mime_type\":\"audio/pcm;rate=24000\",\"sample_rate\":24000,\"channels\":1}}}}\n\n\
-         data: {{\"event_type\":\"step.delta\",\"index\":0,\"delta\":{{\"type\":\"audio\",\"data\":\"{}\",\"mime_type\":\"audio/pcm;rate=24000\",\"sample_rate\":24000,\"channels\":1}}}}\n\n\
-         data: {{\"event_type\":\"step.stop\",\"index\":0}}\n\n\
-         data: {{\"event_type\":\"interaction.completed\",\"interaction\":{{\"id\":\"int_123\",\"status\":\"completed\"}}}}\n\n",
-        b64_chunk1, b64_chunk2
-    );
+    tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        use tokio::io::AsyncWriteExt;
 
-    Mock::given(method("POST"))
-        .and(path("/interactions"))
-        .and(header("x-goog-api-key", "test-api-key"))
-        .and(header("Api-Revision", "2026-05-20"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_string(sse_body)
-                .set_delay(std::time::Duration::from_millis(50))
-                .append_header("content-type", "text/event-stream"),
-        )
-        .mount(&mock_server)
-        .await;
+        let b64_chunk1 = base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            [0x01, 0x02, 0x03, 0x04],
+        );
+        let b64_chunk2 = base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            [0x05, 0x06, 0x07, 0x08],
+        );
 
-    let tts = test_tts_with_mock_url(format!("{}/interactions", mock_server.uri()));
+        // Write HTTP headers
+        let http_resp = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n";
+        socket.write_all(http_resp.as_bytes()).await.unwrap();
+
+        // Send created event and delta 1
+        let chunk1_sse = format!(
+            "data: {{\"event_type\":\"interaction.created\",\"interaction\":{{\"id\":\"int_123\",\"status\":\"in_progress\"}}}}\n\n\
+             data: {{\"event_type\":\"step.delta\",\"index\":0,\"delta\":{{\"type\":\"audio\",\"data\":\"{}\",\"mime_type\":\"audio/l16;rate=24000\",\"sample_rate\":24000,\"channels\":1}}}}\n\n",
+            b64_chunk1
+        );
+        socket.write_all(chunk1_sse.as_bytes()).await.unwrap();
+        socket.flush().await.unwrap();
+
+        // Wait until consumer confirms receipt of frame 1 before releasing remaining SSE stream
+        let _ = frame1_rx.await;
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Send delta 2 and completion event
+        let chunk2_sse = format!(
+            "data: {{\"event_type\":\"step.delta\",\"index\":0,\"delta\":{{\"type\":\"audio\",\"data\":\"{}\",\"mime_type\":\"audio/l16;rate=24000\",\"sample_rate\":24000,\"channels\":1}}}}\n\n\
+             data: {{\"event_type\":\"interaction.completed\",\"interaction\":{{\"id\":\"int_123\",\"status\":\"completed\"}}}}\n\n",
+            b64_chunk2
+        );
+        socket.write_all(chunk2_sse.as_bytes()).await.unwrap();
+        socket.flush().await.unwrap();
+    });
+
+    let mock_url = format!("http://{}/v1beta/interactions", addr);
+    let tts = test_tts_with_mock_url(mock_url);
     let start_time = std::time::Instant::now();
 
     let request = TtsRequest { text: "Hello streaming world!".to_string(), ..Default::default() };
-
     let mut stream = tts.synthesize_stream(&request).await.expect("synthesize_stream failed");
 
-    let mut first_audio_ts = None;
-    let mut frames = Vec::new();
+    // Recv frame 1
+    let frame1 = stream.next().await.expect("frame 1 missing").expect("frame 1 error");
+    let first_audio_ts = start_time.elapsed();
 
-    while let Some(res) = stream.next().await {
-        let frame = res.expect("frame error");
-        if first_audio_ts.is_none() {
-            first_audio_ts = Some(start_time.elapsed());
-        }
-        frames.push(frame);
-    }
+    // Signal provider server that consumer received frame 1
+    let _ = frame1_tx.send(());
 
+    // Recv frame 2
+    let frame2 = stream.next().await.expect("frame 2 missing").expect("frame 2 error");
+    let end_res = stream.next().await;
+    assert!(end_res.is_none(), "Stream should terminate after completion");
     let completion_ts = start_time.elapsed();
 
-    assert_eq!(frames.len(), 2, "Expected 2 audio frames");
-    assert!(first_audio_ts.is_some(), "First audio timestamp must be recorded");
-    let first_ts = first_audio_ts.unwrap();
     assert!(
-        first_ts < completion_ts,
+        first_audio_ts < completion_ts,
         "first consumer audio timestamp ({:?}) < provider completion timestamp ({:?})",
-        first_ts,
+        first_audio_ts,
         completion_ts
     );
 
-    assert_eq!(frames[0].sample_rate, 24000);
-    assert_eq!(frames[0].channels, 1);
-    assert_eq!(frames[0].data.as_ref(), &[1, 2, 3, 4]);
-    assert_eq!(frames[1].data.as_ref(), &[5, 6, 7, 8]);
+    assert_eq!(frame1.sample_rate, 24000);
+    assert_eq!(frame1.channels, 1);
+    assert_eq!(frame1.data.as_ref(), &[0x02, 0x01, 0x04, 0x03]); // L16 big-endian swapped
+    assert_eq!(frame2.data.as_ref(), &[0x06, 0x05, 0x08, 0x07]);
 }
 
 #[tokio::test]
@@ -275,6 +287,71 @@ async fn test_gemini_tts_dangling_l16_byte_error() {
 }
 
 #[tokio::test]
+async fn test_gemini_tts_custom_base_url_preserves_path() {
+    let mock_server = MockServer::start().await;
+
+    let b64_chunk =
+        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, [1, 2, 3, 4]);
+
+    let sse_body = format!(
+        "data: {{\"event_type\":\"step.delta\",\"index\":0,\"delta\":{{\"type\":\"audio\",\"data\":\"{}\",\"mime_type\":\"audio/pcm;rate=24000\",\"sample_rate\":24000,\"channels\":1}}}}\n\n\
+         data: {{\"event_type\":\"interaction.completed\",\"interaction\":{{\"id\":\"int_123\",\"status\":\"completed\"}}}}\n\n",
+        b64_chunk
+    );
+
+    Mock::given(method("POST"))
+        .and(path("/v1beta/custom/interactions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(sse_body)
+                .append_header("content-type", "text/event-stream"),
+        )
+        .mount(&mock_server)
+        .await;
+
+    // Custom base URL with path segment ending with trailing slash
+    let base_url = format!("{}/v1beta/custom/", mock_server.uri());
+    let mut config = CloudTtsConfig::new("test-api-key");
+    config.base_url = Some(base_url);
+    let tts = GeminiTts::new(config).expect("GeminiTts::new failed");
+
+    let request = TtsRequest { text: "Base URL path test".to_string(), ..Default::default() };
+    let mut stream = tts.synthesize_stream(&request).await.expect("synthesize_stream failed");
+    let frame = stream.next().await.unwrap().unwrap();
+    assert_eq!(frame.data.as_ref(), &[1, 2, 3, 4]);
+}
+
+#[tokio::test]
+async fn test_gemini_tts_rejects_container_audio_formats() {
+    let mock_server = MockServer::start().await;
+
+    let sse_body = "data: {\"event_type\":\"step.delta\",\"index\":0,\"delta\":{\"type\":\"audio\",\"data\":\"RIFF1234WAVEfmt \",\"mime_type\":\"audio/wav;rate=24000\",\"sample_rate\":24000,\"channels\":1}}\n\n";
+
+    Mock::given(method("POST"))
+        .and(path("/interactions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(sse_body)
+                .append_header("content-type", "text/event-stream"),
+        )
+        .mount(&mock_server)
+        .await;
+
+    let tts = test_tts_with_mock_url(format!("{}/interactions", mock_server.uri()));
+    let request = TtsRequest { text: "WAV rejection test".to_string(), ..Default::default() };
+
+    let mut stream = tts.synthesize_stream(&request).await.expect("stream creation failed");
+    let item = stream.next().await.unwrap();
+    assert!(item.is_err(), "audio/wav format must be rejected");
+    let err_msg = item.err().unwrap().to_string();
+    assert!(
+        err_msg.contains("Container/encoded audio format not supported"),
+        "Error message was: {}",
+        err_msg
+    );
+}
+
+#[tokio::test]
 async fn test_gemini_tts_malformed_base64_error() {
     let mock_server = MockServer::start().await;
 
@@ -304,32 +381,50 @@ async fn test_gemini_tts_malformed_base64_error() {
 
 #[tokio::test]
 async fn test_pipeline_emits_first_audio_before_provider_completion() {
-    let mock_server = MockServer::start().await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
 
-    let b64_chunk1 =
-        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, [1, 2, 3, 4]);
-    let b64_chunk2 =
-        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, [5, 6, 7, 8]);
+    let (frame1_tx, frame1_rx) = tokio::sync::oneshot::channel::<()>();
 
-    let sse_body = format!(
-        "data: {{\"event_type\":\"step.delta\",\"index\":0,\"delta\":{{\"type\":\"audio\",\"data\":\"{}\",\"mime_type\":\"audio/pcm;rate=24000\",\"sample_rate\":24000,\"channels\":1}}}}\n\n\
-         data: {{\"event_type\":\"step.delta\",\"index\":0,\"delta\":{{\"type\":\"audio\",\"data\":\"{}\",\"mime_type\":\"audio/pcm;rate=24000\",\"sample_rate\":24000,\"channels\":1}}}}\n\n\
-         data: {{\"event_type\":\"interaction.completed\",\"interaction\":{{\"id\":\"int_123\",\"status\":\"completed\"}}}}\n\n",
-        b64_chunk1, b64_chunk2
-    );
+    tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        use tokio::io::AsyncWriteExt;
 
-    Mock::given(method("POST"))
-        .and(path("/interactions"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_string(sse_body)
-                .set_delay(std::time::Duration::from_millis(50))
-                .append_header("content-type", "text/event-stream"),
-        )
-        .mount(&mock_server)
-        .await;
+        let b64_chunk1 = base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            [0x01, 0x02, 0x03, 0x04],
+        );
+        let b64_chunk2 = base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            [0x05, 0x06, 0x07, 0x08],
+        );
 
-    let tts = Arc::new(test_tts_with_mock_url(format!("{}/interactions", mock_server.uri())));
+        let http_resp = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n";
+        socket.write_all(http_resp.as_bytes()).await.unwrap();
+
+        let chunk1_sse = format!(
+            "data: {{\"event_type\":\"step.delta\",\"index\":0,\"delta\":{{\"type\":\"audio\",\"data\":\"{}\",\"mime_type\":\"audio/l16;rate=24000\",\"sample_rate\":24000,\"channels\":1}}}}\n\n",
+            b64_chunk1
+        );
+        socket.write_all(chunk1_sse.as_bytes()).await.unwrap();
+        socket.flush().await.unwrap();
+
+        // Wait until pipeline outputs frame #1
+        let _ = frame1_rx.await;
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let chunk2_sse = format!(
+            "data: {{\"event_type\":\"step.delta\",\"index\":0,\"delta\":{{\"type\":\"audio\",\"data\":\"{}\",\"mime_type\":\"audio/l16;rate=24000\",\"sample_rate\":24000,\"channels\":1}}}}\n\n\
+             data: {{\"event_type\":\"interaction.completed\",\"interaction\":{{\"id\":\"int_123\",\"status\":\"completed\"}}}}\n\n",
+            b64_chunk2
+        );
+        socket.write_all(chunk2_sse.as_bytes()).await.unwrap();
+        socket.flush().await.unwrap();
+    });
+
+    let mock_url = format!("http://{}/v1beta/interactions", addr);
+    let tts = Arc::new(test_tts_with_mock_url(mock_url));
     let pipeline_handle = adk_audio::pipeline::builder::AudioPipelineBuilder::new()
         .tts(tts)
         .build_tts()
@@ -348,17 +443,20 @@ async fn test_pipeline_emits_first_audio_before_provider_completion() {
 
     assert!(first_out.is_some());
     if let Some(PipelineOutput::Audio(frame)) = first_out {
-        assert_eq!(frame.data.as_ref(), &[1, 2, 3, 4]);
+        assert_eq!(frame.data.as_ref(), &[0x02, 0x01, 0x04, 0x03]);
     } else {
         panic!("Expected Audio output frame #1");
     }
+
+    // Signal server that pipeline received frame 1
+    let _ = frame1_tx.send(());
 
     let second_out = handle.output_rx.recv().await;
     let completion_ts = start_time.elapsed();
 
     assert!(second_out.is_some());
     if let Some(PipelineOutput::Audio(frame)) = second_out {
-        assert_eq!(frame.data.as_ref(), &[5, 6, 7, 8]);
+        assert_eq!(frame.data.as_ref(), &[0x06, 0x05, 0x08, 0x07]);
     } else {
         panic!("Expected Audio output frame #2");
     }
