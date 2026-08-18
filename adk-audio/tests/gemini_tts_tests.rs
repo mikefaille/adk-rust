@@ -42,6 +42,7 @@ async fn test_gemini_tts_streaming_delayed_stream_and_first_audio() {
         .respond_with(
             ResponseTemplate::new(200)
                 .set_body_string(sse_body)
+                .set_delay(std::time::Duration::from_millis(50))
                 .append_header("content-type", "text/event-stream"),
         )
         .mount(&mock_server)
@@ -71,8 +72,8 @@ async fn test_gemini_tts_streaming_delayed_stream_and_first_audio() {
     assert!(first_audio_ts.is_some(), "First audio timestamp must be recorded");
     let first_ts = first_audio_ts.unwrap();
     assert!(
-        first_ts <= completion_ts,
-        "first consumer audio timestamp ({:?}) <= provider completion timestamp ({:?})",
+        first_ts < completion_ts,
+        "first consumer audio timestamp ({:?}) < provider completion timestamp ({:?})",
         first_ts,
         completion_ts
     );

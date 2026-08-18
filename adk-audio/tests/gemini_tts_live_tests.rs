@@ -4,6 +4,7 @@ use adk_audio::providers::tts::GeminiTts;
 use adk_audio::traits::{TtsProvider, TtsRequest};
 use futures::StreamExt;
 
+#[ignore = "Gated live test requiring GEMINI_API_KEY environment variable"]
 #[tokio::test]
 async fn test_live_gemini_3_1_tts_streaming() {
     let _api_key =

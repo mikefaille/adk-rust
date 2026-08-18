@@ -8,7 +8,8 @@
 use std::pin::Pin;
 
 use adk_gemini::interactions::{
-    CreateInteractionRequest, Input, InteractionSseEvent, ResponseFormat, StepDelta,
+    CreateInteractionRequest, Input, InteractionSseEvent, ResponseFormat, SpeechConfigEntry,
+    StepDelta,
 };
 use async_stream::try_stream;
 use async_trait::async_trait;
@@ -114,6 +115,15 @@ impl GeminiTts {
         self
     }
 
+    fn base_url(&self) -> String {
+        self.config.base_url.clone().unwrap_or_else(|| {
+            format!(
+                "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent",
+                self.model
+            )
+        })
+    }
+
     fn interactions_url(&self) -> String {
         if let Some(ref base) = self.config.base_url {
             if base.contains("/interactions") {
@@ -126,51 +136,27 @@ impl GeminiTts {
         }
     }
 
-    fn build_speech_config(&self, voice: &str) -> serde_json::Value {
+    fn build_speech_config(&self, voice: &str) -> Vec<SpeechConfigEntry> {
         match &self.speakers {
-            Some(speakers) if !speakers.is_empty() => {
-                let speaker_configs: Vec<serde_json::Value> = speakers
-                    .iter()
-                    .map(|s| {
-                        serde_json::json!({
-                            "speaker": s.name,
-                            "voiceConfig": {
-                                "prebuiltVoiceConfig": {
-                                    "voiceName": s.voice
-                                }
-                            }
-                        })
-                    })
-                    .collect();
-                serde_json::json!({
-                    "multiSpeakerVoiceConfig": {
-                        "speakerVoiceConfigs": speaker_configs
-                    }
-                })
-            }
+            Some(speakers) if !speakers.is_empty() => speakers
+                .iter()
+                .map(|s| SpeechConfigEntry::speaker_voice(&s.name, &s.voice))
+                .collect(),
             _ => {
                 let voice_name = if voice.is_empty() { "Kore" } else { voice };
-                serde_json::json!({
-                    "voiceConfig": {
-                        "prebuiltVoiceConfig": {
-                            "voiceName": voice_name
-                        }
-                    }
-                })
+                vec![SpeechConfigEntry::voice(voice_name)]
             }
         }
     }
 
     fn build_request(&self, request: &TtsRequest, stream: bool) -> CreateInteractionRequest {
-        let speech_config_val = self.build_speech_config(&request.voice);
-        let speech_config: Option<adk_gemini::generation::SpeechConfig> =
-            serde_json::from_value(speech_config_val).ok();
+        let speech_config = Some(self.build_speech_config(&request.voice));
 
         CreateInteractionRequest {
             model: Some(self.model.clone()),
             input: Input::Text(request.text.clone()),
             response_format: Some(ResponseFormat::Audio {
-                mime_type: Some("audio/pcm".to_string()),
+                mime_type: Some("audio/l16".to_string()),
                 sample_rate: Some(24000),
             }),
             stream: Some(stream),
@@ -184,24 +170,49 @@ impl GeminiTts {
     }
 }
 
-/// Helper function to parse audio mime_type string like "audio/pcm;rate=24000" or sample_rate header field
+/// Helper function to validate MIME type and parse sample rate
 fn parse_sample_rate(mime_type: Option<&str>, sample_rate: Option<i64>) -> AudioResult<u32> {
-    if let Some(sr) = sample_rate
-        && sr > 0
-    {
+    if let Some(sr) = sample_rate {
+        if sr <= 0 {
+            return Err(AudioError::Tts {
+                provider: "gemini".into(),
+                message: format!("Invalid non-positive sample rate: {sr}"),
+            });
+        }
         return Ok(sr as u32);
     }
     if let Some(mime) = mime_type {
+        let base_mime = mime.split(';').next().unwrap_or(mime).trim();
+        if !base_mime.is_empty()
+            && !base_mime.starts_with("audio/pcm")
+            && !base_mime.starts_with("audio/raw")
+            && !base_mime.starts_with("audio/l16")
+            && !base_mime.starts_with("audio/wav")
+            && base_mime != "audio/x-raw"
+        {
+            return Err(AudioError::Tts {
+                provider: "gemini".into(),
+                message: format!("Unsupported audio MIME type: {mime}"),
+            });
+        }
+
         for part in mime.split(';') {
             let part = part.trim();
             if let Some(val) = part.strip_prefix("rate=")
                 && let Ok(rate) = val.parse::<u32>()
             {
+                if rate == 0 {
+                    return Err(AudioError::Tts {
+                        provider: "gemini".into(),
+                        message: "Invalid sample rate: 0".into(),
+                    });
+                }
                 return Ok(rate);
             }
         }
         if mime.starts_with("audio/pcm")
             || mime.starts_with("audio/raw")
+            || mime.starts_with("audio/l16")
             || mime.starts_with("audio/wav")
         {
             return Ok(24000);
@@ -211,17 +222,41 @@ fn parse_sample_rate(mime_type: Option<&str>, sample_rate: Option<i64>) -> Audio
 }
 
 fn parse_channels(mime_type: Option<&str>, channels: Option<i64>) -> AudioResult<u8> {
-    if let Some(ch) = channels
-        && ch > 0
-    {
+    if let Some(ch) = channels {
+        if ch <= 0 || ch > 2 {
+            return Err(AudioError::Tts {
+                provider: "gemini".into(),
+                message: format!("Invalid channels count: {ch}"),
+            });
+        }
         return Ok(ch as u8);
     }
     if let Some(mime) = mime_type {
+        let base_mime = mime.split(';').next().unwrap_or(mime).trim();
+        if !base_mime.is_empty()
+            && !base_mime.starts_with("audio/pcm")
+            && !base_mime.starts_with("audio/raw")
+            && !base_mime.starts_with("audio/l16")
+            && !base_mime.starts_with("audio/wav")
+            && base_mime != "audio/x-raw"
+        {
+            return Err(AudioError::Tts {
+                provider: "gemini".into(),
+                message: format!("Unsupported audio MIME type: {mime}"),
+            });
+        }
+
         for part in mime.split(';') {
             let part = part.trim();
             if let Some(val) = part.strip_prefix("channels=")
                 && let Ok(ch) = val.parse::<u8>()
             {
+                if ch == 0 || ch > 2 {
+                    return Err(AudioError::Tts {
+                        provider: "gemini".into(),
+                        message: format!("Invalid channels count: {ch}"),
+                    });
+                }
                 return Ok(ch);
             }
         }
@@ -232,6 +267,92 @@ fn parse_channels(mime_type: Option<&str>, channels: Option<i64>) -> AudioResult
 #[async_trait]
 impl TtsProvider for GeminiTts {
     async fn synthesize(&self, request: &TtsRequest) -> AudioResult<AudioFrame> {
+        if self.model.contains("gemini-2.5") {
+            let url = self.base_url();
+            let speech_config = match &self.speakers {
+                Some(speakers) if !speakers.is_empty() => {
+                    let speaker_configs: Vec<serde_json::Value> = speakers
+                        .iter()
+                        .map(|s| {
+                            serde_json::json!({
+                                "speaker": s.name,
+                                "voiceConfig": {
+                                    "prebuiltVoiceConfig": {
+                                        "voiceName": s.voice
+                                    }
+                                }
+                            })
+                        })
+                        .collect();
+                    serde_json::json!({
+                        "multiSpeakerVoiceConfig": {
+                            "speakerVoiceConfigs": speaker_configs
+                        }
+                    })
+                }
+                _ => {
+                    let voice_name = if request.voice.is_empty() { "Kore" } else { &request.voice };
+                    serde_json::json!({
+                        "voiceConfig": {
+                            "prebuiltVoiceConfig": {
+                                "voiceName": voice_name
+                            }
+                        }
+                    })
+                }
+            };
+
+            let body = serde_json::json!({
+                "contents": [{"parts": [{"text": request.text}]}],
+                "generationConfig": {
+                    "response_modalities": ["AUDIO"],
+                    "speech_config": speech_config
+                }
+            });
+
+            let resp = self
+                .client
+                .post(&url)
+                .header("x-goog-api-key", &self.config.api_key)
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| AudioError::Tts {
+                    provider: "gemini".into(),
+                    message: e.to_string(),
+                })?;
+
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                return Err(AudioError::Tts {
+                    provider: "gemini".into(),
+                    message: format!("HTTP {status}: {body}"),
+                });
+            }
+
+            let json: serde_json::Value = resp.json().await.map_err(|e| AudioError::Tts {
+                provider: "gemini".into(),
+                message: e.to_string(),
+            })?;
+
+            let audio_b64 = json["candidates"][0]["content"]["parts"][0]["inlineData"]["data"]
+                .as_str()
+                .ok_or_else(|| AudioError::Tts {
+                    provider: "gemini".into(),
+                    message: "no audio data in response".into(),
+                })?;
+
+            let pcm = base64::engine::general_purpose::STANDARD.decode(audio_b64).map_err(|e| {
+                AudioError::Tts {
+                    provider: "gemini".into(),
+                    message: format!("base64 decode failed: {e}"),
+                }
+            })?;
+
+            return Ok(AudioFrame::new(Bytes::from(pcm), 24000, 1));
+        }
+
         let mut stream = self.synthesize_stream(request).await?;
         let mut frames = Vec::new();
 
@@ -254,6 +375,11 @@ impl TtsProvider for GeminiTts {
         &self,
         request: &TtsRequest,
     ) -> AudioResult<Pin<Box<dyn Stream<Item = AudioResult<AudioFrame>> + Send>>> {
+        if self.model.contains("gemini-2.5") {
+            let frame = self.synthesize(request).await?;
+            return Ok(Box::pin(futures::stream::once(async { Ok(frame) })));
+        }
+
         let url = self.interactions_url();
         let payload = self.build_request(request, true);
 
