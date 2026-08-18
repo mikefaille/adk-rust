@@ -343,6 +343,32 @@ pub struct ImageConfig {
     pub image_size: Option<String>,
 }
 
+/// Single speech configuration entry for Interactions API `generation_config.speech_config`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpeechConfigEntry {
+    /// Voice name (e.g. "Kore", "Puck").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voice: Option<String>,
+    /// Speaker name (for multi-speaker dialogue).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speaker: Option<String>,
+    /// BCP-47 language tag (e.g. "en-US").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+}
+
+impl SpeechConfigEntry {
+    /// Create a single voice speech configuration entry.
+    pub fn voice(voice: impl Into<String>) -> Self {
+        Self { voice: Some(voice.into()), speaker: None, language: None }
+    }
+
+    /// Create a speaker-specific voice speech configuration entry.
+    pub fn speaker_voice(speaker: impl Into<String>, voice: impl Into<String>) -> Self {
+        Self { voice: Some(voice.into()), speaker: Some(speaker.into()), language: None }
+    }
+}
+
 /// Configuration parameters for a model interaction.
 ///
 /// This is the Interactions API equivalent of `generateContent`'s
@@ -378,6 +404,9 @@ pub struct GenerationConfig {
     /// Configuration for image output.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_config: Option<ImageConfig>,
+    /// Speech configuration array for text-to-speech generation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speech_config: Option<Vec<SpeechConfigEntry>>,
 }
 
 impl GenerationConfig {

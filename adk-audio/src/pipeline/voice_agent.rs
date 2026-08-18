@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use futures::StreamExt;
 use tokio::sync::{RwLock, mpsc, oneshot};
 
 use crate::error::AudioResult;
@@ -110,14 +111,38 @@ async fn process_text_to_speech(
 
         let tts_start = std::time::Instant::now();
         let request = TtsRequest { text: sentence, ..Default::default() };
-        if let Ok(frame) = tts.synthesize(&request).await {
-            let tts_elapsed = tts_start.elapsed().as_millis() as f64;
-            {
-                let mut m = metrics.write().await;
-                m.tts_latency_ms = tts_elapsed;
-                m.total_audio_ms += frame.duration_ms as u64;
+
+        match tts.synthesize_stream(&request).await {
+            Ok(mut stream) => {
+                let mut first_frame = true;
+                while let Some(res) = stream.next().await {
+                    match res {
+                        Ok(frame) => {
+                            let elapsed = tts_start.elapsed().as_millis() as f64;
+                            {
+                                let mut m = metrics.write().await;
+                                if first_frame {
+                                    m.tts_first_audio_latency_ms = elapsed;
+                                    first_frame = false;
+                                }
+                                m.tts_latency_ms = elapsed;
+                                m.total_audio_ms += frame.duration_ms as u64;
+                            }
+                            if output_tx.send(PipelineOutput::Audio(frame)).await.is_err() {
+                                // Consumer channel closed/cancelled; stop processing TTS stream.
+                                break;
+                            }
+                        }
+                        Err(err) => {
+                            tracing::error!(error = %err, "TTS stream failure during voice agent loop");
+                            break;
+                        }
+                    }
+                }
             }
-            let _ = output_tx.send(PipelineOutput::Audio(frame)).await;
+            Err(err) => {
+                tracing::error!(error = %err, "Failed to initiate TTS stream synthesis in voice agent loop");
+            }
         }
     }
 }

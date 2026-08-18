@@ -269,3 +269,70 @@ fn unknown_sse_event_falls_back_to_other() {
     let event: InteractionSseEvent = serde_json::from_value(raw).unwrap();
     assert!(matches!(event, InteractionSseEvent::Other(_)));
 }
+
+#[test]
+fn tts_request_with_audio_format_and_speech_config_serializes() {
+    use adk_gemini::interactions::SpeechConfigEntry;
+    let req = CreateInteractionRequest {
+        model: Some("gemini-3.1-flash-tts-preview".to_string()),
+        input: Input::Text("Alice: Hello Bob!\nBob: Hi Alice!".to_string()),
+        response_format: Some(ResponseFormat::Audio {
+            mime_type: Some("audio/l16".to_string()),
+            sample_rate: Some(24000),
+        }),
+        stream: Some(true),
+        generation_config: Some(adk_gemini::interactions::GenerationConfig {
+            speech_config: Some(vec![
+                SpeechConfigEntry::speaker_voice("Alice", "Kore"),
+                SpeechConfigEntry::speaker_voice("Bob", "Puck"),
+            ]),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    let value = serde_json::to_value(&req).unwrap();
+    assert_eq!(value["model"], json!("gemini-3.1-flash-tts-preview"));
+    assert_eq!(value["stream"], json!(true));
+    assert_eq!(value["response_format"]["type"], json!("audio"));
+    assert_eq!(value["response_format"]["mime_type"], json!("audio/l16"));
+    assert_eq!(value["response_format"]["sample_rate"], json!(24000));
+
+    let speech_cfg = &value["generation_config"]["speech_config"];
+    assert_eq!(speech_cfg[0]["speaker"], json!("Alice"));
+    assert_eq!(speech_cfg[0]["voice"], json!("Kore"));
+    assert_eq!(speech_cfg[1]["speaker"], json!("Bob"));
+    assert_eq!(speech_cfg[1]["voice"], json!("Puck"));
+}
+
+#[test]
+fn parses_step_delta_audio_event() {
+    let raw = json!({
+        "event_type": "step.delta",
+        "index": 0,
+        "delta": {
+            "type": "audio",
+            "data": "AQIDBA==",
+            "mime_type": "audio/pcm;rate=24000",
+            "sample_rate": 24000,
+            "channels": 1
+        }
+    });
+
+    let event: InteractionSseEvent = serde_json::from_value(raw).unwrap();
+    match event {
+        InteractionSseEvent::StepDelta { index, delta, .. } => {
+            assert_eq!(index, 0);
+            match delta {
+                StepDelta::Audio { data, mime_type, sample_rate, channels } => {
+                    assert_eq!(data.as_deref(), Some("AQIDBA=="));
+                    assert_eq!(mime_type.as_deref(), Some("audio/pcm;rate=24000"));
+                    assert_eq!(sample_rate, Some(24000));
+                    assert_eq!(channels, Some(1));
+                }
+                other => panic!("expected StepDelta::Audio, got {other:?}"),
+            }
+        }
+        other => panic!("expected step.delta, got {other:?}"),
+    }
+}
