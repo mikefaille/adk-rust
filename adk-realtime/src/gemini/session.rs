@@ -1489,6 +1489,10 @@ impl RealtimeRecovery for GeminiRealtimeSession {
                 .unwrap_or(false)
                 || setup_session_val.get("resumed").and_then(|r| r.as_bool()).unwrap_or(false));
 
+        if let Some(ref handle) = resume_handle {
+            *candidate_session.last_resume_handle.lock() = Some(handle.clone());
+        }
+
         let continuity =
             if is_resumed { RecoveryContinuity::Resumed } else { RecoveryContinuity::Reconnected };
 
