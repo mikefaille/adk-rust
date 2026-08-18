@@ -1,4 +1,4 @@
-# Realtime Concurrency and Audio Rules
+# Realtime Concurrency, Audio, and Recovery Rules
 
 ## Context
 
@@ -20,7 +20,7 @@ Use for async orchestration state and true cross-task async coordination.
 
 - You MUST NOT use Tokio locks for short CPU-bound hot paths.
 - You MUST NOT keep Tokio lock guards alive across provider or network `.await` calls when a handle can be cloned first.
-- You MUST prefer the `session_handle()` pattern in `RealtimeRunner`: lock → clone → drop guard → await.
+- You MUST prefer the session-generation snapshot pattern in `RealtimeRunner`: acquire authority → clone the exact generation/session handle → drop guards → await provider I/O.
 
 **References**
 - Tokio documents that the async mutex is **more expensive** than the blocking mutex and that the main use case is the ability to keep the guard across `.await`; for plain data, `std::sync::Mutex` is often preferred, and `parking_lot` is also called out as a good fit. [^tokio-mutex]
@@ -64,12 +64,14 @@ Rules:
 
 In `RealtimeRunner` helpers such as `send_audio`, `send_text`, `commit_audio`, `create_response`, `interrupt`, and `next_event`:
 
-- acquire the lock
-- clone the session handle
+- acquire the supervisor/session-generation authority
+- clone the exact generation/session snapshot used by the operation
 - drop the guard
 - then perform the async call
 
-You MUST NOT await provider I/O while still holding a session lock guard.
+You MUST NOT await provider I/O while still holding a general state lock guard.
+
+A dedicated serialization lock such as the private replacement/publication lock MAY be intentionally held across candidate-producing provider I/O when that lock is the explicit single-flight authority for the transaction. Do not generalize that exception to ordinary reads or writes.
 
 **References**
 - This follows Tokio’s guidance that async mutexes are primarily for cases where the guard must cross `.await`; if you do not need that, prefer shorter lock lifetimes and cheaper blocking primitives where possible. [^tokio-mutex]
@@ -133,16 +135,20 @@ You MUST NOT increase buffering substantially unless profiling shows it is neces
 
 ---
 
-## 7. Prefer graceful polling for transient disconnects
+## 7. Prefer managed lifecycle handling for transient disconnects
 
-In loops such as `next_event()`:
+For application-facing `RealtimeRunner` paths, temporary transport loss MUST be handled by the managed session-generation lifecycle rather than by ad-hoc polling or a second reconnect loop.
 
-- temporary absence of session MUST be treated as a transient condition
-- you SHOULD prefer short non-blocking delay and retry-style behavior where appropriate
-- you MUST NOT collapse outer orchestration loops on every temporary gap
+- `RealtimeRunner` is the managed abstraction.
+- `RealtimeSession` remains the raw provider abstraction.
+- Managed reads MUST be generation-aware and wake on generation publication.
+- Managed writes MUST pass through the common write-admission boundary.
+- You MUST NOT add a third reconnect authority in provider adapters, event handlers, or application bridges.
+
+A raw provider session may still fail fast. Do not silently change raw APIs into policy-owning managed APIs.
 
 **References**
-- **PROJECT RULE:** this is a control-plane resilience policy for this repo’s orchestration loops.
+- **PROJECT RULE:** this is the managed recovery architecture established by the realtime recovery integration. See `MANAGED_RECOVERY.md`.
 
 ---
 
@@ -190,6 +196,138 @@ size_of::<i16>()` bytes).
   fix. Reference implementation and exhaustive chunk-boundary tests (every
   chunk size across 1–4 channels): `RemainderState` in
   `src/livekit/handler.rs`.
+
+---
+
+## 10. Preserve the managed recovery authority
+
+`RecoverySupervisor` is the single writable authority for the active realtime session generation, canonical configuration revision, transport status, recovery publication, and terminal lifecycle.
+
+You MUST preserve these invariants:
+
+1. `RealtimeRunner` MUST NOT regain a second synchronized active-session cache.
+2. Every managed read or write MUST capture the generation together with the exact raw session it invokes.
+3. Failure reporting MUST use that captured generation, never the generation current later during error handling.
+4. `set_initial_session()` is valid only while the supervisor is uninitialized; later replacements mint a new monotonic generation.
+5. Recovery and intentional context resumption MUST share the same replacement/publication serialization boundary.
+6. Generation watchers are liveness signals only; supervisor state remains authoritative.
+7. Candidate publication order MUST remain: ready candidate -> revision revalidation -> atomic N+1 publication -> watcher notification -> bounded asynchronous retirement of N.
+8. A candidate MUST NOT be published if the coherent config revision changed while it was being built.
+9. `Closed` and `Exhausted` MUST be non-admittable terminal states.
+
+You MUST NOT restore `RealtimeAvailability` or invent another public availability/reconnect state machine to compete with the supervisor.
+
+See `MANAGED_RECOVERY.md` for the full transaction and extension contract.
+
+---
+
+## 11. Preserve delivery certainty
+
+`DeliveryCertainty` records only what the managed runner knows about the local provider invocation boundary.
+
+- `NotAttempted` means the managed layer rejected the write before invoking the raw session.
+- `Indeterminate` means the raw session was invoked and remote acceptance/processing is not known.
+
+Rules:
+
+- A pre-invocation rejection MUST perform zero raw calls.
+- Once the raw session is invoked, a failure MUST NOT be labeled `NotAttempted`.
+- You MUST NOT interpret `Indeterminate` as safe to retry automatically.
+- You MUST NOT interpret a successful raw write as proof of provider-side business processing.
+- Application replay policy MUST stay outside generic ADK recovery.
+
+This boundary is customer-facing reliability semantics, not merely an internal error detail.
+
+---
+
+## 12. Recovery episodes are cancellation-safe transactions
+
+When recovery for generation N begins:
+
+- the supervisor transitions to private `Recovering`
+- new managed writes MUST be rejected before raw invocation
+- one recovery epoch identifies the active episode
+- the cancellation guard MUST own the episode from the moment `Recovering` is published until a replacement or terminal state is published
+
+Cleanup from an older cancelled episode MUST NOT restore `Healthy` during a newer episode.
+
+A ready but unpublished provider candidate MUST remain cleanup-owned until atomic publication. Cancelling before publication MUST leave N authoritative and close the unpublished candidate with bounded cleanup work.
+
+Do not insert an `.await` between publishing `Recovering` and establishing guard ownership. Do not disarm the episode guard before publishing `Healthy` or `Exhausted`.
+
+---
+
+## 13. Provider recovery is one candidate attempt
+
+A provider opts into managed recovery through `RealtimeSession::recovery()` and `RealtimeRecovery`.
+
+One `recover(context)` call MUST mean exactly one provider candidate attempt.
+
+The provider owns:
+
+- provider-specific cause/error classification
+- authentication or token refresh for that attempt
+- transport creation
+- setup/configuration frames
+- the provider-specific readiness boundary
+- attempt-local cleanup
+- truthful `RecoveryContinuity`
+
+The provider MUST NOT own:
+
+- the outer retry loop
+- backoff policy
+- generation allocation/publication
+- application replay
+- another session replacement authority
+
+`RecoveredSession` may be returned only after the candidate is actually ready for managed traffic. `Resumed` requires confirmed provider-native logical continuity; otherwise use `Reconnected`.
+
+---
+
+## 14. Do not overclaim runtime reliability
+
+The provider-neutral recovery state machine and its deterministic tests prove the generic managed boundary. They do not prove that a specific external provider can reconnect successfully under real network conditions.
+
+When documenting or marketing this crate:
+
+You MAY claim:
+
+- managed realtime recovery orchestration
+- generation-safe session replacement
+- bounded recovery attempts/deadlines
+- delivery-certainty-aware writes
+- config-safe recovery/resumption publication
+- cancellation-safe candidate cleanup
+
+You MUST NOT claim without provider/runtime evidence:
+
+- universal automatic provider reconnect
+- zero dropped calls
+- zero lost audio
+- exactly-once provider delivery
+- preserved provider history after every reconnect
+- a recovery latency SLA
+
+Gemini- or provider-specific runtime claims require the corresponding provider implementation plus real endpoint validation.
+
+---
+
+## 15. Required recovery validation
+
+For changes touching managed recovery, session-generation authority, write certainty, resumption, or terminal lifecycle, run:
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo nextest run --workspace
+cargo clippy -p adk-realtime --features integration --all-targets -- -D warnings
+cargo nextest run -p adk-realtime --features integration
+```
+
+Tests SHOULD explicitly cover the interleaving or boundary being changed. A test name is not proof unless synchronization actually forces the intended race.
+
+Do not replace deterministic synchronization with fixed sleeps when a notification, barrier, held lock, bounded poll, or paused Tokio clock can prove the state transition directly.
 
 ---
 
