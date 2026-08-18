@@ -92,7 +92,8 @@ impl GeminiTts {
     /// Create with explicit config.
     pub fn new(config: CloudTtsConfig) -> Self {
         let model = models::GEMINI_3_1_FLASH_TTS.to_string();
-        let mut builder = GeminiBuilder::new(&config.api_key).with_model(Model::from(model.clone()));
+        let mut builder =
+            GeminiBuilder::new(&config.api_key).with_model(Model::from(model.clone()));
         if let Some(ref base) = config.base_url {
             if let Ok(url) = url::Url::parse(base) {
                 builder = builder.with_base_url(url);
@@ -100,19 +101,14 @@ impl GeminiTts {
         }
         let gemini = builder.build().unwrap_or_else(|_| Gemini::new(&config.api_key).unwrap());
 
-        Self {
-            config,
-            gemini,
-            model,
-            voices: build_voice_catalog(),
-            speakers: None,
-        }
+        Self { config, gemini, model, voices: build_voice_catalog(), speakers: None }
     }
 
     /// Set the TTS model.
     pub fn with_model(mut self, model: impl Into<String>) -> Self {
         self.model = model.into();
-        let mut builder = GeminiBuilder::new(&self.config.api_key).with_model(Model::from(self.model.clone()));
+        let mut builder =
+            GeminiBuilder::new(&self.config.api_key).with_model(Model::from(self.model.clone()));
         if let Some(ref base) = self.config.base_url {
             if let Ok(url) = url::Url::parse(base) {
                 builder = builder.with_base_url(url);
@@ -141,7 +137,6 @@ impl GeminiTts {
             )
         })
     }
-
 
     fn build_speech_config(&self, voice: &str) -> Vec<SpeechConfigEntry> {
         match &self.speakers {
@@ -390,12 +385,11 @@ impl TtsProvider for GeminiTts {
 
         let payload = self.build_request(request, true);
 
-        let mut event_stream = self.gemini.send_interaction_stream(payload).await.map_err(|e| {
-            AudioError::Tts {
+        let mut event_stream =
+            self.gemini.send_interaction_stream(payload).await.map_err(|e| AudioError::Tts {
                 provider: "gemini".into(),
                 message: format!("HTTP / stream request failed: {e}"),
-            }
-        })?;
+            })?;
 
         let stream = try_stream! {
             let mut audio_chunks_received = 0u64;
