@@ -319,6 +319,7 @@ impl GeminiRealtimeSession {
     }
 
     /// Constructs a mock `GeminiRealtimeSession` for testing connection lifecycle & recovery.
+    #[cfg(any(test, feature = "integration", feature = "gemini"))]
     pub fn new_for_test(
         session_id: String,
         reconnect_url: String,

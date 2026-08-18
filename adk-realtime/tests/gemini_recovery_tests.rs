@@ -426,27 +426,36 @@ async fn test_candidate_raii_cleanup_on_timeout() {
 
 #[tokio::test]
 async fn test_event_queue_cancellation_safety_zero_lost_messages() {
-    let (addr, _s) = spawn_mock_ws_server(|mut ws| async move {
-        // Read setup frame
-        let _setup = ws.next().await;
-        // Send setupComplete first
-        let setup_complete = json!({ "setupComplete": {} });
-        ws.send(Message::Text(setup_complete.to_string().into())).await.unwrap();
+    let frame_send_trigger = Arc::new(tokio::sync::Notify::new());
+    let trigger_clone = Arc::clone(&frame_send_trigger);
 
-        // Send two serverContent frames in a single burst
-        let f1 = json!({
-            "serverContent": {
-                "inputTranscription": { "text": "Chunk 1" }
-            }
-        });
-        let f2 = json!({
-            "serverContent": {
-                "inputTranscription": { "text": "Chunk 2" }
-            }
-        });
-        ws.send(Message::Text(f1.to_string().into())).await.unwrap();
-        ws.send(Message::Text(f2.to_string().into())).await.unwrap();
-        tokio::time::sleep(Duration::from_secs(1)).await;
+    let (addr, _s) = spawn_mock_ws_server(move |mut ws| {
+        let trigger = Arc::clone(&trigger_clone);
+        async move {
+            // Read setup frame
+            let _setup = ws.next().await;
+            // Send setupComplete first
+            let setup_complete = json!({ "setupComplete": {} });
+            ws.send(Message::Text(setup_complete.to_string().into())).await.unwrap();
+
+            // Wait for test thread to start polling and cancel next_event()
+            trigger.notified().await;
+
+            // Send two serverContent frames in a single WS burst
+            let f1 = json!({
+                "serverContent": {
+                    "inputTranscription": { "text": "Chunk 1" }
+                }
+            });
+            let f2 = json!({
+                "serverContent": {
+                    "inputTranscription": { "text": "Chunk 2" }
+                }
+            });
+            ws.send(Message::Text(f1.to_string().into())).await.unwrap();
+            ws.send(Message::Text(f2.to_string().into())).await.unwrap();
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
     })
     .await;
 
@@ -456,11 +465,26 @@ async fn test_event_queue_cancellation_safety_zero_lost_messages() {
     let session =
         GeminiRealtimeSession::connect(backend, "models/gemini-live", config).await.unwrap();
 
-    // Consume first event
+    // Consume setupComplete
     let ev1 = session.next_event().await.unwrap().unwrap();
     assert!(matches!(ev1, ServerEvent::SessionCreated { .. }));
 
-    // Read Chunk 1 (which decodes WS message carrying Chunk 1 + Chunk 2 into event_queue synchronously)
+    // Phase 1: Actively poll next_event() while the server has NOT sent frames yet, then cancel/drop the future.
+    let mut in_flight_read = Box::pin(session.next_event());
+    tokio::select! {
+        _ = &mut in_flight_read => {
+            panic!("read_fut completed unexpectedly before server sent frames");
+        }
+        _ = tokio::task::yield_now() => {
+            // Future was actively polled and entered receiver.lock().await before cancellation
+        }
+    }
+    drop(in_flight_read);
+
+    // Trigger server to send Chunk 1 + Chunk 2
+    frame_send_trigger.notify_one();
+
+    // Phase 2: Read next_event(); it decodes Chunk 1 + Chunk 2 from WS, returns Chunk 1, and synchronously queues Chunk 2
     let ev2 = session.next_event().await.unwrap().unwrap();
     if let ServerEvent::InputTranscriptDelta { delta, .. } = ev2 {
         assert_eq!(delta, "Chunk 1");
@@ -468,12 +492,13 @@ async fn test_event_queue_cancellation_safety_zero_lost_messages() {
         panic!("Expected InputTranscriptDelta Chunk 1, got {:?}", ev2);
     }
 
-    // Now test cancellation mid-read: create a next_event() future and drop it without awaiting it
-    let fut = session.next_event();
-    drop(fut);
+    // Phase 3: Actively poll next_event() when Chunk 2 is in event_queue
+    let mut queued_read = Box::pin(session.next_event());
+    let ev3 = match futures::future::poll_immediate(&mut queued_read).await {
+        Some(res) => res.unwrap().unwrap(),
+        None => panic!("Expected poll_immediate to return Chunk 2 from event_queue"),
+    };
 
-    // Read next event: Chunk 2 must still be present in event_queue despite the dropped future
-    let ev3 = session.next_event().await.unwrap().unwrap();
     if let ServerEvent::InputTranscriptDelta { delta, .. } = ev3 {
         assert_eq!(delta, "Chunk 2");
     } else {
