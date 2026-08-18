@@ -26,9 +26,9 @@ async fn test_model_id_normalization_for_google_compliance() {
 fn test_tcp_connection_reset_classification() {
     let reset_errors = vec![
         RealtimeError::ConnectionError("read tcp 127.0.0.1:443: connection reset by peer".into()),
-        RealtimeError::MessageError("ECONNRESET: connection lost".into()),
-        RealtimeError::ProviderError("Broken pipe on socket write".into()),
-        RealtimeError::Protocol("Connection closed abruptly".into()),
+        RealtimeError::ConnectionError("ECONNRESET: connection lost".into()),
+        RealtimeError::ConnectionError("Broken pipe on socket write".into()),
+        RealtimeError::ConnectionError("connection aborted".into()),
     ];
 
     for err in &reset_errors {
@@ -39,8 +39,21 @@ fn test_tcp_connection_reset_classification() {
         );
     }
 
-    let non_reset_err = RealtimeError::ConfigError("Invalid model ID".into());
-    assert!(!non_reset_err.is_connection_reset());
+    let non_reset_errors = vec![
+        RealtimeError::ConfigError("Invalid model ID".into()),
+        RealtimeError::ProviderError("Broken pipe on socket write".into()),
+        RealtimeError::Protocol("Connection closed abruptly".into()),
+        RealtimeError::ConnectionError("connection closed gracefully".into()),
+        RealtimeError::MessageError("ECONNRESET: connection lost".into()),
+    ];
+
+    for err in &non_reset_errors {
+        assert!(
+            !err.is_connection_reset(),
+            "Error {:?} should NOT be classified as connection reset",
+            err
+        );
+    }
 }
 
 #[tokio::test]
