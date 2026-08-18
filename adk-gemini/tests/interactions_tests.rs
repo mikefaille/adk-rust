@@ -272,16 +272,20 @@ fn unknown_sse_event_falls_back_to_other() {
 
 #[test]
 fn tts_request_with_audio_format_and_speech_config_serializes() {
-    use adk_gemini::generation::{SpeakerVoiceConfig, SpeechConfig};
+    use adk_gemini::interactions::SpeechConfigEntry;
     let req = CreateInteractionRequest {
         model: Some("gemini-3.1-flash-tts-preview".to_string()),
         input: Input::Text("Alice: Hello Bob!\nBob: Hi Alice!".to_string()),
         response_format: Some(ResponseFormat::Audio {
-            mime_type: Some("audio/pcm".to_string()),
+            mime_type: Some("audio/l16".to_string()),
             sample_rate: Some(24000),
         }),
         stream: Some(true),
         generation_config: Some(adk_gemini::interactions::GenerationConfig {
+            speech_config: Some(vec![
+                SpeechConfigEntry::speaker_voice("Alice", "Kore"),
+                SpeechConfigEntry::speaker_voice("Bob", "Puck"),
+            ]),
             ..Default::default()
         }),
         ..Default::default()
@@ -291,16 +295,14 @@ fn tts_request_with_audio_format_and_speech_config_serializes() {
     assert_eq!(value["model"], json!("gemini-3.1-flash-tts-preview"));
     assert_eq!(value["stream"], json!(true));
     assert_eq!(value["response_format"]["type"], json!("audio"));
-    assert_eq!(value["response_format"]["mime_type"], json!("audio/pcm"));
+    assert_eq!(value["response_format"]["mime_type"], json!("audio/l16"));
     assert_eq!(value["response_format"]["sample_rate"], json!(24000));
 
-    // Also test speech config serialization in generation config if passed via standard SpeechConfig
-    let speech_cfg = SpeechConfig::multi_speaker(vec![
-        SpeakerVoiceConfig::new("Alice", "Kore"),
-        SpeakerVoiceConfig::new("Bob", "Puck"),
-    ]);
-    let speech_json = serde_json::to_value(&speech_cfg).unwrap();
-    assert!(speech_json.get("multiSpeakerVoiceConfig").is_some());
+    let speech_cfg = &value["generation_config"]["speech_config"];
+    assert_eq!(speech_cfg[0]["speaker"], json!("Alice"));
+    assert_eq!(speech_cfg[0]["voice"], json!("Kore"));
+    assert_eq!(speech_cfg[1]["speaker"], json!("Bob"));
+    assert_eq!(speech_cfg[1]["voice"], json!("Puck"));
 }
 
 #[test]

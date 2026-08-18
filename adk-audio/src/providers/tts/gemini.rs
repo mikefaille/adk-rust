@@ -411,6 +411,7 @@ impl TtsProvider for GeminiTts {
             let mut audio_chunks_received = 0u64;
             let mut expected_sample_rate: Option<u32> = None;
             let mut expected_channels: Option<u8> = None;
+            let mut completed_successfully = false;
 
             while let Some(event_res) = event_stream.next().await {
                 let event = event_res.map_err(|e| AudioError::Tts {
@@ -482,10 +483,18 @@ impl TtsProvider for GeminiTts {
                                 message: "Interaction completed with status failed".into(),
                             })?;
                         }
+                        completed_successfully = true;
                         break;
                     }
                     _ => {}
                 }
+            }
+
+            if !completed_successfully {
+                Err(AudioError::Tts {
+                    provider: "gemini".into(),
+                    message: "Stream terminated abruptly without interaction.completed event".into(),
+                })?;
             }
 
             if audio_chunks_received == 0 {

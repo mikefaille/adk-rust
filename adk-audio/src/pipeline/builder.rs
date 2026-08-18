@@ -155,11 +155,39 @@ impl AudioPipelineBuilder {
                             if input.is_none() { break; }
                             continue;
                         };
+                        let tts_start = std::time::Instant::now();
                         let request = TtsRequest { text, ..Default::default() };
-                        if let Ok(frame) = tts.synthesize(&request).await {
-                            let mut metrics = m.write().await;
-                            metrics.total_audio_ms += frame.duration_ms as u64;
-                            let _ = output_tx.send(PipelineOutput::Audio(frame)).await;
+                        match tts.synthesize_stream(&request).await {
+                            Ok(mut stream) => {
+                                use futures::StreamExt;
+                                let mut first_frame = true;
+                                while let Some(res) = stream.next().await {
+                                    match res {
+                                        Ok(frame) => {
+                                            let elapsed = tts_start.elapsed().as_millis() as f64;
+                                            {
+                                                let mut metrics = m.write().await;
+                                                if first_frame {
+                                                    metrics.tts_first_audio_latency_ms = elapsed;
+                                                    first_frame = false;
+                                                }
+                                                metrics.tts_latency_ms = elapsed;
+                                                metrics.total_audio_ms += frame.duration_ms as u64;
+                                            }
+                                            if output_tx.send(PipelineOutput::Audio(frame)).await.is_err() {
+                                                break;
+                                            }
+                                        }
+                                        Err(err) => {
+                                            tracing::error!(error = %err, "TTS stream error in build_tts pipeline");
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                            Err(err) => {
+                                tracing::error!(error = %err, "Failed to start TTS stream in build_tts pipeline");
+                            }
                         }
                     }
                 }

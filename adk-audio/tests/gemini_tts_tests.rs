@@ -5,7 +5,6 @@ use adk_audio::providers::tts::{CloudTtsConfig, GeminiTts};
 use adk_audio::traits::{TtsProvider, TtsRequest};
 use futures::StreamExt;
 use std::sync::Arc;
-use tokio::sync::{RwLock, mpsc};
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -244,52 +243,29 @@ async fn test_pipeline_emits_first_audio_before_provider_completion() {
         .respond_with(
             ResponseTemplate::new(200)
                 .set_body_string(sse_body)
+                .set_delay(std::time::Duration::from_millis(50))
                 .append_header("content-type", "text/event-stream"),
         )
         .mount(&mock_server)
         .await;
 
     let tts = Arc::new(test_tts_with_mock_url(format!("{}/interactions", mock_server.uri())));
-    let (output_tx, mut output_rx) = mpsc::channel(10);
-    let metrics = Arc::new(RwLock::new(adk_audio::pipeline::types::PipelineMetrics::default()));
+    let pipeline_handle = adk_audio::pipeline::builder::AudioPipelineBuilder::new()
+        .tts(tts)
+        .build_tts()
+        .expect("build_tts should succeed");
 
-    let tts_clone = Arc::clone(&tts);
-    let output_tx_clone = output_tx.clone();
-    let metrics_clone = Arc::clone(&metrics);
+    let mut handle = pipeline_handle;
+    let start_time = std::time::Instant::now();
+    handle
+        .input_tx
+        .send(adk_audio::pipeline::types::PipelineInput::Text("Hello world.".to_string()))
+        .await
+        .expect("send text should succeed");
 
-    tokio::spawn(async move {
-        // Feed text directly to process_text_to_speech
-        let text = "Hello world.";
-        let mut chunker = adk_audio::pipeline::chunker::SentenceChunker::new();
-        let sentences = chunker.push(text);
-        let remaining = chunker.flush();
-        let all_sentences = sentences.into_iter().chain(remaining).collect::<Vec<_>>();
+    let first_out = handle.output_rx.recv().await;
+    let first_audio_ts = start_time.elapsed();
 
-        for sentence in all_sentences {
-            let request = TtsRequest { text: sentence, ..Default::default() };
-            if let Ok(mut stream) = tts_clone.synthesize_stream(&request).await {
-                let tts_start = std::time::Instant::now();
-                let mut first_frame = true;
-                while let Some(res) = stream.next().await {
-                    if let Ok(frame) = res {
-                        let elapsed = tts_start.elapsed().as_millis() as f64;
-                        {
-                            let mut m = metrics_clone.write().await;
-                            if first_frame {
-                                m.tts_first_audio_latency_ms = elapsed;
-                                first_frame = false;
-                            }
-                            m.tts_latency_ms = elapsed;
-                        }
-                        let _ = output_tx_clone.send(PipelineOutput::Audio(frame)).await;
-                    }
-                }
-            }
-        }
-    });
-
-    // Receive first output
-    let first_out = output_rx.recv().await;
     assert!(first_out.is_some());
     if let Some(PipelineOutput::Audio(frame)) = first_out {
         assert_eq!(frame.data.as_ref(), &[1, 2, 3, 4]);
@@ -297,6 +273,23 @@ async fn test_pipeline_emits_first_audio_before_provider_completion() {
         panic!("Expected Audio output frame");
     }
 
-    let m = metrics.read().await;
+    let second_out = handle.output_rx.recv().await;
+    let completion_ts = start_time.elapsed();
+
+    assert!(second_out.is_some());
+    if let Some(PipelineOutput::Audio(frame)) = second_out {
+        assert_eq!(frame.data.as_ref(), &[5, 6, 7, 8]);
+    } else {
+        panic!("Expected second Audio output frame");
+    }
+
+    assert!(
+        first_audio_ts < completion_ts,
+        "first audio timestamp ({:?}) < completion timestamp ({:?})",
+        first_audio_ts,
+        completion_ts
+    );
+
+    let m = handle.metrics.read().await;
     assert!(m.tts_first_audio_latency_ms >= 0.0);
 }

@@ -233,25 +233,41 @@ impl RealtimeError {
         }
     }
 
-    /// Returns true if this error represents a transient TCP connection reset, closed stream, or broken pipe.
+    /// Returns true if this error represents a low-level, conservative transport reset fact
+    /// (such as a TCP connection reset, broken pipe, or connection aborted).
+    ///
+    /// This is a transport-fact predicate ("did the transport actually reset?"), NOT a provider
+    /// recovery policy ("should this error cause retry?"). Provider recovery policy belongs in
+    /// `RealtimeRecovery::classify` / `classify_attempt_error`.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use adk_realtime::RealtimeError;
+    ///
+    /// let reset_err = RealtimeError::connection("read tcp: connection reset by peer");
+    /// assert!(reset_err.is_connection_reset());
+    ///
+    /// // Non-transport error variants or broad strings return false
+    /// let protocol_err = RealtimeError::protocol("connection reset by peer in payload");
+    /// assert!(!protocol_err.is_connection_reset());
+    /// ```
     pub fn is_connection_reset(&self) -> bool {
         match self {
-            RealtimeError::ConnectionError(msg)
-            | RealtimeError::MessageError(msg)
-            | RealtimeError::ProviderError(msg)
-            | RealtimeError::Protocol(msg) => {
+            RealtimeError::ConnectionError(msg) => {
                 let lower = msg.to_lowercase();
-                lower.contains("connection reset by peer")
+                lower.contains("connection reset")
                     || lower.contains("econnreset")
                     || lower.contains("broken pipe")
-                    || lower.contains("connection closed")
-                    || lower.contains("receive error")
+                    || lower.contains("connection aborted")
+                    || lower.contains("econnaborted")
             }
             RealtimeError::IoError(err) => {
                 err.kind() == std::io::ErrorKind::ConnectionReset
                     || err.kind() == std::io::ErrorKind::BrokenPipe
                     || err.kind() == std::io::ErrorKind::ConnectionAborted
             }
+            RealtimeError::WriteFailed { error, .. } => error.is_connection_reset(),
             _ => false,
         }
     }
@@ -263,20 +279,81 @@ mod tests {
 
     #[test]
     fn test_is_connection_reset_classification() {
+        // Positive transport reset facts
         let err1 = RealtimeError::ConnectionError("read tcp: connection reset by peer".to_string());
         assert!(err1.is_connection_reset());
 
-        let err2 = RealtimeError::MessageError("ECONNRESET occurred".to_string());
+        let err2 = RealtimeError::ConnectionError("ECONNRESET occurred".to_string());
         assert!(err2.is_connection_reset());
 
-        let io_err = RealtimeError::IoError(Arc::new(std::io::Error::new(
+        let err3 = RealtimeError::ConnectionError("Broken pipe on socket write".to_string());
+        assert!(err3.is_connection_reset());
+
+        let err4 = RealtimeError::ConnectionError("connection aborted by host".to_string());
+        assert!(err4.is_connection_reset());
+
+        let io_reset = RealtimeError::IoError(Arc::new(std::io::Error::new(
             std::io::ErrorKind::ConnectionReset,
             "reset",
         )));
-        assert!(io_err.is_connection_reset());
+        assert!(io_reset.is_connection_reset());
 
-        let config_err = RealtimeError::ConfigError("invalid param".to_string());
+        let io_broken = RealtimeError::IoError(Arc::new(std::io::Error::new(
+            std::io::ErrorKind::BrokenPipe,
+            "pipe",
+        )));
+        assert!(io_broken.is_connection_reset());
+
+        let io_aborted = RealtimeError::IoError(Arc::new(std::io::Error::new(
+            std::io::ErrorKind::ConnectionAborted,
+            "aborted",
+        )));
+        assert!(io_aborted.is_connection_reset());
+
+        let write_failed_reset = RealtimeError::write_failed(
+            Arc::new(io_reset.clone()),
+            DeliveryCertainty::Indeterminate,
+        );
+        assert!(write_failed_reset.is_connection_reset());
+
+        // Negative cases: Broad phrases or non-transport variants MUST NOT be classified as reset
+        let broad_closed =
+            RealtimeError::ConnectionError("connection closed gracefully".to_string());
+        assert!(!broad_closed.is_connection_reset());
+
+        let broad_recv = RealtimeError::MessageError("receive error on channel".to_string());
+        assert!(!broad_recv.is_connection_reset());
+
+        let msg_reset = RealtimeError::MessageError("ECONNRESET occurred".to_string());
+        assert!(!msg_reset.is_connection_reset());
+
+        // Protocol & Provider errors must never be classified as transport reset regardless of text
+        let protocol_reset_text =
+            RealtimeError::Protocol("connection reset by peer in payload".to_string());
+        assert!(!protocol_reset_text.is_connection_reset());
+
+        let provider_reset_text =
+            RealtimeError::ProviderError("broken pipe on provider stream".to_string());
+        assert!(!provider_reset_text.is_connection_reset());
+
+        // Quota / Auth / Config / Setup Rejections
+        let quota_err = RealtimeError::ServerError {
+            code: "429".into(),
+            message: "RESOURCE_EXHAUSTED / Quota exceeded".into(),
+        };
+        assert!(!quota_err.is_connection_reset());
+
+        let auth_err = RealtimeError::AuthError("401 Unauthorized token expired".into());
+        assert!(!auth_err.is_connection_reset());
+
+        let config_err = RealtimeError::ConfigError("invalid parameter in setup".into());
         assert!(!config_err.is_connection_reset());
+
+        let write_failed_config = RealtimeError::write_failed(
+            Arc::new(config_err.clone()),
+            DeliveryCertainty::NotAttempted,
+        );
+        assert!(!write_failed_config.is_connection_reset());
     }
 
     #[cfg(feature = "livekit")]
