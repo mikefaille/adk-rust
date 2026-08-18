@@ -176,7 +176,6 @@ dependencies = [
  "cpal",
  "dasp",
  "espeak-rs",
- "eventsource-stream",
  "futures",
  "hf-hub 0.5.0",
  "livekit-api",
@@ -196,6 +195,7 @@ dependencies = [
  "tokio",
  "tokio-tungstenite 0.28.0",
  "tracing",
+ "url",
  "wiremock",
 ]
 

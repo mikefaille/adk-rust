@@ -32,7 +32,7 @@ pin-project-lite = "0.2"
 reqwest = { workspace = true, features = ["multipart"], optional = true }
 base64 = { version = "0.22", optional = true }
 adk-gemini = { workspace = true, features = ["interactions"], optional = true }
-eventsource-stream = { version = "0.2", optional = true }
+url = "2"
 
 # DSP (optional)
 rubato = { version = "4.0", optional = true }
@@ -89,7 +89,7 @@ wiremock = "0.6"
 
 [features]
 default = ["tts", "stt"]
-tts = ["dep:reqwest", "dep:base64", "dep:adk-gemini", "dep:eventsource-stream"]
+tts = ["dep:reqwest", "dep:base64", "dep:adk-gemini"]
 stt = ["dep:reqwest", "dep:tokio-tungstenite"]
 music = ["dep:reqwest"]
 fx = ["dep:rubato", "dep:dasp"]

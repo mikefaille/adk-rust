@@ -11,11 +11,11 @@ use adk_gemini::interactions::{
     CreateInteractionRequest, Input, InteractionSseEvent, ResponseFormat, SpeechConfigEntry,
     StepDelta,
 };
+use adk_gemini::{Gemini, GeminiBuilder, Model};
 use async_stream::try_stream;
 use async_trait::async_trait;
 use base64::Engine as _;
 use bytes::Bytes;
-use eventsource_stream::Eventsource;
 use futures::{Stream, StreamExt};
 
 use crate::error::{AudioError, AudioResult};
@@ -71,7 +71,7 @@ impl SpeakerConfig {
 /// ```
 pub struct GeminiTts {
     config: CloudTtsConfig,
-    client: reqwest::Client,
+    gemini: Gemini,
     model: String,
     voices: Vec<Voice>,
     speakers: Option<Vec<SpeakerConfig>>,
@@ -91,10 +91,19 @@ impl GeminiTts {
 
     /// Create with explicit config.
     pub fn new(config: CloudTtsConfig) -> Self {
+        let model = models::GEMINI_3_1_FLASH_TTS.to_string();
+        let mut builder = GeminiBuilder::new(&config.api_key).with_model(Model::from(model.clone()));
+        if let Some(ref base) = config.base_url {
+            if let Ok(url) = url::Url::parse(base) {
+                builder = builder.with_base_url(url);
+            }
+        }
+        let gemini = builder.build().unwrap_or_else(|_| Gemini::new(&config.api_key).unwrap());
+
         Self {
             config,
-            client: reqwest::Client::new(),
-            model: models::GEMINI_3_1_FLASH_TTS.into(),
+            gemini,
+            model,
             voices: build_voice_catalog(),
             speakers: None,
         }
@@ -103,6 +112,15 @@ impl GeminiTts {
     /// Set the TTS model.
     pub fn with_model(mut self, model: impl Into<String>) -> Self {
         self.model = model.into();
+        let mut builder = GeminiBuilder::new(&self.config.api_key).with_model(Model::from(self.model.clone()));
+        if let Some(ref base) = self.config.base_url {
+            if let Ok(url) = url::Url::parse(base) {
+                builder = builder.with_base_url(url);
+            }
+        }
+        if let Ok(g) = builder.build() {
+            self.gemini = g;
+        }
         self
     }
 
@@ -124,17 +142,6 @@ impl GeminiTts {
         })
     }
 
-    fn interactions_url(&self) -> String {
-        if let Some(ref base) = self.config.base_url {
-            if base.contains("/interactions") {
-                base.clone()
-            } else {
-                format!("{}/interactions", base.trim_end_matches('/'))
-            }
-        } else {
-            "https://generativelanguage.googleapis.com/v1beta/interactions".to_string()
-        }
-    }
 
     fn build_speech_config(&self, voice: &str) -> Vec<SpeechConfigEntry> {
         match &self.speakers {
@@ -160,6 +167,7 @@ impl GeminiTts {
                 sample_rate: Some(24000),
             }),
             stream: Some(stream),
+            store: Some(false),
             generation_config: Some(adk_gemini::interactions::GenerationConfig {
                 speech_config,
                 ..Default::default()
@@ -310,8 +318,8 @@ impl TtsProvider for GeminiTts {
                 }
             });
 
-            let resp = self
-                .client
+            let client = reqwest::Client::new();
+            let resp = client
                 .post(&url)
                 .header("x-goog-api-key", &self.config.api_key)
                 .json(&body)
@@ -380,32 +388,14 @@ impl TtsProvider for GeminiTts {
             return Ok(Box::pin(futures::stream::once(async { Ok(frame) })));
         }
 
-        let url = self.interactions_url();
         let payload = self.build_request(request, true);
 
-        let response = self
-            .client
-            .post(&url)
-            .header("x-goog-api-key", &self.config.api_key)
-            .header("Api-Revision", adk_gemini::interactions::API_REVISION)
-            .json(&payload)
-            .send()
-            .await
-            .map_err(|e| AudioError::Tts {
+        let mut event_stream = self.gemini.send_interaction_stream(payload).await.map_err(|e| {
+            AudioError::Tts {
                 provider: "gemini".into(),
-                message: format!("HTTP request failed: {e}"),
-            })?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            return Err(AudioError::Tts {
-                provider: "gemini".into(),
-                message: format!("HTTP {status}: {body}"),
-            });
-        }
-
-        let mut event_stream = response.bytes_stream().eventsource();
+                message: format!("HTTP / stream request failed: {e}"),
+            }
+        })?;
 
         let stream = try_stream! {
             let mut audio_chunks_received = 0u64;
@@ -414,16 +404,10 @@ impl TtsProvider for GeminiTts {
             let mut completed_successfully = false;
 
             while let Some(event_res) = event_stream.next().await {
-                let event = event_res.map_err(|e| AudioError::Tts {
+                let sse_event = event_res.map_err(|e| AudioError::Tts {
                     provider: "gemini".into(),
                     message: format!("SSE stream read error: {e}"),
                 })?;
-
-                let sse_event: InteractionSseEvent = serde_json::from_str(&event.data)
-                    .map_err(|e| AudioError::Tts {
-                        provider: "gemini".into(),
-                        message: format!("Failed to parse SSE event JSON: {e}"),
-                    })?;
 
                 match sse_event {
                     InteractionSseEvent::StepDelta { delta: StepDelta::Audio { data, mime_type, sample_rate, channels }, .. } => {
@@ -455,7 +439,7 @@ impl TtsProvider for GeminiTts {
                         if let Some(b64) = data
                             && !b64.is_empty()
                         {
-                            let decoded = base64::engine::general_purpose::STANDARD.decode(&b64)
+                            let mut decoded = base64::engine::general_purpose::STANDARD.decode(&b64)
                                 .map_err(|e| AudioError::Tts {
                                     provider: "gemini".into(),
                                     message: format!("Invalid base64 audio payload: {e}"),
@@ -463,6 +447,13 @@ impl TtsProvider for GeminiTts {
 
                             if decoded.is_empty() {
                                 continue;
+                            }
+
+                            // Normalize audio/l16 (big-endian 16-bit PCM) to canonical PCM16 Little-Endian
+                            if mime_type.as_deref().is_some_and(|m| m.starts_with("audio/l16")) {
+                                for chunk in decoded.chunks_exact_mut(2) {
+                                    chunk.swap(0, 1);
+                                }
                             }
 
                             audio_chunks_received += 1;
@@ -477,10 +468,10 @@ impl TtsProvider for GeminiTts {
                         })?;
                     }
                     InteractionSseEvent::InteractionCompleted { interaction, .. } => {
-                        if interaction.status == adk_gemini::interactions::InteractionStatus::Failed {
+                        if interaction.status != adk_gemini::interactions::InteractionStatus::Completed {
                             Err(AudioError::Tts {
                                 provider: "gemini".into(),
-                                message: "Interaction completed with status failed".into(),
+                                message: format!("Interaction finished with non-successful status: {:?}", interaction.status),
                             })?;
                         }
                         completed_successfully = true;
