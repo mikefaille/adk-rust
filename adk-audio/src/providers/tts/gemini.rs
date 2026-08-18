@@ -86,38 +86,46 @@ impl GeminiTts {
                 provider: "gemini".into(),
                 message: "GEMINI_API_KEY or GOOGLE_API_KEY not set".into(),
             })?;
-        Ok(Self::new(CloudTtsConfig::new(api_key)))
+        Self::new(CloudTtsConfig::new(api_key))
     }
 
     /// Create with explicit config.
-    pub fn new(config: CloudTtsConfig) -> Self {
+    pub fn new(config: CloudTtsConfig) -> AudioResult<Self> {
         let model = models::GEMINI_3_1_FLASH_TTS.to_string();
         let mut builder =
             GeminiBuilder::new(&config.api_key).with_model(Model::from(model.clone()));
         if let Some(ref base) = config.base_url {
-            if let Ok(url) = url::Url::parse(base) {
-                builder = builder.with_base_url(url);
-            }
+            let url = url::Url::parse(base).map_err(|e| AudioError::Tts {
+                provider: "gemini".into(),
+                message: format!("Invalid base_url '{base}': {e}"),
+            })?;
+            builder = builder.with_base_url(url);
         }
-        let gemini = builder.build().unwrap_or_else(|_| Gemini::new(&config.api_key).unwrap());
+        let gemini = builder.build().map_err(|e| AudioError::Tts {
+            provider: "gemini".into(),
+            message: format!("Failed to build Gemini client: {e}"),
+        })?;
 
-        Self { config, gemini, model, voices: build_voice_catalog(), speakers: None }
+        Ok(Self { config, gemini, model, voices: build_voice_catalog(), speakers: None })
     }
 
     /// Set the TTS model.
-    pub fn with_model(mut self, model: impl Into<String>) -> Self {
+    pub fn with_model(mut self, model: impl Into<String>) -> AudioResult<Self> {
         self.model = model.into();
         let mut builder =
             GeminiBuilder::new(&self.config.api_key).with_model(Model::from(self.model.clone()));
         if let Some(ref base) = self.config.base_url {
-            if let Ok(url) = url::Url::parse(base) {
-                builder = builder.with_base_url(url);
-            }
+            let url = url::Url::parse(base).map_err(|e| AudioError::Tts {
+                provider: "gemini".into(),
+                message: format!("Invalid base_url '{base}': {e}"),
+            })?;
+            builder = builder.with_base_url(url);
         }
-        if let Ok(g) = builder.build() {
-            self.gemini = g;
-        }
-        self
+        self.gemini = builder.build().map_err(|e| AudioError::Tts {
+            provider: "gemini".into(),
+            message: format!("Failed to build Gemini client for model '{}': {e}", self.model),
+        })?;
+        Ok(self)
     }
 
     /// Configure multi-speaker synthesis.

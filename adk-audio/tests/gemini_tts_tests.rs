@@ -11,7 +11,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 fn test_tts_with_mock_url(mock_url: String) -> GeminiTts {
     let mut config = CloudTtsConfig::new("test-api-key");
     config.base_url = Some(mock_url);
-    GeminiTts::new(config)
+    GeminiTts::new(config).expect("GeminiTts::new failed")
 }
 
 #[tokio::test]
@@ -270,7 +270,7 @@ async fn test_pipeline_emits_first_audio_before_provider_completion() {
     if let Some(PipelineOutput::Audio(frame)) = first_out {
         assert_eq!(frame.data.as_ref(), &[1, 2, 3, 4]);
     } else {
-        panic!("Expected Audio output frame");
+        panic!("Expected Audio output frame #1");
     }
 
     let second_out = handle.output_rx.recv().await;
@@ -280,7 +280,7 @@ async fn test_pipeline_emits_first_audio_before_provider_completion() {
     if let Some(PipelineOutput::Audio(frame)) = second_out {
         assert_eq!(frame.data.as_ref(), &[5, 6, 7, 8]);
     } else {
-        panic!("Expected second Audio output frame");
+        panic!("Expected Audio output frame #2");
     }
 
     assert!(
