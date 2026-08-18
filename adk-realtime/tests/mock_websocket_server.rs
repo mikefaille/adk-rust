@@ -26,9 +26,9 @@ async fn test_model_id_normalization_for_google_compliance() {
 fn test_tcp_connection_reset_classification() {
     let reset_errors = vec![
         RealtimeError::ConnectionError("read tcp 127.0.0.1:443: connection reset by peer".into()),
-        RealtimeError::MessageError("ECONNRESET: connection lost".into()),
+        RealtimeError::ConnectionError("ECONNRESET: connection lost".into()),
         RealtimeError::ConnectionError("Broken pipe on socket write".into()),
-        RealtimeError::MessageError("connection aborted".into()),
+        RealtimeError::ConnectionError("connection aborted".into()),
     ];
 
     for err in &reset_errors {
@@ -44,6 +44,7 @@ fn test_tcp_connection_reset_classification() {
         RealtimeError::ProviderError("Broken pipe on socket write".into()),
         RealtimeError::Protocol("Connection closed abruptly".into()),
         RealtimeError::ConnectionError("connection closed gracefully".into()),
+        RealtimeError::MessageError("ECONNRESET: connection lost".into()),
     ];
 
     for err in &non_reset_errors {

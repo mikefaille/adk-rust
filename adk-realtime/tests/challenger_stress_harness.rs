@@ -54,13 +54,6 @@ fn test_challenger_tcp_reset_error_classification_exhaustive() {
             "Expected ConnectionError({:?}) to be classified as connection reset",
             msg
         );
-
-        let msg_err = RealtimeError::MessageError(msg.to_string());
-        assert!(
-            msg_err.is_connection_reset(),
-            "Expected MessageError({:?}) to be classified as connection reset",
-            msg
-        );
     }
 
     // 2. std::io::Error variants
@@ -98,6 +91,7 @@ fn test_challenger_tcp_reset_error_classification_exhaustive() {
         // Broad string phrases in ConnectionError / MessageError without reset evidence
         RealtimeError::ConnectionError("connection closed gracefully".into()),
         RealtimeError::MessageError("receive error on websocket channel".into()),
+        RealtimeError::MessageError("ECONNRESET occurred".into()),
         // Protocol and Provider errors must NEVER be classified as transport resets merely from strings
         RealtimeError::Protocol("connection reset by peer in payload".into()),
         RealtimeError::Protocol("broken pipe in protocol framing".into()),

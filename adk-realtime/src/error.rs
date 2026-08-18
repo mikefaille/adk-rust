@@ -241,7 +241,7 @@ impl RealtimeError {
     /// `RealtimeRecovery::classify` / `classify_attempt_error`.
     pub fn is_connection_reset(&self) -> bool {
         match self {
-            RealtimeError::ConnectionError(msg) | RealtimeError::MessageError(msg) => {
+            RealtimeError::ConnectionError(msg) => {
                 let lower = msg.to_lowercase();
                 lower.contains("connection reset")
                     || lower.contains("econnreset")
@@ -270,13 +270,13 @@ mod tests {
         let err1 = RealtimeError::ConnectionError("read tcp: connection reset by peer".to_string());
         assert!(err1.is_connection_reset());
 
-        let err2 = RealtimeError::MessageError("ECONNRESET occurred".to_string());
+        let err2 = RealtimeError::ConnectionError("ECONNRESET occurred".to_string());
         assert!(err2.is_connection_reset());
 
         let err3 = RealtimeError::ConnectionError("Broken pipe on socket write".to_string());
         assert!(err3.is_connection_reset());
 
-        let err4 = RealtimeError::MessageError("connection aborted by host".to_string());
+        let err4 = RealtimeError::ConnectionError("connection aborted by host".to_string());
         assert!(err4.is_connection_reset());
 
         let io_reset = RealtimeError::IoError(Arc::new(std::io::Error::new(
@@ -310,6 +310,9 @@ mod tests {
 
         let broad_recv = RealtimeError::MessageError("receive error on channel".to_string());
         assert!(!broad_recv.is_connection_reset());
+
+        let msg_reset = RealtimeError::MessageError("ECONNRESET occurred".to_string());
+        assert!(!msg_reset.is_connection_reset());
 
         // Protocol & Provider errors must never be classified as transport reset regardless of text
         let protocol_reset_text =
