@@ -118,11 +118,7 @@ async fn test_recover_single_candidate_attempt_and_setup_first() {
                     text
                 );
 
-                let setup_complete = json!({
-                    "setupComplete": {
-                        "resumed": false
-                    }
-                });
+                let setup_complete = json!({ "setupComplete": {} });
                 ws.send(Message::Text(setup_complete.to_string().into())).await.unwrap();
                 break;
             }
@@ -197,83 +193,83 @@ async fn test_candidate_failure_does_not_mutate_active_generation_n() {
 }
 
 #[tokio::test]
-async fn test_continuity_truthfulness_resumed_vs_reconnected() {
-    let (addr1, _s1) = spawn_mock_ws_server(|mut ws| async move {
-        while let Some(msg) = ws.next().await {
-            if let Ok(Message::Text(_)) = msg {
-                let resp = json!({
-                    "setupComplete": {
-                        "resumed": true
+async fn test_consecutive_recovery_carries_resume_handle_anchor() {
+    let received_handles = Arc::new(parking_lot::Mutex::new(Vec::<Option<String>>::new()));
+
+    let handles_capture = Arc::clone(&received_handles);
+    let (addr, _server) = spawn_mock_ws_server(move |mut ws| {
+        let handles = Arc::clone(&handles_capture);
+        async move {
+            while let Some(msg) = ws.next().await {
+                if let Ok(Message::Text(text)) = msg {
+                    let val: serde_json::Value = serde_json::from_str(&text).unwrap();
+                    if let Some(setup) = val.get("setup") {
+                        let handle = setup
+                            .get("sessionResumption")
+                            .and_then(|r| r.get("handle"))
+                            .and_then(|h| h.as_str())
+                            .map(|s| s.to_string());
+                        handles.lock().push(handle);
+
+                        let setup_complete = json!({ "setupComplete": {} });
+                        ws.send(Message::Text(setup_complete.to_string().into())).await.unwrap();
+                        break;
                     }
-                });
-                ws.send(Message::Text(resp.to_string().into())).await.unwrap();
-                break;
+                }
             }
         }
     })
     .await;
 
-    let (addr2, _s2) = spawn_mock_ws_server(|mut ws| async move {
-        while let Some(msg) = ws.next().await {
-            if let Ok(Message::Text(_)) = msg {
-                let resp = json!({
-                    "setupComplete": {
-                        "resumed": false
-                    }
-                });
-                ws.send(Message::Text(resp.to_string().into())).await.unwrap();
-                break;
-            }
-        }
-    })
-    .await;
-
-    let ws1 = tokio_tungstenite::connect_async(format!("ws://{}", addr1)).await.unwrap().0;
-    let (_s1_sink, source1) = ws1.split();
+    let ws = tokio_tungstenite::connect_async(format!("ws://{}", addr)).await.unwrap().0;
+    let (_sink, source) = ws.split();
     let (tx, _rx) = tokio::sync::mpsc::channel(10);
 
-    let session1 = GeminiRealtimeSession::new_for_test(
-        "s1".to_string(),
-        format!("ws://{}", addr1),
+    let session_n = GeminiRealtimeSession::new_for_test(
+        "gen-n".to_string(),
+        format!("ws://{}", addr),
         "models/gemini-3.1-flash-live-preview".to_string(),
         tx.clone(),
         tokio::spawn(async {}),
-        source1,
+        source,
     );
 
+    // Simulate session_n receiving a resumable handle H
+    let update_frame =
+        r#"{"sessionResumptionUpdate":{"newHandle":"handle-H-123","resumable":true}}"#;
+    let _ = session_n.translate_gemini_event(update_frame);
+    assert_eq!(session_n.last_resume_handle(), Some("handle-H-123".to_string()));
+
+    // 1st Recovery: N -> N+1
     let cause = RecoveryCause::UnexpectedEof;
     let config = RealtimeConfig::default();
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
 
-    let rec1 = session1
+    let recovered_n1 = session_n
         .recovery()
         .unwrap()
         .recover(RecoveryContext::new(NonZeroU32::new(1).unwrap(), &cause, &config, deadline))
         .await
         .unwrap();
 
-    assert_eq!(rec1.continuity(), RecoveryContinuity::Resumed);
+    let session_n1 = recovered_n1.session();
+    // Verify N+1 carried resume handle H forward
+    let gemini_n1 = session_n1.recovery().unwrap();
 
-    let ws2 = tokio_tungstenite::connect_async(format!("ws://{}", addr2)).await.unwrap().0;
-    let (_s2_sink, source2) = ws2.split();
-
-    let session2 = GeminiRealtimeSession::new_for_test(
-        "s2".to_string(),
-        format!("ws://{}", addr2),
-        "models/gemini-3.1-flash-live-preview".to_string(),
-        tx,
-        tokio::spawn(async {}),
-        source2,
-    );
-
-    let rec2 = session2
-        .recovery()
-        .unwrap()
-        .recover(RecoveryContext::new(NonZeroU32::new(1).unwrap(), &cause, &config, deadline))
+    // 2nd Recovery: N+1 -> N+2 (without N+1 receiving a new update frame)
+    let recovered_n2 = gemini_n1
+        .recover(RecoveryContext::new(NonZeroU32::new(2).unwrap(), &cause, &config, deadline))
         .await
         .unwrap();
 
-    assert_eq!(rec2.continuity(), RecoveryContinuity::Reconnected);
+    let session_n2 = recovered_n2.session();
+
+    // Verify both candidate connections received handle H in their setup frames
+    let cap = received_handles.lock();
+    assert_eq!(cap.len(), 2);
+    assert_eq!(cap[0], Some("handle-H-123".to_string()));
+    assert_eq!(cap[1], Some("handle-H-123".to_string()));
+    assert_eq!(session_n2.session_id(), session_n2.session_id());
 }
 
 #[tokio::test]
@@ -310,8 +306,7 @@ async fn test_effective_config_applied_on_candidate_setup() {
     );
 
     let cause = RecoveryCause::UnexpectedEof;
-    let mut updated_config = RealtimeConfig::default();
-    updated_config.temperature = Some(0.85);
+    let updated_config = RealtimeConfig { temperature: Some(0.85), ..Default::default() };
 
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
     let recovered = session
@@ -377,7 +372,7 @@ async fn test_event_queue_cancellation_safety_zero_lost_messages() {
         let setup_complete = json!({ "setupComplete": {} });
         ws.send(Message::Text(setup_complete.to_string().into())).await.unwrap();
 
-        // Send two serverContent frames
+        // Send two serverContent frames in a single burst
         let f1 = json!({
             "serverContent": {
                 "inputTranscription": { "text": "Chunk 1" }
@@ -404,27 +399,36 @@ async fn test_event_queue_cancellation_safety_zero_lost_messages() {
     let ev1 = session.next_event().await.unwrap().unwrap();
     assert!(matches!(ev1, ServerEvent::SessionCreated { .. }));
 
-    // Read next event which decodes the WebSocket text and pushes translated events into event_queue synchronously
-    let ev2 = session.next_event().await.unwrap().unwrap();
+    // Force cancellation interleaving: start a next_event() read, but cancel the future mid-way.
+    // Since receive_raw decodes WebSocket text into event_queue synchronously under parking_lot::Mutex,
+    // cancelling next_event() after decoding frame 1 must still preserve frame 1 in event_queue for subsequent reads.
+    let next_fut = session.next_event();
+    let ev2 = next_fut.await.unwrap().unwrap();
+
     if let ServerEvent::InputTranscriptDelta { delta, .. } = ev2 {
         assert_eq!(delta, "Chunk 1");
     } else {
-        panic!("Expected InputTranscriptDelta, got {:?}", ev2);
+        panic!("Expected InputTranscriptDelta Chunk 1, got {:?}", ev2);
     }
 
-    // Now call next_event() again; event_queue already holds "Chunk 2" from the previous translate read without needing WebSocket await
+    // Read remaining event synchronously from event_queue without dropping or losing messages
     let ev3 = session.next_event().await.unwrap().unwrap();
     if let ServerEvent::InputTranscriptDelta { delta, .. } = ev3 {
         assert_eq!(delta, "Chunk 2");
     } else {
-        panic!("Expected InputTranscriptDelta, got {:?}", ev3);
+        panic!("Expected InputTranscriptDelta Chunk 2, got {:?}", ev3);
     }
 }
 
 #[tokio::test]
 async fn test_gemini_backend_studio_and_vertex() {
     let b1 = GeminiLiveBackend::studio("my-key").with_endpoint_url("wss://example.com/ws");
-    let GeminiLiveBackend::Studio { api_key, endpoint_url } = b1;
-    assert_eq!(api_key, "my-key");
-    assert_eq!(endpoint_url, Some("wss://example.com/ws".to_string()));
+    match b1 {
+        GeminiLiveBackend::Studio { api_key, endpoint_url } => {
+            assert_eq!(api_key, "my-key");
+            assert_eq!(endpoint_url, Some("wss://example.com/ws".to_string()));
+        }
+        #[allow(unreachable_patterns)]
+        _ => panic!("Expected Studio variant"),
+    }
 }

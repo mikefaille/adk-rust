@@ -95,7 +95,12 @@ impl GeminiLiveBackend {
                     "Failed to discover Application Default Credentials: {e}"
                 ))
             })?;
-        Ok(Self::Vertex { credentials, region: region.into(), project_id: project_id.into() })
+        Ok(Self::Vertex {
+            credentials,
+            region: region.into(),
+            project_id: project_id.into(),
+            endpoint_url: None,
+        })
     }
 }
 
@@ -740,7 +745,7 @@ impl GeminiRealtimeSession {
     /// Also intercepts `SessionUpdated` events carrying a resumable handle and
     /// caches the handle on `self.last_resume_handle` so that
     /// `reconnect_with_backoff` can present it on the next connection attempt.
-    fn translate_gemini_event(&self, raw: &str) -> Result<Vec<ServerEvent>> {
+    pub fn translate_gemini_event(&self, raw: &str) -> Result<Vec<ServerEvent>> {
         let events = Self::translate_event_logged(raw, Some(&self.frame_log))?;
         // Intercept SessionUpdated to cache the resume handle locally.
         for event in &events {
@@ -1030,22 +1035,54 @@ impl RealtimeRecovery for GeminiRealtimeSession {
     async fn recover(&self, context: RecoveryContext<'_>) -> Result<RecoveredSession> {
         let deadline = context.deadline();
         let config = context.config();
+        let prior_handle = self.last_resume_handle();
+
+        struct CandidateGuard {
+            session: Option<Arc<GeminiRealtimeSession>>,
+        }
+
+        impl CandidateGuard {
+            fn new(session: GeminiRealtimeSession) -> Self {
+                Self { session: Some(Arc::new(session)) }
+            }
+
+            fn disarm(mut self) -> Arc<GeminiRealtimeSession> {
+                self.session.take().expect("candidate exists")
+            }
+        }
+
+        impl Drop for CandidateGuard {
+            fn drop(&mut self) {
+                if let Some(session) = self.session.take() {
+                    session.connected.store(false, Ordering::SeqCst);
+                    if let Ok(token) = session.cancel_token.try_lock() {
+                        token.cancel();
+                    }
+                    if let Ok(mut writer) = session.writer_task.try_lock()
+                        && let Some(handle) = writer.take()
+                    {
+                        handle.abort();
+                    }
+                }
+            }
+        }
 
         let attempt_fut = async {
             let mut effective_config = config.clone();
-            if let Some(resume_handle) = self.last_resume_handle() {
+            if let Some(ref resume_handle) = prior_handle {
                 let extra_obj =
                     effective_config.extra.get_or_insert_with(|| json!({})).as_object_mut();
 
-                if let Some(extra) = extra_obj {
-                    if !extra.contains_key("resumeToken") && !extra.contains_key("resumeHandle") {
-                        extra.insert("resumeHandle".to_string(), json!(resume_handle));
-                    }
+                if let Some(extra) = extra_obj
+                    && !extra.contains_key("resumeToken")
+                    && !extra.contains_key("resumeHandle")
+                {
+                    extra.insert("resumeHandle".to_string(), json!(resume_handle));
                 }
             }
 
             // Construct private candidate session with updated config & setup frame
-            let candidate = Self::connect_with_dialect(
+            let candidate_session = Self::connect_with_dialect(
                 self.backend.clone(),
                 &self.reconnect_model,
                 effective_config,
@@ -1053,21 +1090,12 @@ impl RealtimeRecovery for GeminiRealtimeSession {
             )
             .await?;
 
-            // Wait for setupComplete frame as the setup-first transaction
-            let mut continuity = RecoveryContinuity::Reconnected;
-            loop {
-                match candidate.next_event().await {
-                    Some(Ok(ServerEvent::SessionCreated { session, .. })) => {
-                        let is_resumed = session
-                            .get("setupComplete")
-                            .and_then(|sc| sc.get("resumed"))
-                            .and_then(|r| r.as_bool())
-                            .or_else(|| session.get("resumed").and_then(|r| r.as_bool()))
-                            .unwrap_or(false);
+            let guard = CandidateGuard::new(candidate_session);
 
-                        if is_resumed {
-                            continuity = RecoveryContinuity::Resumed;
-                        }
+            // Wait for setupComplete frame as the setup-first transaction
+            loop {
+                match guard.session.as_ref().unwrap().next_event().await {
+                    Some(Ok(ServerEvent::SessionCreated { .. })) => {
                         break;
                     }
                     Some(Ok(_)) => continue,
@@ -1080,8 +1108,15 @@ impl RealtimeRecovery for GeminiRealtimeSession {
                 }
             }
 
-            let recovered: Arc<dyn RealtimeSession> = Arc::new(candidate);
-            Ok(RecoveredSession::new(recovered, continuity))
+            let candidate = guard.disarm();
+
+            // Carry prior resume handle if candidate hasn't received a new one yet
+            if candidate.last_resume_handle().is_none() && prior_handle.is_some() {
+                *candidate.last_resume_handle.lock() = prior_handle;
+            }
+
+            let recovered: Arc<dyn RealtimeSession> = candidate;
+            Ok(RecoveredSession::new(recovered, RecoveryContinuity::Reconnected))
         };
 
         match tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), attempt_fut).await {
