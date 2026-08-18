@@ -1,12 +1,14 @@
 //! Error types for the realtime module.
 
+use crate::recovery::DeliveryCertainty;
+use std::sync::Arc;
 use thiserror::Error;
 
 /// Result type for realtime operations.
 pub type Result<T> = std::result::Result<T, RealtimeError>;
 
 /// Errors that can occur during realtime operations.
-#[derive(Error, Debug)]
+#[derive(Error, Debug, Clone)]
 pub enum RealtimeError {
     /// WebSocket connection error.
     #[error("WebSocket connection error: {0}")]
@@ -59,7 +61,7 @@ pub enum RealtimeError {
 
     /// Serialization/deserialization error.
     #[error("Serialization error: {0}")]
-    SerializationError(#[from] serde_json::Error),
+    SerializationError(Arc<serde_json::Error>),
 
     /// Provider-specific error.
     #[error("Provider error: {0}")]
@@ -67,7 +69,7 @@ pub enum RealtimeError {
 
     /// Generic IO error.
     #[error("IO error: {0}")]
-    IoError(#[from] std::io::Error),
+    IoError(Arc<std::io::Error>),
 
     /// Opus codec error.
     #[error("Opus codec error: {0}")]
@@ -84,14 +86,30 @@ pub enum RealtimeError {
     /// Native LiveKit component error.
     #[cfg(feature = "livekit")]
     #[error(transparent)]
-    LiveKitNativeError(Box<crate::livekit::LiveKitError>),
+    LiveKitNativeError(Arc<crate::livekit::LiveKitError>),
+
+    /// Write operation failure with delivery certainty attribution.
+    #[error("Write failed ({certainty:?}): {error}")]
+    WriteFailed { error: Arc<RealtimeError>, certainty: DeliveryCertainty },
+}
+
+impl From<serde_json::Error> for RealtimeError {
+    fn from(err: serde_json::Error) -> Self {
+        RealtimeError::SerializationError(Arc::new(err))
+    }
+}
+
+impl From<std::io::Error> for RealtimeError {
+    fn from(err: std::io::Error) -> Self {
+        RealtimeError::IoError(Arc::new(err))
+    }
 }
 
 #[cfg(feature = "livekit")]
-/// Manually implemented to box the inner error, keeping `Result` small on the happy path.
+/// Manually implemented to wrap the inner error, keeping `Result` small on the happy path.
 impl From<crate::livekit::LiveKitError> for RealtimeError {
     fn from(err: crate::livekit::LiveKitError) -> Self {
-        RealtimeError::LiveKitNativeError(Box::new(err))
+        RealtimeError::LiveKitNativeError(Arc::new(err))
     }
 }
 
@@ -150,6 +168,20 @@ impl RealtimeError {
         Self::LiveKitError(msg.into())
     }
 
+    /// Create a write failure with specified delivery certainty.
+    pub fn write_failed(err: Arc<RealtimeError>, certainty: DeliveryCertainty) -> Self {
+        Self::WriteFailed { error: err, certainty }
+    }
+
+    /// Returns the delivery certainty for this error if applicable.
+    /// Returns `Some(DeliveryCertainty)` for write-related failures, and `None` for generic errors.
+    pub fn delivery_certainty(&self) -> Option<DeliveryCertainty> {
+        match self {
+            RealtimeError::WriteFailed { certainty, .. } => Some(*certainty),
+            _ => None,
+        }
+    }
+
     /// Returns true if this error represents a transient TCP connection reset, closed stream, or broken pipe.
     pub fn is_connection_reset(&self) -> bool {
         match self {
@@ -186,10 +218,10 @@ mod tests {
         let err2 = RealtimeError::MessageError("ECONNRESET occurred".to_string());
         assert!(err2.is_connection_reset());
 
-        let io_err = RealtimeError::IoError(std::io::Error::new(
+        let io_err = RealtimeError::IoError(Arc::new(std::io::Error::new(
             std::io::ErrorKind::ConnectionReset,
             "reset",
-        ));
+        )));
         assert!(io_err.is_connection_reset());
 
         let config_err = RealtimeError::ConfigError("invalid param".to_string());
@@ -199,13 +231,10 @@ mod tests {
     #[cfg(feature = "livekit")]
     #[test]
     fn test_livekit_native_error_conversion() {
-        // Construct a simple LiveKitError variant
         let inner = crate::livekit::LiveKitError::ConfigError("test config error".to_string());
 
-        // Convert into RealtimeError
         let realtime_err: crate::error::RealtimeError = inner.into();
 
-        // Verify it matches the Boxed variant and formats correctly
         match realtime_err {
             crate::error::RealtimeError::LiveKitNativeError(boxed_err) => {
                 assert!(matches!(*boxed_err, crate::livekit::LiveKitError::ConfigError(_)));
