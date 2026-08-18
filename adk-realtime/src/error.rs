@@ -1,4 +1,16 @@
-//! Error types for the realtime module.
+//! Error types for realtime operations.
+//!
+//! Managed [`crate::runner::RealtimeRunner`] writes add one important piece of
+//! information that raw provider errors cannot provide by themselves:
+//! [`DeliveryCertainty`]. A [`RealtimeError::WriteFailed`] tells callers whether
+//! the managed layer rejected the operation before invoking the raw session or
+//! whether provider invocation already occurred and the delivery outcome is
+//! therefore indeterminate.
+//!
+//! This is a retry-safety boundary, not an exactly-once guarantee. Application
+//! code should inspect [`RealtimeError::delivery_certainty`] before replaying a
+//! failed side-effectful managed write. See `adk-realtime/MANAGED_RECOVERY.md`
+//! for the full recovery and replay contract.
 
 use crate::recovery::DeliveryCertainty;
 use std::sync::Arc;
@@ -88,7 +100,15 @@ pub enum RealtimeError {
     #[error(transparent)]
     LiveKitNativeError(Arc<crate::livekit::LiveKitError>),
 
-    /// Write operation failure with delivery certainty attribution.
+    /// Managed write failure with local provider-invocation certainty.
+    ///
+    /// - `NotAttempted`: the managed runner rejected the write before invoking
+    ///   the raw provider session.
+    /// - `Indeterminate`: the raw provider session was invoked, but peer
+    ///   acceptance or processing is not known.
+    ///
+    /// Do not automatically replay side-effectful operations after an
+    /// `Indeterminate` result.
     #[error("Write failed ({certainty:?}): {error}")]
     WriteFailed { error: Arc<RealtimeError>, certainty: DeliveryCertainty },
 }
@@ -168,13 +188,44 @@ impl RealtimeError {
         Self::LiveKitError(msg.into())
     }
 
-    /// Create a write failure with specified delivery certainty.
+    /// Create a managed write failure with the supplied delivery certainty.
+    ///
+    /// Use `NotAttempted` only when the managed layer can prove that it rejected
+    /// the operation before raw provider invocation. Once provider invocation
+    /// begins, a failed write must be `Indeterminate`.
     pub fn write_failed(err: Arc<RealtimeError>, certainty: DeliveryCertainty) -> Self {
         Self::WriteFailed { error: err, certainty }
     }
 
-    /// Returns the delivery certainty for this error if applicable.
-    /// Returns `Some(DeliveryCertainty)` for write-related failures, and `None` for generic errors.
+    /// Return the delivery certainty carried by a managed write failure.
+    ///
+    /// Generic/provider errors return `None` because they do not establish
+    /// whether the managed write boundary invoked a provider session.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use adk_realtime::{DeliveryCertainty, RealtimeError};
+    /// use std::sync::Arc;
+    ///
+    /// let err = RealtimeError::write_failed(
+    ///     Arc::new(RealtimeError::connection("transport unavailable")),
+    ///     DeliveryCertainty::NotAttempted,
+    /// );
+    ///
+    /// match err.delivery_certainty() {
+    ///     Some(DeliveryCertainty::NotAttempted) => {
+    ///         // The raw provider session was not invoked by this operation.
+    ///     }
+    ///     Some(DeliveryCertainty::Indeterminate) => {
+    ///         // Do not blindly replay a side-effectful operation.
+    ///     }
+    ///     None => {
+    ///         // This error does not carry managed write certainty.
+    ///     }
+    ///     _ => {}
+    /// }
+    /// ```
     pub fn delivery_certainty(&self) -> Option<DeliveryCertainty> {
         match self {
             RealtimeError::WriteFailed { certainty, .. } => Some(*certainty),
