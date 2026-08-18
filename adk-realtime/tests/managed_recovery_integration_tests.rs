@@ -844,9 +844,17 @@ async fn test_tool_future_failure_in_run_with_cancellation_recovers_and_continue
         tokio::task::yield_now().await;
     }
 
-    assert_eq!(rec_attempts.load(Ordering::SeqCst), 1, "Recovery was triggered by failing tool output write");
+    assert_eq!(
+        rec_attempts.load(Ordering::SeqCst),
+        1,
+        "Recovery was triggered by failing tool output write"
+    );
     assert_eq!(runner.session_id().await.as_deref(), Some("gen-1-recovered"));
-    assert_eq!(texts.lock().as_slice(), &["hello-from-gen-1"], "TextDelta from recovered gen-1 session was processed");
+    assert_eq!(
+        texts.lock().as_slice(),
+        &["hello-from-gen-1"],
+        "TextDelta from recovered gen-1 session was processed"
+    );
 
     cancel_token.cancel();
     let res = run_task.await.unwrap();
