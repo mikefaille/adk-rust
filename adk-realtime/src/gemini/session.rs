@@ -7,6 +7,10 @@ use crate::audio::{AudioChunk, AudioFormat};
 use crate::config::{RealtimeConfig, ToolDefinition};
 use crate::error::{RealtimeError, Result};
 use crate::events::{ClientEvent, ServerEvent, ToolResponse};
+use crate::recovery::{
+    RealtimeRecovery, RecoveredSession, RecoveryCause, RecoveryContext, RecoveryContinuity,
+    RecoveryDisposition,
+};
 use crate::session::{ContextMutationOutcome, RealtimeSession};
 use adk_gemini::schema_adapter::GeminiSchemaDialect;
 use async_trait::async_trait;
@@ -37,7 +41,7 @@ const AUDIO_FLUSH_TARGET_MS: usize = 40;
 #[derive(Debug, Clone)]
 pub enum GeminiLiveBackend {
     /// AI Studio with API key authentication.
-    Studio { api_key: String },
+    Studio { api_key: String, endpoint_url: Option<String> },
 
     /// Vertex AI with OAuth2/ADC authentication.
     #[cfg(feature = "vertex-live")]
@@ -48,13 +52,26 @@ pub enum GeminiLiveBackend {
         region: String,
         /// Google Cloud project ID.
         project_id: String,
+        /// Custom WebSocket URL endpoint override.
+        endpoint_url: Option<String>,
     },
 }
 
 impl GeminiLiveBackend {
     /// Create a Studio backend with API key authentication.
     pub fn studio(api_key: impl Into<String>) -> Self {
-        Self::Studio { api_key: api_key.into() }
+        Self::Studio { api_key: api_key.into(), endpoint_url: None }
+    }
+
+    /// Override the WebSocket connection URL (useful for mock servers or custom gateway proxies).
+    pub fn with_endpoint_url(mut self, endpoint_url: impl Into<String>) -> Self {
+        let ep = Some(endpoint_url.into());
+        match &mut self {
+            GeminiLiveBackend::Studio { endpoint_url: e, .. } => *e = ep,
+            #[cfg(feature = "vertex-live")]
+            GeminiLiveBackend::Vertex { endpoint_url: e, .. } => *e = ep,
+        }
+        self
     }
 
     /// Create a Vertex AI backend using Application Default Credentials (ADC).
@@ -243,17 +260,12 @@ struct GeminiTurn {
 pub struct GeminiRealtimeSession {
     session_id: String,
     connected: Arc<AtomicBool>,
-    /// Mutex-protected so `try_reconnect_once` can swap the token in place
-    /// without `unsafe`, replacing it with a fresh token for the new socket's
-    /// writer task while `close` may hold the old one.
     cancel_token: Arc<Mutex<tokio_util::sync::CancellationToken>>,
-    /// Mutex-protected so `try_reconnect_once` can swap the sender in place
-    /// when a new writer task is spun up after reconnect.
     outbound_tx: Arc<Mutex<mpsc::Sender<Message>>>,
     writer_task: Arc<Mutex<Option<JoinHandle<()>>>>,
     receiver: Arc<Mutex<WsSource>>,
     audio_buffer: Arc<ParkingMutex<BytesMut>>,
-    event_queue: Arc<Mutex<std::collections::VecDeque<ServerEvent>>>,
+    event_queue: Arc<ParkingMutex<std::collections::VecDeque<ServerEvent>>>,
     schema_cache: Arc<adk_core::SchemaCache>,
     adapter: Arc<dyn adk_core::SchemaAdapter>,
     frame_log: FrameLog,
@@ -263,12 +275,9 @@ pub struct GeminiRealtimeSession {
     /// close and a dead socket as the same `None`, so a polling caller cannot
     /// tell an aborted session from a broken one without it.
     last_disconnect: Arc<ParkingMutex<Option<crate::session::DisconnectReason>>>,
-    /// The full WebSocket URL used to establish this session, stored so that
-    /// `reconnect_with_backoff` can open a fresh connection to the same endpoint
-    /// without requiring the caller to repeat authentication parameters.
-    reconnect_url: String,
-    /// The normalized model ID sent in the initial setup frame, used to rebuild
-    /// the setup message on reconnect.
+    backend: GeminiLiveBackend,
+    dialect: GeminiSchemaDialect,
+    /// The normalized model ID sent in the initial setup frame.
     reconnect_model: String,
     /// The most recent resumable handle received via `sessionResumptionUpdate`.
     ///
@@ -315,6 +324,8 @@ impl GeminiRealtimeSession {
     ) -> Self {
         use std::sync::atomic::AtomicBool;
         let cancel_token = tokio_util::sync::CancellationToken::new();
+        let backend = GeminiLiveBackend::studio("mock-api-key").with_endpoint_url(reconnect_url);
+        let dialect = GeminiSchemaDialect::OpenApiSubset;
         Self {
             session_id: session_id.clone(),
             connected: Arc::new(AtomicBool::new(true)),
@@ -323,12 +334,13 @@ impl GeminiRealtimeSession {
             writer_task: Arc::new(Mutex::new(Some(writer_task))),
             receiver: Arc::new(Mutex::new(receiver)),
             audio_buffer: Arc::new(ParkingMutex::new(BytesMut::new())),
-            event_queue: Arc::new(Mutex::new(std::collections::VecDeque::new())),
+            event_queue: Arc::new(ParkingMutex::new(std::collections::VecDeque::new())),
             schema_cache: Arc::new(adk_core::SchemaCache::new()),
             adapter: Arc::new(adk_core::GenericSchemaAdapter),
             frame_log: FrameLog::new(session_id, "studio", reconnect_model.clone()),
             last_disconnect: Arc::new(ParkingMutex::new(None)),
-            reconnect_url,
+            backend,
+            dialect,
             reconnect_model,
             last_resume_handle: Arc::new(ParkingMutex::new(None)),
         }
@@ -382,14 +394,10 @@ impl GeminiRealtimeSession {
         let tools = convert_tools(config.tools.clone(), &schema_cache, adapter.as_ref())?;
 
         let ws_stream = match &backend {
-            GeminiLiveBackend::Studio { api_key } => {
-                // `GEMINI_LIVE_URL` is v1beta. On the Studio surface the
-                // endpoint version is coupled to the auth method, not the
-                // model: API-key auth is served on v1beta, and v1alpha is for
-                // ephemeral-token auth. This was hardcoded to v1alpha while
-                // the constant went unused — see the Gemini surface table in
-                // `zenith/data_plane/AGENTS.md`.
-                let url = format!("{}?key={}", super::GEMINI_LIVE_URL, api_key);
+            GeminiLiveBackend::Studio { api_key, endpoint_url } => {
+                let url = endpoint_url
+                    .clone()
+                    .unwrap_or_else(|| format!("{}?key={}", super::GEMINI_LIVE_URL, api_key));
                 let request = url.into_client_request().map_err(|e| {
                     RealtimeError::connection(format!("Failed to create request: {}", e))
                 })?;
@@ -400,8 +408,9 @@ impl GeminiRealtimeSession {
                 ws
             }
             #[cfg(feature = "vertex-live")]
-            GeminiLiveBackend::Vertex { credentials, region, project_id } => {
-                let url = build_vertex_live_url(region, project_id)?;
+            GeminiLiveBackend::Vertex { credentials, region, project_id, endpoint_url } => {
+                let url =
+                    endpoint_url.clone().unwrap_or(build_vertex_live_url(region, project_id)?);
 
                 // Obtain OAuth2 bearer token from ADC credentials
                 let header_map =
@@ -456,18 +465,6 @@ impl GeminiRealtimeSession {
                     ))
                 })?;
                 ws
-            }
-        };
-
-        // Capture the WS URL before the connection is consumed so that
-        // `reconnect_with_backoff` can open a fresh socket to the same endpoint.
-        let reconnect_url = match &backend {
-            GeminiLiveBackend::Studio { api_key } => {
-                format!("{}?key={}", super::GEMINI_LIVE_URL, api_key)
-            }
-            #[cfg(feature = "vertex-live")]
-            GeminiLiveBackend::Vertex { region, project_id, .. } => {
-                build_vertex_live_url(region, project_id)?.to_string()
             }
         };
 
@@ -526,11 +523,12 @@ impl GeminiRealtimeSession {
             receiver: Arc::new(Mutex::new(source)),
             audio_buffer: Arc::new(ParkingMutex::new(BytesMut::new())),
             last_disconnect: Arc::new(ParkingMutex::new(None)),
-            event_queue: Arc::new(Mutex::new(std::collections::VecDeque::new())),
+            event_queue: Arc::new(ParkingMutex::new(std::collections::VecDeque::new())),
             schema_cache,
             adapter,
             frame_log,
-            reconnect_url,
+            backend: backend.clone(),
+            dialect,
             reconnect_model: normalized_model.clone(),
             last_resume_handle: Arc::new(ParkingMutex::new(None)),
         };
@@ -640,131 +638,6 @@ impl GeminiRealtimeSession {
         self.send_raw(&setup).await
     }
 
-    /// Open a fresh WebSocket connection to the same endpoint, swap internal
-    /// socket handles in place, and send a reconnect setup frame.
-    ///
-    /// Called by `reconnect_with_backoff`; should not be called directly.
-    /// The `resume_handle` is the last resumable token received from the server;
-    /// pass `None` when no handle was ever received (the server will start a
-    /// fresh session context).
-    async fn try_reconnect_once(&self, resume_handle: &Option<String>) -> Result<()> {
-        // Open a new WebSocket connection to the same URL.
-        let request = self.reconnect_url.clone().into_client_request().map_err(|e| {
-            RealtimeError::connection(format!("reconnect: failed to build request: {e}"))
-        })?;
-        let (ws_stream, response) = connect_async(request).await.map_err(|e| {
-            RealtimeError::connection(format!("reconnect: WebSocket connect failed: {e}"))
-        })?;
-        tracing::debug!(status = ?response.status(), "GeminiRealtimeSession: reconnect handshake complete");
-
-        let (mut new_sink, new_source) = ws_stream.split();
-
-        // Spin up a fresh writer task that drains from a new outbound channel.
-        let new_cancel = tokio_util::sync::CancellationToken::new();
-        let writer_cancel = new_cancel.clone();
-        let (new_tx, mut new_rx) = mpsc::channel::<Message>(WRITER_CHANNEL_CAPACITY);
-        let writer_connected = Arc::clone(&self.connected);
-        let new_writer = tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    _ = writer_cancel.cancelled() => {
-                        tracing::info!("gemini reconnect writer task cancelled");
-                        break;
-                    }
-                    msg = new_rx.recv() => {
-                        match msg {
-                            Some(message) => {
-                                let should_close = matches!(message, Message::Close(_));
-                                if let Err(e) = new_sink.send(message).await {
-                                    writer_connected.store(false, Ordering::SeqCst);
-                                    tracing::warn!(error = %e, "gemini reconnect writer send failed");
-                                    break;
-                                }
-                                if should_close { break; }
-                            }
-                            None => break,
-                        }
-                    }
-                }
-            }
-            writer_connected.store(false, Ordering::SeqCst);
-        });
-
-        // Acquire all locks in a consistent order to prevent deadlock:
-        //   receiver → writer_task → cancel_token → outbound_tx
-        {
-            let mut recv = self.receiver.lock().await;
-            *recv = new_source;
-        }
-        {
-            let mut wt = self.writer_task.lock().await;
-            *wt = Some(new_writer);
-        }
-        {
-            let mut token = self.cancel_token.lock().await;
-            *token = new_cancel;
-        }
-        {
-            let mut tx = self.outbound_tx.lock().await;
-            *tx = new_tx;
-        }
-        self.connected.store(true, Ordering::SeqCst);
-
-        // Send a reconnect setup frame with the resume handle (if available).
-        let setup_msg = GeminiClientMessage {
-            setup: Some(GeminiSetup {
-                model: Some(self.reconnect_model.clone()),
-                system_instruction: None,
-                generation_config: None,
-                tools: None,
-                cached_content: None,
-                session_resumption: Some(SessionResumptionConfig { handle: resume_handle.clone() }),
-                input_audio_transcription: None,
-                output_audio_transcription: None,
-                realtime_input_config: None,
-            }),
-            realtime_input: None,
-            tool_response: None,
-            client_content: None,
-        };
-
-        tracing::info!(
-            model = %self.reconnect_model,
-            has_resume_handle = resume_handle.is_some(),
-            "GeminiRealtimeSession: sending reconnect setup frame"
-        );
-        self.send_raw(&setup_msg).await?;
-
-        // Wait for `setupComplete` from the server (up to 5 s).
-        let deadline = std::time::Duration::from_secs(5);
-        let setup_result = tokio::time::timeout(deadline, async {
-            loop {
-                match self.receive_raw().await {
-                    Some(Ok(ServerEvent::SessionCreated { .. })) => return Ok(()),
-                    Some(Ok(_)) => continue, // other events before setupComplete
-                    Some(Err(e)) => return Err(e),
-                    None => {
-                        return Err(RealtimeError::connection(
-                            "reconnect: server closed before setupComplete",
-                        ));
-                    }
-                }
-            }
-        })
-        .await;
-
-        match setup_result {
-            Ok(Ok(())) => {
-                tracing::info!("GeminiRealtimeSession: setupComplete received after reconnect");
-                Ok(())
-            }
-            Ok(Err(e)) => Err(e),
-            Err(_) => Err(RealtimeError::connection(
-                "reconnect: timed out waiting for setupComplete (5 s)",
-            )),
-        }
-    }
-
     /// Send a raw message.
     async fn send_raw<T: Serialize>(&self, value: &T) -> Result<()> {
         let msg = serde_json::to_string(value)
@@ -784,7 +657,7 @@ impl GeminiRealtimeSession {
     async fn receive_raw(&self) -> Option<Result<ServerEvent>> {
         // First check if there's anything in the queue
         {
-            let mut queue = self.event_queue.lock().await;
+            let mut queue = self.event_queue.lock();
             if let Some(event) = queue.pop_front() {
                 return Some(Ok(event));
             }
@@ -795,7 +668,7 @@ impl GeminiRealtimeSession {
         match receiver.next().await {
             Some(Ok(Message::Text(text))) => match self.translate_gemini_event(&text) {
                 Ok(events) => {
-                    let mut queue = self.event_queue.lock().await;
+                    let mut queue = self.event_queue.lock();
                     let mut iter = events.into_iter();
                     let first = iter.next();
                     for event in iter {
@@ -808,7 +681,7 @@ impl GeminiRealtimeSession {
             Some(Ok(Message::Binary(bytes))) => match String::from_utf8(bytes.to_vec()) {
                 Ok(text) => match self.translate_gemini_event(&text) {
                     Ok(events) => {
-                        let mut queue = self.event_queue.lock().await;
+                        let mut queue = self.event_queue.lock();
                         let mut iter = events.into_iter();
                         let first = iter.next();
                         for event in iter {
@@ -1132,7 +1005,100 @@ impl GeminiRealtimeSession {
 }
 
 #[async_trait]
+impl RealtimeRecovery for GeminiRealtimeSession {
+    fn classify(&self, cause: &RecoveryCause) -> RecoveryDisposition {
+        match cause {
+            RecoveryCause::ReadFailed(err) | RecoveryCause::WriteFailed(err) => {
+                if err.is_connection_reset() {
+                    RecoveryDisposition::Recoverable
+                } else {
+                    RecoveryDisposition::Fatal
+                }
+            }
+            RecoveryCause::UnexpectedEof => RecoveryDisposition::Recoverable,
+        }
+    }
+
+    fn classify_attempt_error(&self, error: &RealtimeError) -> RecoveryDisposition {
+        if error.is_connection_reset() {
+            RecoveryDisposition::Recoverable
+        } else {
+            RecoveryDisposition::Fatal
+        }
+    }
+
+    async fn recover(&self, context: RecoveryContext<'_>) -> Result<RecoveredSession> {
+        let deadline = context.deadline();
+        let config = context.config();
+
+        let attempt_fut = async {
+            let mut effective_config = config.clone();
+            if let Some(resume_handle) = self.last_resume_handle() {
+                let extra_obj =
+                    effective_config.extra.get_or_insert_with(|| json!({})).as_object_mut();
+
+                if let Some(extra) = extra_obj {
+                    if !extra.contains_key("resumeToken") && !extra.contains_key("resumeHandle") {
+                        extra.insert("resumeHandle".to_string(), json!(resume_handle));
+                    }
+                }
+            }
+
+            // Construct private candidate session with updated config & setup frame
+            let candidate = Self::connect_with_dialect(
+                self.backend.clone(),
+                &self.reconnect_model,
+                effective_config,
+                self.dialect,
+            )
+            .await?;
+
+            // Wait for setupComplete frame as the setup-first transaction
+            let mut continuity = RecoveryContinuity::Reconnected;
+            loop {
+                match candidate.next_event().await {
+                    Some(Ok(ServerEvent::SessionCreated { session, .. })) => {
+                        let is_resumed = session
+                            .get("setupComplete")
+                            .and_then(|sc| sc.get("resumed"))
+                            .and_then(|r| r.as_bool())
+                            .or_else(|| session.get("resumed").and_then(|r| r.as_bool()))
+                            .unwrap_or(false);
+
+                        if is_resumed {
+                            continuity = RecoveryContinuity::Resumed;
+                        }
+                        break;
+                    }
+                    Some(Ok(_)) => continue,
+                    Some(Err(e)) => return Err(e),
+                    None => {
+                        return Err(RealtimeError::connection(
+                            "Candidate connection closed before setupComplete frame",
+                        ));
+                    }
+                }
+            }
+
+            let recovered: Arc<dyn RealtimeSession> = Arc::new(candidate);
+            Ok(RecoveredSession::new(recovered, continuity))
+        };
+
+        match tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), attempt_fut).await {
+            Ok(res) => res,
+            Err(_) => Err(RealtimeError::Timeout(
+                "Gemini recovery attempt timed out waiting for setupComplete".to_string(),
+            )),
+        }
+    }
+}
+
+#[async_trait]
 impl RealtimeSession for GeminiRealtimeSession {
+    fn recovery(&self) -> Option<&dyn RealtimeRecovery> {
+        Some(self)
+    }
+
     fn session_id(&self) -> &str {
         &self.session_id
     }
@@ -2643,7 +2609,7 @@ mod teardown_tests {
             writer_task: Arc::new(Mutex::new(Some(writer_task))),
             receiver: Arc::new(Mutex::new(source)),
             audio_buffer: Arc::new(ParkingMutex::new(BytesMut::new())),
-            event_queue: Arc::new(Mutex::new(std::collections::VecDeque::new())),
+            event_queue: Arc::new(ParkingMutex::new(std::collections::VecDeque::new())),
             schema_cache: Arc::new(adk_core::SchemaCache::new()),
             adapter: Arc::new(adk_core::GenericSchemaAdapter),
             frame_log: FrameLog::new(
@@ -2652,7 +2618,8 @@ mod teardown_tests {
                 "models/gemini-3.1-flash-live-preview".into(),
             ),
             last_disconnect: Arc::new(ParkingMutex::new(None)),
-            reconnect_url: "wss://localhost/ws".into(),
+            backend: GeminiLiveBackend::studio("test-key").with_endpoint_url("wss://localhost/ws"),
+            dialect: GeminiSchemaDialect::OpenApiSubset,
             reconnect_model: "models/gemini-3.1-flash-live-preview".into(),
             last_resume_handle: Arc::new(ParkingMutex::new(None)),
         };
