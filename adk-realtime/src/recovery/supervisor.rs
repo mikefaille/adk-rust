@@ -419,7 +419,7 @@ impl RecoverySupervisor {
         };
 
         // 3. Double-check state now that we hold the lock and transition to Recovering
-        {
+        let recovery_epoch = {
             let mut state_guard = match tokio::time::timeout_at(
                 deadline_instant,
                 self.state.write(),
@@ -469,9 +469,8 @@ impl RecoverySupervisor {
 
             state_guard.status = TransportStatus::Recovering;
             state_guard.recovery_epoch = state_guard.recovery_epoch.wrapping_add(1);
-        }
-
-        let recovery_epoch = { self.state.read().await.recovery_epoch };
+            state_guard.recovery_epoch
+        };
 
         struct RecoveryEpisodeGuard {
             state: Arc<tokio::sync::RwLock<SupervisorState>>,
@@ -532,6 +531,7 @@ impl RecoverySupervisor {
                 let mut state_guard = self.state.write().await;
                 state_guard.exhausted_generation = Some(report.generation);
                 state_guard.status = TransportStatus::Exhausted;
+                episode_guard.disarmed = true;
                 return Err(err);
             }
         };
@@ -545,6 +545,7 @@ impl RecoverySupervisor {
             let mut state_guard = self.state.write().await;
             state_guard.exhausted_generation = Some(report.generation);
             state_guard.status = TransportStatus::Exhausted;
+            episode_guard.disarmed = true;
             return Err(err);
         }
 
@@ -805,10 +806,10 @@ impl RecoverySupervisor {
             "recovery exhausted or fatal"
         );
 
-        episode_guard.disarmed = true;
         let mut state_guard = self.state.write().await;
         state_guard.exhausted_generation = Some(report.generation);
         state_guard.status = TransportStatus::Exhausted;
+        episode_guard.disarmed = true;
 
         Err(final_err)
     }
@@ -1603,6 +1604,135 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_pre_guard_cancellation_repair() {
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let pause_recover = Arc::new(tokio::sync::Notify::new());
+
+        struct PausingRecovery {
+            started_tx: parking_lot::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+            pause_notify: Arc<tokio::sync::Notify>,
+        }
+
+        #[async_trait]
+        impl RealtimeRecovery for PausingRecovery {
+            fn classify(&self, _cause: &RecoveryCause) -> RecoveryDisposition {
+                RecoveryDisposition::Recoverable
+            }
+
+            async fn recover(&self, _context: RecoveryContext<'_>) -> Result<RecoveredSession> {
+                if let Some(tx) = self.started_tx.lock().take() {
+                    let _ = tx.send(());
+                }
+                self.pause_notify.notified().await;
+                Err(RealtimeError::ConnectionError("cancelled".to_string()))
+            }
+        }
+
+        let mock_rec = Arc::new(PausingRecovery {
+            started_tx: parking_lot::Mutex::new(Some(started_tx)),
+            pause_notify: pause_recover.clone(),
+        });
+
+        let initial_session = Arc::new(MockSession {
+            id: "gen-0".to_string(),
+            recovery: Some(Arc::clone(&mock_rec) as Arc<dyn RealtimeRecovery>),
+        });
+
+        let policy = RecoveryPolicy::default();
+        let config = Arc::new(tokio::sync::RwLock::new(crate::config::RealtimeConfig::default()));
+        let supervisor =
+            Arc::new(RecoverySupervisor::with_initial_session(policy, config, initial_session));
+
+        let sup_task = Arc::clone(&supervisor);
+        let handle = tokio::spawn(async move {
+            let report = FailureReport { generation: 0, cause: RecoveryCause::UnexpectedEof };
+            sup_task.report_failure(report).await
+        });
+
+        started_rx.await.expect("recover should start and signal");
+        assert_eq!(supervisor.status().await, TransportStatus::Recovering);
+
+        // Abort while paused inside recover (after transition to Recovering)
+        handle.abort();
+        let _ = handle.await;
+
+        // Allow any spawned drop task to acquire lock and run
+        let mut restored = false;
+        for _ in 0..50 {
+            if supervisor.status().await == TransportStatus::Healthy {
+                restored = true;
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+
+        assert!(restored, "Status must return to Healthy after cancelled episode");
+        assert!(supervisor.admit_write().await.is_ok(), "Old generation becomes usable again");
+    }
+
+    #[tokio::test]
+    async fn test_post_disarm_terminal_cancellation_repair() {
+        let (started_tx, _started_rx) = tokio::sync::oneshot::channel();
+
+        struct ImmediateExhaustRecovery {
+            started_tx: parking_lot::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+        }
+
+        #[async_trait]
+        impl RealtimeRecovery for ImmediateExhaustRecovery {
+            fn classify(&self, _cause: &RecoveryCause) -> RecoveryDisposition {
+                RecoveryDisposition::Fatal
+            }
+
+            async fn recover(&self, _context: RecoveryContext<'_>) -> Result<RecoveredSession> {
+                if let Some(tx) = self.started_tx.lock().take() {
+                    let _ = tx.send(());
+                }
+                Err(RealtimeError::ConnectionError("fatal".to_string()))
+            }
+        }
+
+        let mock_rec = Arc::new(ImmediateExhaustRecovery {
+            started_tx: parking_lot::Mutex::new(Some(started_tx)),
+        });
+
+        let initial_session = Arc::new(MockSession {
+            id: "gen-0".to_string(),
+            recovery: Some(Arc::clone(&mock_rec) as Arc<dyn RealtimeRecovery>),
+        });
+
+        let policy = RecoveryPolicy::default();
+        let config = Arc::new(tokio::sync::RwLock::new(crate::config::RealtimeConfig::default()));
+        let supervisor =
+            Arc::new(RecoverySupervisor::with_initial_session(policy, config, initial_session));
+
+        // Block state write lock so report_failure pauses at terminal state write
+        let write_guard = supervisor.state.write().await;
+
+        let sup_task = Arc::clone(&supervisor);
+        let handle = tokio::spawn(async move {
+            let report = FailureReport { generation: 0, cause: RecoveryCause::UnexpectedEof };
+            sup_task.report_failure(report).await
+        });
+
+        // Let task reach write lock wait
+        tokio::task::yield_now().await;
+
+        // Abort task while waiting for terminal state publication
+        handle.abort();
+        let _ = handle.await;
+
+        drop(write_guard);
+
+        let status = supervisor.status().await;
+        assert_ne!(
+            status,
+            TransportStatus::Recovering,
+            "Must never remain permanently stuck in Recovering after terminal cancellation"
+        );
+    }
+
+    #[tokio::test]
     async fn test_cancelled_episode_a_cannot_unlock_episode_b() {
         let (ready_a_tx, ready_a_rx) = tokio::sync::oneshot::channel();
         let (done_a_tx, done_a_rx) = tokio::sync::oneshot::channel();
@@ -1715,10 +1845,11 @@ mod tests {
 
         ready_b_rx.await.expect("Episode B should yield ready signal");
 
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        // Explicitly verify episode A's drop task has completed by yielding
+        tokio::task::yield_now().await;
 
         assert_eq!(supervisor.status().await, TransportStatus::Recovering);
-        assert!(supervisor.admit_write().await.is_err());
+        assert!(supervisor.admit_write().await.is_err(), "admit_write remains rejected");
 
         pause_b.notify_one();
         let outcome_b = report_task_b.await.unwrap().unwrap();

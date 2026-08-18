@@ -100,6 +100,14 @@ impl RealtimeSession for MockRecoverySession {
         Ok(())
     }
 
+    async fn send_tool_output(&self, _response: ToolResponse) -> Result<()> {
+        self.counters.raw_sends.fetch_add(1, Ordering::SeqCst);
+        if self.send_fails {
+            return Err(RealtimeError::connection("simulated send_tool_output write failure"));
+        }
+        Ok(())
+    }
+
     async fn send_audio_base64(&self, _audio: &str) -> Result<()> {
         self.counters.raw_sends.fetch_add(1, Ordering::SeqCst);
         if self.send_fails {
@@ -677,6 +685,172 @@ async fn test_cancellation_after_candidate_ready_cleans_unpublished_candidate() 
         1,
         "Unpublished candidate session must be closed on cancellation"
     );
+}
+
+#[derive(Clone)]
+struct EventScriptedSession {
+    id: String,
+    counters: Arc<TestCounters>,
+    recovery: Option<Arc<dyn RealtimeRecovery>>,
+    events: Arc<parking_lot::Mutex<Vec<ServerEvent>>>,
+    send_fails: bool,
+}
+
+#[async_trait]
+impl RealtimeSession for EventScriptedSession {
+    fn session_id(&self) -> &str {
+        &self.id
+    }
+    fn is_connected(&self) -> bool {
+        true
+    }
+    fn recovery(&self) -> Option<&dyn RealtimeRecovery> {
+        self.recovery.as_ref().map(|r| r.as_ref())
+    }
+    async fn send_audio(&self, _audio: &AudioChunk) -> Result<()> {
+        Ok(())
+    }
+    async fn send_audio_base64(&self, _audio: &str) -> Result<()> {
+        Ok(())
+    }
+    async fn send_text(&self, _text: &str) -> Result<()> {
+        Ok(())
+    }
+    async fn send_tool_response(&self, _response: ToolResponse) -> Result<()> {
+        Ok(())
+    }
+    async fn send_tool_output(&self, _response: ToolResponse) -> Result<()> {
+        self.counters.raw_sends.fetch_add(1, Ordering::SeqCst);
+        if self.send_fails {
+            return Err(RealtimeError::connection("simulated send_tool_output write failure"));
+        }
+        Ok(())
+    }
+    async fn commit_audio(&self) -> Result<()> {
+        Ok(())
+    }
+    async fn clear_audio(&self) -> Result<()> {
+        Ok(())
+    }
+    async fn create_response(&self) -> Result<()> {
+        Ok(())
+    }
+    async fn interrupt(&self) -> Result<()> {
+        Ok(())
+    }
+    async fn send_event(&self, _event: ClientEvent) -> Result<()> {
+        Ok(())
+    }
+    async fn next_event(&self) -> Option<Result<ServerEvent>> {
+        let ev = self.events.lock().pop();
+        if let Some(ev) = ev { Some(Ok(ev)) } else { std::future::pending().await }
+    }
+    fn events(&self) -> Pin<Box<dyn futures::Stream<Item = Result<ServerEvent>> + Send + '_>> {
+        Box::pin(futures::stream::empty())
+    }
+    async fn close(&self) -> Result<()> {
+        self.counters.close_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+    async fn mutate_context(&self, _config: RealtimeConfig) -> Result<ContextMutationOutcome> {
+        Ok(ContextMutationOutcome::Applied)
+    }
+}
+
+struct TextRecorder {
+    texts: Arc<parking_lot::Mutex<Vec<String>>>,
+}
+
+#[async_trait]
+impl adk_realtime::runner::EventHandler for TextRecorder {
+    async fn on_text(&self, text: &str, _item_id: &str) -> Result<()> {
+        self.texts.lock().push(text.to_string());
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn test_tool_future_failure_in_run_with_cancellation_recovers_and_continues() {
+    let counters = Arc::new(TestCounters::default());
+    let gen1_counters = Arc::new(TestCounters::default());
+
+    let gen1_session = Arc::new(EventScriptedSession {
+        id: "gen-1-recovered".to_string(),
+        counters: gen1_counters.clone(),
+        recovery: None,
+        events: Arc::new(parking_lot::Mutex::new(vec![ServerEvent::TextDelta {
+            event_id: "evt".into(),
+            response_id: "resp".into(),
+            item_id: "item".into(),
+            output_index: 0,
+            content_index: 0,
+            delta: "hello-from-gen-1".into(),
+        }])),
+        send_fails: false,
+    });
+
+    let rec_attempts = Arc::new(AtomicUsize::new(0));
+    let recovery_provider = Arc::new(RecoveringProvider {
+        attempts: rec_attempts.clone(),
+        recovered_session: gen1_session,
+        continuity: RecoveryContinuity::Reconnected,
+    });
+
+    let gen0_session = Arc::new(EventScriptedSession {
+        id: "gen-0-failing-tool".to_string(),
+        counters: counters.clone(),
+        recovery: Some(recovery_provider),
+        events: Arc::new(parking_lot::Mutex::new(vec![ServerEvent::FunctionCallDone {
+            event_id: "evt".into(),
+            response_id: "resp".into(),
+            item_id: "item".into(),
+            output_index: 0,
+            call_id: "call-1".into(),
+            name: "test_tool".into(),
+            arguments: serde_json::json!({}),
+        }])),
+        send_fails: true,
+    });
+
+    let texts = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let tool_def = adk_realtime::config::ToolDefinition {
+        name: "test_tool".to_string(),
+        description: None,
+        parameters: None,
+    };
+
+    let runner = RealtimeRunner::builder()
+        .model(Arc::new(DummyModel))
+        .tool_fn(tool_def, |_| Ok(serde_json::json!({"ok": true})))
+        .event_handler(TextRecorder { texts: texts.clone() })
+        .build()
+        .unwrap();
+
+    let _ = runner.set_initial_session(gen0_session).await.unwrap();
+
+    let cancel_token = tokio_util::sync::CancellationToken::new();
+    let cancel_token_clone = cancel_token.clone();
+
+    let runner = Arc::new(runner);
+    let runner_clone = runner.clone();
+    let run_task =
+        tokio::spawn(async move { runner_clone.run_with_cancellation(cancel_token_clone).await });
+
+    // Yield to let run_with_cancellation pick up FunctionCallDone, run the tool, attempt send_tool_output, fail, recover, and process gen-1's TextDelta
+    for _ in 0..50 {
+        if !texts.lock().is_empty() {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+
+    assert_eq!(rec_attempts.load(Ordering::SeqCst), 1, "Recovery was triggered by failing tool output write");
+    assert_eq!(runner.session_id().await.as_deref(), Some("gen-1-recovered"));
+    assert_eq!(texts.lock().as_slice(), &["hello-from-gen-1"], "TextDelta from recovered gen-1 session was processed");
+
+    cancel_token.cancel();
+    let res = run_task.await.unwrap();
+    assert!(res.is_ok(), "run_with_cancellation completed cleanly");
 }
 
 #[tokio::test]
