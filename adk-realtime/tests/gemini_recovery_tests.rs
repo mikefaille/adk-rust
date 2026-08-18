@@ -213,6 +213,17 @@ async fn test_consecutive_recovery_carries_resume_handle_anchor() {
 
                         let setup_complete = json!({ "setupComplete": {} });
                         ws.send(Message::Text(setup_complete.to_string().into())).await.unwrap();
+
+                        // Send sessionResumptionUpdate frame on initial connection only
+                        if handles.lock().len() == 1 {
+                            let update_frame = json!({
+                                "sessionResumptionUpdate": {
+                                    "newHandle": "handle-H-123",
+                                    "resumable": true
+                                }
+                            });
+                            ws.send(Message::Text(update_frame.to_string().into())).await.unwrap();
+                        }
                         break;
                     }
                 }
@@ -221,23 +232,20 @@ async fn test_consecutive_recovery_carries_resume_handle_anchor() {
     })
     .await;
 
-    let ws = tokio_tungstenite::connect_async(format!("ws://{}", addr)).await.unwrap().0;
-    let (_sink, source) = ws.split();
-    let (tx, _rx) = tokio::sync::mpsc::channel(10);
+    let backend = GeminiLiveBackend::studio("test-key").with_endpoint_url(format!("ws://{}", addr));
+    let config = RealtimeConfig::default();
 
-    let session_n = GeminiRealtimeSession::new_for_test(
-        "gen-n".to_string(),
-        format!("ws://{}", addr),
-        "models/gemini-3.1-flash-live-preview".to_string(),
-        tx.clone(),
-        tokio::spawn(async {}),
-        source,
-    );
+    // Connect session N
+    let session_n =
+        GeminiRealtimeSession::connect(backend, "models/gemini-live", config).await.unwrap();
 
-    // Simulate session_n receiving a resumable handle H
-    let update_frame =
-        r#"{"sessionResumptionUpdate":{"newHandle":"handle-H-123","resumable":true}}"#;
-    let _ = session_n.translate_gemini_event(update_frame);
+    // Read setupComplete
+    let ev1 = session_n.next_event().await.unwrap().unwrap();
+    assert!(matches!(ev1, ServerEvent::SessionCreated { .. }));
+
+    // Read SessionUpdated carrying handle-H-123 over WebSocket wire
+    let ev2 = session_n.next_event().await.unwrap().unwrap();
+    assert!(matches!(ev2, ServerEvent::SessionUpdated { .. }));
     assert_eq!(session_n.last_resume_handle(), Some("handle-H-123".to_string()));
 
     // 1st Recovery: N -> N+1
@@ -253,7 +261,6 @@ async fn test_consecutive_recovery_carries_resume_handle_anchor() {
         .unwrap();
 
     let session_n1 = recovered_n1.session();
-    // Verify N+1 carried resume handle H forward
     let gemini_n1 = session_n1.recovery().unwrap();
 
     // 2nd Recovery: N+1 -> N+2 (without N+1 receiving a new update frame)
@@ -264,12 +271,18 @@ async fn test_consecutive_recovery_carries_resume_handle_anchor() {
 
     let session_n2 = recovered_n2.session();
 
-    // Verify both candidate connections received handle H in their setup frames
+    // Verify received handle array in server: [Initial setup = None, N->N+1 setup = Some("handle-H-123"), N+1->N+2 setup = Some("handle-H-123")]
     let cap = received_handles.lock();
-    assert_eq!(cap.len(), 2);
-    assert_eq!(cap[0], Some("handle-H-123".to_string()));
+    assert_eq!(cap.len(), 3);
+    assert_eq!(cap[0], None);
     assert_eq!(cap[1], Some("handle-H-123".to_string()));
-    assert_eq!(session_n2.session_id(), session_n2.session_id());
+    assert_eq!(cap[2], Some("handle-H-123".to_string()));
+
+    // Meaningful session authority assertions
+    assert!(session_n2.is_connected());
+    assert_ne!(session_n2.session_id(), session_n.session_id());
+    assert_ne!(session_n1.session_id(), session_n.session_id());
+    assert_ne!(session_n2.session_id(), session_n1.session_id());
 }
 
 #[tokio::test]
@@ -364,6 +377,54 @@ async fn test_recover_obeys_deadline_and_times_out() {
 }
 
 #[tokio::test]
+async fn test_candidate_raii_cleanup_on_timeout() {
+    let server_closed_signal = Arc::new(tokio::sync::Notify::new());
+    let notify = Arc::clone(&server_closed_signal);
+
+    let (addr, _s) = spawn_mock_ws_server(move |mut ws| {
+        let notify = Arc::clone(&notify);
+        async move {
+            let _setup = ws.next().await;
+            // Never send setupComplete; wait until client drops/closes connection
+            let next_msg = ws.next().await;
+            assert!(matches!(next_msg, None | Some(Err(_)) | Some(Ok(Message::Close(_)))));
+            notify.notify_one();
+        }
+    })
+    .await;
+
+    let ws = tokio_tungstenite::connect_async(format!("ws://{}", addr)).await.unwrap().0;
+    let (_s_sink, source) = ws.split();
+    let (tx, _rx) = tokio::sync::mpsc::channel(10);
+
+    let session = GeminiRealtimeSession::new_for_test(
+        "s".to_string(),
+        format!("ws://{}", addr),
+        "models/gemini-3.1-flash-live-preview".to_string(),
+        tx,
+        tokio::spawn(async {}),
+        source,
+    );
+
+    let cause = RecoveryCause::UnexpectedEof;
+    let config = RealtimeConfig::default();
+    let deadline = std::time::Instant::now() + Duration::from_millis(100);
+
+    let res = session
+        .recovery()
+        .unwrap()
+        .recover(RecoveryContext::new(NonZeroU32::new(1).unwrap(), &cause, &config, deadline))
+        .await;
+
+    assert!(matches!(res, Err(RealtimeError::Timeout(_))));
+
+    // Verify candidate socket/writer was aborted and closed on timeout via CandidateGuard drop
+    let closed_result =
+        tokio::time::timeout(Duration::from_secs(1), server_closed_signal.notified()).await;
+    assert!(closed_result.is_ok(), "Candidate socket must be closed upon timeout drop");
+}
+
+#[tokio::test]
 async fn test_event_queue_cancellation_safety_zero_lost_messages() {
     let (addr, _s) = spawn_mock_ws_server(|mut ws| async move {
         // Read setup frame
@@ -399,19 +460,19 @@ async fn test_event_queue_cancellation_safety_zero_lost_messages() {
     let ev1 = session.next_event().await.unwrap().unwrap();
     assert!(matches!(ev1, ServerEvent::SessionCreated { .. }));
 
-    // Force cancellation interleaving: start a next_event() read, but cancel the future mid-way.
-    // Since receive_raw decodes WebSocket text into event_queue synchronously under parking_lot::Mutex,
-    // cancelling next_event() after decoding frame 1 must still preserve frame 1 in event_queue for subsequent reads.
-    let next_fut = session.next_event();
-    let ev2 = next_fut.await.unwrap().unwrap();
-
+    // Read Chunk 1 (which decodes WS message carrying Chunk 1 + Chunk 2 into event_queue synchronously)
+    let ev2 = session.next_event().await.unwrap().unwrap();
     if let ServerEvent::InputTranscriptDelta { delta, .. } = ev2 {
         assert_eq!(delta, "Chunk 1");
     } else {
         panic!("Expected InputTranscriptDelta Chunk 1, got {:?}", ev2);
     }
 
-    // Read remaining event synchronously from event_queue without dropping or losing messages
+    // Now test cancellation mid-read: create a next_event() future and drop it without awaiting it
+    let fut = session.next_event();
+    drop(fut);
+
+    // Read next event: Chunk 2 must still be present in event_queue despite the dropped future
     let ev3 = session.next_event().await.unwrap().unwrap();
     if let ServerEvent::InputTranscriptDelta { delta, .. } = ev3 {
         assert_eq!(delta, "Chunk 2");

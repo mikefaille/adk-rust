@@ -414,8 +414,10 @@ impl GeminiRealtimeSession {
             }
             #[cfg(feature = "vertex-live")]
             GeminiLiveBackend::Vertex { credentials, region, project_id, endpoint_url } => {
-                let url =
-                    endpoint_url.clone().unwrap_or(build_vertex_live_url(region, project_id)?);
+                let url = match endpoint_url {
+                    Some(u) => u.clone(),
+                    None => build_vertex_live_url(region, project_id)?,
+                };
 
                 // Obtain OAuth2 bearer token from ADC credentials
                 let header_map =
@@ -745,7 +747,7 @@ impl GeminiRealtimeSession {
     /// Also intercepts `SessionUpdated` events carrying a resumable handle and
     /// caches the handle on `self.last_resume_handle` so that
     /// `reconnect_with_backoff` can present it on the next connection attempt.
-    pub fn translate_gemini_event(&self, raw: &str) -> Result<Vec<ServerEvent>> {
+    pub(crate) fn translate_gemini_event(&self, raw: &str) -> Result<Vec<ServerEvent>> {
         let events = Self::translate_event_logged(raw, Some(&self.frame_log))?;
         // Intercept SessionUpdated to cache the resume handle locally.
         for event in &events {
