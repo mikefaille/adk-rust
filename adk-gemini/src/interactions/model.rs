@@ -378,6 +378,9 @@ pub struct GenerationConfig {
     /// Configuration for image output.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_config: Option<ImageConfig>,
+    /// Speech configuration for text-to-speech generation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speech_config: Option<crate::generation::SpeechConfig>,
 }
 
 impl GenerationConfig {

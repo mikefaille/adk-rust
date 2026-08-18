@@ -31,6 +31,8 @@ pin-project-lite = "0.2"
 # Cloud providers (optional)
 reqwest = { workspace = true, features = ["multipart"], optional = true }
 base64 = { version = "0.22", optional = true }
+adk-gemini = { workspace = true, features = ["interactions"], optional = true }
+eventsource-stream = { version = "0.2", optional = true }
 
 # DSP (optional)
 rubato = { version = "4.0", optional = true }
@@ -83,10 +85,11 @@ livekit-api = { workspace = true, optional = true }
 proptest = "1"
 rustls = { workspace = true }
 tokio = { version = "1", features = ["full", "test-util"] }
+wiremock = "0.6"
 
 [features]
 default = ["tts", "stt"]
-tts = ["dep:reqwest", "dep:base64"]
+tts = ["dep:reqwest", "dep:base64", "dep:adk-gemini", "dep:eventsource-stream"]
 stt = ["dep:reqwest", "dep:tokio-tungstenite"]
 music = ["dep:reqwest"]
 fx = ["dep:rubato", "dep:dasp"]

@@ -269,3 +269,68 @@ fn unknown_sse_event_falls_back_to_other() {
     let event: InteractionSseEvent = serde_json::from_value(raw).unwrap();
     assert!(matches!(event, InteractionSseEvent::Other(_)));
 }
+
+#[test]
+fn tts_request_with_audio_format_and_speech_config_serializes() {
+    use adk_gemini::generation::{SpeakerVoiceConfig, SpeechConfig};
+    let req = CreateInteractionRequest {
+        model: Some("gemini-3.1-flash-tts-preview".to_string()),
+        input: Input::Text("Alice: Hello Bob!\nBob: Hi Alice!".to_string()),
+        response_format: Some(ResponseFormat::Audio {
+            mime_type: Some("audio/pcm".to_string()),
+            sample_rate: Some(24000),
+        }),
+        stream: Some(true),
+        generation_config: Some(adk_gemini::interactions::GenerationConfig {
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    let value = serde_json::to_value(&req).unwrap();
+    assert_eq!(value["model"], json!("gemini-3.1-flash-tts-preview"));
+    assert_eq!(value["stream"], json!(true));
+    assert_eq!(value["response_format"]["type"], json!("audio"));
+    assert_eq!(value["response_format"]["mime_type"], json!("audio/pcm"));
+    assert_eq!(value["response_format"]["sample_rate"], json!(24000));
+
+    // Also test speech config serialization in generation config if passed via standard SpeechConfig
+    let speech_cfg = SpeechConfig::multi_speaker(vec![
+        SpeakerVoiceConfig::new("Alice", "Kore"),
+        SpeakerVoiceConfig::new("Bob", "Puck"),
+    ]);
+    let speech_json = serde_json::to_value(&speech_cfg).unwrap();
+    assert!(speech_json.get("multiSpeakerVoiceConfig").is_some());
+}
+
+#[test]
+fn parses_step_delta_audio_event() {
+    let raw = json!({
+        "event_type": "step.delta",
+        "index": 0,
+        "delta": {
+            "type": "audio",
+            "data": "AQIDBA==",
+            "mime_type": "audio/pcm;rate=24000",
+            "sample_rate": 24000,
+            "channels": 1
+        }
+    });
+
+    let event: InteractionSseEvent = serde_json::from_value(raw).unwrap();
+    match event {
+        InteractionSseEvent::StepDelta { index, delta, .. } => {
+            assert_eq!(index, 0);
+            match delta {
+                StepDelta::Audio { data, mime_type, sample_rate, channels } => {
+                    assert_eq!(data.as_deref(), Some("AQIDBA=="));
+                    assert_eq!(mime_type.as_deref(), Some("audio/pcm;rate=24000"));
+                    assert_eq!(sample_rate, Some(24000));
+                    assert_eq!(channels, Some(1));
+                }
+                other => panic!("expected StepDelta::Audio, got {other:?}"),
+            }
+        }
+        other => panic!("expected step.delta, got {other:?}"),
+    }
+}

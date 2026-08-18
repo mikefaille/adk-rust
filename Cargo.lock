@@ -165,6 +165,7 @@ name = "adk-audio"
 version = "3.0.0"
 dependencies = [
  "adk-core",
+ "adk-gemini",
  "adk-realtime",
  "async-stream",
  "async-trait",
@@ -175,6 +176,7 @@ dependencies = [
  "cpal",
  "dasp",
  "espeak-rs",
+ "eventsource-stream",
  "futures",
  "hf-hub 0.5.0",
  "livekit-api",
@@ -194,6 +196,7 @@ dependencies = [
  "tokio",
  "tokio-tungstenite 0.28.0",
  "tracing",
+ "wiremock",
 ]
 
 [[package]]
