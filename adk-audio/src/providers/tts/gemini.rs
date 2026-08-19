@@ -95,7 +95,9 @@ impl GeminiTts {
         let mut builder =
             GeminiBuilder::new(&config.api_key).with_model(Model::from(model.clone()));
         if let Some(ref base) = config.base_url {
-            let url = url::Url::parse(base).map_err(|e| AudioError::Tts {
+            let normalized_base =
+                if !base.ends_with('/') { format!("{base}/") } else { base.clone() };
+            let url = url::Url::parse(&normalized_base).map_err(|e| AudioError::Tts {
                 provider: "gemini".into(),
                 message: format!("Invalid base_url '{base}': {e}"),
             })?;
@@ -115,7 +117,9 @@ impl GeminiTts {
         let mut builder =
             GeminiBuilder::new(&self.config.api_key).with_model(Model::from(self.model.clone()));
         if let Some(ref base) = self.config.base_url {
-            let url = url::Url::parse(base).map_err(|e| AudioError::Tts {
+            let normalized_base =
+                if !base.ends_with('/') { format!("{base}/") } else { base.clone() };
+            let url = url::Url::parse(&normalized_base).map_err(|e| AudioError::Tts {
                 provider: "gemini".into(),
                 message: format!("Invalid base_url '{base}': {e}"),
             })?;
@@ -181,7 +185,7 @@ impl GeminiTts {
     }
 }
 
-/// Validate MIME type and enforce audio/l16 / raw PCM encoding contract.
+/// Validate MIME type and enforce audio/l16 encoding contract.
 fn validate_audio_mime_type(mime_type: Option<&str>) -> AudioResult<()> {
     let Some(mime) = mime_type else {
         return Ok(());
@@ -203,14 +207,12 @@ fn validate_audio_mime_type(mime_type: Option<&str>) -> AudioResult<()> {
         });
     }
 
-    if !base_mime.starts_with("audio/l16")
-        && !base_mime.starts_with("audio/pcm")
-        && !base_mime.starts_with("audio/raw")
-        && base_mime != "audio/x-raw"
-    {
+    if !base_mime.starts_with("audio/l16") {
         return Err(AudioError::Tts {
             provider: "gemini".into(),
-            message: format!("Unsupported audio MIME type for TTS stream: {mime}"),
+            message: format!(
+                "Unsupported audio MIME type for TTS stream (expected audio/l16): {mime}"
+            ),
         });
     }
 

@@ -112,7 +112,7 @@ async fn test_gemini_tts_zero_audio_completion_is_error() {
         .mount(&mock_server)
         .await;
 
-    let tts = test_tts_with_mock_url(format!("{}/interactions", mock_server.uri()));
+    let tts = test_tts_with_mock_url(mock_server.uri());
     let request = TtsRequest { text: "Zero audio test".to_string(), ..Default::default() };
 
     let mut stream = tts.synthesize_stream(&request).await.expect("stream creation failed");
@@ -132,7 +132,7 @@ async fn test_gemini_tts_mid_stream_provider_error() {
         base64::Engine::encode(&base64::engine::general_purpose::STANDARD, [1, 2, 3, 4]);
 
     let sse_body = format!(
-        "data: {{\"event_type\":\"step.delta\",\"index\":0,\"delta\":{{\"type\":\"audio\",\"data\":\"{}\",\"mime_type\":\"audio/pcm;rate=24000\",\"sample_rate\":24000,\"channels\":1}}}}\n\n\
+        "data: {{\"event_type\":\"step.delta\",\"index\":0,\"delta\":{{\"type\":\"audio\",\"data\":\"{}\",\"mime_type\":\"audio/l16;rate=24000\",\"sample_rate\":24000,\"channels\":1}}}}\n\n\
          data: {{\"event_type\":\"error\",\"error\":{{\"code\":\"RESOURCE_EXHAUSTED\",\"message\":\"Rate limit exceeded\"}}}}\n\n",
         b64_chunk
     );
@@ -147,7 +147,7 @@ async fn test_gemini_tts_mid_stream_provider_error() {
         .mount(&mock_server)
         .await;
 
-    let tts = test_tts_with_mock_url(format!("{}/interactions", mock_server.uri()));
+    let tts = test_tts_with_mock_url(mock_server.uri());
     let request = TtsRequest { text: "Mid-stream failure test".to_string(), ..Default::default() };
 
     let mut stream = tts.synthesize_stream(&request).await.expect("stream creation failed");
@@ -176,8 +176,8 @@ async fn test_gemini_tts_metadata_mismatch_error() {
 
     // First chunk claims 24000Hz, second claims 48000Hz (contradictory metadata)
     let sse_body = format!(
-        "data: {{\"event_type\":\"step.delta\",\"index\":0,\"delta\":{{\"type\":\"audio\",\"data\":\"{}\",\"mime_type\":\"audio/pcm;rate=24000\",\"sample_rate\":24000,\"channels\":1}}}}\n\n\
-         data: {{\"event_type\":\"step.delta\",\"index\":0,\"delta\":{{\"type\":\"audio\",\"data\":\"{}\",\"mime_type\":\"audio/pcm;rate=48000\",\"sample_rate\":48000,\"channels\":1}}}}\n\n",
+        "data: {{\"event_type\":\"step.delta\",\"index\":0,\"delta\":{{\"type\":\"audio\",\"data\":\"{}\",\"mime_type\":\"audio/l16;rate=24000\",\"sample_rate\":24000,\"channels\":1}}}}\n\n\
+         data: {{\"event_type\":\"step.delta\",\"index\":0,\"delta\":{{\"type\":\"audio\",\"data\":\"{}\",\"mime_type\":\"audio/l16;rate=48000\",\"sample_rate\":48000,\"channels\":1}}}}\n\n",
         b64_chunk1, b64_chunk2
     );
 
@@ -191,7 +191,7 @@ async fn test_gemini_tts_metadata_mismatch_error() {
         .mount(&mock_server)
         .await;
 
-    let tts = test_tts_with_mock_url(format!("{}/interactions", mock_server.uri()));
+    let tts = test_tts_with_mock_url(mock_server.uri());
     let request = TtsRequest { text: "Mismatch test".to_string(), ..Default::default() };
 
     let mut stream = tts.synthesize_stream(&request).await.expect("stream creation failed");
@@ -234,7 +234,7 @@ async fn test_gemini_tts_l16_sample_split_across_deltas() {
         .mount(&mock_server)
         .await;
 
-    let tts = test_tts_with_mock_url(format!("{}/interactions", mock_server.uri()));
+    let tts = test_tts_with_mock_url(mock_server.uri());
     let request = TtsRequest { text: "Split L16 test".to_string(), ..Default::default() };
 
     let mut stream = tts.synthesize_stream(&request).await.expect("stream creation failed");
@@ -272,7 +272,7 @@ async fn test_gemini_tts_dangling_l16_byte_error() {
         .mount(&mock_server)
         .await;
 
-    let tts = test_tts_with_mock_url(format!("{}/interactions", mock_server.uri()));
+    let tts = test_tts_with_mock_url(mock_server.uri());
     let request = TtsRequest { text: "Dangling L16 byte test".to_string(), ..Default::default() };
 
     let mut stream = tts.synthesize_stream(&request).await.expect("stream creation failed");
@@ -294,7 +294,7 @@ async fn test_gemini_tts_custom_base_url_preserves_path() {
         base64::Engine::encode(&base64::engine::general_purpose::STANDARD, [1, 2, 3, 4]);
 
     let sse_body = format!(
-        "data: {{\"event_type\":\"step.delta\",\"index\":0,\"delta\":{{\"type\":\"audio\",\"data\":\"{}\",\"mime_type\":\"audio/pcm;rate=24000\",\"sample_rate\":24000,\"channels\":1}}}}\n\n\
+        "data: {{\"event_type\":\"step.delta\",\"index\":0,\"delta\":{{\"type\":\"audio\",\"data\":\"{}\",\"mime_type\":\"audio/l16;rate=24000\",\"sample_rate\":24000,\"channels\":1}}}}\n\n\
          data: {{\"event_type\":\"interaction.completed\",\"interaction\":{{\"id\":\"int_123\",\"status\":\"completed\"}}}}\n\n",
         b64_chunk
     );
@@ -318,7 +318,86 @@ async fn test_gemini_tts_custom_base_url_preserves_path() {
     let request = TtsRequest { text: "Base URL path test".to_string(), ..Default::default() };
     let mut stream = tts.synthesize_stream(&request).await.expect("synthesize_stream failed");
     let frame = stream.next().await.unwrap().unwrap();
-    assert_eq!(frame.data.as_ref(), &[1, 2, 3, 4]);
+    assert_eq!(frame.data.as_ref(), &[0x02, 0x01, 0x04, 0x03]);
+}
+
+#[tokio::test]
+async fn test_gemini_tts_custom_base_url_without_trailing_slash_normalizes() {
+    let mock_server = MockServer::start().await;
+
+    let b64_chunk =
+        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, [1, 2, 3, 4]);
+
+    let sse_body = format!(
+        "data: {{\"event_type\":\"step.delta\",\"index\":0,\"delta\":{{\"type\":\"audio\",\"data\":\"{}\",\"mime_type\":\"audio/l16;rate=24000\",\"sample_rate\":24000,\"channels\":1}}}}\n\n\
+         data: {{\"event_type\":\"interaction.completed\",\"interaction\":{{\"id\":\"int_123\",\"status\":\"completed\"}}}}\n\n",
+        b64_chunk
+    );
+
+    Mock::given(method("POST"))
+        .and(path("/v1beta/custom/interactions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(sse_body)
+                .append_header("content-type", "text/event-stream"),
+        )
+        .mount(&mock_server)
+        .await;
+
+    // Base URL lacking trailing slash: should normalize to .../v1beta/custom/ so url.join("interactions") preserves custom segment
+    let base_url_no_slash = format!("{}/v1beta/custom", mock_server.uri());
+    let mut config = CloudTtsConfig::new("test-api-key");
+    config.base_url = Some(base_url_no_slash);
+    let tts = GeminiTts::new(config).expect("GeminiTts::new failed");
+
+    let request =
+        TtsRequest { text: "Base URL no trailing slash test".to_string(), ..Default::default() };
+    let mut stream = tts.synthesize_stream(&request).await.expect("synthesize_stream failed");
+    let frame = stream.next().await.unwrap().unwrap();
+    assert_eq!(frame.data.as_ref(), &[0x02, 0x01, 0x04, 0x03]);
+}
+
+#[tokio::test]
+async fn test_gemini_tts_rejects_pcm_encoding_switch_and_odd_remainder() {
+    let mock_server = MockServer::start().await;
+
+    // Delta 1: L16 with 3 bytes (1 sample + 1 remainder byte)
+    let b64_delta1 =
+        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, [0x01, 0x02, 0x03]);
+    // Delta 2: audio/pcm (violates audio/l16 contract)
+    let b64_delta2 =
+        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, [0x04, 0x05]);
+
+    let sse_body = format!(
+        "data: {{\"event_type\":\"step.delta\",\"index\":0,\"delta\":{{\"type\":\"audio\",\"data\":\"{}\",\"mime_type\":\"audio/l16;rate=24000\",\"sample_rate\":24000,\"channels\":1}}}}\n\n\
+         data: {{\"event_type\":\"step.delta\",\"index\":0,\"delta\":{{\"type\":\"audio\",\"data\":\"{}\",\"mime_type\":\"audio/pcm;rate=24000\",\"sample_rate\":24000,\"channels\":1}}}}\n\n",
+        b64_delta1, b64_delta2
+    );
+
+    Mock::given(method("POST"))
+        .and(path("/interactions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(sse_body)
+                .append_header("content-type", "text/event-stream"),
+        )
+        .mount(&mock_server)
+        .await;
+
+    let tts = test_tts_with_mock_url(mock_server.uri());
+    let request = TtsRequest { text: "PCM switch test".to_string(), ..Default::default() };
+
+    let mut stream = tts.synthesize_stream(&request).await.expect("stream creation failed");
+
+    // First frame succeeds (L16 chunk)
+    let first = stream.next().await.unwrap().unwrap();
+    assert_eq!(first.data.as_ref(), &[0x02, 0x01]);
+
+    // Second delta with audio/pcm must fail before frame emission
+    let second = stream.next().await.unwrap();
+    assert!(second.is_err(), "audio/pcm delta must be rejected");
+    let err_msg = second.err().unwrap().to_string();
+    assert!(err_msg.contains("Unsupported audio MIME type"), "Error message was: {}", err_msg);
 }
 
 #[tokio::test]
@@ -337,7 +416,7 @@ async fn test_gemini_tts_rejects_container_audio_formats() {
         .mount(&mock_server)
         .await;
 
-    let tts = test_tts_with_mock_url(format!("{}/interactions", mock_server.uri()));
+    let tts = test_tts_with_mock_url(mock_server.uri());
     let request = TtsRequest { text: "WAV rejection test".to_string(), ..Default::default() };
 
     let mut stream = tts.synthesize_stream(&request).await.expect("stream creation failed");
@@ -355,7 +434,7 @@ async fn test_gemini_tts_rejects_container_audio_formats() {
 async fn test_gemini_tts_malformed_base64_error() {
     let mock_server = MockServer::start().await;
 
-    let sse_body = "data: {\"event_type\":\"step.delta\",\"index\":0,\"delta\":{\"type\":\"audio\",\"data\":\"!!!NOT_BASE64!!!\",\"mime_type\":\"audio/pcm\",\"sample_rate\":24000,\"channels\":1}}\n\n";
+    let sse_body = "data: {\"event_type\":\"step.delta\",\"index\":0,\"delta\":{\"type\":\"audio\",\"data\":\"!!!NOT_BASE64!!!\",\"mime_type\":\"audio/l16\",\"sample_rate\":24000,\"channels\":1}}\n\n";
 
     Mock::given(method("POST"))
         .and(path("/interactions"))
@@ -367,7 +446,7 @@ async fn test_gemini_tts_malformed_base64_error() {
         .mount(&mock_server)
         .await;
 
-    let tts = test_tts_with_mock_url(format!("{}/interactions", mock_server.uri()));
+    let tts = test_tts_with_mock_url(mock_server.uri());
     let request = TtsRequest { text: "Malformed base64 test".to_string(), ..Default::default() };
 
     let mut stream = tts.synthesize_stream(&request).await.expect("stream creation failed");

@@ -196,6 +196,7 @@ impl AudioPipelineBuilder {
                             }
                             Err(err) => {
                                 tracing::error!(error = %err, "Failed to start TTS stream in build_tts pipeline");
+                                break;
                             }
                         }
                     }
