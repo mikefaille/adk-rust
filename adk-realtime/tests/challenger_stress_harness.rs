@@ -57,18 +57,18 @@ fn test_challenger_tcp_reset_error_classification_exhaustive() {
     }
 
     // 2. std::io::Error variants
-    let io_reset =
-        RealtimeError::IoError(std::io::Error::new(std::io::ErrorKind::ConnectionReset, "reset"));
+    let io_reset = RealtimeError::IoError(
+        std::io::Error::new(std::io::ErrorKind::ConnectionReset, "reset").into(),
+    );
     assert!(io_reset.is_connection_reset());
 
     let io_broken =
-        RealtimeError::IoError(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "pipe"));
+        RealtimeError::IoError(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "pipe").into());
     assert!(io_broken.is_connection_reset());
 
-    let io_aborted = RealtimeError::IoError(std::io::Error::new(
-        std::io::ErrorKind::ConnectionAborted,
-        "aborted",
-    ));
+    let io_aborted = RealtimeError::IoError(
+        std::io::Error::new(std::io::ErrorKind::ConnectionAborted, "aborted").into(),
+    );
     assert!(io_aborted.is_connection_reset());
 
     // 3. Non-reset error variants & generic/protocol/provider text

@@ -131,8 +131,7 @@ async fn test_mock_websocket_server_e2e_reconnect_resumption() {
     });
 
     // 3. Connect client session to mock server URL
-    let _backend =
-        adk_realtime::gemini::GeminiLiveBackend::Studio { api_key: "mock_api_key".into() };
+    let _backend = adk_realtime::gemini::GeminiLiveBackend::studio("mock_api_key");
     let _config = adk_realtime::config::RealtimeConfig {
         instruction: Some("Test instructions".into()),
         ..Default::default()
