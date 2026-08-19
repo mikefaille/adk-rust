@@ -1,3 +1,5 @@
+#![cfg(feature = "tts")]
+
 //! Tests for Gemini TTS Interactions streaming in adk-audio.
 
 use adk_audio::pipeline::types::PipelineOutput;
@@ -358,6 +360,41 @@ async fn test_gemini_tts_custom_base_url_without_trailing_slash_normalizes() {
 }
 
 #[tokio::test]
+async fn test_gemini_tts_omitted_mime_inherits_l16_and_swaps_endianness() {
+    let mock_server = MockServer::start().await;
+
+    let b64_chunk = base64::Engine::encode(
+        &base64::engine::general_purpose::STANDARD,
+        [0x01, 0x02, 0x03, 0x04],
+    );
+
+    // mime_type is omitted (None)
+    let sse_body = format!(
+        "data: {{\"event_type\":\"step.delta\",\"index\":0,\"delta\":{{\"type\":\"audio\",\"data\":\"{}\",\"sample_rate\":24000,\"channels\":1}}}}\n\n\
+         data: {{\"event_type\":\"interaction.completed\",\"interaction\":{{\"id\":\"int_123\",\"status\":\"completed\"}}}}\n\n",
+        b64_chunk
+    );
+
+    Mock::given(method("POST"))
+        .and(path("/interactions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(sse_body)
+                .append_header("content-type", "text/event-stream"),
+        )
+        .mount(&mock_server)
+        .await;
+
+    let tts = test_tts_with_mock_url(mock_server.uri());
+    let request = TtsRequest { text: "Omitted MIME test".to_string(), ..Default::default() };
+
+    let mut stream = tts.synthesize_stream(&request).await.expect("stream creation failed");
+    let frame = stream.next().await.unwrap().unwrap();
+    // Must inherit negotiated audio/l16 and swap big-endian bytes [0x01, 0x02, 0x03, 0x04] -> [0x02, 0x01, 0x04, 0x03]
+    assert_eq!(frame.data.as_ref(), &[0x02, 0x01, 0x04, 0x03]);
+}
+
+#[tokio::test]
 async fn test_gemini_tts_rejects_pcm_encoding_switch_and_odd_remainder() {
     let mock_server = MockServer::start().await;
 
@@ -428,6 +465,60 @@ async fn test_gemini_tts_rejects_container_audio_formats() {
         "Error message was: {}",
         err_msg
     );
+}
+
+#[tokio::test]
+async fn test_gemini_tts_cancellation_dropping_stream_stops_consumption() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let (drop_tx, drop_rx) = tokio::sync::oneshot::channel::<()>();
+
+    tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        use tokio::io::AsyncWriteExt;
+
+        let b64_chunk = base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            [0x01, 0x02, 0x03, 0x04],
+        );
+
+        let http_resp = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n";
+        if socket.write_all(http_resp.as_bytes()).await.is_err() {
+            return;
+        }
+
+        let chunk_sse = format!(
+            "data: {{\"event_type\":\"step.delta\",\"index\":0,\"delta\":{{\"type\":\"audio\",\"data\":\"{}\",\"mime_type\":\"audio/l16;rate=24000\",\"sample_rate\":24000,\"channels\":1}}}}\n\n",
+            b64_chunk
+        );
+        if socket.write_all(chunk_sse.as_bytes()).await.is_err() {
+            return;
+        }
+        let _ = socket.flush().await;
+
+        // Try writing continuously until client drops connection
+        loop {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            if socket.write_all(chunk_sse.as_bytes()).await.is_err() {
+                let _ = drop_tx.send(());
+                break;
+            }
+        }
+    });
+
+    let mock_url = format!("http://{}/interactions", addr);
+    let tts = test_tts_with_mock_url(mock_url);
+
+    let request = TtsRequest { text: "Cancellation test".to_string(), ..Default::default() };
+    let stream = tts.synthesize_stream(&request).await.expect("synthesize_stream failed");
+
+    // Explicitly drop stream consumer to cancel HTTP connection
+    drop(stream);
+
+    // Verify server detected dropped socket connection
+    let drop_detected = tokio::time::timeout(std::time::Duration::from_millis(500), drop_rx).await;
+    assert!(drop_detected.is_ok(), "Dropping TTS stream must terminate server connection");
 }
 
 #[tokio::test]

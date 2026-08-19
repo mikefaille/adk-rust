@@ -1,3 +1,5 @@
+#![cfg(feature = "tts")]
+
 //! Gated live test against real Gemini 3.1 TTS endpoint.
 
 use adk_audio::providers::tts::GeminiTts;

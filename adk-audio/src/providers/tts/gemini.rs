@@ -186,11 +186,8 @@ impl GeminiTts {
 }
 
 /// Validate MIME type and enforce audio/l16 encoding contract.
-fn validate_audio_mime_type(mime_type: Option<&str>) -> AudioResult<()> {
-    let Some(mime) = mime_type else {
-        return Ok(());
-    };
-    let base_mime = mime.split(';').next().unwrap_or(mime).trim();
+fn validate_audio_mime_type(mime_type: &str) -> AudioResult<()> {
+    let base_mime = mime_type.split(';').next().unwrap_or(mime_type).trim();
     if base_mime.is_empty() {
         return Ok(());
     }
@@ -203,7 +200,9 @@ fn validate_audio_mime_type(mime_type: Option<&str>) -> AudioResult<()> {
     {
         return Err(AudioError::Tts {
             provider: "gemini".into(),
-            message: format!("Container/encoded audio format not supported for TTS stream: {mime}"),
+            message: format!(
+                "Container/encoded audio format not supported for TTS stream: {mime_type}"
+            ),
         });
     }
 
@@ -211,7 +210,7 @@ fn validate_audio_mime_type(mime_type: Option<&str>) -> AudioResult<()> {
         return Err(AudioError::Tts {
             provider: "gemini".into(),
             message: format!(
-                "Unsupported audio MIME type for TTS stream (expected audio/l16): {mime}"
+                "Unsupported audio MIME type for TTS stream (expected audio/l16): {mime_type}"
             ),
         });
     }
@@ -220,7 +219,7 @@ fn validate_audio_mime_type(mime_type: Option<&str>) -> AudioResult<()> {
 }
 
 /// Helper function to validate MIME type and parse sample rate
-fn parse_sample_rate(mime_type: Option<&str>, sample_rate: Option<i64>) -> AudioResult<u32> {
+fn parse_sample_rate(mime_type: &str, sample_rate: Option<i64>) -> AudioResult<u32> {
     validate_audio_mime_type(mime_type)?;
 
     if let Some(sr) = sample_rate {
@@ -232,26 +231,24 @@ fn parse_sample_rate(mime_type: Option<&str>, sample_rate: Option<i64>) -> Audio
         }
         return Ok(sr as u32);
     }
-    if let Some(mime) = mime_type {
-        for part in mime.split(';') {
-            let part = part.trim();
-            if let Some(val) = part.strip_prefix("rate=")
-                && let Ok(rate) = val.parse::<u32>()
-            {
-                if rate == 0 {
-                    return Err(AudioError::Tts {
-                        provider: "gemini".into(),
-                        message: "Invalid sample rate: 0".into(),
-                    });
-                }
-                return Ok(rate);
+    for part in mime_type.split(';') {
+        let part = part.trim();
+        if let Some(val) = part.strip_prefix("rate=")
+            && let Ok(rate) = val.parse::<u32>()
+        {
+            if rate == 0 {
+                return Err(AudioError::Tts {
+                    provider: "gemini".into(),
+                    message: "Invalid sample rate: 0".into(),
+                });
             }
+            return Ok(rate);
         }
     }
     Ok(24000)
 }
 
-fn parse_channels(mime_type: Option<&str>, channels: Option<i64>) -> AudioResult<u8> {
+fn parse_channels(mime_type: &str, channels: Option<i64>) -> AudioResult<u8> {
     validate_audio_mime_type(mime_type)?;
 
     if let Some(ch) = channels {
@@ -263,20 +260,18 @@ fn parse_channels(mime_type: Option<&str>, channels: Option<i64>) -> AudioResult
         }
         return Ok(ch as u8);
     }
-    if let Some(mime) = mime_type {
-        for part in mime.split(';') {
-            let part = part.trim();
-            if let Some(val) = part.strip_prefix("channels=")
-                && let Ok(ch) = val.parse::<u8>()
-            {
-                if ch == 0 || ch > 2 {
-                    return Err(AudioError::Tts {
-                        provider: "gemini".into(),
-                        message: format!("Invalid channels count: {ch}"),
-                    });
-                }
-                return Ok(ch);
+    for part in mime_type.split(';') {
+        let part = part.trim();
+        if let Some(val) = part.strip_prefix("channels=")
+            && let Ok(ch) = val.parse::<u8>()
+        {
+            if ch == 0 || ch > 2 {
+                return Err(AudioError::Tts {
+                    provider: "gemini".into(),
+                    message: format!("Invalid channels count: {ch}"),
+                });
             }
+            return Ok(ch);
         }
     }
     Ok(1)
@@ -421,8 +416,9 @@ impl TtsProvider for GeminiTts {
 
                 match sse_event {
                     InteractionSseEvent::StepDelta { delta: StepDelta::Audio { data, mime_type, sample_rate, channels }, .. } => {
-                        let sample_rate_val = parse_sample_rate(mime_type.as_deref(), sample_rate)?;
-                        let channels_val = parse_channels(mime_type.as_deref(), channels)?;
+                        let effective_mime = mime_type.as_deref().unwrap_or("audio/l16");
+                        let sample_rate_val = parse_sample_rate(effective_mime, sample_rate)?;
+                        let channels_val = parse_channels(effective_mime, channels)?;
 
                         if let Some(exp_sr) = expected_sample_rate {
                             if exp_sr != sample_rate_val {
@@ -459,8 +455,9 @@ impl TtsProvider for GeminiTts {
                                 continue;
                             }
 
-                            // Handle audio/l16 big-endian PCM framing across deltas
-                            if mime_type.as_deref().is_some_and(|m| m.starts_with("audio/l16")) {
+                            // Handle audio/l16 big-endian PCM framing across deltas.
+                            // Omitted or missing MIME on subsequent deltas inherits the stream's audio/l16 contract.
+                            if effective_mime.starts_with("audio/l16") {
                                 if let Some(rem) = l16_remainder.take() {
                                     decoded.insert(0, rem);
                                 }
