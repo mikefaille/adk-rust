@@ -1,4 +1,4 @@
-//! Gemini native audio TTS provider using the Interactions API.
+//! Gemini native audio TTS provider using the Gemini API.
 //!
 //! Supports all Gemini TTS models:
 //! - `gemini-3.1-flash-tts-preview` — expressive, audio tags, multi-speaker (default)
@@ -7,16 +7,15 @@
 
 use std::pin::Pin;
 
-use adk_gemini::interactions::{
-    CreateInteractionRequest, Input, InteractionSseEvent, ResponseFormat, SpeechConfigEntry,
-    StepDelta,
+use adk_gemini::{
+    Gemini, GeminiBuilder, Model, Part,
+    generation::{SpeakerVoiceConfig, SpeechConfig},
 };
-use adk_gemini::{Gemini, GeminiBuilder, Model};
 use async_stream::try_stream;
 use async_trait::async_trait;
 use base64::Engine as _;
 use bytes::Bytes;
-use futures::{Stream, StreamExt};
+use futures::{Stream, StreamExt, TryStreamExt};
 
 use crate::error::{AudioError, AudioResult};
 use crate::frame::AudioFrame;
@@ -50,7 +49,7 @@ impl SpeakerConfig {
     }
 }
 
-/// Gemini TTS provider using the Interactions API for low-latency audio streaming.
+/// Gemini TTS provider using the Gemini API for low-latency audio streaming.
 ///
 /// # Example
 ///
@@ -141,51 +140,24 @@ impl GeminiTts {
         self
     }
 
-    fn base_url(&self) -> String {
-        self.config.base_url.clone().unwrap_or_else(|| {
-            format!(
-                "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent",
-                self.model
-            )
-        })
-    }
-
-    fn build_speech_config(&self, voice: &str) -> Vec<SpeechConfigEntry> {
+    fn build_speech_config(&self, voice: &str) -> SpeechConfig {
         match &self.speakers {
-            Some(speakers) if !speakers.is_empty() => speakers
-                .iter()
-                .map(|s| SpeechConfigEntry::speaker_voice(&s.name, &s.voice))
-                .collect(),
+            Some(speakers) if !speakers.is_empty() => {
+                let speaker_configs = speakers
+                    .iter()
+                    .map(|s| SpeakerVoiceConfig::new(&s.name, &s.voice))
+                    .collect();
+                SpeechConfig::multi_speaker(speaker_configs)
+            }
             _ => {
                 let voice_name = if voice.is_empty() { "Kore" } else { voice };
-                vec![SpeechConfigEntry::voice(voice_name)]
+                SpeechConfig::single_voice(voice_name)
             }
-        }
-    }
-
-    fn build_request(&self, request: &TtsRequest, stream: bool) -> CreateInteractionRequest {
-        let speech_config = Some(self.build_speech_config(&request.voice));
-
-        CreateInteractionRequest {
-            model: Some(self.model.clone()),
-            input: Input::Text(request.text.clone()),
-            response_format: Some(ResponseFormat::Audio {
-                mime_type: Some("audio/l16".to_string()),
-                sample_rate: Some(24000),
-            }),
-            stream: Some(stream),
-            store: Some(false),
-            generation_config: Some(adk_gemini::interactions::GenerationConfig {
-                speech_config,
-                ..Default::default()
-            }),
-            agent_config: None,
-            ..Default::default()
         }
     }
 }
 
-/// Validate MIME type and enforce audio/l16 encoding contract.
+/// Validate MIME type and enforce PCM audio encoding contract.
 fn validate_audio_mime_type(mime_type: &str) -> AudioResult<()> {
     let base_mime = mime_type.split(';').next().unwrap_or(mime_type).trim();
     if base_mime.is_empty() {
@@ -209,11 +181,12 @@ fn validate_audio_mime_type(mime_type: &str) -> AudioResult<()> {
         });
     }
 
-    if !base_mime.eq_ignore_ascii_case("audio/l16") {
+    if !base_mime.eq_ignore_ascii_case("audio/l16") && !base_mime.eq_ignore_ascii_case("audio/pcm")
+    {
         return Err(AudioError::Tts {
             provider: "gemini".into(),
             message: format!(
-                "Unsupported audio MIME type for TTS stream (expected audio/l16): {mime_type}"
+                "Unsupported audio MIME type for TTS stream (expected audio/l16 or audio/pcm): {mime_type}"
             ),
         });
     }
@@ -283,92 +256,6 @@ fn parse_channels(mime_type: &str, channels: Option<i64>) -> AudioResult<u8> {
 #[async_trait]
 impl TtsProvider for GeminiTts {
     async fn synthesize(&self, request: &TtsRequest) -> AudioResult<AudioFrame> {
-        if self.model.contains("gemini-2.5") {
-            let url = self.base_url();
-            let speech_config = match &self.speakers {
-                Some(speakers) if !speakers.is_empty() => {
-                    let speaker_configs: Vec<serde_json::Value> = speakers
-                        .iter()
-                        .map(|s| {
-                            serde_json::json!({
-                                "speaker": s.name,
-                                "voiceConfig": {
-                                    "prebuiltVoiceConfig": {
-                                        "voiceName": s.voice
-                                    }
-                                }
-                            })
-                        })
-                        .collect();
-                    serde_json::json!({
-                        "multiSpeakerVoiceConfig": {
-                            "speakerVoiceConfigs": speaker_configs
-                        }
-                    })
-                }
-                _ => {
-                    let voice_name = if request.voice.is_empty() { "Kore" } else { &request.voice };
-                    serde_json::json!({
-                        "voiceConfig": {
-                            "prebuiltVoiceConfig": {
-                                "voiceName": voice_name
-                            }
-                        }
-                    })
-                }
-            };
-
-            let body = serde_json::json!({
-                "contents": [{"parts": [{"text": request.text}]}],
-                "generationConfig": {
-                    "response_modalities": ["AUDIO"],
-                    "speech_config": speech_config
-                }
-            });
-
-            let client = reqwest::Client::new();
-            let resp = client
-                .post(&url)
-                .header("x-goog-api-key", &self.config.api_key)
-                .json(&body)
-                .send()
-                .await
-                .map_err(|e| AudioError::Tts {
-                    provider: "gemini".into(),
-                    message: e.to_string(),
-                })?;
-
-            if !resp.status().is_success() {
-                let status = resp.status();
-                let body = resp.text().await.unwrap_or_default();
-                return Err(AudioError::Tts {
-                    provider: "gemini".into(),
-                    message: format!("HTTP {status}: {body}"),
-                });
-            }
-
-            let json: serde_json::Value = resp.json().await.map_err(|e| AudioError::Tts {
-                provider: "gemini".into(),
-                message: e.to_string(),
-            })?;
-
-            let audio_b64 = json["candidates"][0]["content"]["parts"][0]["inlineData"]["data"]
-                .as_str()
-                .ok_or_else(|| AudioError::Tts {
-                    provider: "gemini".into(),
-                    message: "no audio data in response".into(),
-                })?;
-
-            let pcm = base64::engine::general_purpose::STANDARD.decode(audio_b64).map_err(|e| {
-                AudioError::Tts {
-                    provider: "gemini".into(),
-                    message: format!("base64 decode failed: {e}"),
-                }
-            })?;
-
-            return Ok(AudioFrame::new(Bytes::from(pcm), 24000, 1));
-        }
-
         let mut stream = self.synthesize_stream(request).await?;
         let mut frames = Vec::new();
 
@@ -391,120 +278,93 @@ impl TtsProvider for GeminiTts {
         &self,
         request: &TtsRequest,
     ) -> AudioResult<Pin<Box<dyn Stream<Item = AudioResult<AudioFrame>> + Send>>> {
-        if self.model.contains("gemini-2.5") {
-            let frame = self.synthesize(request).await?;
-            return Ok(Box::pin(futures::stream::once(async { Ok(frame) })));
-        }
+        let speech_config = self.build_speech_config(&request.voice);
+        let builder = self
+            .gemini
+            .generate_content()
+            .with_user_message(&request.text)
+            .with_speech_config(speech_config)
+            .with_audio_output();
 
-        let payload = self.build_request(request, true);
-
-        let mut event_stream =
-            self.gemini.send_interaction_stream(payload).await.map_err(|e| AudioError::Tts {
-                provider: "gemini".into(),
-                message: format!("HTTP / stream request failed: {e}"),
-            })?;
+        let mut response_stream = Box::pin(builder.execute_stream().await.map_err(|e| AudioError::Tts {
+            provider: "gemini".into(),
+            message: format!("HTTP / stream request failed: {e}"),
+        })?);
 
         let stream = try_stream! {
             let mut audio_chunks_received = 0u64;
             let mut expected_sample_rate: Option<u32> = None;
             let mut expected_channels: Option<u8> = None;
-            let mut completed_successfully = false;
             let mut l16_remainder: Option<u8> = None;
 
-            while let Some(event_res) = event_stream.next().await {
-                let sse_event = event_res.map_err(|e| AudioError::Tts {
-                    provider: "gemini".into(),
-                    message: format!("SSE stream read error: {e}"),
-                })?;
+            while let Some(response) = response_stream.try_next().await.map_err(|e| AudioError::Tts {
+                provider: "gemini".into(),
+                message: format!("SSE stream read error: {e}"),
+            })? {
+                for candidate in response.candidates {
+                    if let Some(parts) = candidate.content.parts {
+                        for part in parts {
+                            if let Part::InlineData { inline_data } = part {
+                                let sample_rate_val = parse_sample_rate(&inline_data.mime_type, None)?;
+                                let channels_val = parse_channels(&inline_data.mime_type, None)?;
 
-                match sse_event {
-                    InteractionSseEvent::StepDelta { delta: StepDelta::Audio { data, mime_type, sample_rate, channels }, .. } => {
-                        let effective_mime = mime_type.as_deref().unwrap_or("audio/l16");
-                        let sample_rate_val = parse_sample_rate(effective_mime, sample_rate)?;
-                        let channels_val = parse_channels(effective_mime, channels)?;
-
-                        if let Some(exp_sr) = expected_sample_rate {
-                            if exp_sr != sample_rate_val {
-                                Err(AudioError::Tts {
-                                    provider: "gemini".into(),
-                                    message: format!("MIME/Metadata mismatch: expected sample rate {exp_sr}, got {sample_rate_val}"),
-                                })?;
-                            }
-                        } else {
-                            expected_sample_rate = Some(sample_rate_val);
-                        }
-
-                        if let Some(exp_ch) = expected_channels {
-                            if exp_ch != channels_val {
-                                Err(AudioError::Tts {
-                                    provider: "gemini".into(),
-                                    message: format!("MIME/Metadata mismatch: expected channels {exp_ch}, got {channels_val}"),
-                                })?;
-                            }
-                        } else {
-                            expected_channels = Some(channels_val);
-                        }
-
-                        if let Some(b64) = data
-                            && !b64.is_empty()
-                        {
-                            let mut decoded = base64::engine::general_purpose::STANDARD.decode(&b64)
-                                .map_err(|e| AudioError::Tts {
-                                    provider: "gemini".into(),
-                                    message: format!("Invalid base64 audio payload: {e}"),
-                                })?;
-
-                            if decoded.is_empty() {
-                                continue;
-                            }
-
-                            // Handle audio/l16 big-endian PCM framing across deltas.
-                            // Omitted or missing MIME on subsequent deltas inherits the stream's audio/l16 contract.
-                            let base_mime = effective_mime.split(';').next().unwrap_or(effective_mime).trim();
-                            if base_mime.eq_ignore_ascii_case("audio/l16") {
-                                if let Some(rem) = l16_remainder.take() {
-                                    decoded.insert(0, rem);
+                                if let Some(exp_sr) = expected_sample_rate {
+                                    if exp_sr != sample_rate_val {
+                                        Err(AudioError::Tts {
+                                            provider: "gemini".into(),
+                                            message: format!("MIME/Metadata mismatch: expected sample rate {exp_sr}, got {sample_rate_val}"),
+                                        })?;
+                                    }
+                                } else {
+                                    expected_sample_rate = Some(sample_rate_val);
                                 }
-                                if decoded.len() % 2 != 0 {
-                                    l16_remainder = decoded.pop();
-                                }
-                                for chunk in decoded.chunks_exact_mut(2) {
-                                    chunk.swap(0, 1);
-                                }
-                            }
 
-                            if !decoded.is_empty() {
-                                audio_chunks_received += 1;
-                                let frame = AudioFrame::new(Bytes::from(decoded), sample_rate_val, channels_val);
-                                yield frame;
+                                if let Some(exp_ch) = expected_channels {
+                                    if exp_ch != channels_val {
+                                        Err(AudioError::Tts {
+                                            provider: "gemini".into(),
+                                            message: format!("MIME/Metadata mismatch: expected channels {exp_ch}, got {channels_val}"),
+                                        })?;
+                                    }
+                                } else {
+                                    expected_channels = Some(channels_val);
+                                }
+
+                                if !inline_data.data.is_empty() {
+                                    let mut decoded = base64::engine::general_purpose::STANDARD.decode(&inline_data.data)
+                                        .map_err(|e| AudioError::Tts {
+                                            provider: "gemini".into(),
+                                            message: format!("Invalid base64 audio payload: {e}"),
+                                        })?;
+
+                                    if decoded.is_empty() {
+                                        continue;
+                                    }
+
+                                    // Handle audio/l16 big-endian PCM framing across deltas.
+                                    let base_mime = inline_data.mime_type.split(';').next().unwrap_or(&inline_data.mime_type).trim();
+                                    if base_mime.eq_ignore_ascii_case("audio/l16") {
+                                        if let Some(rem) = l16_remainder.take() {
+                                            decoded.insert(0, rem);
+                                        }
+                                        if decoded.len() % 2 != 0 {
+                                            l16_remainder = decoded.pop();
+                                        }
+                                        for chunk in decoded.chunks_exact_mut(2) {
+                                            chunk.swap(0, 1);
+                                        }
+                                    }
+
+                                    if !decoded.is_empty() {
+                                        audio_chunks_received += 1;
+                                        let frame = AudioFrame::new(Bytes::from(decoded), sample_rate_val, channels_val);
+                                        yield frame;
+                                    }
+                                }
                             }
                         }
                     }
-                    InteractionSseEvent::Error { error, .. } => {
-                        Err(AudioError::Tts {
-                            provider: "gemini".into(),
-                            message: format!("Provider stream error: {}: {}", error.code.unwrap_or_default(), error.message),
-                        })?;
-                    }
-                    InteractionSseEvent::InteractionCompleted { interaction, .. } => {
-                        if interaction.status != adk_gemini::interactions::InteractionStatus::Completed {
-                            Err(AudioError::Tts {
-                                provider: "gemini".into(),
-                                message: format!("Interaction finished with non-successful status: {:?}", interaction.status),
-                            })?;
-                        }
-                        completed_successfully = true;
-                        break;
-                    }
-                    _ => {}
                 }
-            }
-
-            if !completed_successfully {
-                Err(AudioError::Tts {
-                    provider: "gemini".into(),
-                    message: "Stream terminated abruptly without interaction.completed event".into(),
-                })?;
             }
 
             if l16_remainder.is_some() {
@@ -517,7 +377,7 @@ impl TtsProvider for GeminiTts {
             if audio_chunks_received == 0 {
                 Err(AudioError::Tts {
                     provider: "gemini".into(),
-                    message: "Interactions stream finished without emitting audio frames".into(),
+                    message: "TTS stream finished without emitting audio frames".into(),
                 })?;
             }
         };
