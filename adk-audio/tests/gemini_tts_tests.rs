@@ -7,7 +7,7 @@ use adk_audio::providers::tts::{CloudTtsConfig, GeminiTts};
 use adk_audio::traits::{TtsProvider, TtsRequest};
 use futures::StreamExt;
 use std::sync::Arc;
-use wiremock::matchers::{method, path};
+use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn test_tts_with_mock_url(mock_url: String) -> GeminiTts {
@@ -426,6 +426,59 @@ async fn test_gemini_tts_rejects_invalid_mime_suffix() {
     assert!(item.is_err(), "audio/l16-invalid must be rejected");
     let err_msg = item.err().unwrap().to_string();
     assert!(err_msg.contains("Unsupported audio MIME type"), "Error message was: {}", err_msg);
+}
+
+#[tokio::test]
+async fn test_gemini_tts_http_boundary_contract() {
+    let mock_server = MockServer::start().await;
+
+    let b64_chunk = base64::Engine::encode(
+        &base64::engine::general_purpose::STANDARD,
+        [0x01, 0x02, 0x03, 0x04],
+    );
+
+    let sse_body = format!(
+        "data: {{\"event_type\":\"step.delta\",\"index\":0,\"delta\":{{\"type\":\"audio\",\"data\":\"{}\",\"mime_type\":\"audio/l16;rate=24000\",\"sample_rate\":24000,\"channels\":1}}}}\n\n\
+         data: {{\"event_type\":\"interaction.completed\",\"interaction\":{{\"id\":\"int_123\",\"status\":\"completed\"}}}}\n\n",
+        b64_chunk
+    );
+
+    // Assert HTTP boundary headers and JSON request body structure
+    Mock::given(method("POST"))
+        .and(path("/interactions"))
+        .and(header("x-goog-api-key", "test-api-key"))
+        .and(header("Api-Revision", "2026-05-20"))
+        .and(wiremock::matchers::body_json(serde_json::json!({
+            "model": "gemini-3.1-flash-tts-preview",
+            "input": "HTTP boundary contract test",
+            "response_format": {
+                "type": "audio",
+                "mime_type": "audio/l16",
+                "sample_rate": 24000
+            },
+            "stream": true,
+            "store": false,
+            "generation_config": {
+                "speech_config": [
+                    { "voice": "Kore" }
+                ]
+            }
+        })))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(sse_body)
+                .append_header("content-type", "text/event-stream"),
+        )
+        .mount(&mock_server)
+        .await;
+
+    let tts = test_tts_with_mock_url(mock_server.uri());
+    let request =
+        TtsRequest { text: "HTTP boundary contract test".to_string(), ..Default::default() };
+
+    let mut stream = tts.synthesize_stream(&request).await.expect("synthesize_stream failed");
+    let frame = stream.next().await.unwrap().unwrap();
+    assert_eq!(frame.data.as_ref(), &[0x02, 0x01, 0x04, 0x03]);
 }
 
 #[tokio::test]

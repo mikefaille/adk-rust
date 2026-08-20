@@ -281,6 +281,7 @@ fn tts_request_with_audio_format_and_speech_config_serializes() {
             sample_rate: Some(24000),
         }),
         stream: Some(true),
+        store: Some(false),
         generation_config: Some(adk_gemini::interactions::GenerationConfig {
             speech_config: Some(vec![
                 SpeechConfigEntry::speaker_voice("Alice", "Kore"),
@@ -294,6 +295,7 @@ fn tts_request_with_audio_format_and_speech_config_serializes() {
     let value = serde_json::to_value(&req).unwrap();
     assert_eq!(value["model"], json!("gemini-3.1-flash-tts-preview"));
     assert_eq!(value["stream"], json!(true));
+    assert_eq!(value["store"], json!(false));
     assert_eq!(value["response_format"]["type"], json!("audio"));
     assert_eq!(value["response_format"]["mime_type"], json!("audio/l16"));
     assert_eq!(value["response_format"]["sample_rate"], json!(24000));
