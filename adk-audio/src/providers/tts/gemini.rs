@@ -143,10 +143,8 @@ impl GeminiTts {
     fn build_speech_config(&self, voice: &str) -> SpeechConfig {
         match &self.speakers {
             Some(speakers) if !speakers.is_empty() => {
-                let speaker_configs = speakers
-                    .iter()
-                    .map(|s| SpeakerVoiceConfig::new(&s.name, &s.voice))
-                    .collect();
+                let speaker_configs =
+                    speakers.iter().map(|s| SpeakerVoiceConfig::new(&s.name, &s.voice)).collect();
                 SpeechConfig::multi_speaker(speaker_configs)
             }
             _ => {
@@ -286,10 +284,11 @@ impl TtsProvider for GeminiTts {
             .with_speech_config(speech_config)
             .with_audio_output();
 
-        let mut response_stream = Box::pin(builder.execute_stream().await.map_err(|e| AudioError::Tts {
-            provider: "gemini".into(),
-            message: format!("HTTP / stream request failed: {e}"),
-        })?);
+        let mut response_stream =
+            Box::pin(builder.execute_stream().await.map_err(|e| AudioError::Tts {
+                provider: "gemini".into(),
+                message: format!("HTTP / stream request failed: {e}"),
+            })?);
 
         let stream = try_stream! {
             let mut audio_chunks_received = 0u64;

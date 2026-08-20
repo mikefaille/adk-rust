@@ -6,8 +6,8 @@ use adk_audio::providers::tts::GeminiTts;
 use adk_audio::traits::{TtsProvider, TtsRequest};
 use adk_gemini::{GeminiBuilder, Model, Part};
 use base64::Engine;
-use futures::TryStreamExt;
 use futures::StreamExt;
+use futures::TryStreamExt;
 
 #[ignore = "Gated live test requiring GEMINI_API_KEY environment variable"]
 #[tokio::test]
@@ -43,7 +43,9 @@ async fn test_live_gemini_3_1_tts_event_level() {
     let mut audio_event_count = 0;
     let mut total_audio_bytes = 0;
 
-    while let Some(response) = response_stream.try_next().await.expect("Error receiving generation response") {
+    while let Some(response) =
+        response_stream.try_next().await.expect("Error receiving generation response")
+    {
         for candidate in response.candidates {
             if let Some(parts) = candidate.content.parts {
                 for part in parts {
@@ -74,10 +76,7 @@ async fn test_live_gemini_3_1_tts_event_level() {
     }
     let stream_completed_time = start_time.elapsed();
 
-    assert!(
-        first_audio_event_time.is_some(),
-        "Must receive at least one audio event"
-    );
+    assert!(first_audio_event_time.is_some(), "Must receive at least one audio event");
 
     let first_audio_ts = first_audio_event_time.unwrap();
     let completed_ts = stream_completed_time;
@@ -97,11 +96,7 @@ async fn test_live_gemini_3_1_tts_event_level() {
         first_audio_ts,
         completed_ts
     );
-    assert!(
-        audio_event_count > 1,
-        "Expected multiple audio events, got {}",
-        audio_event_count
-    );
+    assert!(audio_event_count > 1, "Expected multiple audio events, got {}", audio_event_count);
     assert!(total_audio_bytes > 0, "Audio bytes must be non-zero");
 }
 
