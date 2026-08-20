@@ -51,7 +51,7 @@ async fn test_live_gemini_3_1_tts_streaming() {
         assert!(!frame.data.is_empty());
     }
 
-    let total_time = start_time.elapsed();
+    let stream_completion_time = start_time.elapsed();
 
     assert!(chunks_count > 1, "Expected multiple streaming audio chunks, got {}", chunks_count);
     assert!(total_pcm_bytes > 0, "Non-zero total PCM bytes must be received");
@@ -60,13 +60,13 @@ async fn test_live_gemini_3_1_tts_streaming() {
     let first_audio_time = first_audio_received_time.unwrap();
     println!(
         "Live test completed in {:?}: first audio at {:?}, received {} chunks ({} bytes)",
-        total_time, first_audio_time, chunks_count, total_pcm_bytes
+        stream_completion_time, first_audio_time, chunks_count, total_pcm_bytes
     );
 
     assert!(
-        first_audio_time < total_time,
-        "first valid audio ({:?}) must arrive before terminal interaction completion ({:?})",
+        first_audio_time < stream_completion_time,
+        "first valid audio ({:?}) must arrive before stream completion ({:?})",
         first_audio_time,
-        total_time
+        stream_completion_time
     );
 }
