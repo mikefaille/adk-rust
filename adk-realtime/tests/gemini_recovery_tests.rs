@@ -698,10 +698,7 @@ async fn test_live_gemini_managed_recovery_interruption() {
     let gen_n_id = *gen_watcher.borrow();
 
     // 2. Deliberately induce real transport failure on generation N
-    runner
-        .force_transport_break_for_testing()
-        .await
-        .expect("Force transport break should succeed");
+    runner.force_transport_break_for_testing().await.expect("Force transport break should succeed");
 
     // 3. Write during recovery is rejected before raw invocation as NotAttempted
     let write_err = runner
