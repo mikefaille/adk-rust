@@ -189,7 +189,10 @@ impl GeminiTts {
 fn validate_audio_mime_type(mime_type: &str) -> AudioResult<()> {
     let base_mime = mime_type.split(';').next().unwrap_or(mime_type).trim();
     if base_mime.is_empty() {
-        return Ok(());
+        return Err(AudioError::Tts {
+            provider: "gemini".into(),
+            message: "Empty audio MIME type".into(),
+        });
     }
 
     if base_mime.starts_with("audio/wav")
@@ -206,7 +209,7 @@ fn validate_audio_mime_type(mime_type: &str) -> AudioResult<()> {
         });
     }
 
-    if !base_mime.starts_with("audio/l16") {
+    if !base_mime.eq_ignore_ascii_case("audio/l16") {
         return Err(AudioError::Tts {
             provider: "gemini".into(),
             message: format!(
@@ -457,7 +460,8 @@ impl TtsProvider for GeminiTts {
 
                             // Handle audio/l16 big-endian PCM framing across deltas.
                             // Omitted or missing MIME on subsequent deltas inherits the stream's audio/l16 contract.
-                            if effective_mime.starts_with("audio/l16") {
+                            let base_mime = effective_mime.split(';').next().unwrap_or(effective_mime).trim();
+                            if base_mime.eq_ignore_ascii_case("audio/l16") {
                                 if let Some(rem) = l16_remainder.take() {
                                     decoded.insert(0, rem);
                                 }

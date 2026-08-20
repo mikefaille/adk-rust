@@ -395,6 +395,40 @@ async fn test_gemini_tts_omitted_mime_inherits_l16_and_swaps_endianness() {
 }
 
 #[tokio::test]
+async fn test_gemini_tts_rejects_invalid_mime_suffix() {
+    let mock_server = MockServer::start().await;
+
+    let b64_chunk = base64::Engine::encode(
+        &base64::engine::general_purpose::STANDARD,
+        [0x01, 0x02, 0x03, 0x04],
+    );
+
+    let sse_body = format!(
+        "data: {{\"event_type\":\"step.delta\",\"index\":0,\"delta\":{{\"type\":\"audio\",\"data\":\"{}\",\"mime_type\":\"audio/l16-invalid;rate=24000\",\"sample_rate\":24000,\"channels\":1}}}}\n\n",
+        b64_chunk
+    );
+
+    Mock::given(method("POST"))
+        .and(path("/interactions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(sse_body)
+                .append_header("content-type", "text/event-stream"),
+        )
+        .mount(&mock_server)
+        .await;
+
+    let tts = test_tts_with_mock_url(mock_server.uri());
+    let request = TtsRequest { text: "MIME suffix test".to_string(), ..Default::default() };
+
+    let mut stream = tts.synthesize_stream(&request).await.expect("stream creation failed");
+    let item = stream.next().await.unwrap();
+    assert!(item.is_err(), "audio/l16-invalid must be rejected");
+    let err_msg = item.err().unwrap().to_string();
+    assert!(err_msg.contains("Unsupported audio MIME type"), "Error message was: {}", err_msg);
+}
+
+#[tokio::test]
 async fn test_gemini_tts_rejects_pcm_encoding_switch_and_odd_remainder() {
     let mock_server = MockServer::start().await;
 
