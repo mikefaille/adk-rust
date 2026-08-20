@@ -558,14 +558,9 @@ async fn test_empty_event_translation_loop_does_not_signal_eof() {
 async fn test_gemini_backend_studio_and_vertex() {
     let b1 = GeminiLiveBackend::studio("my-key").with_endpoint_url("wss://example.com/ws");
     match b1 {
-        GeminiLiveBackend::Studio {
-            api_key,
-            endpoint_url,
-            forward_credentials_to_custom_endpoint,
-        } => {
+        GeminiLiveBackend::Studio { api_key, endpoint_url } => {
             assert_eq!(api_key, "my-key");
             assert_eq!(endpoint_url, Some("wss://example.com/ws".to_string()));
-            assert!(!forward_credentials_to_custom_endpoint);
         }
         #[allow(unreachable_patterns)]
         _ => panic!("Expected Studio variant"),
@@ -573,46 +568,46 @@ async fn test_gemini_backend_studio_and_vertex() {
 }
 
 #[tokio::test]
-async fn test_studio_custom_endpoint_does_not_leak_api_key_unless_opted_in() {
-    let received_urls = Arc::new(parking_lot::Mutex::new(Vec::<String>::new()));
+async fn test_studio_custom_endpoint_does_not_leak_api_key() {
+    let received_uri = Arc::new(parking_lot::Mutex::new(None::<String>));
+    let uri_capture = Arc::clone(&received_uri);
 
-    let urls_capture = Arc::clone(&received_urls);
-    let (addr, _server) = spawn_mock_ws_server(move |ws| {
-        let urls = Arc::clone(&urls_capture);
-        async move {
-            let _ = ws;
-            urls.lock().push("connected".to_string());
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let server_handle = tokio::spawn(async move {
+        if let Ok((stream, _)) = listener.accept().await {
+            let uri_ref = Arc::clone(&uri_capture);
+            let callback = move |req: &tokio_tungstenite::tungstenite::handshake::server::Request,
+                                 resp: tokio_tungstenite::tungstenite::handshake::server::Response| {
+                *uri_ref.lock() = Some(req.uri().to_string());
+                Ok(resp)
+            };
+            let _ = tokio_tungstenite::accept_hdr_async(stream, callback).await;
         }
-    })
-    .await;
+    });
 
-    // Test 1: with_endpoint_url does NOT forward API key
     let custom_url = format!("ws://{}/ws", addr);
-    let backend_default =
-        GeminiLiveBackend::studio("secret-api-key").with_endpoint_url(&custom_url);
+    let backend = GeminiLiveBackend::studio("secret-api-key").with_endpoint_url(&custom_url);
 
-    #[allow(irrefutable_let_patterns)]
-    if let GeminiLiveBackend::Studio { forward_credentials_to_custom_endpoint: f1, .. } =
-        backend_default
-    {
-        assert!(!f1, "Default custom endpoint must NOT forward API key");
-    }
+    let session_res =
+        GeminiRealtimeSession::connect(backend, "models/gemini-live", RealtimeConfig::default())
+            .await;
 
-    // Test 2: with_endpoint_url_forwarding_credentials DOES opt in
-    let backend_opt_in = GeminiLiveBackend::studio("secret-api-key")
-        .with_endpoint_url_forwarding_credentials(&custom_url);
+    assert!(session_res.is_ok(), "Connection to custom endpoint should succeed");
 
-    #[allow(irrefutable_let_patterns)]
-    if let GeminiLiveBackend::Studio { forward_credentials_to_custom_endpoint: f2, .. } =
-        backend_opt_in
-    {
-        assert!(f2, "Opt-in custom endpoint MUST forward API key");
-    }
+    let uri = received_uri.lock().take().expect("Handshake request URI captured");
+    assert!(
+        !uri.contains("key="),
+        "Custom Studio endpoint URI must NOT contain key= query parameter: {uri}"
+    );
+
+    server_handle.abort();
 }
 
 #[cfg(feature = "vertex-live")]
 #[tokio::test]
-async fn test_vertex_custom_endpoint_does_not_leak_auth_header_unless_opted_in() {
+async fn test_vertex_custom_endpoint_does_not_leak_auth_header() {
     let received_headers = Arc::new(parking_lot::Mutex::new(Vec::<Option<String>>::new()));
 
     let headers_capture = Arc::clone(&received_headers);
@@ -639,27 +634,22 @@ async fn test_vertex_custom_endpoint_does_not_leak_auth_header_unless_opted_in()
     });
 
     let mock_credentials = google_cloud_auth::credentials::Builder::default().build().unwrap();
-    let backend_no_auth = GeminiLiveBackend::Vertex {
+    let backend_custom = GeminiLiveBackend::Vertex {
         credentials: mock_credentials.clone(),
         region: "us-central1".into(),
         project_id: "test-project".into(),
         endpoint_url: Some(format!("ws://{}", addr)),
-        forward_credentials_to_custom_endpoint: false,
     };
 
     let _ = GeminiRealtimeSession::connect(
-        backend_no_auth,
+        backend_custom,
         "models/gemini-live",
         RealtimeConfig::default(),
     )
     .await;
 
-    let auth1 = received_headers.lock().pop();
-    assert_eq!(
-        auth1,
-        Some(None),
-        "Custom endpoint without opt-in must NOT receive Authorization header"
-    );
+    let auth = received_headers.lock().pop();
+    assert_eq!(auth, Some(None), "Custom Vertex endpoint must NOT receive Authorization header");
 
     server_handle.abort();
 }
@@ -670,6 +660,8 @@ async fn test_live_gemini_managed_recovery_interruption() {
     use adk_realtime::gemini::GeminiRealtimeModel;
     use adk_realtime::recovery::DeliveryCertainty;
     use adk_realtime::runner::RealtimeRunner;
+
+    let _ = rustls::crypto::ring::default_provider().install_default();
 
     let Ok(api_key) = std::env::var("GEMINI_API_KEY").or_else(|_| std::env::var("GOOGLE_API_KEY"))
     else {
@@ -696,33 +688,52 @@ async fn test_live_gemini_managed_recovery_interruption() {
     runner.connect().await.expect("Initial connect should succeed");
     assert!(runner.is_connected().await);
     let gen_n_id = *gen_watcher.borrow();
+    assert_eq!(gen_n_id, 0);
 
     // 2. Deliberately induce real transport failure on generation N
     runner.force_transport_break_for_testing().await.expect("Force transport break should succeed");
 
-    // 3. Write during recovery is rejected before raw invocation as NotAttempted
+    // 3. Next write on broken transport triggers failure report and transitions supervisor to Recovering
     let write_err = runner
         .send_text("hello during break")
         .await
-        .expect_err("Write should be rejected during recovery");
+        .expect_err("Write on broken transport should fail");
+
     match write_err {
         RealtimeError::WriteFailed { certainty, .. } => {
             assert_eq!(
                 certainty,
+                DeliveryCertainty::Indeterminate,
+                "First write after transport break should be Indeterminate"
+            );
+        }
+        other => panic!("Expected WriteFailed error, got {:?}", other),
+    }
+
+    // Subsequent write during active Recovering state is rejected as NotAttempted
+    let write_err2 = runner
+        .send_text("hello during recovery")
+        .await
+        .expect_err("Write during recovery state should be rejected");
+    match write_err2 {
+        RealtimeError::WriteFailed { certainty, .. } => {
+            assert_eq!(
+                certainty,
                 DeliveryCertainty::NotAttempted,
-                "Write during transport break must be rejected as NotAttempted"
+                "Write during active Recovering state must be rejected as NotAttempted"
             );
         }
         other => panic!("Expected WriteFailed error with NotAttempted delivery, got {:?}", other),
     }
 
-    // 4. Background recovery: next_event or reconnect publishes N+1
-    // Read next_event to trigger managed supervisor recovery flow
+    // 4. Background recovery: next_event completes recovery and publishes N+1
     let event_res = runner.next_event().await;
     assert!(event_res.is_some(), "next_event should complete via managed recovery");
 
     // 5. Verify N+1 publication & public watcher wakeup
-    gen_watcher.changed().await.expect("Watcher must wake on N+1 publication");
+    if *gen_watcher.borrow() == gen_n_id {
+        gen_watcher.changed().await.expect("Watcher must wake on N+1 publication");
+    }
     let gen_n1_id = *gen_watcher.borrow();
     assert_ne!(gen_n_id, gen_n1_id, "Generation must advance from N to N+1");
 

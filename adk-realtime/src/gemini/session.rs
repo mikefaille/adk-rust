@@ -41,11 +41,7 @@ const AUDIO_FLUSH_TARGET_MS: usize = 40;
 #[derive(Debug, Clone)]
 pub enum GeminiLiveBackend {
     /// AI Studio with API key authentication.
-    Studio {
-        api_key: String,
-        endpoint_url: Option<String>,
-        forward_credentials_to_custom_endpoint: bool,
-    },
+    Studio { api_key: String, endpoint_url: Option<String> },
 
     /// Vertex AI with OAuth2/ADC authentication.
     #[cfg(feature = "vertex-live")]
@@ -58,87 +54,29 @@ pub enum GeminiLiveBackend {
         project_id: String,
         /// Custom WebSocket URL endpoint override.
         endpoint_url: Option<String>,
-        /// Whether to attach Google ADC Authorization headers to custom endpoint URL.
-        forward_credentials_to_custom_endpoint: bool,
     },
 }
 
 impl GeminiLiveBackend {
     /// Create a Studio backend with API key authentication.
     pub fn studio(api_key: impl Into<String>) -> Self {
-        Self::Studio {
-            api_key: api_key.into(),
-            endpoint_url: None,
-            forward_credentials_to_custom_endpoint: false,
-        }
+        Self::Studio { api_key: api_key.into(), endpoint_url: None }
     }
 
     /// Override the WebSocket connection URL for mock servers or custom proxies.
     ///
     /// # Security Policy
     ///
-    /// By default, when connecting to a custom endpoint URL specified via `with_endpoint_url()`,
-    /// ADK **will not** forward Google credentials (such as Google API keys or Google ADC bearer tokens)
-    /// to the custom host. This prevents credential leakage when proxying through untrusted endpoints
-    /// or local mock servers.
-    ///
-    /// If you are connecting to a custom endpoint that requires Google credential forwarding
-    /// (e.g., an internal Google auth proxy), use [`with_endpoint_url_forwarding_credentials`](Self::with_endpoint_url_forwarding_credentials)
-    /// to explicitly opt into forwarding Google credentials to the specified host.
+    /// When connecting to a custom endpoint URL specified via `with_endpoint_url()`,
+    /// ADK **will not** attach or forward Google credentials (such as Google API keys
+    /// or Google ADC bearer tokens) to the custom host. This prevents credential leakage
+    /// when proxying through untrusted custom endpoints or local mock servers.
     pub fn with_endpoint_url(mut self, endpoint_url: impl Into<String>) -> Self {
         let ep = Some(endpoint_url.into());
         match &mut self {
-            GeminiLiveBackend::Studio {
-                endpoint_url: e,
-                forward_credentials_to_custom_endpoint: f,
-                ..
-            } => {
-                *e = ep;
-                *f = false;
-            }
+            GeminiLiveBackend::Studio { endpoint_url: e, .. } => *e = ep,
             #[cfg(feature = "vertex-live")]
-            GeminiLiveBackend::Vertex {
-                endpoint_url: e,
-                forward_credentials_to_custom_endpoint: f,
-                ..
-            } => {
-                *e = ep;
-                *f = false;
-            }
-        }
-        self
-    }
-
-    /// Override the WebSocket connection URL and explicitly opt into forwarding Google credentials.
-    ///
-    /// # Security Warning
-    ///
-    /// Using this method will attach Google credentials (API key query parameter for Studio, or OAuth2
-    /// Authorization bearer headers for Vertex) to the specified custom URL. Ensure the target host is
-    /// trusted before opting into credential forwarding.
-    pub fn with_endpoint_url_forwarding_credentials(
-        mut self,
-        endpoint_url: impl Into<String>,
-    ) -> Self {
-        let ep = Some(endpoint_url.into());
-        match &mut self {
-            GeminiLiveBackend::Studio {
-                endpoint_url: e,
-                forward_credentials_to_custom_endpoint: f,
-                ..
-            } => {
-                *e = ep;
-                *f = true;
-            }
-            #[cfg(feature = "vertex-live")]
-            GeminiLiveBackend::Vertex {
-                endpoint_url: e,
-                forward_credentials_to_custom_endpoint: f,
-                ..
-            } => {
-                *e = ep;
-                *f = true;
-            }
+            GeminiLiveBackend::Vertex { endpoint_url: e, .. } => *e = ep,
         }
         self
     }
@@ -169,7 +107,6 @@ impl GeminiLiveBackend {
             region: region.into(),
             project_id: project_id.into(),
             endpoint_url: None,
-            forward_credentials_to_custom_endpoint: false,
         })
     }
 }
@@ -389,7 +326,7 @@ impl GeminiRealtimeSession {
     }
 
     /// Constructs a mock `GeminiRealtimeSession` for testing connection lifecycle & recovery.
-    #[cfg(any(test, feature = "integration", feature = "gemini"))]
+    #[cfg(any(test, feature = "integration"))]
     pub fn new_for_test(
         session_id: String,
         reconnect_url: String,
@@ -470,20 +407,9 @@ impl GeminiRealtimeSession {
         let tools = convert_tools(config.tools.clone(), &schema_cache, adapter.as_ref())?;
 
         let ws_stream = match &backend {
-            GeminiLiveBackend::Studio {
-                api_key,
-                endpoint_url,
-                forward_credentials_to_custom_endpoint,
-            } => {
+            GeminiLiveBackend::Studio { api_key, endpoint_url } => {
                 let url = match endpoint_url {
-                    Some(u) => {
-                        if *forward_credentials_to_custom_endpoint {
-                            let separator = if u.contains('?') { "&" } else { "?" };
-                            format!("{}{}key={}", u, separator, api_key)
-                        } else {
-                            u.clone()
-                        }
-                    }
+                    Some(u) => u.clone(), // Custom endpoint receives NO Google API key
                     None => format!("{}?key={}", super::GEMINI_LIVE_URL, api_key),
                 };
                 let request = url.into_client_request().map_err(|e| {
@@ -496,13 +422,7 @@ impl GeminiRealtimeSession {
                 ws
             }
             #[cfg(feature = "vertex-live")]
-            GeminiLiveBackend::Vertex {
-                credentials,
-                region,
-                project_id,
-                endpoint_url,
-                forward_credentials_to_custom_endpoint,
-            } => {
+            GeminiLiveBackend::Vertex { credentials, region, project_id, endpoint_url } => {
                 let url = match endpoint_url {
                     Some(u) => u.clone(),
                     None => build_vertex_live_url(region, project_id)?,
@@ -512,11 +432,8 @@ impl GeminiRealtimeSession {
                     RealtimeError::connection(format!("Failed to create request: {e}"))
                 })?;
 
-                let should_attach_auth =
-                    endpoint_url.is_none() || *forward_credentials_to_custom_endpoint;
-
-                if should_attach_auth {
-                    // Obtain OAuth2 bearer token from ADC credentials
+                // Attach Google ADC Authorization header ONLY to standard default Google Vertex endpoint
+                if endpoint_url.is_none() {
                     let header_map = match credentials.headers(Default::default()).await.map_err(
                         |e| {
                             RealtimeError::AuthError(format!(
@@ -533,7 +450,6 @@ impl GeminiRealtimeSession {
                         }
                     };
 
-                    // Extract the Authorization header value
                     let auth_value = header_map
                         .get("authorization")
                         .ok_or_else(|| {
