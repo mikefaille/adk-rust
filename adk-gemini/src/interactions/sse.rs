@@ -123,6 +123,21 @@ pub enum StepDelta {
         /// The text fragment to append.
         text: String,
     },
+    /// An incremental audio fragment.
+    Audio {
+        /// Base64-encoded audio payload fragment.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        data: Option<String>,
+        /// MIME type of the audio (e.g., "audio/pcm", "audio/wav", "audio/mp3").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mime_type: Option<String>,
+        /// Sample rate in Hz.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sample_rate: Option<i64>,
+        /// Channel count (e.g. 1 for mono, 2 for stereo).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        channels: Option<i64>,
+    },
     /// An incremental function-call arguments fragment (partial JSON string).
     FunctionCall {
         /// Partial JSON string of arguments to accumulate.

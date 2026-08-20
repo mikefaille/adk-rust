@@ -842,8 +842,8 @@ fn sse_step_delta_to_chunk(
             }
             None
         }
-        // A delta type this crate version does not model: ignore it.
-        StepDelta::Other(_) => None,
+        // Audio delta or other unhandled delta variants produced during SSE streaming.
+        StepDelta::Audio { .. } | StepDelta::Other(_) => None,
     }
 }
 

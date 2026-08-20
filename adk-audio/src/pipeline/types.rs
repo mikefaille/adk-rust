@@ -38,7 +38,9 @@ pub enum PipelineOutput {
 /// Real-time latency and quality metrics from pipeline stages.
 #[derive(Debug, Clone, Default)]
 pub struct PipelineMetrics {
-    /// TTS synthesis latency in milliseconds.
+    /// Time to first valid audio frame in milliseconds for TTS.
+    pub tts_first_audio_latency_ms: f64,
+    /// Total TTS synthesis latency in milliseconds until stream completion.
     pub tts_latency_ms: f64,
     /// STT transcription latency in milliseconds.
     pub stt_latency_ms: f64,
