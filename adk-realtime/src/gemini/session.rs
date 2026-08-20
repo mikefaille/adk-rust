@@ -41,7 +41,11 @@ const AUDIO_FLUSH_TARGET_MS: usize = 40;
 #[derive(Debug, Clone)]
 pub enum GeminiLiveBackend {
     /// AI Studio with API key authentication.
-    Studio { api_key: String, endpoint_url: Option<String> },
+    Studio {
+        api_key: String,
+        endpoint_url: Option<String>,
+        forward_credentials_to_custom_endpoint: bool,
+    },
 
     /// Vertex AI with OAuth2/ADC authentication.
     #[cfg(feature = "vertex-live")]
@@ -54,22 +58,87 @@ pub enum GeminiLiveBackend {
         project_id: String,
         /// Custom WebSocket URL endpoint override.
         endpoint_url: Option<String>,
+        /// Whether to attach Google ADC Authorization headers to custom endpoint URL.
+        forward_credentials_to_custom_endpoint: bool,
     },
 }
 
 impl GeminiLiveBackend {
     /// Create a Studio backend with API key authentication.
     pub fn studio(api_key: impl Into<String>) -> Self {
-        Self::Studio { api_key: api_key.into(), endpoint_url: None }
+        Self::Studio {
+            api_key: api_key.into(),
+            endpoint_url: None,
+            forward_credentials_to_custom_endpoint: false,
+        }
     }
 
-    /// Override the WebSocket connection URL (useful for mock servers or custom gateway proxies).
+    /// Override the WebSocket connection URL for mock servers or custom proxies.
+    ///
+    /// # Security Policy
+    ///
+    /// By default, when connecting to a custom endpoint URL specified via `with_endpoint_url()`,
+    /// ADK **will not** forward Google credentials (such as Google API keys or Google ADC bearer tokens)
+    /// to the custom host. This prevents credential leakage when proxying through untrusted endpoints
+    /// or local mock servers.
+    ///
+    /// If you are connecting to a custom endpoint that requires Google credential forwarding
+    /// (e.g., an internal Google auth proxy), use [`with_endpoint_url_forwarding_credentials`](Self::with_endpoint_url_forwarding_credentials)
+    /// to explicitly opt into forwarding Google credentials to the specified host.
     pub fn with_endpoint_url(mut self, endpoint_url: impl Into<String>) -> Self {
         let ep = Some(endpoint_url.into());
         match &mut self {
-            GeminiLiveBackend::Studio { endpoint_url: e, .. } => *e = ep,
+            GeminiLiveBackend::Studio {
+                endpoint_url: e,
+                forward_credentials_to_custom_endpoint: f,
+                ..
+            } => {
+                *e = ep;
+                *f = false;
+            }
             #[cfg(feature = "vertex-live")]
-            GeminiLiveBackend::Vertex { endpoint_url: e, .. } => *e = ep,
+            GeminiLiveBackend::Vertex {
+                endpoint_url: e,
+                forward_credentials_to_custom_endpoint: f,
+                ..
+            } => {
+                *e = ep;
+                *f = false;
+            }
+        }
+        self
+    }
+
+    /// Override the WebSocket connection URL and explicitly opt into forwarding Google credentials.
+    ///
+    /// # Security Warning
+    ///
+    /// Using this method will attach Google credentials (API key query parameter for Studio, or OAuth2
+    /// Authorization bearer headers for Vertex) to the specified custom URL. Ensure the target host is
+    /// trusted before opting into credential forwarding.
+    pub fn with_endpoint_url_forwarding_credentials(
+        mut self,
+        endpoint_url: impl Into<String>,
+    ) -> Self {
+        let ep = Some(endpoint_url.into());
+        match &mut self {
+            GeminiLiveBackend::Studio {
+                endpoint_url: e,
+                forward_credentials_to_custom_endpoint: f,
+                ..
+            } => {
+                *e = ep;
+                *f = true;
+            }
+            #[cfg(feature = "vertex-live")]
+            GeminiLiveBackend::Vertex {
+                endpoint_url: e,
+                forward_credentials_to_custom_endpoint: f,
+                ..
+            } => {
+                *e = ep;
+                *f = true;
+            }
         }
         self
     }
@@ -100,6 +169,7 @@ impl GeminiLiveBackend {
             region: region.into(),
             project_id: project_id.into(),
             endpoint_url: None,
+            forward_credentials_to_custom_endpoint: false,
         })
     }
 }
@@ -319,7 +389,7 @@ impl GeminiRealtimeSession {
     }
 
     /// Constructs a mock `GeminiRealtimeSession` for testing connection lifecycle & recovery.
-    #[cfg(any(test, feature = "integration"))]
+    #[cfg(any(test, feature = "integration", feature = "gemini"))]
     pub fn new_for_test(
         session_id: String,
         reconnect_url: String,
@@ -400,10 +470,22 @@ impl GeminiRealtimeSession {
         let tools = convert_tools(config.tools.clone(), &schema_cache, adapter.as_ref())?;
 
         let ws_stream = match &backend {
-            GeminiLiveBackend::Studio { api_key, endpoint_url } => {
-                let url = endpoint_url
-                    .clone()
-                    .unwrap_or_else(|| format!("{}?key={}", super::GEMINI_LIVE_URL, api_key));
+            GeminiLiveBackend::Studio {
+                api_key,
+                endpoint_url,
+                forward_credentials_to_custom_endpoint,
+            } => {
+                let url = match endpoint_url {
+                    Some(u) => {
+                        if *forward_credentials_to_custom_endpoint {
+                            let separator = if u.contains('?') { "&" } else { "?" };
+                            format!("{}{}key={}", u, separator, api_key)
+                        } else {
+                            u.clone()
+                        }
+                    }
+                    None => format!("{}?key={}", super::GEMINI_LIVE_URL, api_key),
+                };
                 let request = url.into_client_request().map_err(|e| {
                     RealtimeError::connection(format!("Failed to create request: {}", e))
                 })?;
@@ -414,58 +496,71 @@ impl GeminiRealtimeSession {
                 ws
             }
             #[cfg(feature = "vertex-live")]
-            GeminiLiveBackend::Vertex { credentials, region, project_id, endpoint_url } => {
+            GeminiLiveBackend::Vertex {
+                credentials,
+                region,
+                project_id,
+                endpoint_url,
+                forward_credentials_to_custom_endpoint,
+            } => {
                 let url = match endpoint_url {
                     Some(u) => u.clone(),
                     None => build_vertex_live_url(region, project_id)?,
                 };
 
-                // Obtain OAuth2 bearer token from ADC credentials
-                let header_map =
-                    match credentials.headers(Default::default()).await.map_err(|e| {
-                        RealtimeError::AuthError(format!(
-                            "Failed to obtain OAuth2 token from ADC credentials: {e}"
-                        ))
-                    })? {
-                        google_cloud_auth::credentials::CacheableResource::New { data, .. } => data,
-                        google_cloud_auth::credentials::CacheableResource::NotModified => {
-                            return Err(RealtimeError::AuthError(
-                            "ADC credentials returned NotModified with no cached token available"
-                                .to_string(),
-                        ));
-                        }
-                    };
-
-                // Extract the Authorization header value
-                let auth_value = header_map
-                    .get("authorization")
-                    .ok_or_else(|| {
-                        RealtimeError::AuthError(
-                            "ADC credentials did not produce an Authorization header".to_string(),
-                        )
-                    })?
-                    .to_str()
-                    .map_err(|e| {
-                        RealtimeError::AuthError(format!(
-                            "Authorization header contains non-ASCII characters: {e}"
-                        ))
-                    })?
-                    .to_string();
-
-                // Build a WebSocket request with the Authorization header
                 let mut request = url.into_client_request().map_err(|e| {
                     RealtimeError::connection(format!("Failed to create request: {e}"))
                 })?;
-                request.headers_mut().insert(
-                    "Authorization",
-                    auth_value.parse().map_err(
-                        |e: tokio_tungstenite::tungstenite::http::header::InvalidHeaderValue| {
+
+                let should_attach_auth =
+                    endpoint_url.is_none() || *forward_credentials_to_custom_endpoint;
+
+                if should_attach_auth {
+                    // Obtain OAuth2 bearer token from ADC credentials
+                    let header_map = match credentials.headers(Default::default()).await.map_err(
+                        |e| {
                             RealtimeError::AuthError(format!(
-                                "Failed to parse Authorization header value: {e}"
+                                "Failed to obtain OAuth2 token from ADC credentials: {e}"
                             ))
                         },
-                    )?,
-                );
+                    )? {
+                        google_cloud_auth::credentials::CacheableResource::New { data, .. } => data,
+                        google_cloud_auth::credentials::CacheableResource::NotModified => {
+                            return Err(RealtimeError::AuthError(
+                                "ADC credentials returned NotModified with no cached token available"
+                                    .to_string(),
+                            ));
+                        }
+                    };
+
+                    // Extract the Authorization header value
+                    let auth_value = header_map
+                        .get("authorization")
+                        .ok_or_else(|| {
+                            RealtimeError::AuthError(
+                                "ADC credentials did not produce an Authorization header"
+                                    .to_string(),
+                            )
+                        })?
+                        .to_str()
+                        .map_err(|e| {
+                            RealtimeError::AuthError(format!(
+                                "Authorization header contains non-ASCII characters: {e}"
+                            ))
+                        })?
+                        .to_string();
+
+                    request.headers_mut().insert(
+                        "Authorization",
+                        auth_value.parse().map_err(
+                            |e: tokio_tungstenite::tungstenite::http::header::InvalidHeaderValue| {
+                                RealtimeError::AuthError(format!(
+                                    "Failed to parse Authorization header value: {e}"
+                                ))
+                            },
+                        )?,
+                    );
+                }
 
                 let (ws, _) = connect_async(request).await.map_err(|e| {
                     RealtimeError::connection(format!(

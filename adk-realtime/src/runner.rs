@@ -448,6 +448,31 @@ impl RealtimeRunner {
             .map(|g| g.session.session_id().to_string())
     }
 
+    /// Deliberately force a transport interruption on the active session generation for testing.
+    ///
+    /// Closes the raw active session transport without closing the managed supervisor,
+    /// triggering the managed failure recovery path on the next read or write operation.
+    #[cfg(any(test, feature = "integration", feature = "gemini"))]
+    pub async fn force_transport_break_for_testing(&self) -> Result<()> {
+        let gen_item = self.supervisor.get_active_generation().await?;
+        gen_item.session.close().await
+    }
+
+    /// Subscribe to session generation publication notifications.
+    ///
+    /// Returns a read-only watch receiver that fires when a new authoritative session generation
+    /// is installed or published by the underlying supervisor.
+    ///
+    /// # Liveness vs Authority
+    ///
+    /// This watcher provides a **liveness notification** to wake application-owned buffered-data
+    /// replay loops or subscriber tasks upon generation transition (e.g. `N -> N+1`).
+    /// It is **not** an authority over recovery policy, transport state transitions, or provider handles.
+    /// Candidate connection attempts that fail or are rejected before publication do not advance this watcher.
+    pub fn subscribe_generation(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.supervisor.subscribe_generation()
+    }
+
     /// Returns the connected provider's native audio output format.
     ///
     /// This format specifies the sample rate, channel count, and encoding (e.g. PCM16 24kHz)
@@ -2272,5 +2297,141 @@ mod runner_tests {
             1,
             "transport loss must be reported exactly once"
         );
+    }
+
+    #[tokio::test]
+    async fn subscribe_generation_wakes_on_published_generation_n_plus_1_only() {
+        let runner = RealtimeRunner::builder()
+            .model(Arc::new(MockModel) as BoxedModel)
+            .recovery_policy(
+                RecoveryPolicy::default()
+                    .with_max_attempts(std::num::NonZeroU32::new(3).unwrap())
+                    .with_initial_delay(std::time::Duration::ZERO),
+            )
+            .build()
+            .unwrap();
+
+        let mut rx = runner.subscribe_generation();
+        assert_eq!(*rx.borrow(), 0, "initial watcher starts at generation 0");
+
+        let session2 = Arc::new(ScriptedSession::new(Arc::new(Counts::default()), vec![]))
+            as Arc<dyn RealtimeSession>;
+
+        // Setup a recovery implementation where attempt 1 fails (so candidate fails), but attempt 2 succeeds and publishes N+1
+        struct TwoAttemptRecovery {
+            attempts: Arc<AtomicUsize>,
+            session2: Arc<dyn RealtimeSession>,
+        }
+
+        #[async_trait]
+        impl crate::recovery::RealtimeRecovery for TwoAttemptRecovery {
+            fn classify(&self, _cause: &RecoveryCause) -> crate::recovery::RecoveryDisposition {
+                crate::recovery::RecoveryDisposition::Recoverable
+            }
+            fn classify_attempt_error(
+                &self,
+                _error: &RealtimeError,
+            ) -> crate::recovery::RecoveryDisposition {
+                crate::recovery::RecoveryDisposition::Recoverable
+            }
+            async fn recover(
+                &self,
+                _context: crate::recovery::RecoveryContext<'_>,
+            ) -> Result<crate::recovery::RecoveredSession> {
+                let count = self.attempts.fetch_add(1, Ordering::SeqCst) + 1;
+                if count == 1 {
+                    Err(RealtimeError::ConnectionError("Connection reset by peer".into()))
+                } else {
+                    Ok(crate::recovery::RecoveredSession::new(
+                        self.session2.clone(),
+                        crate::recovery::RecoveryContinuity::Reconnected,
+                    ))
+                }
+            }
+        }
+
+        struct RetryableSession {
+            inner: ScriptedSession,
+            rec: TwoAttemptRecovery,
+        }
+
+        #[async_trait]
+        impl RealtimeSession for RetryableSession {
+            fn session_id(&self) -> &str {
+                self.inner.session_id()
+            }
+            fn is_connected(&self) -> bool {
+                self.inner.is_connected()
+            }
+            fn recovery(&self) -> Option<&dyn crate::recovery::RealtimeRecovery> {
+                Some(&self.rec)
+            }
+            async fn send_audio(&self, a: &AudioChunk) -> Result<()> {
+                self.inner.send_audio(a).await
+            }
+            async fn send_audio_base64(&self, a: &str) -> Result<()> {
+                self.inner.send_audio_base64(a).await
+            }
+            async fn send_text(&self, t: &str) -> Result<()> {
+                self.inner.send_text(t).await
+            }
+            async fn send_tool_response(&self, r: ToolResponse) -> Result<()> {
+                self.inner.send_tool_response(r).await
+            }
+            async fn commit_audio(&self) -> Result<()> {
+                self.inner.commit_audio().await
+            }
+            async fn clear_audio(&self) -> Result<()> {
+                self.inner.clear_audio().await
+            }
+            async fn create_response(&self) -> Result<()> {
+                self.inner.create_response().await
+            }
+            async fn interrupt(&self) -> Result<()> {
+                self.inner.interrupt().await
+            }
+            async fn send_event(&self, e: ClientEvent) -> Result<()> {
+                self.inner.send_event(e).await
+            }
+            async fn next_event(&self) -> Option<Result<ServerEvent>> {
+                self.inner.next_event().await
+            }
+            fn events(
+                &self,
+            ) -> Pin<Box<dyn futures::Stream<Item = Result<ServerEvent>> + Send + '_>> {
+                self.inner.events()
+            }
+            async fn close(&self) -> Result<()> {
+                self.inner.close().await
+            }
+            async fn mutate_context(&self, c: RealtimeConfig) -> Result<ContextMutationOutcome> {
+                self.inner.mutate_context(c).await
+            }
+        }
+
+        let attempts_counter = Arc::new(AtomicUsize::new(0));
+        let retryable = Arc::new(RetryableSession {
+            inner: ScriptedSession::new(Arc::new(Counts::default()), vec![]),
+            rec: TwoAttemptRecovery {
+                attempts: Arc::clone(&attempts_counter),
+                session2: session2.clone(),
+            },
+        });
+
+        // Set initial session to retryable session (generation 0)
+        let _ = runner.set_initial_session(retryable).await.unwrap();
+        rx.changed().await.unwrap();
+        assert_eq!(*rx.borrow(), 0, "initial generation is 0");
+
+        // Trigger failure report for generation 0
+        let report = FailureReport { generation: 0, cause: RecoveryCause::UnexpectedEof };
+        let recovery_res = runner.supervisor.report_failure(report).await.unwrap();
+
+        assert!(matches!(recovery_res, RecoveryOutcome::Recovered { .. }));
+        assert_eq!(attempts_counter.load(Ordering::SeqCst), 2, "2 attempts were made");
+
+        // Watcher must wake exactly for published N+1 (generation 1)
+        rx.changed().await.unwrap();
+        assert_eq!(*rx.borrow(), 1, "ready published candidate advances watcher to generation 1");
     }
 }
