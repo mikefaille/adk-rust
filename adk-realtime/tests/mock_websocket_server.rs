@@ -152,13 +152,17 @@ async fn test_mock_websocket_server_e2e_reconnect_resumption() {
     sink.send(Message::Text(setup_msg.into())).await.unwrap();
 
     // Build session wrapping the mock socket stream
-    let (tx, rx) = tokio::sync::mpsc::channel(256);
+    let (tx, rx) = tokio::sync::mpsc::channel::<adk_realtime::gemini::OutboundMessage>(256);
     let writer_task = tokio::spawn(async move {
         let mut rx = rx;
         let mut sink = sink;
-        while let Some(msg) = rx.recv().await {
-            if sink.send(msg).await.is_err() {
-                break;
+        while let Some(item) = rx.recv().await {
+            let res = sink.send(item.message).await;
+            if let Some(ack) = item.ack {
+                let _ =
+                    ack.send(res.map_err(|e| {
+                        adk_realtime::error::RealtimeError::connection(e.to_string())
+                    }));
             }
         }
     });

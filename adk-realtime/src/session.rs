@@ -172,6 +172,7 @@ pub trait RealtimeSession: Send + Sync {
     async fn close(&self) -> Result<()>;
 
     /// Abruptly break the transport without a graceful close frame for testing recovery.
+    #[cfg(any(test, feature = "integration"))]
     async fn force_transport_break(&self) -> Result<()> {
         self.close().await
     }

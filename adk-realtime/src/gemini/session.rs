@@ -34,6 +34,7 @@ type WsStream =
 type WsSource = futures::stream::SplitStream<WsStream>;
 const WRITER_CHANNEL_CAPACITY: usize = 64;
 const AUDIO_FLUSH_TARGET_MS: usize = 40;
+const MAX_CALL_NAMES_CAPACITY: usize = 1000;
 
 /// Backend configuration for Gemini Live connections.
 ///
@@ -270,11 +271,16 @@ struct GeminiTurn {
 /// Gemini Live session.
 ///
 /// Manages a WebSocket connection to Google's Gemini Live API.
+pub struct OutboundMessage {
+    pub message: Message,
+    pub ack: Option<tokio::sync::oneshot::Sender<Result<()>>>,
+}
+
 pub struct GeminiRealtimeSession {
     session_id: String,
     connected: Arc<AtomicBool>,
     cancel_token: Arc<Mutex<tokio_util::sync::CancellationToken>>,
-    outbound_tx: Arc<Mutex<mpsc::Sender<Message>>>,
+    outbound_tx: Arc<Mutex<mpsc::Sender<OutboundMessage>>>,
     writer_task: Arc<Mutex<Option<JoinHandle<()>>>>,
     receiver: Arc<Mutex<WsSource>>,
     audio_buffer: Arc<ParkingMutex<BytesMut>>,
@@ -300,7 +306,53 @@ pub struct GeminiRealtimeSession {
     /// best reconnect anchor).
     last_resume_handle: Arc<ParkingMutex<Option<String>>>,
     /// Association map between function call IDs and tool names for wire-conforming `FunctionResponse` payloads.
-    call_names: Arc<ParkingMutex<std::collections::HashMap<String, String>>>,
+    call_names: Arc<ParkingMutex<CallNamesState>>,
+}
+
+#[derive(Default)]
+struct CallNamesState {
+    map: std::collections::HashMap<String, String>,
+    order: std::collections::VecDeque<String>,
+}
+
+impl CallNamesState {
+    #[allow(dead_code)]
+    fn new() -> Self {
+        Self { map: std::collections::HashMap::new(), order: std::collections::VecDeque::new() }
+    }
+
+    fn insert(&mut self, call_id: String, name: String) {
+        if !self.map.contains_key(&call_id) {
+            self.order.push_back(call_id.clone());
+        }
+        self.map.insert(call_id, name);
+
+        while self.map.len() > MAX_CALL_NAMES_CAPACITY {
+            if let Some(oldest) = self.order.pop_front() {
+                self.map.remove(&oldest);
+            } else {
+                break;
+            }
+        }
+    }
+
+    fn remove(&mut self, call_id: &str) -> Option<String> {
+        let name = self.map.remove(call_id);
+        if name.is_some() {
+            self.order.retain(|id| id != call_id);
+        }
+        name
+    }
+
+    #[allow(dead_code)]
+    fn get(&self, call_id: &str) -> Option<&String> {
+        self.map.get(call_id)
+    }
+
+    #[allow(dead_code)]
+    fn len(&self) -> usize {
+        self.map.len()
+    }
 }
 
 /// Ensure the model ID is prefixed with "models/" as required by Gemini Live setup frames.
@@ -328,13 +380,17 @@ impl GeminiRealtimeSession {
         self.last_resume_handle.lock().clone()
     }
 
+    fn insert_call_name(&self, call_id: String, name: String) {
+        self.call_names.lock().insert(call_id, name);
+    }
+
     /// Constructs a mock `GeminiRealtimeSession` for testing connection lifecycle & recovery.
-    #[cfg(any(test, feature = "integration"))]
+    #[cfg(any(test, feature = "integration", feature = "gemini"))]
     pub fn new_for_test(
         session_id: String,
         reconnect_url: String,
         reconnect_model: String,
-        outbound_tx: mpsc::Sender<Message>,
+        outbound_tx: mpsc::Sender<OutboundMessage>,
         writer_task: tokio::task::JoinHandle<()>,
         receiver: WsSource,
     ) -> Self {
@@ -359,7 +415,7 @@ impl GeminiRealtimeSession {
             dialect,
             reconnect_model,
             last_resume_handle: Arc::new(ParkingMutex::new(None)),
-            call_names: Arc::new(ParkingMutex::new(std::collections::HashMap::new())),
+            call_names: Arc::new(ParkingMutex::new(CallNamesState::new())),
         }
     }
 
@@ -495,7 +551,8 @@ impl GeminiRealtimeSession {
         let connected = Arc::new(AtomicBool::new(true));
         let cancel_token = tokio_util::sync::CancellationToken::new();
         let writer_cancel = cancel_token.clone();
-        let (outbound_tx, mut outbound_rx) = mpsc::channel(WRITER_CHANNEL_CAPACITY);
+        let (outbound_tx, mut outbound_rx) =
+            mpsc::channel::<OutboundMessage>(WRITER_CHANNEL_CAPACITY);
         let writer_connected = Arc::clone(&connected);
         let writer_task = tokio::spawn(async move {
             loop {
@@ -504,16 +561,21 @@ impl GeminiRealtimeSession {
                         tracing::info!("gemini websocket writer task cancelled via token");
                         break;
                     }
-                    msg = outbound_rx.recv() => {
-                        match msg {
-                            Some(message) => {
+                    item = outbound_rx.recv() => {
+                        match item {
+                            Some(OutboundMessage { message, ack }) => {
                                 let should_close = matches!(message, Message::Close(_));
-                                if let Err(error) = sink.send(message).await {
+                                let send_res = sink.send(message).await.map_err(|e| {
+                                    RealtimeError::connection(format!("gemini websocket writer send failed: {e}"))
+                                });
+                                if let Err(ref error) = send_res {
                                     writer_connected.store(false, Ordering::SeqCst);
                                     tracing::warn!(error = %error, "gemini websocket writer send failed");
-                                    break;
                                 }
-                                if should_close {
+                                if let Some(ack_tx) = ack {
+                                    let _ = ack_tx.send(send_res.clone());
+                                }
+                                if send_res.is_err() || should_close {
                                     break;
                                 }
                             }
@@ -554,7 +616,7 @@ impl GeminiRealtimeSession {
             dialect,
             reconnect_model: normalized_model.clone(),
             last_resume_handle: Arc::new(ParkingMutex::new(None)),
-            call_names: Arc::new(ParkingMutex::new(std::collections::HashMap::new())),
+            call_names: Arc::new(ParkingMutex::new(CallNamesState::new())),
         };
 
         session.send_setup_with_compiled_tools(&normalized_model, config, tools).await?;
@@ -587,36 +649,7 @@ impl GeminiRealtimeSession {
         config: RealtimeConfig,
         compiled_tools: Option<Vec<Value>>,
     ) -> Result<()> {
-        let mut generation_config = json!({
-            "responseModalities": gemini_response_modalities(config.modalities.as_deref()),
-        });
-
-        if let Some(voice) = &config.voice {
-            generation_config["speechConfig"] = json!({
-                "voiceConfig": {
-                    "prebuiltVoiceConfig": {
-                        "voiceName": voice
-                    }
-                }
-            });
-        }
-
-        if let Some(temp) = config.temperature {
-            generation_config["temperature"] = json!(temp);
-        }
-
-        // Emotion-aware ("affective") dialog — a generationConfig field, honored
-        // by native-audio models on the v1alpha endpoint.
-        if config.affective_dialog == Some(true) {
-            generation_config["enableAffectiveDialog"] = json!(true);
-        }
-
-        if let Some(extra) = &config.extra
-            && let Some(thinking_level) = extra.get("thinking_level")
-            && let Some(obj) = generation_config.as_object_mut()
-        {
-            obj.insert("thinkingConfig".to_string(), json!({ "thinkingLevel": thinking_level }));
-        }
+        let generation_config = build_generation_config(model, &config);
 
         // Computed before anything moves out of `config`.
         let realtime_input_config = gemini_realtime_input_config(&config);
@@ -662,19 +695,41 @@ impl GeminiRealtimeSession {
         self.send_raw(&setup).await
     }
 
-    /// Send a raw message.
+    /// Send a raw message to Gemini Live.
+    ///
+    /// # Delivery Semantics & Proven Facts
+    ///
+    /// Outbound writes navigate three distinct delivery boundaries:
+    /// 1. **Local Queue Acceptance**: The message is enqueued into the session's mpsc channel.
+    /// 2. **Socket-Sink Completion**: The background writer task finishes `sink.send()` on the WebSocket TCP stream.
+    ///    This method awaits oneshot acknowledgement from the writer task, confirming socket-sink completion.
+    /// 3. **Remote / Model Processing**: The Gemini server receives, parses, and acts on the message.
+    ///    Socket-sink completion confirms transport egress only; model processing is signaled asynchronously via server events.
+    ///
+    /// If `sink.send()` fails, this method returns `Err(RealtimeError::ConnectionError)`.
+    /// Under `RealtimeRunner::invoke_write`, this write error is assigned `DeliveryCertainty::Indeterminate`
+    /// and triggers managed recovery through `RecoverySupervisor`. Zero retry or recovery state machine logic exists in the writer task.
     async fn send_raw<T: Serialize>(&self, value: &T) -> Result<()> {
         let msg = serde_json::to_string(value)
             .map_err(|e| RealtimeError::protocol(format!("JSON serialize error: {}", e)))?;
 
+        let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+        let outbound_item =
+            OutboundMessage { message: Message::Text(msg.into()), ack: Some(ack_tx) };
+
         self.outbound_tx
             .lock()
             .await
-            .send(Message::Text(msg.into()))
+            .send(outbound_item)
             .await
             .map_err(|e| RealtimeError::connection(format!("Send queue error: {e}")))?;
 
-        Ok(())
+        match ack_rx.await {
+            Ok(res) => res,
+            Err(_) => Err(RealtimeError::connection(
+                "WebSocket writer task terminated before socket-sink completion",
+            )),
+        }
     }
 
     /// Receive and parse the next message.
@@ -785,7 +840,13 @@ impl GeminiRealtimeSession {
                     }
                 }
                 ServerEvent::FunctionCallDone { call_id, name, .. } => {
-                    self.call_names.lock().insert(call_id.clone(), name.clone());
+                    self.insert_call_name(call_id.clone(), name.clone());
+                }
+                ServerEvent::ToolCallCancelled { call_ids } => {
+                    let mut map = self.call_names.lock();
+                    for id in call_ids {
+                        map.remove(id.as_str());
+                    }
                 }
                 _ => {}
             }
@@ -806,6 +867,23 @@ impl GeminiRealtimeSession {
         let value: Value = serde_json::from_str(raw)
             .map_err(|e| RealtimeError::protocol(describe_unparseable_frame(raw, &e)))?;
         log_frame_shape(&value, frame_log);
+
+        // Check for server goAway signal (planned connection rotation)
+        if let Some(go_away) = value.get("goAway") {
+            let time_remaining =
+                go_away.get("timeRemaining").and_then(|t| t.as_str()).unwrap_or("unspecified");
+            let reason = go_away.get("reason").and_then(|r| r.as_str()).unwrap_or("unspecified");
+
+            tracing::warn!(
+                time_remaining = %time_remaining,
+                reason = %reason,
+                "Received Gemini goAway lifecycle signal; initiating managed connection rotation"
+            );
+
+            return Err(RealtimeError::connection(format!(
+                "Gemini goAway received (timeRemaining: {time_remaining}, reason: {reason})"
+            )));
+        }
 
         // Check for setup completion
         if let Some(_setup_complete) = value.get("setupComplete") {
@@ -902,6 +980,17 @@ impl GeminiRealtimeSession {
                     item_id: String::new(),
                     content_index: 0,
                     delta: text.to_string(),
+                });
+            }
+
+            if let Some(gen_complete) = content.get("generationComplete")
+                && gen_complete.as_bool().unwrap_or(false)
+            {
+                events.push(ServerEvent::OutputItemDone {
+                    event_id: uuid::Uuid::new_v4().to_string(),
+                    response_id: String::new(),
+                    output_index: 0,
+                    item: value.clone(),
                 });
             }
 
@@ -1048,7 +1137,7 @@ impl RealtimeRecovery for GeminiRealtimeSession {
     fn classify(&self, cause: &RecoveryCause) -> RecoveryDisposition {
         match cause {
             RecoveryCause::ReadFailed(err) | RecoveryCause::WriteFailed(err) => {
-                if err.is_connection_reset() {
+                if err.is_connection_reset() || is_go_away_error(err) {
                     RecoveryDisposition::Recoverable
                 } else {
                     RecoveryDisposition::Fatal
@@ -1059,7 +1148,7 @@ impl RealtimeRecovery for GeminiRealtimeSession {
     }
 
     fn classify_attempt_error(&self, error: &RealtimeError) -> RecoveryDisposition {
-        if error.is_connection_reset() {
+        if error.is_connection_reset() || is_go_away_error(error) {
             RecoveryDisposition::Recoverable
         } else {
             RecoveryDisposition::Fatal
@@ -1168,6 +1257,7 @@ impl RealtimeSession for GeminiRealtimeSession {
         Some(self)
     }
 
+    #[cfg(any(test, feature = "integration"))]
     async fn force_transport_break(&self) -> Result<()> {
         self.connected.store(false, Ordering::SeqCst);
         self.cancel_token.lock().await.cancel();
@@ -1303,7 +1393,7 @@ impl RealtimeSession for GeminiRealtimeSession {
 
         let name = self.call_names.lock().remove(&response.call_id).ok_or_else(|| {
             RealtimeError::protocol(format!(
-                "Missing tool name for call_id '{}' in GeminiFunctionResponse",
+                "Tool call '{}' is missing, cancelled, or stale for active session generation; response omitted",
                 response.call_id
             ))
         })?;
@@ -1397,25 +1487,9 @@ impl RealtimeSession for GeminiRealtimeSession {
                     RealtimeError::protocol(format!("Failed to parse SessionUpdate config: {e}"))
                 })?;
 
-                let mut generation_config = json!({});
-                if config.modalities.is_some() {
-                    generation_config["responseModalities"] =
-                        json!(gemini_response_modalities(config.modalities.as_deref()));
-                }
-
-                if let Some(voice) = &config.voice {
-                    generation_config["speechConfig"] = json!({
-                        "voiceConfig": {
-                            "prebuiltVoiceConfig": {
-                                "voiceName": voice
-                            }
-                        }
-                    });
-                }
-
-                if let Some(temp) = config.temperature {
-                    generation_config["temperature"] = json!(temp);
-                }
+                let effective_model =
+                    config.model.as_deref().unwrap_or(self.reconnect_model.as_str());
+                let generation_config = build_generation_config(effective_model, &config);
 
                 // Computed before anything moves out of `config`. Session
                 // updates rebuild setup from the live config, so the VAD
@@ -1443,11 +1517,7 @@ impl RealtimeSession for GeminiRealtimeSession {
                     setup: Some(GeminiSetup {
                         model: config.model,
                         system_instruction,
-                        generation_config: if generation_config.as_object().unwrap().is_empty() {
-                            None
-                        } else {
-                            Some(generation_config)
-                        },
+                        generation_config: Some(generation_config),
                         tools,
                         cached_content: config.cached_content,
                         session_resumption,
@@ -1493,7 +1563,11 @@ impl RealtimeSession for GeminiRealtimeSession {
         // Attempt graceful close frame enqueue under a short timeout (500ms) so a full
         // channel never blocks teardown indefinitely.
         let _ = tokio::time::timeout(std::time::Duration::from_millis(500), async {
-            self.outbound_tx.lock().await.send(Message::Close(None)).await
+            self.outbound_tx
+                .lock()
+                .await
+                .send(OutboundMessage { message: Message::Close(None), ack: None })
+                .await
         })
         .await;
 
@@ -1544,6 +1618,72 @@ impl std::fmt::Debug for GeminiRealtimeSession {
 /// `serverContent` at all, so callers heard silence for the whole call.
 /// Anything unrecognised is passed through uppercased rather than dropped, so a
 /// new modality fails loudly at the API instead of silently degrading here.
+fn is_go_away_error(error: &RealtimeError) -> bool {
+    let msg = error.to_string();
+    msg.contains("goAway") || msg.contains("go_away")
+}
+
+pub(crate) fn build_generation_config(model: &str, config: &RealtimeConfig) -> Value {
+    let mut generation_config = json!({
+        "responseModalities": gemini_response_modalities(config.modalities.as_deref()),
+    });
+
+    if let Some(voice) = &config.voice {
+        generation_config["speechConfig"] = json!({
+            "voiceConfig": {
+                "prebuiltVoiceConfig": {
+                    "voiceName": voice
+                }
+            }
+        });
+    }
+
+    if let Some(temp) = config.temperature {
+        generation_config["temperature"] = json!(temp);
+    }
+
+    // Emotion-aware ("affective") dialog — model capability check
+    let is_gemini_31 = model.contains("gemini-3.1");
+    if config.affective_dialog == Some(true) {
+        if is_gemini_31 {
+            tracing::warn!(
+                model,
+                "affective_dialog requested but gemini-3.1-flash-live-preview does not support enableAffectiveDialog; omitting setting"
+            );
+        } else {
+            generation_config["enableAffectiveDialog"] = json!(true);
+        }
+    }
+
+    if let Some(extra) = &config.extra {
+        if let Some(thinking_level) = extra.get("thinking_level")
+            && let Some(obj) = generation_config.as_object_mut()
+        {
+            obj.insert("thinkingConfig".to_string(), json!({ "thinkingLevel": thinking_level }));
+        }
+
+        // Context-window compression support for long-running audio sessions
+        let comp = extra
+            .get("context_window_compression")
+            .or_else(|| extra.get("contextWindowCompression"));
+        if let Some(comp_val) = comp {
+            if comp_val.is_boolean() && comp_val.as_bool() == Some(true) {
+                generation_config["contextWindowCompression"] = json!({ "slidingWindow": {} });
+            } else {
+                generation_config["contextWindowCompression"] = comp_val.clone();
+            }
+        } else if let Some(sliding) =
+            extra.get("sliding_window").or_else(|| extra.get("slidingWindow"))
+        {
+            generation_config["contextWindowCompression"] = json!({
+                "slidingWindow": sliding
+            });
+        }
+    }
+
+    generation_config
+}
+
 fn gemini_response_modalities(modalities: Option<&[String]>) -> Vec<String> {
     match modalities {
         Some(values) if !values.is_empty() => values.iter().map(|m| m.to_uppercase()).collect(),
@@ -2340,6 +2480,65 @@ mod tests {
     }
 
     #[test]
+    fn test_context_window_compression_serialization_and_preservation() {
+        let config = RealtimeConfig {
+            extra: Some(json!({
+                "context_window_compression": {
+                    "slidingWindow": {
+                        "targetTokens": 8000
+                    }
+                }
+            })),
+            ..Default::default()
+        };
+
+        let gen_cfg = build_generation_config("models/gemini-3.1-flash-live-preview", &config);
+        assert_eq!(
+            gen_cfg.get("contextWindowCompression"),
+            Some(&json!({
+                "slidingWindow": {
+                    "targetTokens": 8000
+                }
+            }))
+        );
+
+        // Verify boolean shorthand
+        let bool_config = RealtimeConfig {
+            extra: Some(json!({
+                "contextWindowCompression": true
+            })),
+            ..Default::default()
+        };
+        let bool_gen_cfg =
+            build_generation_config("models/gemini-3.1-flash-live-preview", &bool_config);
+        assert_eq!(
+            bool_gen_cfg.get("contextWindowCompression"),
+            Some(&json!({
+                "slidingWindow": {}
+            }))
+        );
+    }
+
+    #[test]
+    fn test_affective_dialog_omitted_for_gemini_31_and_included_otherwise() {
+        let config = RealtimeConfig::default().with_affective_dialog(true);
+
+        let g31_cfg = build_generation_config("models/gemini-3.1-flash-live-preview", &config);
+        assert!(
+            g31_cfg.get("enableAffectiveDialog").is_none(),
+            "gemini-3.1 must omit enableAffectiveDialog"
+        );
+
+        let g25_cfg =
+            build_generation_config("models/gemini-2.5-flash-native-audio-latest", &config);
+        assert_eq!(
+            g25_cfg.get("enableAffectiveDialog"),
+            Some(&json!(true)),
+            "gemini-2.5 native audio must keep enableAffectiveDialog"
+        );
+    }
+
+    #[test]
     fn test_affective_dialog_builder_sets_config() {
         let c = RealtimeConfig::default().with_affective_dialog(true);
         assert_eq!(c.affective_dialog, Some(true));
@@ -2611,6 +2810,164 @@ mod tests {
     }
 
     #[test]
+    fn test_generation_complete_emits_output_item_done_without_response_done() {
+        let raw = json!({
+            "serverContent": {
+                "modelTurn": {
+                    "parts": [{"text": "Hello world"}]
+                },
+                "generationComplete": true,
+                "turnComplete": false
+            }
+        })
+        .to_string();
+
+        let events = GeminiRealtimeSession::translate_event_static(&raw).unwrap();
+        assert_eq!(events.len(), 2);
+        assert!(matches!(events[0], ServerEvent::TextDelta { .. }));
+        assert!(matches!(events[1], ServerEvent::OutputItemDone { .. }));
+        assert!(!events.iter().any(|e| matches!(e, ServerEvent::ResponseDone { .. })));
+    }
+
+    #[test]
+    fn test_multi_signal_server_content_frame_ordering() {
+        let raw = json!({
+            "serverContent": {
+                "modelTurn": {
+                    "parts": [
+                        {"inlineData": {"mimeType": "audio/pcm;rate=16000", "data": "AQID"}},
+                        {"text": "Sample text"}
+                    ]
+                },
+                "outputTranscription": {"text": "Model transcript"},
+                "inputTranscription": {"text": "User transcript"},
+                "generationComplete": true,
+                "turnComplete": true
+            }
+        })
+        .to_string();
+
+        let events = GeminiRealtimeSession::translate_event_static(&raw).unwrap();
+        assert_eq!(events.len(), 6);
+        assert!(matches!(events[0], ServerEvent::AudioDelta { .. }));
+        assert!(matches!(events[1], ServerEvent::TextDelta { .. }));
+        assert!(matches!(events[2], ServerEvent::TranscriptDelta { .. }));
+        assert!(matches!(events[3], ServerEvent::InputTranscriptDelta { .. }));
+        assert!(matches!(events[4], ServerEvent::OutputItemDone { .. }));
+        assert!(matches!(events[5], ServerEvent::ResponseDone { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_tool_call_cancellation_evicts_call_names_and_rejects_response() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let _server_handle = tokio::spawn(async move {
+            if let Ok((stream, _)) = listener.accept().await {
+                let _ = tokio_tungstenite::accept_async(stream).await;
+            }
+        });
+        let (ws_stream, _) =
+            tokio_tungstenite::connect_async(format!("ws://{}", addr)).await.unwrap();
+        let (_sink, source) = ws_stream.split();
+        let (tx, _rx) = tokio::sync::mpsc::channel(10);
+
+        let session = GeminiRealtimeSession::new_for_test(
+            "test-sess".into(),
+            format!("ws://{}", addr),
+            "models/gemini-3.1-flash-live-preview".into(),
+            tx,
+            tokio::spawn(async {}),
+            source,
+        );
+
+        // Translate FunctionCallDone -> records call_id in call_names
+        let call_raw = json!({
+            "toolCall": {
+                "functionCalls": [{
+                    "id": "call_123",
+                    "name": "lookup_user",
+                    "args": {"user_id": 42}
+                }]
+            }
+        })
+        .to_string();
+        let _ = session.translate_gemini_event(&call_raw).unwrap();
+        assert_eq!(
+            session.call_names.lock().get("call_123").map(|s| s.as_str()),
+            Some("lookup_user")
+        );
+
+        // Translate ToolCallCancelled for call_123
+        let cancel_raw = json!({
+            "toolCallCancellation": {
+                "ids": ["call_123"]
+            }
+        })
+        .to_string();
+        let _ = session.translate_gemini_event(&cancel_raw).unwrap();
+        assert!(session.call_names.lock().get("call_123").is_none());
+
+        // Attempt send_tool_response for cancelled call_id -> fails with deterministic stale error
+        let res = session.send_tool_response(ToolResponse::from_string("call_123", "result")).await;
+        assert!(res.is_err());
+        let err_msg = res.unwrap_err().to_string();
+        assert!(err_msg.contains("Tool call 'call_123' is missing, cancelled, or stale"));
+    }
+
+    #[tokio::test]
+    async fn test_call_names_bounded_capacity_prevents_unbounded_growth() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let _server_handle = tokio::spawn(async move {
+            if let Ok((stream, _)) = listener.accept().await {
+                let _ = tokio_tungstenite::accept_async(stream).await;
+            }
+        });
+        let (ws_stream, _) =
+            tokio_tungstenite::connect_async(format!("ws://{}", addr)).await.unwrap();
+        let (_sink, source) = ws_stream.split();
+        let (tx, _rx) = tokio::sync::mpsc::channel(10);
+
+        let session = GeminiRealtimeSession::new_for_test(
+            "test-sess".into(),
+            format!("ws://{}", addr),
+            "models/gemini-3.1-flash-live-preview".into(),
+            tx,
+            tokio::spawn(async {}),
+            source,
+        );
+
+        for i in 0..1100 {
+            session.insert_call_name(format!("call_{i}"), "tool_func".into());
+        }
+
+        assert_eq!(session.call_names.lock().len(), MAX_CALL_NAMES_CAPACITY);
+        assert!(session.call_names.lock().get("call_0").is_none(), "oldest entry must be evicted");
+        assert!(session.call_names.lock().get("call_1099").is_some(), "newest entry present");
+    }
+
+    #[test]
+    fn go_away_frame_is_parsed_and_classified_as_recoverable() {
+        let raw = json!({
+            "goAway": {
+                "timeRemaining": "15s",
+                "reason": "SERVER_MAINTENANCE"
+            }
+        })
+        .to_string();
+
+        let err = GeminiRealtimeSession::translate_event_static(&raw)
+            .expect_err("goAway must return a connection error");
+
+        let err_msg = err.to_string();
+        assert!(err_msg.contains("Gemini goAway received"));
+        assert!(err_msg.contains("timeRemaining: 15s"));
+        assert!(err_msg.contains("reason: SERVER_MAINTENANCE"));
+
+        assert!(is_go_away_error(&err));
+    }
+
+    #[test]
     fn absent_or_false_interrupted_emits_no_cancellation() {
         for raw in [
             json!({ "serverContent": { "turnComplete": true } }).to_string(),
@@ -2692,9 +3049,11 @@ mod teardown_tests {
             tokio_tungstenite::connect_async(format!("ws://{}", addr)).await.unwrap();
         let (_sink, source) = ws_stream.split();
 
-        let (outbound_tx, _outbound_rx) = mpsc::channel::<Message>(1);
+        let (outbound_tx, _outbound_rx) = mpsc::channel::<OutboundMessage>(1);
         // Fill channel to capacity
-        outbound_tx.try_send(Message::Text("blocker".into())).unwrap();
+        outbound_tx
+            .try_send(OutboundMessage { message: Message::Text("blocker".into()), ack: None })
+            .unwrap();
 
         let connected = Arc::new(AtomicBool::new(true));
         let cancel_token = CancellationToken::new();
@@ -2729,7 +3088,7 @@ mod teardown_tests {
             dialect: GeminiSchemaDialect::OpenApiSubset,
             reconnect_model: "models/gemini-3.1-flash-live-preview".into(),
             last_resume_handle: Arc::new(ParkingMutex::new(None)),
-            call_names: Arc::new(ParkingMutex::new(std::collections::HashMap::new())),
+            call_names: Arc::new(ParkingMutex::new(CallNamesState::new())),
         };
 
         // Execution of close() must complete quickly despite channel full & writer blocked

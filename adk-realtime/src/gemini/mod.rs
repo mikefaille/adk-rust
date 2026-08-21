@@ -45,7 +45,7 @@ mod model;
 mod session;
 
 pub use model::GeminiRealtimeModel;
-pub use session::{GeminiLiveBackend, GeminiRealtimeSession, normalize_model_id};
+pub use session::{GeminiLiveBackend, GeminiRealtimeSession, OutboundMessage, normalize_model_id};
 
 #[cfg(feature = "vertex-live")]
 pub use session::build_vertex_live_url;
