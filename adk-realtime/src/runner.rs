@@ -450,12 +450,12 @@ impl RealtimeRunner {
 
     /// Deliberately force a transport interruption on the active session generation for testing.
     ///
-    /// Closes the raw active session transport without closing the managed supervisor,
+    /// Abruptly drops the raw active session transport without closing the managed supervisor,
     /// triggering the managed failure recovery path on the next read or write operation.
-    #[cfg(any(test, feature = "integration", feature = "gemini"))]
+    #[cfg(any(test, feature = "integration"))]
     pub async fn force_transport_break_for_testing(&self) -> Result<()> {
         let gen_item = self.supervisor.get_active_generation().await?;
-        gen_item.session.close().await
+        gen_item.session.force_transport_break().await
     }
 
     /// Subscribe to session generation publication notifications.
@@ -2329,12 +2329,16 @@ mod runner_tests {
         let session2 = Arc::new(ScriptedSession::new(Arc::new(Counts::default()), vec![]))
             as Arc<dyn RealtimeSession>;
 
+        use std::time::Duration;
+
         // Setup a recovery implementation where attempt 1 fails (so candidate fails), but attempt 2 succeeds and publishes N+1
         struct TwoAttemptRecovery {
             attempts: Arc<AtomicUsize>,
             session2: Arc<dyn RealtimeSession>,
-            attempt_1_started: Arc<tokio::sync::Notify>,
-            attempt_1_continue: Arc<tokio::sync::Notify>,
+            started_1: Arc<tokio::sync::Notify>,
+            continue_1: Arc<tokio::sync::Notify>,
+            started_2: Arc<tokio::sync::Notify>,
+            continue_2: Arc<tokio::sync::Notify>,
         }
 
         #[async_trait]
@@ -2354,10 +2358,12 @@ mod runner_tests {
             ) -> Result<crate::recovery::RecoveredSession> {
                 let count = self.attempts.fetch_add(1, Ordering::SeqCst) + 1;
                 if count == 1 {
-                    self.attempt_1_started.notify_one();
-                    self.attempt_1_continue.notified().await;
+                    self.started_1.notify_one();
+                    self.continue_1.notified().await;
                     Err(RealtimeError::ConnectionError("Connection reset by peer".into()))
                 } else {
+                    self.started_2.notify_one();
+                    self.continue_2.notified().await;
                     Ok(crate::recovery::RecoveredSession::new(
                         self.session2.clone(),
                         crate::recovery::RecoveryContinuity::Reconnected,
@@ -2426,16 +2432,20 @@ mod runner_tests {
         }
 
         let attempts_counter = Arc::new(AtomicUsize::new(0));
-        let started = Arc::new(tokio::sync::Notify::new());
-        let continue_signal = Arc::new(tokio::sync::Notify::new());
+        let started_1 = Arc::new(tokio::sync::Notify::new());
+        let continue_1 = Arc::new(tokio::sync::Notify::new());
+        let started_2 = Arc::new(tokio::sync::Notify::new());
+        let continue_2 = Arc::new(tokio::sync::Notify::new());
 
         let retryable = Arc::new(RetryableSession {
             inner: ScriptedSession::new(Arc::new(Counts::default()), vec![]),
             rec: TwoAttemptRecovery {
                 attempts: Arc::clone(&attempts_counter),
                 session2: session2.clone(),
-                attempt_1_started: Arc::clone(&started),
-                attempt_1_continue: Arc::clone(&continue_signal),
+                started_1: Arc::clone(&started_1),
+                continue_1: Arc::clone(&continue_1),
+                started_2: Arc::clone(&started_2),
+                continue_2: Arc::clone(&continue_2),
             },
         });
 
@@ -2452,26 +2462,43 @@ mod runner_tests {
             supervisor_arc.report_failure(report).await
         });
 
-        // Wait until recovery attempt 1 has actually started inside recover()
-        started.notified().await;
+        // Wait until recovery attempt 1 has started inside recover()
+        tokio::time::timeout(Duration::from_secs(2), started_1.notified())
+            .await
+            .expect("attempt 1 started");
 
-        // Verify watcher has NOT changed / remains 0 during failed candidate attempt 1
-        assert!(
-            !rx.has_changed().unwrap(),
-            "failed candidate attempt 1 must NOT wake generation watcher"
+        // Allow attempt 1 to complete and fail
+        continue_1.notify_one();
+
+        // Wait until recovery attempt 2 starts inside recover()
+        tokio::time::timeout(Duration::from_secs(2), started_2.notified())
+            .await
+            .expect("attempt 2 started");
+
+        // Assert watcher still reads generation 0 while attempt 1 failed and attempt 2 is paused
+        assert_eq!(
+            *rx.borrow(),
+            0,
+            "failed candidate attempt 1 must not advance watcher to generation 1"
         );
-        assert_eq!(*rx.borrow(), 0, "generation remains 0 during failed candidate attempt 1");
 
-        // Allow attempt 1 to fail and proceed to attempt 2
-        continue_signal.notify_one();
+        // Allow attempt 2 to complete and succeed
+        continue_2.notify_one();
 
-        let recovery_res = recovery_task.await.unwrap().unwrap();
+        let recovery_res = tokio::time::timeout(Duration::from_secs(2), recovery_task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
 
         assert!(matches!(recovery_res, RecoveryOutcome::Recovered { .. }));
         assert_eq!(attempts_counter.load(Ordering::SeqCst), 2, "2 attempts were made");
 
         // Watcher must wake exactly for published N+1 (generation 1)
-        rx.changed().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), rx.changed())
+            .await
+            .expect("watcher changed")
+            .unwrap();
         assert_eq!(*rx.borrow(), 1, "ready published candidate advances watcher to generation 1");
     }
 }

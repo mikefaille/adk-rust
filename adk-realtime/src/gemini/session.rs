@@ -220,8 +220,7 @@ struct GeminiToolResponse {
 #[serde(rename_all = "camelCase")]
 struct GeminiFunctionResponse {
     id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    name: Option<String>,
+    name: String,
     response: Value,
 }
 
@@ -330,7 +329,7 @@ impl GeminiRealtimeSession {
     }
 
     /// Constructs a mock `GeminiRealtimeSession` for testing connection lifecycle & recovery.
-    #[cfg(any(test, feature = "integration", feature = "gemini"))]
+    #[cfg(any(test, feature = "integration"))]
     pub fn new_for_test(
         session_id: String,
         reconnect_url: String,
@@ -1169,6 +1168,16 @@ impl RealtimeSession for GeminiRealtimeSession {
         Some(self)
     }
 
+    async fn force_transport_break(&self) -> Result<()> {
+        self.connected.store(false, Ordering::SeqCst);
+        self.cancel_token.lock().await.cancel();
+        let mut writer_task = self.writer_task.lock().await;
+        if let Some(handle) = writer_task.take() {
+            handle.abort();
+        }
+        Ok(())
+    }
+
     fn session_id(&self) -> &str {
         &self.session_id
     }
@@ -1305,7 +1314,7 @@ impl RealtimeSession for GeminiRealtimeSession {
             tool_response: Some(GeminiToolResponse {
                 function_responses: vec![GeminiFunctionResponse {
                     id: response.call_id,
-                    name: Some(name),
+                    name,
                     response: output,
                 }],
             }),

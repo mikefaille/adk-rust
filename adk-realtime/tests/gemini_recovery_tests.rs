@@ -643,12 +643,14 @@ async fn test_vertex_custom_endpoint_does_not_leak_auth_header() {
         endpoint_url: Some(format!("ws://{}", addr)),
     };
 
-    let _ = GeminiRealtimeSession::connect(
+    let session_res = GeminiRealtimeSession::connect(
         backend_custom,
         "models/gemini-live",
         RealtimeConfig::default(),
     )
     .await;
+
+    assert!(session_res.is_ok(), "Connection to custom Vertex endpoint should succeed");
 
     let auth = received_headers.lock().pop();
     assert_eq!(auth, Some(None), "Custom Vertex endpoint must NOT receive Authorization header");

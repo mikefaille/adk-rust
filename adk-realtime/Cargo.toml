@@ -156,6 +156,10 @@ harness = false
 name = "audio_boundary_decode"
 harness = false
 
+[[test]]
+name = "gemini_recovery_tests"
+required-features = ["gemini", "integration"]
+
 [features]
 default = []
 # Allow diagnostics to include bounded raw provider frames. Off by default because
