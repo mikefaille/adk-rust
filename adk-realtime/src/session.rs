@@ -176,11 +176,6 @@ pub trait RealtimeSession: Send + Sync {
         self.close().await
     }
 
-    /// Set an integration test recovery barrier (test helper).
-    #[cfg(any(test, feature = "integration", feature = "gemini"))]
-    fn set_recovery_barrier(&self, _barrier: std::sync::Arc<crate::recovery::TestRecoveryBarrier>) {
-    }
-
     /// Attempt to mutate the session parameters mid-flight.
     ///
     /// For providers that support native hot-swapping (e.g., OpenAI), this

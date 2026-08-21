@@ -855,12 +855,42 @@ async fn test_live_gemini_managed_recovery_interruption() {
         None => panic!("Initial connect returned EOF"),
     }
 
-    // 2. Set test recovery barrier on generation N
-    let barrier = Arc::new(adk_realtime::recovery::TestRecoveryBarrier::new());
+    // Prove Generation N is demonstrably usable before interruption by executing a minimal prompt & response
     runner
-        .set_recovery_barrier_for_testing(barrier.clone())
+        .send_text("Say hello in one word.")
         .await
-        .expect("Set recovery barrier on generation N");
+        .expect("Send text on Generation N must succeed");
+
+    let mut n_usable = false;
+    let n_usable_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while tokio::time::Instant::now() < n_usable_deadline {
+        let ev = match tokio::time::timeout(Duration::from_secs(3), runner.next_event()).await {
+            Ok(Some(Ok(e))) => e,
+            Ok(Some(Err(err))) => panic!("Error on Generation N prompt: {err:?}"),
+            Ok(None) => panic!("Unexpected EOF on Generation N prompt"),
+            Err(_) => continue,
+        };
+        match ev {
+            ServerEvent::TextDelta { delta, .. } if !delta.is_empty() => {
+                n_usable = true;
+            }
+            ServerEvent::AudioDelta { delta, .. } if !delta.is_empty() => {
+                n_usable = true;
+            }
+            ServerEvent::ResponseDone { .. } if n_usable => {
+                break;
+            }
+            _ => {}
+        }
+    }
+    assert!(
+        n_usable,
+        "Generation N must produce real model output and prove usability before interruption"
+    );
+
+    // 2. Set test recovery barrier on recovery supervisor
+    let barrier = Arc::new(adk_realtime::recovery::TestRecoveryBarrier::new());
+    runner.set_recovery_barrier_for_testing(barrier.clone());
 
     // 3. Induce abrupt transport drop via proxy (genuine TCP drop without WebSocket Close frame)
     proxy.trigger_abrupt_disconnect();
@@ -870,8 +900,10 @@ async fn test_live_gemini_managed_recovery_interruption() {
     let runner_read_clone = Arc::clone(&runner_arc);
     let read_task = tokio::spawn(async move { runner_read_clone.next_event().await });
 
-    // 5. Wait on barrier to confirm supervisor has entered TransportStatus::Recovering
-    barrier.wait_until_recovering_entered().await;
+    // 5. Wait on barrier to confirm supervisor has entered TransportStatus::Recovering (with 5s timeout)
+    tokio::time::timeout(Duration::from_secs(5), barrier.wait_until_recovering_entered())
+        .await
+        .expect("Recovery supervisor must enter Recovering state within 5s");
 
     // 6. Issue exactly one managed write during held Recovering window and prove it returns WriteFailed(NotAttempted)
     let write_res = runner_arc.send_text("hello during recovery").await;
@@ -890,10 +922,18 @@ async fn test_live_gemini_managed_recovery_interruption() {
     // 7. Release recovery barrier, allowing candidate session (N+1) to connect, send setup first, receive setupComplete, and publish
     barrier.release();
 
-    // 8. Verify generation advances N -> N+1 and subscribe_generation() watcher wakes up without requiring new app traffic
-    gen_watcher.changed().await.expect("Watcher must wake on N+1 publication");
+    // 8. Verify generation advances monotonically N -> N+1 and subscribe_generation() watcher wakes up without requiring new app traffic
+    tokio::time::timeout(Duration::from_secs(10), gen_watcher.changed())
+        .await
+        .expect("Watcher must wake on N+1 publication within 10s")
+        .expect("Watcher channel valid");
     let gen_n1_id = *gen_watcher.borrow_and_update();
-    assert_ne!(gen_n_id, gen_n1_id, "Generation must advance from N to N+1");
+    assert_eq!(
+        gen_n1_id,
+        gen_n_id + 1,
+        "Generation must advance monotonically from N ({gen_n_id}) to N+1 ({})",
+        gen_n_id + 1
+    );
 
     let runner = runner_arc;
 
@@ -904,7 +944,10 @@ async fn test_live_gemini_managed_recovery_interruption() {
         .expect("Send text on N+1 must succeed");
 
     // 10. Await first event from background read_task (which is currently polling next_event() on N+1)
-    let first_ev = read_task.await.expect("read_task join");
+    let first_ev = tokio::time::timeout(Duration::from_secs(10), read_task)
+        .await
+        .expect("read_task must complete within 10s")
+        .expect("read_task join");
     let mut received_function_call = false;
     let mut received_final_response = false;
 
@@ -955,6 +998,16 @@ async fn test_live_gemini_managed_recovery_interruption() {
                 ServerEvent::TextDelta { delta, .. }
                     if !delta.is_empty() && received_function_call =>
                 {
+                    received_final_response = true;
+                    break;
+                }
+                ServerEvent::TranscriptDelta { delta, .. }
+                    if !delta.is_empty() && received_function_call =>
+                {
+                    received_final_response = true;
+                    break;
+                }
+                ServerEvent::ResponseDone { .. } if received_function_call => {
                     received_final_response = true;
                     break;
                 }

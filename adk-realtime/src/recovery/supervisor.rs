@@ -91,6 +91,9 @@ pub(crate) struct RecoverySupervisor {
     state: Arc<tokio::sync::RwLock<SupervisorState>>,
     replacement_lock: tokio::sync::Mutex<()>,
     generation_tx: tokio::sync::watch::Sender<u64>,
+    #[cfg(any(test, feature = "integration"))]
+    test_recovery_barrier:
+        Arc<parking_lot::Mutex<Option<Arc<crate::recovery::TestRecoveryBarrier>>>>,
 }
 
 impl RecoverySupervisor {
@@ -112,6 +115,8 @@ impl RecoverySupervisor {
             })),
             replacement_lock: tokio::sync::Mutex::new(()),
             generation_tx,
+            #[cfg(any(test, feature = "integration"))]
+            test_recovery_barrier: Arc::new(parking_lot::Mutex::new(None)),
         }
     }
 
@@ -139,7 +144,18 @@ impl RecoverySupervisor {
             })),
             replacement_lock: tokio::sync::Mutex::new(()),
             generation_tx,
+            #[cfg(any(test, feature = "integration"))]
+            test_recovery_barrier: Arc::new(parking_lot::Mutex::new(None)),
         }
+    }
+
+    /// Set an integration test recovery barrier to hold managed recovery in `TransportStatus::Recovering`.
+    #[cfg(any(test, feature = "integration"))]
+    pub(crate) fn set_recovery_barrier_for_testing(
+        &self,
+        barrier: Arc<crate::recovery::TestRecoveryBarrier>,
+    ) {
+        *self.test_recovery_barrier.lock() = Some(barrier);
     }
 
     /// Install the initial session (generation 0).
@@ -547,6 +563,14 @@ impl RecoverySupervisor {
             state_guard.status = TransportStatus::Exhausted;
             episode_guard.disarmed = true;
             return Err(err);
+        }
+
+        #[cfg(any(test, feature = "integration"))]
+        {
+            let maybe_barrier = self.test_recovery_barrier.lock().take();
+            if let Some(barrier) = maybe_barrier {
+                barrier.on_recovering().await;
+            }
         }
 
         // 6. Recovery attempt loop
