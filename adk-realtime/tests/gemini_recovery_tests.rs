@@ -578,6 +578,7 @@ async fn test_studio_custom_endpoint_does_not_leak_api_key() {
     let server_handle = tokio::spawn(async move {
         if let Ok((stream, _)) = listener.accept().await {
             let uri_ref = Arc::clone(&uri_capture);
+            #[allow(clippy::result_large_err)]
             let callback = move |req: &tokio_tungstenite::tungstenite::handshake::server::Request,
                                  resp: tokio_tungstenite::tungstenite::handshake::server::Response| {
                 *uri_ref.lock() = Some(req.uri().to_string());
@@ -617,6 +618,7 @@ async fn test_vertex_custom_endpoint_does_not_leak_auth_header() {
     let server_handle = tokio::spawn(async move {
         while let Ok((stream, _)) = listener.accept().await {
             let headers_ref = Arc::clone(&headers_capture);
+            #[allow(clippy::result_large_err)]
             let callback = move |req: &tokio_tungstenite::tungstenite::handshake::server::Request,
                                  resp: tokio_tungstenite::tungstenite::handshake::server::Response| {
                 let auth = req
@@ -663,7 +665,7 @@ async fn test_live_gemini_managed_recovery_interruption() {
     use adk_realtime::recovery::DeliveryCertainty;
     use adk_realtime::runner::RealtimeRunner;
 
-    let _ = rustls::crypto::ring::default_provider().install_default();
+    adk_core::ensure_crypto_provider();
 
     let Ok(api_key) = std::env::var("GEMINI_API_KEY").or_else(|_| std::env::var("GOOGLE_API_KEY"))
     else {
@@ -700,47 +702,61 @@ async fn test_live_gemini_managed_recovery_interruption() {
 
     let mut gen_watcher = runner.subscribe_generation();
 
-    // 1. Healthy generation N (0)
+    // 1. Healthy generation N (0): Prove initial generation is usable
     runner.connect().await.expect("Initial connect should succeed");
     assert!(runner.is_connected().await);
     let gen_n_id = *gen_watcher.borrow();
     assert_eq!(gen_n_id, 0);
 
+    // Consume setupComplete frame from stream
+    let setup_ev = runner.next_event().await;
+    assert!(
+        matches!(setup_ev, Some(Ok(ServerEvent::SessionCreated { .. }))),
+        "Initial generation N must produce SessionCreated setupComplete frame"
+    );
+
     // 2. Deliberately induce real transport failure on generation N
     runner.force_transport_break_for_testing().await.expect("Force transport break should succeed");
 
-    // 3. Next write on broken transport triggers failure report and transitions supervisor to Recovering
-    let write_err = runner
-        .send_text("hello during break")
-        .await
-        .expect_err("Write on broken transport should fail");
+    // 3. Trigger report_failure in a background task so supervisor enters Recovering
+    let runner_arc = Arc::new(runner);
+    let runner_clone = Arc::clone(&runner_arc);
+    let first_write_task =
+        tokio::spawn(async move { runner_clone.send_text("hello during break").await });
 
-    match write_err {
-        RealtimeError::WriteFailed { certainty, .. } => {
+    // Wait until supervisor transitions to Recovering (admit_write rejects as NotAttempted)
+    let mut write_rejected_as_not_attempted = false;
+    for _ in 0..100 {
+        let res = runner_arc.send_text("hello during recovery").await;
+        if let Err(RealtimeError::WriteFailed {
+            certainty: DeliveryCertainty::NotAttempted, ..
+        }) = res
+        {
+            write_rejected_as_not_attempted = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    // Wait for first write task to finish (it reports failure and triggers managed recovery)
+    let first_write_res = first_write_task.await.expect("first write task join");
+    match first_write_res {
+        Err(RealtimeError::WriteFailed { certainty, .. }) => {
             assert_eq!(
                 certainty,
                 DeliveryCertainty::Indeterminate,
-                "First write after transport break should be Indeterminate"
+                "First write after break must be Indeterminate"
             );
         }
-        other => panic!("Expected WriteFailed error, got {:?}", other),
+        other => panic!("Expected WriteFailed Indeterminate for first write, got {:?}", other),
     }
 
-    // Subsequent write during active Recovering state is rejected as NotAttempted
-    let write_err2 = runner
-        .send_text("hello during recovery")
-        .await
-        .expect_err("Write during recovery state should be rejected");
-    match write_err2 {
-        RealtimeError::WriteFailed { certainty, .. } => {
-            assert_eq!(
-                certainty,
-                DeliveryCertainty::NotAttempted,
-                "Write during active Recovering state must be rejected as NotAttempted"
-            );
-        }
-        other => panic!("Expected WriteFailed error with NotAttempted delivery, got {:?}", other),
-    }
+    assert!(
+        write_rejected_as_not_attempted,
+        "Write during active Recovering state must be rejected as NotAttempted"
+    );
+
+    let runner = runner_arc;
 
     // 4. Background recovery: next_event completes recovery and publishes N+1
     let event_res = runner.next_event().await;
@@ -783,17 +799,17 @@ async fn test_live_gemini_managed_recovery_interruption() {
                         .await
                         .expect("send_tool_response on N+1 must succeed");
                 }
-                ServerEvent::TextDelta { delta, .. } if !delta.is_empty() => {
-                    if received_function_call {
-                        received_final_response = true;
-                        break;
-                    }
+                ServerEvent::TextDelta { delta, .. }
+                    if !delta.is_empty() && received_function_call =>
+                {
+                    received_final_response = true;
+                    break;
                 }
-                ServerEvent::AudioDelta { delta, .. } if !delta.is_empty() => {
-                    if received_function_call {
-                        received_final_response = true;
-                        break;
-                    }
+                ServerEvent::AudioDelta { delta, .. }
+                    if !delta.is_empty() && received_function_call =>
+                {
+                    received_final_response = true;
+                    break;
                 }
                 _ => {}
             }

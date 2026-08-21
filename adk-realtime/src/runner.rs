@@ -452,7 +452,7 @@ impl RealtimeRunner {
     ///
     /// Closes the raw active session transport without closing the managed supervisor,
     /// triggering the managed failure recovery path on the next read or write operation.
-    #[cfg(any(test, feature = "integration"))]
+    #[cfg(any(test, feature = "integration", feature = "vertex-live"))]
     pub async fn force_transport_break_for_testing(&self) -> Result<()> {
         let gen_item = self.supervisor.get_active_generation().await?;
         gen_item.session.close().await
@@ -2311,9 +2311,6 @@ mod runner_tests {
             .build()
             .unwrap();
 
-        let mut rx = runner.subscribe_generation();
-        assert_eq!(*rx.borrow(), 0, "initial watcher starts at generation 0");
-
         let session2 = Arc::new(ScriptedSession::new(Arc::new(Counts::default()), vec![]))
             as Arc<dyn RealtimeSession>;
 
@@ -2321,6 +2318,8 @@ mod runner_tests {
         struct TwoAttemptRecovery {
             attempts: Arc<AtomicUsize>,
             session2: Arc<dyn RealtimeSession>,
+            attempt_1_started: Arc<tokio::sync::Notify>,
+            attempt_1_continue: Arc<tokio::sync::Notify>,
         }
 
         #[async_trait]
@@ -2340,6 +2339,8 @@ mod runner_tests {
             ) -> Result<crate::recovery::RecoveredSession> {
                 let count = self.attempts.fetch_add(1, Ordering::SeqCst) + 1;
                 if count == 1 {
+                    self.attempt_1_started.notify_one();
+                    self.attempt_1_continue.notified().await;
                     Err(RealtimeError::ConnectionError("Connection reset by peer".into()))
                 } else {
                     Ok(crate::recovery::RecoveredSession::new(
@@ -2410,22 +2411,46 @@ mod runner_tests {
         }
 
         let attempts_counter = Arc::new(AtomicUsize::new(0));
+        let started = Arc::new(tokio::sync::Notify::new());
+        let continue_signal = Arc::new(tokio::sync::Notify::new());
+
         let retryable = Arc::new(RetryableSession {
             inner: ScriptedSession::new(Arc::new(Counts::default()), vec![]),
             rec: TwoAttemptRecovery {
                 attempts: Arc::clone(&attempts_counter),
                 session2: session2.clone(),
+                attempt_1_started: Arc::clone(&started),
+                attempt_1_continue: Arc::clone(&continue_signal),
             },
         });
 
         // Set initial session to retryable session (generation 0)
         let _ = runner.set_initial_session(retryable).await.unwrap();
-        rx.changed().await.unwrap();
-        assert_eq!(*rx.borrow(), 0, "initial generation is 0");
 
-        // Trigger failure report for generation 0
-        let report = FailureReport { generation: 0, cause: RecoveryCause::UnexpectedEof };
-        let recovery_res = runner.supervisor.report_failure(report).await.unwrap();
+        // Subscribe AFTER set_initial_session so watch channel's initial value is 0
+        let mut rx = runner.subscribe_generation();
+        assert_eq!(*rx.borrow_and_update(), 0, "initial generation is 0");
+
+        let supervisor_arc = Arc::clone(&runner.supervisor);
+        let recovery_task = tokio::spawn(async move {
+            let report = FailureReport { generation: 0, cause: RecoveryCause::UnexpectedEof };
+            supervisor_arc.report_failure(report).await
+        });
+
+        // Wait until recovery attempt 1 has actually started inside recover()
+        started.notified().await;
+
+        // Verify watcher has NOT changed / remains 0 during failed candidate attempt 1
+        assert!(
+            !rx.has_changed().unwrap(),
+            "failed candidate attempt 1 must NOT wake generation watcher"
+        );
+        assert_eq!(*rx.borrow(), 0, "generation remains 0 during failed candidate attempt 1");
+
+        // Allow attempt 1 to fail and proceed to attempt 2
+        continue_signal.notify_one();
+
+        let recovery_res = recovery_task.await.unwrap().unwrap();
 
         assert!(matches!(recovery_res, RecoveryOutcome::Recovered { .. }));
         assert_eq!(attempts_counter.load(Ordering::SeqCst), 2, "2 attempts were made");

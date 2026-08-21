@@ -326,7 +326,7 @@ impl GeminiRealtimeSession {
     }
 
     /// Constructs a mock `GeminiRealtimeSession` for testing connection lifecycle & recovery.
-    #[cfg(any(test, feature = "integration"))]
+    #[cfg(any(test, feature = "integration", feature = "vertex-live"))]
     pub fn new_for_test(
         session_id: String,
         reconnect_url: String,
@@ -1261,18 +1261,16 @@ impl RealtimeSession for GeminiRealtimeSession {
     }
 
     async fn send_text(&self, text: &str) -> Result<()> {
-        // Use client_content with turns (correct Gemini Live API format)
+        // Send text via realtimeInput as required by Gemini 3.1 Live API for conversational text turns.
         let msg = GeminiClientMessage {
             setup: None,
-            realtime_input: None,
-            tool_response: None,
-            client_content: Some(GeminiClientContent {
-                turns: vec![GeminiTurn {
-                    role: "user".to_string(),
-                    parts: vec![GeminiPart { text: Some(text.to_string()), inline_data: None }],
-                }],
-                turn_complete: true,
+            realtime_input: Some(GeminiRealtimeInput {
+                audio: None,
+                media_chunks: None,
+                text: Some(text.to_string()),
             }),
+            tool_response: None,
+            client_content: None,
         };
         self.send_raw(&msg).await
     }
