@@ -1240,14 +1240,8 @@ impl RealtimeRecovery for GeminiRealtimeSession {
                 *candidate.last_resume_handle.lock() = prior_handle;
             }
 
-            let continuity = if has_resumption_handle {
-                RecoveryContinuity::Resumed
-            } else {
-                RecoveryContinuity::Reconnected
-            };
-
             let recovered: Arc<dyn RealtimeSession> = candidate;
-            Ok(RecoveredSession::new(recovered, continuity))
+            Ok(RecoveredSession::new(recovered, RecoveryContinuity::Reconnected))
         };
 
         match tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), attempt_fut).await {
