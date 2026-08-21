@@ -301,6 +301,8 @@ pub struct GeminiRealtimeSession {
     last_resume_handle: Arc<ParkingMutex<Option<String>>>,
     /// Association map between function call IDs and tool names for wire-conforming `FunctionResponse` payloads.
     call_names: Arc<ParkingMutex<std::collections::HashMap<String, String>>>,
+    #[cfg(any(test, feature = "integration", feature = "gemini"))]
+    recovery_barrier: Arc<ParkingMutex<Option<Arc<crate::recovery::TestRecoveryBarrier>>>>,
 }
 
 /// Ensure the model ID is prefixed with "models/" as required by Gemini Live setup frames.
@@ -329,7 +331,7 @@ impl GeminiRealtimeSession {
     }
 
     /// Constructs a mock `GeminiRealtimeSession` for testing connection lifecycle & recovery.
-    #[cfg(any(test, feature = "integration"))]
+    #[cfg(any(test, feature = "integration", feature = "gemini"))]
     pub fn new_for_test(
         session_id: String,
         reconnect_url: String,
@@ -360,7 +362,21 @@ impl GeminiRealtimeSession {
             reconnect_model,
             last_resume_handle: Arc::new(ParkingMutex::new(None)),
             call_names: Arc::new(ParkingMutex::new(std::collections::HashMap::new())),
+            #[cfg(any(test, feature = "integration", feature = "gemini"))]
+            recovery_barrier: Arc::new(ParkingMutex::new(None)),
         }
+    }
+
+    /// Set an integration test recovery barrier to hold managed recovery in `TransportStatus::Recovering`.
+    #[cfg(any(test, feature = "integration", feature = "gemini"))]
+    pub fn set_recovery_barrier(&self, barrier: Arc<crate::recovery::TestRecoveryBarrier>) {
+        *self.recovery_barrier.lock() = Some(barrier);
+    }
+
+    /// Get the current integration test recovery barrier, if set.
+    #[cfg(any(test, feature = "integration", feature = "gemini"))]
+    pub fn recovery_barrier(&self) -> Option<Arc<crate::recovery::TestRecoveryBarrier>> {
+        self.recovery_barrier.lock().clone()
     }
 
     /// The dialect a backend uses unless the caller names another.
@@ -555,6 +571,8 @@ impl GeminiRealtimeSession {
             reconnect_model: normalized_model.clone(),
             last_resume_handle: Arc::new(ParkingMutex::new(None)),
             call_names: Arc::new(ParkingMutex::new(std::collections::HashMap::new())),
+            #[cfg(any(test, feature = "integration", feature = "gemini"))]
+            recovery_barrier: Arc::new(ParkingMutex::new(None)),
         };
 
         session.send_setup_with_compiled_tools(&normalized_model, config, tools).await?;
@@ -787,10 +805,22 @@ impl GeminiRealtimeSession {
                 ServerEvent::FunctionCallDone { call_id, name, .. } => {
                     self.call_names.lock().insert(call_id.clone(), name.clone());
                 }
+                ServerEvent::ToolCallCancelled { call_ids } => {
+                    let mut names = self.call_names.lock();
+                    for id in call_ids {
+                        names.remove(id.as_str());
+                    }
+                }
                 _ => {}
             }
         }
         Ok(events)
+    }
+
+    /// Returns the current number of tracked function call names (test helper).
+        #[cfg(any(test, feature = "integration", feature = "gemini"))]
+    pub fn call_names_count(&self) -> usize {
+        self.call_names.lock().len()
     }
 
     /// Test entry point: no session, so no per-connection telemetry identity.
@@ -1067,6 +1097,14 @@ impl RealtimeRecovery for GeminiRealtimeSession {
     }
 
     async fn recover(&self, context: RecoveryContext<'_>) -> Result<RecoveredSession> {
+        #[cfg(any(test, feature = "integration", feature = "gemini"))]
+        {
+            let maybe_barrier = self.recovery_barrier.lock().clone();
+            if let Some(barrier) = maybe_barrier {
+                barrier.on_recovering().await;
+            }
+        }
+
         let deadline = context.deadline();
         let config = context.config();
         let prior_handle = self.last_resume_handle();
@@ -1124,6 +1162,11 @@ impl RealtimeRecovery for GeminiRealtimeSession {
             )
             .await?;
 
+            #[cfg(any(test, feature = "integration", feature = "gemini"))]
+            if let Some(barrier) = self.recovery_barrier.lock().clone() {
+                candidate_session.set_recovery_barrier(barrier);
+            }
+
             let guard = CandidateGuard::new(candidate_session);
 
             // Wait for setupComplete frame as the setup-first transaction
@@ -1166,6 +1209,11 @@ impl RealtimeRecovery for GeminiRealtimeSession {
 impl RealtimeSession for GeminiRealtimeSession {
     fn recovery(&self) -> Option<&dyn RealtimeRecovery> {
         Some(self)
+    }
+
+    #[cfg(any(test, feature = "integration"))]
+    fn set_recovery_barrier(&self, barrier: Arc<crate::recovery::TestRecoveryBarrier>) {
+        *self.recovery_barrier.lock() = Some(barrier);
     }
 
     async fn force_transport_break(&self) -> Result<()> {
@@ -2542,6 +2590,57 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn test_tool_call_cancellation_evicts_call_names() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            if let Ok((stream, _)) = listener.accept().await {
+                let _ = tokio_tungstenite::accept_async(stream).await;
+            }
+        });
+
+        let ws = tokio_tungstenite::connect_async(format!("ws://{}", addr)).await.unwrap().0;
+        let (_sink, source) = ws.split();
+        let (tx, _rx) = tokio::sync::mpsc::channel(10);
+        let writer_task = tokio::spawn(async {});
+
+        let session = GeminiRealtimeSession::new_for_test(
+            "test-session".to_string(),
+            format!("ws://{}", addr),
+            "models/gemini-3.1-flash-live-preview".to_string(),
+            tx,
+            writer_task,
+            source,
+        );
+
+        let fc_raw = json!({
+            "toolCall": {
+                "functionCalls": [{
+                    "name": "my_tool",
+                    "id": "call_123",
+                    "args": {}
+                }]
+            }
+        })
+        .to_string();
+
+        let _ = session.translate_gemini_event(&fc_raw).unwrap();
+        assert_eq!(session.call_names_count(), 1);
+
+        let cancel_raw = json!({
+            "toolCallCancellation": {
+                "ids": ["call_123"]
+            }
+        })
+        .to_string();
+
+        let _ = session.translate_gemini_event(&cancel_raw).unwrap();
+        assert_eq!(session.call_names_count(), 0);
+
+        server.abort();
+    }
+
     #[test]
     fn cancellation_dto_tolerates_fields_google_adds_later() {
         // Gemini Live is a Preview surface. A strict DTO would refuse the whole
@@ -2730,6 +2829,8 @@ mod teardown_tests {
             reconnect_model: "models/gemini-3.1-flash-live-preview".into(),
             last_resume_handle: Arc::new(ParkingMutex::new(None)),
             call_names: Arc::new(ParkingMutex::new(std::collections::HashMap::new())),
+            #[cfg(any(test, feature = "integration", feature = "gemini"))]
+            recovery_barrier: Arc::new(ParkingMutex::new(None)),
         };
 
         // Execution of close() must complete quickly despite channel full & writer blocked

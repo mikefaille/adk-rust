@@ -41,6 +41,139 @@ where
     (addr, server_handle)
 }
 
+/// Integration-only controlled WebSocket proxy that connects to the real Gemini Live endpoint.
+///
+/// Forwards traffic bi-directionally for healthy connections, and provides `trigger_abrupt_disconnect()`
+/// to sever the ADK-facing TCP transport abruptly without sending a graceful WebSocket Close frame.
+pub struct GeminiLiveWsProxy {
+    addr: SocketAddr,
+    disconnect_notify: Arc<tokio::sync::Notify>,
+    proxy_handle: tokio::task::JoinHandle<()>,
+}
+
+impl GeminiLiveWsProxy {
+    pub async fn start(api_key: String) -> Self {
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        adk_core::ensure_crypto_provider();
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("proxy TcpListener bind");
+        let addr = listener.local_addr().expect("proxy local_addr");
+        let disconnect_notify = Arc::new(tokio::sync::Notify::new());
+
+        let target_url = format!("{}?key={}", adk_realtime::gemini::GEMINI_LIVE_URL, api_key);
+
+        let disconnect_notify_clone = Arc::clone(&disconnect_notify);
+
+        let proxy_handle = tokio::spawn(async move {
+            let conn_counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+            while let Ok((stream, _)) = listener.accept().await {
+                let conn_id = conn_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                let target_url = target_url.clone();
+                let disconnect_notify = Arc::clone(&disconnect_notify_clone);
+
+                tokio::spawn(async move {
+                    let client_ws = match accept_async(stream).await {
+                        Ok(ws) => ws,
+                        Err(e) => {
+                            eprintln!("GeminiLiveWsProxy accept handshake error: {e}");
+                            return;
+                        }
+                    };
+
+                    let target_ws = match tokio_tungstenite::connect_async(&target_url).await {
+                        Ok((ws, _)) => ws,
+                        Err(e) => {
+                            eprintln!(
+                                "GeminiLiveWsProxy connect to real Gemini upstream error: {e}"
+                            );
+                            return;
+                        }
+                    };
+
+                    let (mut client_sink, mut client_stream) = client_ws.split();
+                    let (mut target_sink, mut target_stream) = target_ws.split();
+
+                    tracing::info!(conn_id, "GeminiLiveWsProxy accepted connection");
+                    if conn_id == 1 {
+                        // Connection 1: healthy traffic forwarding until abrupt disconnect signal
+                        loop {
+                            tokio::select! {
+                                _ = disconnect_notify.notified() => {
+                                    tracing::info!("GeminiLiveWsProxy: Inducing abrupt transport drop on connection 1");
+                                    // Drop client_sink/client_stream abruptly without sending WebSocket Close!
+                                    break;
+                                }
+                                client_msg = client_stream.next() => {
+                                    match client_msg {
+                                        Some(Ok(msg)) => {
+                                            if target_sink.send(msg).await.is_err() {
+                                                break;
+                                            }
+                                        }
+                                        _ => break,
+                                    }
+                                }
+                                target_msg = target_stream.next() => {
+                                    match target_msg {
+                                        Some(Ok(msg)) => {
+                                            if client_sink.send(msg).await.is_err() {
+                                                break;
+                                            }
+                                        }
+                                        _ => break,
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        // Connection 2+: Candidate and subsequent recovery connections forward traffic normally
+                        loop {
+                            tokio::select! {
+                                client_msg = client_stream.next() => {
+                                    match client_msg {
+                                        Some(Ok(msg)) => {
+                                            if target_sink.send(msg).await.is_err() {
+                                                break;
+                                            }
+                                        }
+                                        _ => break,
+                                    }
+                                }
+                                target_msg = target_stream.next() => {
+                                    match target_msg {
+                                        Some(Ok(msg)) => {
+                                            if client_sink.send(msg).await.is_err() {
+                                                break;
+                                            }
+                                        }
+                                        _ => break,
+                                    }
+                                }
+                            }
+                        }
+                    }
+                });
+            }
+        });
+
+        Self { addr, disconnect_notify, proxy_handle }
+    }
+
+    pub fn url(&self) -> String {
+        format!("ws://{}", self.addr)
+    }
+
+    pub fn trigger_abrupt_disconnect(&self) {
+        self.disconnect_notify.notify_one();
+    }
+}
+
+impl Drop for GeminiLiveWsProxy {
+    fn drop(&mut self) {
+        self.proxy_handle.abort();
+    }
+}
+
 #[tokio::test]
 async fn test_gemini_exposes_recovery_spi() {
     let (addr, _server) = spawn_mock_ws_server(|_| async {}).await;
@@ -667,15 +800,17 @@ async fn test_live_gemini_managed_recovery_interruption() {
     use adk_realtime::recovery::DeliveryCertainty;
     use adk_realtime::runner::RealtimeRunner;
 
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    let _ = tracing_subscriber::fmt().with_env_filter("info").try_init();
     adk_core::ensure_crypto_provider();
 
-    let Ok(api_key) = std::env::var("GEMINI_API_KEY").or_else(|_| std::env::var("GOOGLE_API_KEY"))
-    else {
-        println!(
-            "GEMINI_API_KEY or GOOGLE_API_KEY not set; skipping live Gemini interruption proof test."
-        );
-        return;
-    };
+    let api_key = std::env::var("GEMINI_API_KEY")
+        .or_else(|_| std::env::var("GOOGLE_API_KEY"))
+        .ok()
+        .filter(|k| !k.trim().is_empty())
+        .expect("GEMINI_API_KEY or GOOGLE_API_KEY environment variable required for live Gemini recovery proof test");
+
+    let proxy = GeminiLiveWsProxy::start(api_key.clone()).await;
 
     let probe_tool = ToolDefinition::new("recovery_probe")
         .with_description("A test tool to probe recovery readiness after reconnect.")
@@ -688,7 +823,7 @@ async fn test_live_gemini_managed_recovery_interruption() {
         }));
 
     let model = Arc::new(GeminiRealtimeModel::new(
-        GeminiLiveBackend::studio(api_key),
+        GeminiLiveBackend::studio(api_key).with_endpoint_url(proxy.url()),
         "models/gemini-3.1-flash-live-preview",
     ));
 
@@ -704,94 +839,110 @@ async fn test_live_gemini_managed_recovery_interruption() {
 
     let mut gen_watcher = runner.subscribe_generation();
 
-    // 1. Healthy generation N (0): Prove initial generation is usable
+    // 1. Connect initial generation N (0): prove initial generation receives real setupComplete
     runner.connect().await.expect("Initial connect should succeed");
     assert!(runner.is_connected().await);
-    let gen_n_id = *gen_watcher.borrow();
+    let gen_n_id = *gen_watcher.borrow_and_update();
     assert_eq!(gen_n_id, 0);
 
-    // Consume setupComplete frame from stream
     let setup_ev = runner.next_event().await;
-    assert!(
-        matches!(setup_ev, Some(Ok(ServerEvent::SessionCreated { .. }))),
-        "Initial generation N must produce SessionCreated setupComplete frame"
-    );
-
-    // 2. Deliberately induce real transport failure on generation N
-    runner.force_transport_break_for_testing().await.expect("Force transport break should succeed");
-
-    // 3. Trigger report_failure in a background task so supervisor enters Recovering
-    let runner_arc = Arc::new(runner);
-    let runner_clone = Arc::clone(&runner_arc);
-    let first_write_task =
-        tokio::spawn(async move { runner_clone.send_text("hello during break").await });
-
-    // Wait until supervisor transitions to Recovering (admit_write rejects as NotAttempted)
-    let mut write_rejected_as_not_attempted = false;
-    for _ in 0..100 {
-        let res = runner_arc.send_text("hello during recovery").await;
-        if let Err(RealtimeError::WriteFailed {
-            certainty: DeliveryCertainty::NotAttempted, ..
-        }) = res
-        {
-            write_rejected_as_not_attempted = true;
-            break;
+    match setup_ev {
+        Some(Ok(ServerEvent::SessionCreated { .. })) => {
+            tracing::info!("Generation N connected and received setupComplete");
         }
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        Some(Ok(other)) => panic!("Expected SessionCreated setupComplete frame, got: {other:?}"),
+        Some(Err(err)) => panic!("Initial connect produced error: {err:?}"),
+        None => panic!("Initial connect returned EOF"),
     }
 
-    // Wait for first write task to finish (it reports failure and triggers managed recovery)
-    let first_write_res = first_write_task.await.expect("first write task join");
-    match first_write_res {
-        Err(RealtimeError::WriteFailed { certainty, .. }) => {
-            assert_eq!(
-                certainty,
-                DeliveryCertainty::Indeterminate,
-                "First write after break must be Indeterminate"
+    // 2. Set test recovery barrier on generation N
+    let barrier = Arc::new(adk_realtime::recovery::TestRecoveryBarrier::new());
+    runner
+        .set_recovery_barrier_for_testing(barrier.clone())
+        .await
+        .expect("Set recovery barrier on generation N");
+
+    // 3. Induce abrupt transport drop via proxy (genuine TCP drop without WebSocket Close frame)
+    proxy.trigger_abrupt_disconnect();
+
+    // 4. Start background read task so managed read path observes EOF/reset and triggers supervisor.report_failure
+    let runner_arc = Arc::new(runner);
+    let runner_read_clone = Arc::clone(&runner_arc);
+    let read_task = tokio::spawn(async move { runner_read_clone.next_event().await });
+
+    // 5. Wait on barrier to confirm supervisor has entered TransportStatus::Recovering
+    barrier.wait_until_recovering_entered().await;
+
+    // 6. Issue exactly one managed write during held Recovering window and prove it returns WriteFailed(NotAttempted)
+    let write_res = runner_arc.send_text("hello during recovery").await;
+    match write_res {
+        Err(RealtimeError::WriteFailed { certainty: DeliveryCertainty::NotAttempted, .. }) => {
+            tracing::info!(
+                "Managed write issued during Recovering was correctly rejected as NotAttempted"
             );
         }
-        other => panic!("Expected WriteFailed Indeterminate for first write, got {:?}", other),
+        other => panic!(
+            "Expected WriteFailed(NotAttempted) during held Recovering window, got: {:?}",
+            other
+        ),
     }
 
-    assert!(
-        write_rejected_as_not_attempted,
-        "Write during active Recovering state must be rejected as NotAttempted"
-    );
+    // 7. Release recovery barrier, allowing candidate session (N+1) to connect, send setup first, receive setupComplete, and publish
+    barrier.release();
+
+    // 8. Verify generation advances N -> N+1 and subscribe_generation() watcher wakes up without requiring new app traffic
+    gen_watcher.changed().await.expect("Watcher must wake on N+1 publication");
+    let gen_n1_id = *gen_watcher.borrow_and_update();
+    assert_ne!(gen_n_id, gen_n1_id, "Generation must advance from N to N+1");
 
     let runner = runner_arc;
 
-    // 4. Background recovery: next_event completes recovery and publishes N+1
-    let event_res = runner.next_event().await;
-    assert!(event_res.is_some(), "next_event should complete via managed recovery");
-
-    // 5. Verify N+1 publication & public watcher wakeup
-    if *gen_watcher.borrow() == gen_n_id {
-        gen_watcher.changed().await.expect("Watcher must wake on N+1 publication");
-    }
-    let gen_n1_id = *gen_watcher.borrow();
-    assert_ne!(gen_n_id, gen_n1_id, "Generation must advance from N to N+1");
-
-    // 6. Subsequent real model input succeeds on generation N+1: trigger function call on N+1
+    // 9. Subsequent real post-recovery Gemini 3.1 interaction on N+1: send text prompt to Gemini
     runner
         .send_text("Please call the tool recovery_probe with value 'test12345' now.")
         .await
         .expect("Send text on N+1 must succeed");
 
-    // 7. Observe function call -> function response -> model continuation on N+1
+    // 10. Await first event from background read_task (which is currently polling next_event() on N+1)
+    let first_ev = read_task.await.expect("read_task join");
     let mut received_function_call = false;
     let mut received_final_response = false;
 
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
-    while tokio::time::Instant::now() < deadline {
-        if let Some(Ok(event)) =
-            tokio::time::timeout(Duration::from_secs(3), runner.next_event()).await.ok().flatten()
-        {
-            match event {
-                ServerEvent::FunctionCallDone { call_id, name, arguments, .. } => {
+    match first_ev {
+        Some(Ok(event)) => {
+            if let ServerEvent::FunctionCallDone { call_id, name, arguments, .. } = event {
+                assert_eq!(name, "recovery_probe");
+                received_function_call = true;
+                let response = ToolResponse {
+                    call_id,
+                    output: json!({ "status": "probed", "value": arguments.get("value") }),
+                };
+                runner
+                    .send_tool_response(response)
+                    .await
+                    .expect("send_tool_response on N+1 must succeed");
+            }
+        }
+        Some(Err(err)) => panic!("Error receiving first event post-recovery on N+1: {err:?}"),
+        None => panic!("Unexpected EOF receiving first event post-recovery on N+1"),
+    }
+
+    // 11. Continue polling next_event() until model continuation response is received
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    while tokio::time::Instant::now() < deadline && !received_final_response {
+        let event_opt =
+            match tokio::time::timeout(Duration::from_secs(4), runner.next_event()).await {
+                Ok(opt) => opt,
+                Err(_) => continue,
+            };
+
+        match event_opt {
+            Some(Ok(event)) => match event {
+                ServerEvent::FunctionCallDone { call_id, name, arguments, .. }
+                    if !received_function_call =>
+                {
                     assert_eq!(name, "recovery_probe");
                     received_function_call = true;
-                    // Auto-execute handles execution in runner if run_loop is running; since we are calling next_event manually,
-                    // send tool response directly to complete the FunctionResponse transaction on N+1.
                     let response = ToolResponse {
                         call_id,
                         output: json!({ "status": "probed", "value": arguments.get("value") }),
@@ -814,7 +965,9 @@ async fn test_live_gemini_managed_recovery_interruption() {
                     break;
                 }
                 _ => {}
-            }
+            },
+            Some(Err(err)) => panic!("Error during post-recovery interaction on N+1: {err:?}"),
+            None => panic!("Unexpected EOF during post-recovery interaction on N+1"),
         }
     }
 

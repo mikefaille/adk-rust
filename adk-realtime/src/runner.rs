@@ -458,6 +458,17 @@ impl RealtimeRunner {
         gen_item.session.force_transport_break().await
     }
 
+    /// Set an integration test recovery barrier on the active session generation.
+    #[cfg(any(test, feature = "integration", feature = "gemini"))]
+    pub async fn set_recovery_barrier_for_testing(
+        &self,
+        barrier: Arc<crate::recovery::TestRecoveryBarrier>,
+    ) -> Result<()> {
+        let gen_item = self.supervisor.get_active_generation().await?;
+        gen_item.session.set_recovery_barrier(barrier);
+        Ok(())
+    }
+
     /// Subscribe to session generation publication notifications.
     ///
     /// Returns a read-only watch receiver that fires when a new authoritative session generation

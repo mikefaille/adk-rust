@@ -323,3 +323,36 @@ pub trait RealtimeRecovery: Send + Sync {
 }
 
 pub(crate) mod supervisor;
+
+/// Integration test barrier for holding managed recovery in `TransportStatus::Recovering`
+/// before candidate connection/publication completes.
+#[cfg(any(test, feature = "integration", feature = "gemini"))]
+#[derive(Debug, Default)]
+pub struct TestRecoveryBarrier {
+    recovering_entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+#[cfg(any(test, feature = "integration", feature = "gemini"))]
+impl TestRecoveryBarrier {
+    /// Create a new recovery barrier.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Wait until `RecoverySupervisor` has entered `TransportStatus::Recovering`.
+    pub async fn wait_until_recovering_entered(&self) {
+        self.recovering_entered.notified().await;
+    }
+
+    /// Release the held recovery episode, allowing provider candidate connection & publication to proceed.
+    pub fn release(&self) {
+        self.release.notify_waiters();
+    }
+
+    /// Invoked by `RealtimeRecovery::recover` to signal `Recovering` state entry and pause until released.
+    pub async fn on_recovering(&self) {
+        self.recovering_entered.notify_waiters();
+        self.release.notified().await;
+    }
+}
