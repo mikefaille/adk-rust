@@ -469,6 +469,21 @@ impl RealtimeRunner {
     /// replay loops or subscriber tasks upon generation transition (e.g. `N -> N+1`).
     /// It is **not** an authority over recovery policy, transport state transitions, or provider handles.
     /// Candidate connection attempts that fail or are rejected before publication do not advance this watcher.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # use adk_realtime::runner::RealtimeRunner;
+    /// # async fn example(runner: RealtimeRunner) {
+    /// let mut rx = runner.subscribe_generation();
+    /// tokio::spawn(async move {
+    ///     while rx.changed().await.is_ok() {
+    ///         let generation = *rx.borrow();
+    ///         println!("New session generation published: {generation}");
+    ///     }
+    /// });
+    /// # }
+    /// ```
     pub fn subscribe_generation(&self) -> tokio::sync::watch::Receiver<u64> {
         self.supervisor.subscribe_generation()
     }

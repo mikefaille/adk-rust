@@ -1292,7 +1292,12 @@ impl RealtimeSession for GeminiRealtimeSession {
             other => other.clone(),
         };
 
-        let name = self.call_names.lock().remove(&response.call_id);
+        let name = self.call_names.lock().remove(&response.call_id).ok_or_else(|| {
+            RealtimeError::protocol(format!(
+                "Missing tool name for call_id '{}' in GeminiFunctionResponse",
+                response.call_id
+            ))
+        })?;
 
         let msg = GeminiClientMessage {
             setup: None,
@@ -1300,7 +1305,7 @@ impl RealtimeSession for GeminiRealtimeSession {
             tool_response: Some(GeminiToolResponse {
                 function_responses: vec![GeminiFunctionResponse {
                     id: response.call_id,
-                    name,
+                    name: Some(name),
                     response: output,
                 }],
             }),
@@ -2018,6 +2023,28 @@ mod tests {
                 GeminiSchemaDialect::OpenApiSubset
             );
         }
+    }
+
+    #[test]
+    fn test_gemini_send_text_uses_realtime_input() {
+        // Conversational text turns must serialize via realtimeInput.text for Gemini 3.1 Live API
+        let msg = GeminiClientMessage {
+            setup: None,
+            realtime_input: Some(GeminiRealtimeInput {
+                audio: None,
+                media_chunks: None,
+                text: Some("Hello 3.1".to_string()),
+            }),
+            tool_response: None,
+            client_content: None,
+        };
+
+        let js = serde_json::to_value(&msg).unwrap();
+        assert!(js.get("clientContent").is_none());
+        assert_eq!(
+            js.get("realtimeInput").and_then(|r| r.get("text")).and_then(|t| t.as_str()),
+            Some("Hello 3.1")
+        );
     }
 
     #[test]
