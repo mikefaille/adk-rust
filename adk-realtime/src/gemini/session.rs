@@ -818,7 +818,7 @@ impl GeminiRealtimeSession {
     }
 
     /// Returns the current number of tracked function call names (test helper).
-        #[cfg(any(test, feature = "integration", feature = "gemini"))]
+    #[cfg(any(test, feature = "integration", feature = "gemini"))]
     pub fn call_names_count(&self) -> usize {
         self.call_names.lock().len()
     }
