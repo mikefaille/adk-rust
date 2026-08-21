@@ -657,6 +657,8 @@ async fn test_vertex_custom_endpoint_does_not_leak_auth_header() {
 #[tokio::test]
 #[ignore]
 async fn test_live_gemini_managed_recovery_interruption() {
+    use adk_realtime::config::ToolDefinition;
+    use adk_realtime::events::ToolResponse;
     use adk_realtime::gemini::GeminiRealtimeModel;
     use adk_realtime::recovery::DeliveryCertainty;
     use adk_realtime::runner::RealtimeRunner;
@@ -671,13 +673,27 @@ async fn test_live_gemini_managed_recovery_interruption() {
         return;
     };
 
+    let probe_tool = ToolDefinition::new("recovery_probe")
+        .with_description("A test tool to probe recovery readiness after reconnect.")
+        .with_parameters(json!({
+            "type": "object",
+            "properties": {
+                "value": { "type": "string", "description": "Echo value" }
+            },
+            "required": ["value"]
+        }));
+
     let model = Arc::new(GeminiRealtimeModel::new(
         GeminiLiveBackend::studio(api_key),
-        "models/gemini-2.5-flash",
+        "models/gemini-3.1-flash-live-preview",
     ));
 
     let runner = RealtimeRunner::builder()
         .model(model as adk_realtime::model::BoxedModel)
+        .tool_fn(probe_tool, |call| {
+            let val = call.arguments.get("value").and_then(|v| v.as_str()).unwrap_or("ok");
+            Ok(json!({ "status": "probed", "value": val }))
+        })
         .instruction("You are a helpful assistant. Reply concisely.")
         .build()
         .expect("Runner build should succeed");
@@ -737,32 +753,56 @@ async fn test_live_gemini_managed_recovery_interruption() {
     let gen_n1_id = *gen_watcher.borrow();
     assert_ne!(gen_n_id, gen_n1_id, "Generation must advance from N to N+1");
 
-    // 6. Subsequent real model input succeeds on generation N+1
+    // 6. Subsequent real model input succeeds on generation N+1: trigger function call on N+1
     runner
-        .send_text("Hello Gemini, please respond with OK")
+        .send_text("Please call the tool recovery_probe with value 'test12345' now.")
         .await
         .expect("Send text on N+1 must succeed");
 
-    // 7. Subsequent real Gemini response is received on N+1
-    let mut received_response = false;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    // 7. Observe function call -> function response -> model continuation on N+1
+    let mut received_function_call = false;
+    let mut received_final_response = false;
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
     while tokio::time::Instant::now() < deadline {
         if let Some(Ok(event)) =
-            tokio::time::timeout(Duration::from_secs(2), runner.next_event()).await.ok().flatten()
+            tokio::time::timeout(Duration::from_secs(3), runner.next_event()).await.ok().flatten()
         {
             match event {
+                ServerEvent::FunctionCallDone { call_id, name, arguments, .. } => {
+                    assert_eq!(name, "recovery_probe");
+                    received_function_call = true;
+                    // Auto-execute handles execution in runner if run_loop is running; since we are calling next_event manually,
+                    // send tool response directly to complete the FunctionResponse transaction on N+1.
+                    let response = ToolResponse {
+                        call_id,
+                        output: json!({ "status": "probed", "value": arguments.get("value") }),
+                    };
+                    runner
+                        .send_tool_response(response)
+                        .await
+                        .expect("send_tool_response on N+1 must succeed");
+                }
                 ServerEvent::TextDelta { delta, .. } if !delta.is_empty() => {
-                    received_response = true;
-                    break;
+                    if received_function_call {
+                        received_final_response = true;
+                        break;
+                    }
                 }
                 ServerEvent::AudioDelta { delta, .. } if !delta.is_empty() => {
-                    received_response = true;
-                    break;
+                    if received_function_call {
+                        received_final_response = true;
+                        break;
+                    }
                 }
                 _ => {}
             }
         }
     }
 
-    assert!(received_response, "Must receive real model response after managed recovery");
+    assert!(received_function_call, "Must receive real function call on generation N+1");
+    assert!(
+        received_final_response,
+        "Must receive real model response after function response on N+1"
+    );
 }
