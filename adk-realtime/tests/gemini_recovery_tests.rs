@@ -704,6 +704,9 @@ async fn test_live_gemini_managed_recovery_interruption() {
 
     let mut gen_watcher = runner.subscribe_generation();
 
+    // Generate a random recovery marker for logical session resumption verification
+    let recovery_marker = format!("RESUME-MARKER-{}", uuid::Uuid::new_v4().simple());
+
     // 1. Healthy generation N (0): Prove initial generation is usable
     runner.connect().await.expect("Initial connect should succeed");
     assert!(runner.is_connected().await);
@@ -716,6 +719,27 @@ async fn test_live_gemini_managed_recovery_interruption() {
         matches!(setup_ev, Some(Ok(ServerEvent::SessionCreated { .. }))),
         "Initial generation N must produce SessionCreated setupComplete frame"
     );
+
+    // Perform one complete real turn on generation N to record context and receive a valid resumable checkpoint
+    runner
+        .send_text(&format!(
+            "Please remember this secret recovery marker for later: {recovery_marker}. Say 'UNDERSTOOD' after storing it."
+        ))
+        .await
+        .expect("Send text on N must succeed");
+
+    let turn_deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    let mut initial_turn_done = false;
+    while tokio::time::Instant::now() < turn_deadline {
+        if let Some(Ok(event)) =
+            tokio::time::timeout(Duration::from_secs(3), runner.next_event()).await.ok().flatten()
+            && matches!(event, ServerEvent::ResponseDone { .. })
+        {
+            initial_turn_done = true;
+            break;
+        }
+    }
+    assert!(initial_turn_done, "Generation N must complete initial turn before interruption");
 
     // 2. Deliberately induce real transport failure on generation N
     runner.force_transport_break_for_testing().await.expect("Force transport break should succeed");
@@ -769,16 +793,17 @@ async fn test_live_gemini_managed_recovery_interruption() {
         gen_watcher.changed().await.expect("Watcher must wake on N+1 publication");
     }
     let gen_n1_id = *gen_watcher.borrow();
-    assert_ne!(gen_n_id, gen_n1_id, "Generation must advance from N to N+1");
+    assert_eq!(gen_n1_id, gen_n_id + 1, "Generation must advance exactly from N to N+1");
 
-    // 6. Subsequent real model input succeeds on generation N+1: trigger function call on N+1
+    // 6. Prove logical session continuity after N+1: ask Gemini for the pre-disconnect secret marker via recovery_probe tool call
     runner
-        .send_text("Please call the tool recovery_probe with value 'test12345' now.")
+        .send_text("Please call the tool recovery_probe with the secret recovery marker I gave you before the disconnect.")
         .await
         .expect("Send text on N+1 must succeed");
 
     // 7. Observe function call -> function response -> model continuation on N+1
     let mut received_function_call = false;
+    let mut marker_matched = false;
     let mut received_final_response = false;
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
@@ -790,11 +815,13 @@ async fn test_live_gemini_managed_recovery_interruption() {
                 ServerEvent::FunctionCallDone { call_id, name, arguments, .. } => {
                     assert_eq!(name, "recovery_probe");
                     received_function_call = true;
-                    // Auto-execute handles execution in runner if run_loop is running; since we are calling next_event manually,
-                    // send tool response directly to complete the FunctionResponse transaction on N+1.
+                    let val = arguments.get("value").and_then(|v| v.as_str()).unwrap_or("");
+                    if val == recovery_marker {
+                        marker_matched = true;
+                    }
                     let response = ToolResponse {
                         call_id,
-                        output: json!({ "status": "probed", "value": arguments.get("value") }),
+                        output: json!({ "status": "probed", "value": val }),
                     };
                     runner
                         .send_tool_response(response)
@@ -819,6 +846,10 @@ async fn test_live_gemini_managed_recovery_interruption() {
     }
 
     assert!(received_function_call, "Must receive real function call on generation N+1");
+    assert!(
+        marker_matched,
+        "Logical continuity proof failed: Gemini on N+1 did not return the exact pre-disconnect recovery marker ({recovery_marker})"
+    );
     assert!(
         received_final_response,
         "Must receive real model response after function response on N+1"

@@ -1233,13 +1233,21 @@ impl RealtimeRecovery for GeminiRealtimeSession {
 
             let candidate = guard.disarm();
 
+            let has_resumption_handle = prior_handle.is_some();
+
             // Carry prior resume handle if candidate hasn't received a new one yet
-            if candidate.last_resume_handle().is_none() && prior_handle.is_some() {
+            if candidate.last_resume_handle().is_none() && has_resumption_handle {
                 *candidate.last_resume_handle.lock() = prior_handle;
             }
 
+            let continuity = if has_resumption_handle {
+                RecoveryContinuity::Resumed
+            } else {
+                RecoveryContinuity::Reconnected
+            };
+
             let recovered: Arc<dyn RealtimeSession> = candidate;
-            Ok(RecoveredSession::new(recovered, RecoveryContinuity::Reconnected))
+            Ok(RecoveredSession::new(recovered, continuity))
         };
 
         match tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), attempt_fut).await {
