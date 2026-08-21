@@ -1,4 +1,4 @@
-#![cfg(feature = "gemini")]
+#![cfg(all(feature = "gemini", feature = "integration"))]
 
 use adk_realtime::RealtimeSession;
 use adk_realtime::error::RealtimeError;

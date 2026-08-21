@@ -730,16 +730,29 @@ async fn test_live_gemini_managed_recovery_interruption() {
 
     let turn_deadline = tokio::time::Instant::now() + Duration::from_secs(15);
     let mut initial_turn_done = false;
+    let mut received_resume_handle = false;
     while tokio::time::Instant::now() < turn_deadline {
         if let Some(Ok(event)) =
             tokio::time::timeout(Duration::from_secs(3), runner.next_event()).await.ok().flatten()
-            && matches!(event, ServerEvent::ResponseDone { .. })
         {
-            initial_turn_done = true;
-            break;
+            if matches!(event, ServerEvent::ResponseDone { .. }) {
+                initial_turn_done = true;
+            }
+            if let ServerEvent::SessionUpdated { session, .. } = &event
+                && session.get("resumeHandle").and_then(|h| h.as_str()).is_some()
+            {
+                received_resume_handle = true;
+            }
+            if initial_turn_done && received_resume_handle {
+                break;
+            }
         }
     }
     assert!(initial_turn_done, "Generation N must complete initial turn before interruption");
+    assert!(
+        received_resume_handle,
+        "Generation N must receive a valid resumable checkpoint before interruption"
+    );
 
     // 2. Deliberately induce real transport failure on generation N
     runner.force_transport_break_for_testing().await.expect("Force transport break should succeed");
@@ -804,6 +817,7 @@ async fn test_live_gemini_managed_recovery_interruption() {
     // 7. Observe function call -> function response -> model continuation on N+1
     let mut received_function_call = false;
     let mut marker_matched = false;
+    let mut received_post_tool_content = false;
     let mut received_final_response = false;
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
@@ -831,11 +845,20 @@ async fn test_live_gemini_managed_recovery_interruption() {
                 ServerEvent::TextDelta { delta, .. }
                     if !delta.is_empty() && received_function_call =>
                 {
-                    received_final_response = true;
-                    break;
+                    received_post_tool_content = true;
                 }
                 ServerEvent::AudioDelta { delta, .. }
                     if !delta.is_empty() && received_function_call =>
+                {
+                    received_post_tool_content = true;
+                }
+                ServerEvent::TranscriptDelta { delta, .. }
+                    if !delta.is_empty() && received_function_call =>
+                {
+                    received_post_tool_content = true;
+                }
+                ServerEvent::ResponseDone { .. }
+                    if received_function_call && received_post_tool_content =>
                 {
                     received_final_response = true;
                     break;
@@ -851,7 +874,11 @@ async fn test_live_gemini_managed_recovery_interruption() {
         "Logical continuity proof failed: Gemini on N+1 did not return the exact pre-disconnect recovery marker ({recovery_marker})"
     );
     assert!(
+        received_post_tool_content,
+        "Must receive non-empty post-tool content (TextDelta, AudioDelta, or TranscriptDelta) on N+1"
+    );
+    assert!(
         received_final_response,
-        "Must receive real model response after function response on N+1"
+        "Must receive ResponseDone after non-empty model continuation on N+1"
     );
 }
