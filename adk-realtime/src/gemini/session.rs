@@ -220,6 +220,8 @@ struct GeminiToolResponse {
 #[serde(rename_all = "camelCase")]
 struct GeminiFunctionResponse {
     id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
     response: Value,
 }
 
@@ -298,6 +300,8 @@ pub struct GeminiRealtimeSession {
     /// overwrite the last safe point (the previous resumable handle remains the
     /// best reconnect anchor).
     last_resume_handle: Arc<ParkingMutex<Option<String>>>,
+    /// Association map between function call IDs and tool names for wire-conforming `FunctionResponse` payloads.
+    call_names: Arc<ParkingMutex<std::collections::HashMap<String, String>>>,
 }
 
 /// Ensure the model ID is prefixed with "models/" as required by Gemini Live setup frames.
@@ -326,7 +330,7 @@ impl GeminiRealtimeSession {
     }
 
     /// Constructs a mock `GeminiRealtimeSession` for testing connection lifecycle & recovery.
-    #[cfg(any(test, feature = "integration", feature = "vertex-live"))]
+    #[cfg(any(test, feature = "integration", feature = "gemini"))]
     pub fn new_for_test(
         session_id: String,
         reconnect_url: String,
@@ -356,6 +360,7 @@ impl GeminiRealtimeSession {
             dialect,
             reconnect_model,
             last_resume_handle: Arc::new(ParkingMutex::new(None)),
+            call_names: Arc::new(ParkingMutex::new(std::collections::HashMap::new())),
         }
     }
 
@@ -550,6 +555,7 @@ impl GeminiRealtimeSession {
             dialect,
             reconnect_model: normalized_model.clone(),
             last_resume_handle: Arc::new(ParkingMutex::new(None)),
+            call_names: Arc::new(ParkingMutex::new(std::collections::HashMap::new())),
         };
 
         session.send_setup_with_compiled_tools(&normalized_model, config, tools).await?;
@@ -771,13 +777,18 @@ impl GeminiRealtimeSession {
     /// `reconnect_with_backoff` can present it on the next connection attempt.
     pub(crate) fn translate_gemini_event(&self, raw: &str) -> Result<Vec<ServerEvent>> {
         let events = Self::translate_event_logged(raw, Some(&self.frame_log))?;
-        // Intercept SessionUpdated to cache the resume handle locally.
         for event in &events {
-            if let ServerEvent::SessionUpdated { session, .. } = event
-                && let Some(handle) = session.get("resumeHandle").and_then(|h| h.as_str())
-            {
-                *self.last_resume_handle.lock() = Some(handle.to_string());
-                tracing::debug!(handle = %handle, "Cached resumable handle for reconnect");
+            match event {
+                ServerEvent::SessionUpdated { session, .. } => {
+                    if let Some(handle) = session.get("resumeHandle").and_then(|h| h.as_str()) {
+                        *self.last_resume_handle.lock() = Some(handle.to_string());
+                        tracing::debug!(handle = %handle, "Cached resumable handle for reconnect");
+                    }
+                }
+                ServerEvent::FunctionCallDone { call_id, name, .. } => {
+                    self.call_names.lock().insert(call_id.clone(), name.clone());
+                }
+                _ => {}
             }
         }
         Ok(events)
@@ -1281,12 +1292,15 @@ impl RealtimeSession for GeminiRealtimeSession {
             other => other.clone(),
         };
 
+        let name = self.call_names.lock().remove(&response.call_id);
+
         let msg = GeminiClientMessage {
             setup: None,
             realtime_input: None,
             tool_response: Some(GeminiToolResponse {
                 function_responses: vec![GeminiFunctionResponse {
                     id: response.call_id,
+                    name,
                     response: output,
                 }],
             }),
@@ -2679,6 +2693,7 @@ mod teardown_tests {
             dialect: GeminiSchemaDialect::OpenApiSubset,
             reconnect_model: "models/gemini-3.1-flash-live-preview".into(),
             last_resume_handle: Arc::new(ParkingMutex::new(None)),
+            call_names: Arc::new(ParkingMutex::new(std::collections::HashMap::new())),
         };
 
         // Execution of close() must complete quickly despite channel full & writer blocked

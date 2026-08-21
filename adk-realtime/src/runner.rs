@@ -452,7 +452,7 @@ impl RealtimeRunner {
     ///
     /// Closes the raw active session transport without closing the managed supervisor,
     /// triggering the managed failure recovery path on the next read or write operation.
-    #[cfg(any(test, feature = "integration", feature = "vertex-live"))]
+    #[cfg(any(test, feature = "integration", feature = "gemini"))]
     pub async fn force_transport_break_for_testing(&self) -> Result<()> {
         let gen_item = self.supervisor.get_active_generation().await?;
         gen_item.session.close().await
