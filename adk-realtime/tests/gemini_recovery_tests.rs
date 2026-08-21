@@ -566,3 +566,261 @@ async fn test_gemini_backend_studio_and_vertex() {
         _ => panic!("Expected Studio variant"),
     }
 }
+
+#[tokio::test]
+async fn test_studio_custom_endpoint_does_not_leak_api_key() {
+    let received_uri = Arc::new(parking_lot::Mutex::new(None::<String>));
+    let uri_capture = Arc::clone(&received_uri);
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let server_handle = tokio::spawn(async move {
+        if let Ok((stream, _)) = listener.accept().await {
+            let uri_ref = Arc::clone(&uri_capture);
+            #[allow(clippy::result_large_err)]
+            let callback = move |req: &tokio_tungstenite::tungstenite::handshake::server::Request,
+                                 resp: tokio_tungstenite::tungstenite::handshake::server::Response| {
+                *uri_ref.lock() = Some(req.uri().to_string());
+                Ok(resp)
+            };
+            let _ = tokio_tungstenite::accept_hdr_async(stream, callback).await;
+        }
+    });
+
+    let custom_url = format!("ws://{}/ws", addr);
+    let backend = GeminiLiveBackend::studio("secret-api-key").with_endpoint_url(&custom_url);
+
+    let session_res =
+        GeminiRealtimeSession::connect(backend, "models/gemini-live", RealtimeConfig::default())
+            .await;
+
+    assert!(session_res.is_ok(), "Connection to custom endpoint should succeed");
+
+    let uri = received_uri.lock().take().expect("Handshake request URI captured");
+    assert!(
+        !uri.contains("key="),
+        "Custom Studio endpoint URI must NOT contain key= query parameter: {uri}"
+    );
+
+    server_handle.abort();
+}
+
+#[cfg(feature = "vertex-live")]
+#[tokio::test]
+async fn test_vertex_custom_endpoint_does_not_leak_auth_header() {
+    let received_headers = Arc::new(parking_lot::Mutex::new(Vec::<Option<String>>::new()));
+
+    let headers_capture = Arc::clone(&received_headers);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let server_handle = tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            let headers_ref = Arc::clone(&headers_capture);
+            #[allow(clippy::result_large_err)]
+            let callback = move |req: &tokio_tungstenite::tungstenite::handshake::server::Request,
+                                 resp: tokio_tungstenite::tungstenite::handshake::server::Response| {
+                let auth = req
+                    .headers()
+                    .get("authorization")
+                    .and_then(|v| v.to_str().ok())
+                    .map(|s| s.to_string());
+                headers_ref.lock().push(auth);
+                Ok(resp)
+            };
+            if let Ok(_ws) = tokio_tungstenite::accept_hdr_async(stream, callback).await {
+                // Handshake completed
+            }
+        }
+    });
+
+    let mock_credentials = google_cloud_auth::credentials::Builder::default().build().unwrap();
+    let backend_custom = GeminiLiveBackend::Vertex {
+        credentials: mock_credentials.clone(),
+        region: "us-central1".into(),
+        project_id: "test-project".into(),
+        endpoint_url: Some(format!("ws://{}", addr)),
+    };
+
+    let session_res = GeminiRealtimeSession::connect(
+        backend_custom,
+        "models/gemini-live",
+        RealtimeConfig::default(),
+    )
+    .await;
+
+    assert!(session_res.is_ok(), "Connection to custom Vertex endpoint should succeed");
+
+    let auth = received_headers.lock().pop();
+    assert_eq!(auth, Some(None), "Custom Vertex endpoint must NOT receive Authorization header");
+
+    server_handle.abort();
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_live_gemini_managed_recovery_interruption() {
+    use adk_realtime::config::ToolDefinition;
+    use adk_realtime::events::ToolResponse;
+    use adk_realtime::gemini::GeminiRealtimeModel;
+    use adk_realtime::recovery::DeliveryCertainty;
+    use adk_realtime::runner::RealtimeRunner;
+
+    adk_core::ensure_crypto_provider();
+
+    let Ok(api_key) = std::env::var("GEMINI_API_KEY").or_else(|_| std::env::var("GOOGLE_API_KEY"))
+    else {
+        println!(
+            "GEMINI_API_KEY or GOOGLE_API_KEY not set; skipping live Gemini interruption proof test."
+        );
+        return;
+    };
+
+    let probe_tool = ToolDefinition::new("recovery_probe")
+        .with_description("A test tool to probe recovery readiness after reconnect.")
+        .with_parameters(json!({
+            "type": "object",
+            "properties": {
+                "value": { "type": "string", "description": "Echo value" }
+            },
+            "required": ["value"]
+        }));
+
+    let model = Arc::new(GeminiRealtimeModel::new(
+        GeminiLiveBackend::studio(api_key),
+        "models/gemini-3.1-flash-live-preview",
+    ));
+
+    let runner = RealtimeRunner::builder()
+        .model(model as adk_realtime::model::BoxedModel)
+        .tool_fn(probe_tool, |call| {
+            let val = call.arguments.get("value").and_then(|v| v.as_str()).unwrap_or("ok");
+            Ok(json!({ "status": "probed", "value": val }))
+        })
+        .instruction("You are a helpful assistant. Reply concisely.")
+        .build()
+        .expect("Runner build should succeed");
+
+    let mut gen_watcher = runner.subscribe_generation();
+
+    // 1. Healthy generation N (0): Prove initial generation is usable
+    runner.connect().await.expect("Initial connect should succeed");
+    assert!(runner.is_connected().await);
+    let gen_n_id = *gen_watcher.borrow();
+    assert_eq!(gen_n_id, 0);
+
+    // Consume setupComplete frame from stream
+    let setup_ev = runner.next_event().await;
+    assert!(
+        matches!(setup_ev, Some(Ok(ServerEvent::SessionCreated { .. }))),
+        "Initial generation N must produce SessionCreated setupComplete frame"
+    );
+
+    // 2. Deliberately induce real transport failure on generation N
+    runner.force_transport_break_for_testing().await.expect("Force transport break should succeed");
+
+    // 3. Trigger report_failure in a background task so supervisor enters Recovering
+    let runner_arc = Arc::new(runner);
+    let runner_clone = Arc::clone(&runner_arc);
+    let first_write_task =
+        tokio::spawn(async move { runner_clone.send_text("hello during break").await });
+
+    // Wait until supervisor transitions to Recovering (admit_write rejects as NotAttempted)
+    let mut write_rejected_as_not_attempted = false;
+    for _ in 0..100 {
+        let res = runner_arc.send_text("hello during recovery").await;
+        if let Err(RealtimeError::WriteFailed {
+            certainty: DeliveryCertainty::NotAttempted, ..
+        }) = res
+        {
+            write_rejected_as_not_attempted = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    // Wait for first write task to finish (it reports failure and triggers managed recovery)
+    let first_write_res = first_write_task.await.expect("first write task join");
+    match first_write_res {
+        Err(RealtimeError::WriteFailed { certainty, .. }) => {
+            assert_eq!(
+                certainty,
+                DeliveryCertainty::Indeterminate,
+                "First write after break must be Indeterminate"
+            );
+        }
+        other => panic!("Expected WriteFailed Indeterminate for first write, got {:?}", other),
+    }
+
+    assert!(
+        write_rejected_as_not_attempted,
+        "Write during active Recovering state must be rejected as NotAttempted"
+    );
+
+    let runner = runner_arc;
+
+    // 4. Background recovery: next_event completes recovery and publishes N+1
+    let event_res = runner.next_event().await;
+    assert!(event_res.is_some(), "next_event should complete via managed recovery");
+
+    // 5. Verify N+1 publication & public watcher wakeup
+    if *gen_watcher.borrow() == gen_n_id {
+        gen_watcher.changed().await.expect("Watcher must wake on N+1 publication");
+    }
+    let gen_n1_id = *gen_watcher.borrow();
+    assert_ne!(gen_n_id, gen_n1_id, "Generation must advance from N to N+1");
+
+    // 6. Subsequent real model input succeeds on generation N+1: trigger function call on N+1
+    runner
+        .send_text("Please call the tool recovery_probe with value 'test12345' now.")
+        .await
+        .expect("Send text on N+1 must succeed");
+
+    // 7. Observe function call -> function response -> model continuation on N+1
+    let mut received_function_call = false;
+    let mut received_final_response = false;
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    while tokio::time::Instant::now() < deadline {
+        if let Some(Ok(event)) =
+            tokio::time::timeout(Duration::from_secs(3), runner.next_event()).await.ok().flatten()
+        {
+            match event {
+                ServerEvent::FunctionCallDone { call_id, name, arguments, .. } => {
+                    assert_eq!(name, "recovery_probe");
+                    received_function_call = true;
+                    // Auto-execute handles execution in runner if run_loop is running; since we are calling next_event manually,
+                    // send tool response directly to complete the FunctionResponse transaction on N+1.
+                    let response = ToolResponse {
+                        call_id,
+                        output: json!({ "status": "probed", "value": arguments.get("value") }),
+                    };
+                    runner
+                        .send_tool_response(response)
+                        .await
+                        .expect("send_tool_response on N+1 must succeed");
+                }
+                ServerEvent::TextDelta { delta, .. }
+                    if !delta.is_empty() && received_function_call =>
+                {
+                    received_final_response = true;
+                    break;
+                }
+                ServerEvent::AudioDelta { delta, .. }
+                    if !delta.is_empty() && received_function_call =>
+                {
+                    received_final_response = true;
+                    break;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    assert!(received_function_call, "Must receive real function call on generation N+1");
+    assert!(
+        received_final_response,
+        "Must receive real model response after function response on N+1"
+    );
+}

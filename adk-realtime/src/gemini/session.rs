@@ -63,7 +63,14 @@ impl GeminiLiveBackend {
         Self::Studio { api_key: api_key.into(), endpoint_url: None }
     }
 
-    /// Override the WebSocket connection URL (useful for mock servers or custom gateway proxies).
+    /// Override the WebSocket connection URL for mock servers or custom proxies.
+    ///
+    /// # Security Policy
+    ///
+    /// When connecting to a custom endpoint URL specified via `with_endpoint_url()`,
+    /// ADK **will not** attach or forward Google credentials (such as Google API keys
+    /// or Google ADC bearer tokens) to the custom host. This prevents credential leakage
+    /// when proxying through untrusted custom endpoints or local mock servers.
     pub fn with_endpoint_url(mut self, endpoint_url: impl Into<String>) -> Self {
         let ep = Some(endpoint_url.into());
         match &mut self {
@@ -213,6 +220,7 @@ struct GeminiToolResponse {
 #[serde(rename_all = "camelCase")]
 struct GeminiFunctionResponse {
     id: String,
+    name: String,
     response: Value,
 }
 
@@ -291,6 +299,8 @@ pub struct GeminiRealtimeSession {
     /// overwrite the last safe point (the previous resumable handle remains the
     /// best reconnect anchor).
     last_resume_handle: Arc<ParkingMutex<Option<String>>>,
+    /// Association map between function call IDs and tool names for wire-conforming `FunctionResponse` payloads.
+    call_names: Arc<ParkingMutex<std::collections::HashMap<String, String>>>,
 }
 
 /// Ensure the model ID is prefixed with "models/" as required by Gemini Live setup frames.
@@ -349,6 +359,7 @@ impl GeminiRealtimeSession {
             dialect,
             reconnect_model,
             last_resume_handle: Arc::new(ParkingMutex::new(None)),
+            call_names: Arc::new(ParkingMutex::new(std::collections::HashMap::new())),
         }
     }
 
@@ -401,9 +412,10 @@ impl GeminiRealtimeSession {
 
         let ws_stream = match &backend {
             GeminiLiveBackend::Studio { api_key, endpoint_url } => {
-                let url = endpoint_url
-                    .clone()
-                    .unwrap_or_else(|| format!("{}?key={}", super::GEMINI_LIVE_URL, api_key));
+                let url = match endpoint_url {
+                    Some(u) => u.clone(), // Custom endpoint receives NO Google API key
+                    None => format!("{}?key={}", super::GEMINI_LIVE_URL, api_key),
+                };
                 let request = url.into_client_request().map_err(|e| {
                     RealtimeError::connection(format!("Failed to create request: {}", e))
                 })?;
@@ -420,52 +432,55 @@ impl GeminiRealtimeSession {
                     None => build_vertex_live_url(region, project_id)?,
                 };
 
-                // Obtain OAuth2 bearer token from ADC credentials
-                let header_map =
-                    match credentials.headers(Default::default()).await.map_err(|e| {
-                        RealtimeError::AuthError(format!(
-                            "Failed to obtain OAuth2 token from ADC credentials: {e}"
-                        ))
-                    })? {
-                        google_cloud_auth::credentials::CacheableResource::New { data, .. } => data,
-                        google_cloud_auth::credentials::CacheableResource::NotModified => {
-                            return Err(RealtimeError::AuthError(
-                            "ADC credentials returned NotModified with no cached token available"
-                                .to_string(),
-                        ));
-                        }
-                    };
-
-                // Extract the Authorization header value
-                let auth_value = header_map
-                    .get("authorization")
-                    .ok_or_else(|| {
-                        RealtimeError::AuthError(
-                            "ADC credentials did not produce an Authorization header".to_string(),
-                        )
-                    })?
-                    .to_str()
-                    .map_err(|e| {
-                        RealtimeError::AuthError(format!(
-                            "Authorization header contains non-ASCII characters: {e}"
-                        ))
-                    })?
-                    .to_string();
-
-                // Build a WebSocket request with the Authorization header
                 let mut request = url.into_client_request().map_err(|e| {
                     RealtimeError::connection(format!("Failed to create request: {e}"))
                 })?;
-                request.headers_mut().insert(
-                    "Authorization",
-                    auth_value.parse().map_err(
-                        |e: tokio_tungstenite::tungstenite::http::header::InvalidHeaderValue| {
+
+                // Attach Google ADC Authorization header ONLY to standard default Google Vertex endpoint
+                if endpoint_url.is_none() {
+                    let header_map = match credentials.headers(Default::default()).await.map_err(
+                        |e| {
                             RealtimeError::AuthError(format!(
-                                "Failed to parse Authorization header value: {e}"
+                                "Failed to obtain OAuth2 token from ADC credentials: {e}"
                             ))
                         },
-                    )?,
-                );
+                    )? {
+                        google_cloud_auth::credentials::CacheableResource::New { data, .. } => data,
+                        google_cloud_auth::credentials::CacheableResource::NotModified => {
+                            return Err(RealtimeError::AuthError(
+                                "ADC credentials returned NotModified with no cached token available"
+                                    .to_string(),
+                            ));
+                        }
+                    };
+
+                    let auth_value = header_map
+                        .get("authorization")
+                        .ok_or_else(|| {
+                            RealtimeError::AuthError(
+                                "ADC credentials did not produce an Authorization header"
+                                    .to_string(),
+                            )
+                        })?
+                        .to_str()
+                        .map_err(|e| {
+                            RealtimeError::AuthError(format!(
+                                "Authorization header contains non-ASCII characters: {e}"
+                            ))
+                        })?
+                        .to_string();
+
+                    request.headers_mut().insert(
+                        "Authorization",
+                        auth_value.parse().map_err(
+                            |e: tokio_tungstenite::tungstenite::http::header::InvalidHeaderValue| {
+                                RealtimeError::AuthError(format!(
+                                    "Failed to parse Authorization header value: {e}"
+                                ))
+                            },
+                        )?,
+                    );
+                }
 
                 let (ws, _) = connect_async(request).await.map_err(|e| {
                     RealtimeError::connection(format!(
@@ -539,6 +554,7 @@ impl GeminiRealtimeSession {
             dialect,
             reconnect_model: normalized_model.clone(),
             last_resume_handle: Arc::new(ParkingMutex::new(None)),
+            call_names: Arc::new(ParkingMutex::new(std::collections::HashMap::new())),
         };
 
         session.send_setup_with_compiled_tools(&normalized_model, config, tools).await?;
@@ -760,13 +776,18 @@ impl GeminiRealtimeSession {
     /// `reconnect_with_backoff` can present it on the next connection attempt.
     pub(crate) fn translate_gemini_event(&self, raw: &str) -> Result<Vec<ServerEvent>> {
         let events = Self::translate_event_logged(raw, Some(&self.frame_log))?;
-        // Intercept SessionUpdated to cache the resume handle locally.
         for event in &events {
-            if let ServerEvent::SessionUpdated { session, .. } = event
-                && let Some(handle) = session.get("resumeHandle").and_then(|h| h.as_str())
-            {
-                *self.last_resume_handle.lock() = Some(handle.to_string());
-                tracing::debug!(handle = %handle, "Cached resumable handle for reconnect");
+            match event {
+                ServerEvent::SessionUpdated { session, .. } => {
+                    if let Some(handle) = session.get("resumeHandle").and_then(|h| h.as_str()) {
+                        *self.last_resume_handle.lock() = Some(handle.to_string());
+                        tracing::debug!(handle = %handle, "Cached resumable handle for reconnect");
+                    }
+                }
+                ServerEvent::FunctionCallDone { call_id, name, .. } => {
+                    self.call_names.lock().insert(call_id.clone(), name.clone());
+                }
+                _ => {}
             }
         }
         Ok(events)
@@ -1147,6 +1168,16 @@ impl RealtimeSession for GeminiRealtimeSession {
         Some(self)
     }
 
+    async fn force_transport_break(&self) -> Result<()> {
+        self.connected.store(false, Ordering::SeqCst);
+        self.cancel_token.lock().await.cancel();
+        let mut writer_task = self.writer_task.lock().await;
+        if let Some(handle) = writer_task.take() {
+            handle.abort();
+        }
+        Ok(())
+    }
+
     fn session_id(&self) -> &str {
         &self.session_id
     }
@@ -1250,18 +1281,16 @@ impl RealtimeSession for GeminiRealtimeSession {
     }
 
     async fn send_text(&self, text: &str) -> Result<()> {
-        // Use client_content with turns (correct Gemini Live API format)
+        // Send text via realtimeInput as required by Gemini 3.1 Live API for conversational text turns.
         let msg = GeminiClientMessage {
             setup: None,
-            realtime_input: None,
-            tool_response: None,
-            client_content: Some(GeminiClientContent {
-                turns: vec![GeminiTurn {
-                    role: "user".to_string(),
-                    parts: vec![GeminiPart { text: Some(text.to_string()), inline_data: None }],
-                }],
-                turn_complete: true,
+            realtime_input: Some(GeminiRealtimeInput {
+                audio: None,
+                media_chunks: None,
+                text: Some(text.to_string()),
             }),
+            tool_response: None,
+            client_content: None,
         };
         self.send_raw(&msg).await
     }
@@ -1272,12 +1301,20 @@ impl RealtimeSession for GeminiRealtimeSession {
             other => other.clone(),
         };
 
+        let name = self.call_names.lock().remove(&response.call_id).ok_or_else(|| {
+            RealtimeError::protocol(format!(
+                "Missing tool name for call_id '{}' in GeminiFunctionResponse",
+                response.call_id
+            ))
+        })?;
+
         let msg = GeminiClientMessage {
             setup: None,
             realtime_input: None,
             tool_response: Some(GeminiToolResponse {
                 function_responses: vec![GeminiFunctionResponse {
                     id: response.call_id,
+                    name,
                     response: output,
                 }],
             }),
@@ -1998,6 +2035,28 @@ mod tests {
     }
 
     #[test]
+    fn test_gemini_send_text_uses_realtime_input() {
+        // Conversational text turns must serialize via realtimeInput.text for Gemini 3.1 Live API
+        let msg = GeminiClientMessage {
+            setup: None,
+            realtime_input: Some(GeminiRealtimeInput {
+                audio: None,
+                media_chunks: None,
+                text: Some("Hello 3.1".to_string()),
+            }),
+            tool_response: None,
+            client_content: None,
+        };
+
+        let js = serde_json::to_value(&msg).unwrap();
+        assert!(js.get("clientContent").is_none());
+        assert_eq!(
+            js.get("realtimeInput").and_then(|r| r.get("text")).and_then(|t| t.as_str()),
+            Some("Hello 3.1")
+        );
+    }
+
+    #[test]
     fn test_gemini_translate_text_only() {
         let parts = vec![Part::Text { text: "Hello".to_string() }];
         let msg = translate_client_message("user", parts);
@@ -2670,6 +2729,7 @@ mod teardown_tests {
             dialect: GeminiSchemaDialect::OpenApiSubset,
             reconnect_model: "models/gemini-3.1-flash-live-preview".into(),
             last_resume_handle: Arc::new(ParkingMutex::new(None)),
+            call_names: Arc::new(ParkingMutex::new(std::collections::HashMap::new())),
         };
 
         // Execution of close() must complete quickly despite channel full & writer blocked

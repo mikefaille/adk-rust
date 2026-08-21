@@ -171,6 +171,11 @@ pub trait RealtimeSession: Send + Sync {
     /// Close the session gracefully.
     async fn close(&self) -> Result<()>;
 
+    /// Abruptly break the transport without a graceful close frame for testing recovery.
+    async fn force_transport_break(&self) -> Result<()> {
+        self.close().await
+    }
+
     /// Attempt to mutate the session parameters mid-flight.
     ///
     /// For providers that support native hot-swapping (e.g., OpenAI), this
