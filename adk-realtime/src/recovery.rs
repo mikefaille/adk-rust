@@ -326,14 +326,14 @@ pub(crate) mod supervisor;
 
 /// Integration test barrier for holding managed recovery in `TransportStatus::Recovering`
 /// before candidate connection/publication completes.
-#[cfg(any(test, feature = "integration"))]
+#[cfg(any(test, feature = "recovery-test-utils"))]
 #[derive(Debug, Default)]
 pub struct TestRecoveryBarrier {
     recovering_entered: tokio::sync::Notify,
     release: tokio::sync::Notify,
 }
 
-#[cfg(any(test, feature = "integration"))]
+#[cfg(any(test, feature = "recovery-test-utils"))]
 impl TestRecoveryBarrier {
     /// Create a new recovery barrier.
     pub fn new() -> Self {

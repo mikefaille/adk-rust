@@ -91,7 +91,7 @@ pub(crate) struct RecoverySupervisor {
     state: Arc<tokio::sync::RwLock<SupervisorState>>,
     replacement_lock: tokio::sync::Mutex<()>,
     generation_tx: tokio::sync::watch::Sender<u64>,
-    #[cfg(any(test, feature = "integration"))]
+    #[cfg(any(test, feature = "recovery-test-utils"))]
     test_recovery_barrier:
         Arc<parking_lot::Mutex<Option<Arc<crate::recovery::TestRecoveryBarrier>>>>,
 }
@@ -115,7 +115,7 @@ impl RecoverySupervisor {
             })),
             replacement_lock: tokio::sync::Mutex::new(()),
             generation_tx,
-            #[cfg(any(test, feature = "integration"))]
+            #[cfg(any(test, feature = "recovery-test-utils"))]
             test_recovery_barrier: Arc::new(parking_lot::Mutex::new(None)),
         }
     }
@@ -144,13 +144,13 @@ impl RecoverySupervisor {
             })),
             replacement_lock: tokio::sync::Mutex::new(()),
             generation_tx,
-            #[cfg(any(test, feature = "integration"))]
+            #[cfg(any(test, feature = "recovery-test-utils"))]
             test_recovery_barrier: Arc::new(parking_lot::Mutex::new(None)),
         }
     }
 
     /// Set an integration test recovery barrier to hold managed recovery in `TransportStatus::Recovering`.
-    #[cfg(any(test, feature = "integration"))]
+    #[cfg(any(test, feature = "recovery-test-utils"))]
     pub(crate) fn set_recovery_barrier_for_testing(
         &self,
         barrier: Arc<crate::recovery::TestRecoveryBarrier>,
@@ -565,7 +565,7 @@ impl RecoverySupervisor {
             return Err(err);
         }
 
-        #[cfg(any(test, feature = "integration"))]
+        #[cfg(any(test, feature = "recovery-test-utils"))]
         {
             let maybe_barrier = self.test_recovery_barrier.lock().take();
             if let Some(barrier) = maybe_barrier {

@@ -452,14 +452,14 @@ impl RealtimeRunner {
     ///
     /// Abruptly drops the raw active session transport without closing the managed supervisor,
     /// triggering the managed failure recovery path on the next read or write operation.
-    #[cfg(any(test, feature = "integration"))]
+    #[cfg(any(test, feature = "recovery-test-utils"))]
     pub async fn force_transport_break_for_testing(&self) -> Result<()> {
         let gen_item = self.supervisor.get_active_generation().await?;
         gen_item.session.force_transport_break().await
     }
 
     /// Set an integration test recovery barrier on the recovery supervisor.
-    #[cfg(any(test, feature = "integration"))]
+    #[cfg(any(test, feature = "recovery-test-utils"))]
     pub fn set_recovery_barrier_for_testing(
         &self,
         barrier: Arc<crate::recovery::TestRecoveryBarrier>,

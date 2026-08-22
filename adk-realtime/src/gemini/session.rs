@@ -363,18 +363,18 @@ impl GeminiRealtimeSession {
     }
 
     /// Returns the last resumable handle received via `sessionResumptionUpdate`.
-    #[cfg(any(test, feature = "integration"))]
+    #[cfg(any(test, feature = "recovery-test-utils"))]
     pub fn last_resume_handle(&self) -> Option<String> {
         self.last_resume_handle.lock().clone()
     }
 
-    #[cfg(not(any(test, feature = "integration")))]
+    #[cfg(not(any(test, feature = "recovery-test-utils")))]
     pub(crate) fn last_resume_handle(&self) -> Option<String> {
         self.last_resume_handle.lock().clone()
     }
 
     /// Constructs a mock `GeminiRealtimeSession` for testing connection lifecycle & recovery.
-    #[cfg(any(test, feature = "integration"))]
+    #[cfg(any(test, feature = "recovery-test-utils"))]
     pub fn new_for_test(
         session_id: String,
         reconnect_url: String,
@@ -445,6 +445,17 @@ impl GeminiRealtimeSession {
         model: &str,
         config: RealtimeConfig,
         dialect: GeminiSchemaDialect,
+    ) -> Result<Self> {
+        Self::connect_with_dialect_and_resume(backend, model, config, dialect, None).await
+    }
+
+    /// Private internal connector that passes a provider-private `private_resume_handle`.
+    async fn connect_with_dialect_and_resume(
+        backend: GeminiLiveBackend,
+        model: &str,
+        config: RealtimeConfig,
+        dialect: GeminiSchemaDialect,
+        private_resume_handle: Option<String>,
     ) -> Result<Self> {
         let normalized_model = normalize_model_id(model);
         let schema_cache = Arc::new(adk_core::SchemaCache::new());
@@ -598,11 +609,13 @@ impl GeminiRealtimeSession {
             backend: backend.clone(),
             dialect,
             reconnect_model: normalized_model.clone(),
-            last_resume_handle: Arc::new(ParkingMutex::new(None)),
+            last_resume_handle: Arc::new(ParkingMutex::new(private_resume_handle.clone())),
             call_names: Arc::new(ParkingMutex::new(CallNamesMap::new())),
         };
 
-        session.send_setup_with_compiled_tools(&normalized_model, config, tools).await?;
+        session
+            .send_setup_with_compiled_tools(&normalized_model, config, tools, private_resume_handle)
+            .await?;
         Ok(session)
     }
 
@@ -625,12 +638,13 @@ impl GeminiRealtimeSession {
         Ok(())
     }
 
-    /// Send initial setup message with pre-compiled tools.
+    /// Send initial setup message with pre-compiled tools and provider-private resume handle.
     async fn send_setup_with_compiled_tools(
         &self,
         model: &str,
         config: RealtimeConfig,
         compiled_tools: Option<Vec<Value>>,
+        private_resume_handle: Option<String>,
     ) -> Result<()> {
         let mut generation_config = json!({
             "responseModalities": gemini_response_modalities(config.modalities.as_deref()),
@@ -671,15 +685,8 @@ impl GeminiRealtimeSession {
 
         let normalized_model = normalize_model_id(model);
 
-        // Functionally extract the token if it exists in the prior state map
-        let handle = config
-            .extra
-            .as_ref()
-            .and_then(|ext| ext.get("resumeToken").or_else(|| ext.get("resumeHandle")))
-            .and_then(|val| val.as_str())
-            .map(|s| s.to_string());
-
-        let session_resumption = Some(SessionResumptionConfig { handle });
+        // Session resumption handle is strictly supplied by the Gemini adapter itself.
+        let session_resumption = Some(SessionResumptionConfig { handle: private_resume_handle });
 
         // When transcription is requested, enable both input (user speech) and
         // output (model speech) transcription so consumers get clean text for
@@ -1175,25 +1182,13 @@ impl RealtimeRecovery for GeminiRealtimeSession {
         }
 
         let attempt_fut = async {
-            let mut effective_config = config.clone();
-            if let Some(ref resume_handle) = prior_handle {
-                let extra_obj =
-                    effective_config.extra.get_or_insert_with(|| json!({})).as_object_mut();
-
-                if let Some(extra) = extra_obj
-                    && !extra.contains_key("resumeToken")
-                    && !extra.contains_key("resumeHandle")
-                {
-                    extra.insert("resumeHandle".to_string(), json!(resume_handle));
-                }
-            }
-
-            // Construct private candidate session with updated config & setup frame
-            let candidate_session = Self::connect_with_dialect(
+            // Construct private candidate session passing prior_handle directly to provider setup
+            let candidate_session = Self::connect_with_dialect_and_resume(
                 self.backend.clone(),
                 &self.reconnect_model,
-                effective_config,
+                config.clone(),
                 self.dialect,
+                prior_handle.clone(),
             )
             .await?;
 
@@ -1241,6 +1236,7 @@ impl RealtimeSession for GeminiRealtimeSession {
         Some(self)
     }
 
+    #[cfg(any(test, feature = "recovery-test-utils"))]
     async fn force_transport_break(&self) -> Result<()> {
         self.connected.store(false, Ordering::SeqCst);
         self.cancel_token.lock().await.cancel();
@@ -1502,15 +1498,8 @@ impl RealtimeSession for GeminiRealtimeSession {
                 // RE-USE the same retained compiler target for updates/resumption
                 let tools = convert_tools(config.tools, &self.schema_cache, self.adapter.as_ref())?;
 
-                let handle = config
-                    .extra
-                    .as_ref()
-                    .and_then(|ext| ext.get("resumeToken"))
-                    .and_then(|val| val.as_str())
-                    .map(|s| s.to_string());
-
-                let session_resumption =
-                    if handle.is_some() { Some(SessionResumptionConfig { handle }) } else { None };
+                let handle = self.last_resume_handle();
+                let session_resumption = Some(SessionResumptionConfig { handle });
 
                 let setup = GeminiClientMessage {
                     setup: Some(GeminiSetup {
@@ -2807,6 +2796,76 @@ mod tests {
         let events = session.translate_gemini_event(&raw).unwrap();
         assert!(events.is_empty());
         assert_eq!(session.last_resume_handle(), Some("test_handle_abc123".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_candidate_setup_uses_provider_cached_handle_not_stale_config_extra() {
+        let setup_received_handle = Arc::new(parking_lot::Mutex::new(None::<String>));
+        let setup_capture = Arc::clone(&setup_received_handle);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let _server = tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                let setup_capture = Arc::clone(&setup_capture);
+                tokio::spawn(async move {
+                    if let Ok(mut ws) = tokio_tungstenite::accept_async(stream).await {
+                        if let Some(Ok(Message::Text(msg))) = ws.next().await
+                            && let Ok(val) = serde_json::from_str::<Value>(&msg)
+                        {
+                            let handle = val
+                                .get("setup")
+                                .and_then(|s| s.get("sessionResumption"))
+                                .and_then(|r| r.get("handle"))
+                                .and_then(|h| h.as_str())
+                                .map(|s| s.to_string());
+                            *setup_capture.lock() = handle;
+                        }
+                        let setup_complete = json!({ "setupComplete": {} });
+                        let _ = ws.send(Message::Text(setup_complete.to_string().into())).await;
+                    }
+                });
+            }
+        });
+
+        let ws = tokio_tungstenite::connect_async(format!("ws://{}", addr)).await.unwrap().0;
+        let (_sink, source) = ws.split();
+        let (tx, _rx) = tokio::sync::mpsc::channel(10);
+        let writer_task = tokio::spawn(async {});
+
+        let session = GeminiRealtimeSession::new_for_test(
+            "test-session".to_string(),
+            format!("ws://{}", addr),
+            "models/gemini-3.1-flash-live-preview".to_string(),
+            tx,
+            writer_task,
+            source,
+        );
+
+        // Simulate provider caching fresh handle H2 ("fresh_provider_h2")
+        *session.last_resume_handle.lock() = Some("fresh_provider_h2".to_string());
+
+        // Construct generic config containing stale handle H1 ("stale_config_h1") in config.extra
+        let stale_config = RealtimeConfig {
+            extra: Some(
+                json!({ "resumeHandle": "stale_config_h1", "resumeToken": "stale_config_h1" }),
+            ),
+            ..Default::default()
+        };
+
+        use std::num::NonZeroU32;
+        use std::time::Duration;
+
+        let recovery = session.recovery().unwrap();
+        let cause = RecoveryCause::UnexpectedEof;
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let context =
+            RecoveryContext::new(NonZeroU32::new(1).unwrap(), &cause, &stale_config, deadline);
+
+        let _recovered = recovery.recover(context).await.unwrap();
+
+        let received = setup_received_handle.lock().clone();
+        assert_eq!(received, Some("fresh_provider_h2".to_string()));
     }
 }
 

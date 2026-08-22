@@ -158,17 +158,19 @@ harness = false
 
 [[test]]
 name = "gemini_recovery_tests"
-required-features = ["gemini", "integration"]
+required-features = ["gemini", "recovery-test-utils", "integration"]
 
 [[test]]
 name = "mock_websocket_server"
-required-features = ["gemini", "integration"]
+required-features = ["gemini", "recovery-test-utils", "integration"]
 
 [features]
 default = []
 # Allow diagnostics to include bounded raw provider frames. Off by default because
 # realtime frames carry transcripts, tool arguments, and identifiers.
 record-payloads = []
+# Feature flag for fault-injection, transport breaking, recovery barrier, and test utilities.
+recovery-test-utils = []
 # Enable ADK services integration (sessions, memory, plugins)
 integration = ["dep:adk-session", "dep:adk-memory", "dep:adk-plugin", "dep:chrono"]
 # Enable OpenAI Realtime API support
