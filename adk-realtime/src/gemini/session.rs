@@ -363,7 +363,13 @@ impl GeminiRealtimeSession {
     }
 
     /// Returns the last resumable handle received via `sessionResumptionUpdate`.
+    #[cfg(any(test, feature = "integration"))]
     pub fn last_resume_handle(&self) -> Option<String> {
+        self.last_resume_handle.lock().clone()
+    }
+
+    #[cfg(not(any(test, feature = "integration")))]
+    pub(crate) fn last_resume_handle(&self) -> Option<String> {
         self.last_resume_handle.lock().clone()
     }
 
@@ -701,7 +707,21 @@ impl GeminiRealtimeSession {
         self.send_raw(&setup).await
     }
 
-    /// Send a raw message.
+    /// Send a raw message to the writer task via local mpsc queue.
+    ///
+    /// # Admission & Delivery Semantics
+    ///
+    /// Returning `Ok(())` indicates only that the message was accepted by the
+    /// local writer `mpsc` queue for asynchronous transmission.
+    ///
+    /// `Ok(())` **does NOT guarantee or prove**:
+    /// - `WebSocket` socket-sink completion or TCP write
+    /// - Network arrival or peer socket acceptance
+    /// - Provider/Gemini service reception or protocol handling
+    /// - Model turn execution or business-logic processing
+    ///
+    /// If local queue enqueue fails (e.g. channel closed due to writer exit),
+    /// this method returns `RealtimeError::ConnectionError`.
     async fn send_raw<T: Serialize>(&self, value: &T) -> Result<()> {
         let msg = serde_json::to_string(value)
             .map_err(|e| RealtimeError::protocol(format!("JSON serialize error: {}", e)))?;

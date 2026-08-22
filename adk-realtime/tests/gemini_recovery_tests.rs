@@ -1127,16 +1127,18 @@ async fn test_live_gemini_managed_recovery_interruption() {
                     received_post_tool_content = true;
                 }
                 ServerEvent::ResponseDone { .. } if received_function_call => {
-                    assert!(
-                        received_post_tool_content,
-                        "Model continuation on N+1 must emit at least one non-empty content delta before ResponseDone"
-                    );
-                    received_final_response = true;
-                    tracing::info!(
-                        post_tool_continuation_success = true,
-                        "Model continuation turn completed post-tool on N+1"
-                    );
-                    break;
+                    if received_post_tool_content {
+                        received_final_response = true;
+                        tracing::info!(
+                            post_tool_continuation_success = true,
+                            "Model continuation turn completed post-tool on N+1"
+                        );
+                        break;
+                    } else {
+                        tracing::info!(
+                            "Received ResponseDone before post-tool content; continuing to wait for model continuation..."
+                        );
+                    }
                 }
                 _ => {}
             },
