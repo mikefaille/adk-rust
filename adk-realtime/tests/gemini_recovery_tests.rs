@@ -48,6 +48,8 @@ where
 pub struct GeminiLiveWsProxy {
     addr: SocketAddr,
     disconnect_notify: Arc<tokio::sync::Notify>,
+    resume_checkpoint_observed: Arc<std::sync::atomic::AtomicBool>,
+    candidate_resume_handle_match: Arc<std::sync::atomic::AtomicBool>,
     proxy_handle: tokio::task::JoinHandle<()>,
 }
 
@@ -58,18 +60,26 @@ impl GeminiLiveWsProxy {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("proxy TcpListener bind");
         let addr = listener.local_addr().expect("proxy local_addr");
         let disconnect_notify = Arc::new(tokio::sync::Notify::new());
+        let resume_checkpoint_observed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let candidate_resume_handle_match = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
         let target_url = format!("{}?key={}", adk_realtime::gemini::GEMINI_LIVE_URL, api_key);
 
         let disconnect_notify_clone = Arc::clone(&disconnect_notify);
+        let resume_obs_clone = Arc::clone(&resume_checkpoint_observed);
+        let candidate_match_clone = Arc::clone(&candidate_resume_handle_match);
 
         let proxy_handle = tokio::spawn(async move {
             let conn_counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let captured_handle = Arc::new(parking_lot::Mutex::new(None::<String>));
 
             while let Ok((stream, _)) = listener.accept().await {
                 let conn_id = conn_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
                 let target_url = target_url.clone();
                 let disconnect_notify = Arc::clone(&disconnect_notify_clone);
+                let resume_obs = Arc::clone(&resume_obs_clone);
+                let candidate_match = Arc::clone(&candidate_match_clone);
+                let captured_handle = Arc::clone(&captured_handle);
 
                 tokio::spawn(async move {
                     let client_ws = match accept_async(stream).await {
@@ -100,7 +110,6 @@ impl GeminiLiveWsProxy {
                             tokio::select! {
                                 _ = disconnect_notify.notified() => {
                                     tracing::info!("GeminiLiveWsProxy: Inducing abrupt transport drop on connection 1");
-                                    // Drop client_sink/client_stream abruptly without sending WebSocket Close!
                                     break;
                                 }
                                 client_msg = client_stream.next() => {
@@ -116,6 +125,21 @@ impl GeminiLiveWsProxy {
                                 target_msg = target_stream.next() => {
                                     match target_msg {
                                         Some(Ok(msg)) => {
+                                            let text_opt = match &msg {
+                                                Message::Text(t) => Some(t.as_str()),
+                                                Message::Binary(b) => std::str::from_utf8(b).ok(),
+                                                _ => None,
+                                            };
+                                            if let Some(text) = text_opt
+                                                && let Ok(val) = serde_json::from_str::<serde_json::Value>(text)
+                                                && let Some(update) = val.get("sessionResumptionUpdate")
+                                                && update.get("resumable").and_then(|r| r.as_bool()) == Some(true)
+                                                && let Some(handle) = update.get("newHandle").and_then(|h| h.as_str())
+                                            {
+                                                *captured_handle.lock() = Some(handle.to_string());
+                                                resume_obs.store(true, std::sync::atomic::Ordering::SeqCst);
+                                                tracing::info!(resume_checkpoint_observed = true, "Captured resumable handle in proxy");
+                                            }
                                             if client_sink.send(msg).await.is_err() {
                                                 break;
                                             }
@@ -126,12 +150,35 @@ impl GeminiLiveWsProxy {
                             }
                         }
                     } else {
-                        // Connection 2+: Candidate and subsequent recovery connections forward traffic normally
+                        // Connection 2+: Candidate and subsequent recovery connections
+                        let mut first_frame_checked = false;
                         loop {
                             tokio::select! {
                                 client_msg = client_stream.next() => {
                                     match client_msg {
                                         Some(Ok(msg)) => {
+                                            if !first_frame_checked {
+                                                let text_opt = match &msg {
+                                                    Message::Text(t) => Some(t.as_str()),
+                                                    Message::Binary(b) => std::str::from_utf8(b).ok(),
+                                                    _ => None,
+                                                };
+                                                if let Some(text) = text_opt {
+                                                    first_frame_checked = true;
+                                                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(text) {
+                                                        let cand_handle = val
+                                                            .get("setup")
+                                                            .and_then(|s| s.get("sessionResumption"))
+                                                            .and_then(|r| r.get("handle"))
+                                                            .and_then(|h| h.as_str());
+                                                        let expected_handle = captured_handle.lock().clone();
+                                                        if cand_handle.is_some() && cand_handle == expected_handle.as_deref() {
+                                                            candidate_match.store(true, std::sync::atomic::Ordering::SeqCst);
+                                                            tracing::info!(candidate_resume_handle_match = true, "Candidate handle matched captured checkpoint in proxy");
+                                                        }
+                                                    }
+                                                }
+                                            }
                                             if target_sink.send(msg).await.is_err() {
                                                 break;
                                             }
@@ -156,7 +203,13 @@ impl GeminiLiveWsProxy {
             }
         });
 
-        Self { addr, disconnect_notify, proxy_handle }
+        Self {
+            addr,
+            disconnect_notify,
+            resume_checkpoint_observed,
+            candidate_resume_handle_match,
+            proxy_handle,
+        }
     }
 
     pub fn url(&self) -> String {
@@ -165,6 +218,14 @@ impl GeminiLiveWsProxy {
 
     pub fn trigger_abrupt_disconnect(&self) {
         self.disconnect_notify.notify_one();
+    }
+
+    pub fn resume_checkpoint_observed(&self) -> bool {
+        self.resume_checkpoint_observed.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub fn candidate_resume_handle_match(&self) -> bool {
+        self.candidate_resume_handle_match.load(std::sync::atomic::Ordering::SeqCst)
     }
 }
 
@@ -855,37 +916,48 @@ async fn test_live_gemini_managed_recovery_interruption() {
         None => panic!("Initial connect returned EOF"),
     }
 
-    // Prove Generation N is demonstrably usable before interruption by executing a minimal prompt & response
+    // Generate random secret recovery marker
+    let random_marker = format!("marker-{}", uuid::Uuid::new_v4());
+
+    // Tell Gemini the secret recovery marker on Generation N
     runner
-        .send_text("Say hello in one word.")
+        .send_text(&format!(
+            "Remember this secret recovery marker: {random_marker}. Say 'understood' in one word."
+        ))
         .await
         .expect("Send text on Generation N must succeed");
 
-    let mut n_usable = false;
-    let n_usable_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let mut marker_turn_done = false;
+    let n_usable_deadline = tokio::time::Instant::now() + Duration::from_secs(15);
     while tokio::time::Instant::now() < n_usable_deadline {
-        let ev = match tokio::time::timeout(Duration::from_secs(3), runner.next_event()).await {
+        let ev = match tokio::time::timeout(Duration::from_secs(4), runner.next_event()).await {
             Ok(Some(Ok(e))) => e,
-            Ok(Some(Err(err))) => panic!("Error on Generation N prompt: {err:?}"),
-            Ok(None) => panic!("Unexpected EOF on Generation N prompt"),
+            Ok(Some(Err(err))) => panic!("Error on Generation N marker prompt: {err:?}"),
+            Ok(None) => panic!("Unexpected EOF on Generation N marker prompt"),
             Err(_) => continue,
         };
-        match ev {
-            ServerEvent::TextDelta { delta, .. } if !delta.is_empty() => {
-                n_usable = true;
-            }
-            ServerEvent::AudioDelta { delta, .. } if !delta.is_empty() => {
-                n_usable = true;
-            }
-            ServerEvent::ResponseDone { .. } if n_usable => {
-                break;
-            }
-            _ => {}
+        if matches!(ev, ServerEvent::ResponseDone { .. }) {
+            marker_turn_done = true;
+            break;
         }
     }
     assert!(
-        n_usable,
-        "Generation N must produce real model output and prove usability before interruption"
+        marker_turn_done,
+        "Generation N marker turn must reach ResponseDone before interruption"
+    );
+
+    // Wait until proxy observes a valid sessionResumptionUpdate checkpoint frame after marker turn
+    let checkpoint_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while tokio::time::Instant::now() < checkpoint_deadline && !proxy.resume_checkpoint_observed() {
+        let _ = tokio::time::timeout(Duration::from_millis(500), runner.next_event()).await;
+    }
+    assert!(
+        proxy.resume_checkpoint_observed(),
+        "Proxy must observe a valid sessionResumptionUpdate checkpoint frame on Generation N"
+    );
+    tracing::info!(
+        resume_checkpoint_observed = true,
+        "Confirmed checkpoint observed prior to abrupt disconnect"
     );
 
     // 2. Set test recovery barrier on recovery supervisor
@@ -935,11 +1007,20 @@ async fn test_live_gemini_managed_recovery_interruption() {
         gen_n_id + 1
     );
 
+    assert!(
+        proxy.candidate_resume_handle_match(),
+        "Candidate session N+1 setup frame must present the exact resume handle captured from Generation N checkpoint"
+    );
+    tracing::info!(
+        candidate_resume_handle_match = true,
+        "Confirmed candidate handle match on N+1 setup"
+    );
+
     let runner = runner_arc;
 
-    // 9. Subsequent real post-recovery Gemini 3.1 interaction on N+1: send text prompt to Gemini
+    // 9. Post-recovery conversation continuity proof: prompt Gemini on N+1 WITHOUT repeating the secret marker
     runner
-        .send_text("Please call the tool recovery_probe with value 'test12345' now.")
+        .send_text("Please call recovery_probe with the secret recovery marker I gave you before the disconnect.")
         .await
         .expect("Send text on N+1 must succeed");
 
@@ -948,17 +1029,29 @@ async fn test_live_gemini_managed_recovery_interruption() {
         .await
         .expect("read_task must complete within 10s")
         .expect("read_task join");
+
     let mut received_function_call = false;
+    let mut received_post_tool_content = false;
     let mut received_final_response = false;
 
     match first_ev {
         Some(Ok(event)) => {
             if let ServerEvent::FunctionCallDone { call_id, name, arguments, .. } = event {
                 assert_eq!(name, "recovery_probe");
+                let probed_val = arguments.get("value").and_then(|v| v.as_str());
+                assert_eq!(
+                    probed_val,
+                    Some(random_marker.as_str()),
+                    "Gemini N+1 must recall the exact secret recovery marker from Generation N history without repetition!"
+                );
+                tracing::info!(
+                    marker_continuity_success = true,
+                    "Secret recovery marker recalled successfully on N+1"
+                );
                 received_function_call = true;
                 let response = ToolResponse {
                     call_id,
-                    output: json!({ "status": "probed", "value": arguments.get("value") }),
+                    output: json!({ "status": "probed", "value": probed_val }),
                 };
                 runner
                     .send_tool_response(response)
@@ -970,7 +1063,7 @@ async fn test_live_gemini_managed_recovery_interruption() {
         None => panic!("Unexpected EOF receiving first event post-recovery on N+1"),
     }
 
-    // 11. Continue polling next_event() until model continuation response is received
+    // 11. Continue polling next_event() until model continuation content and then ResponseDone are observed
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     while tokio::time::Instant::now() < deadline && !received_final_response {
         let event_opt =
@@ -985,10 +1078,20 @@ async fn test_live_gemini_managed_recovery_interruption() {
                     if !received_function_call =>
                 {
                     assert_eq!(name, "recovery_probe");
+                    let probed_val = arguments.get("value").and_then(|v| v.as_str());
+                    assert_eq!(
+                        probed_val,
+                        Some(random_marker.as_str()),
+                        "Gemini N+1 must recall the exact secret recovery marker from Generation N history!"
+                    );
+                    tracing::info!(
+                        marker_continuity_success = true,
+                        "Secret recovery marker recalled successfully on N+1"
+                    );
                     received_function_call = true;
                     let response = ToolResponse {
                         call_id,
-                        output: json!({ "status": "probed", "value": arguments.get("value") }),
+                        output: json!({ "status": "probed", "value": probed_val }),
                     };
                     runner
                         .send_tool_response(response)
@@ -998,23 +1101,28 @@ async fn test_live_gemini_managed_recovery_interruption() {
                 ServerEvent::TextDelta { delta, .. }
                     if !delta.is_empty() && received_function_call =>
                 {
-                    received_final_response = true;
-                    break;
-                }
-                ServerEvent::TranscriptDelta { delta, .. }
-                    if !delta.is_empty() && received_function_call =>
-                {
-                    received_final_response = true;
-                    break;
-                }
-                ServerEvent::ResponseDone { .. } if received_function_call => {
-                    received_final_response = true;
-                    break;
+                    received_post_tool_content = true;
                 }
                 ServerEvent::AudioDelta { delta, .. }
                     if !delta.is_empty() && received_function_call =>
                 {
+                    received_post_tool_content = true;
+                }
+                ServerEvent::TranscriptDelta { delta, .. }
+                    if !delta.is_empty() && received_function_call =>
+                {
+                    received_post_tool_content = true;
+                }
+                ServerEvent::ResponseDone { .. } if received_function_call => {
+                    assert!(
+                        received_post_tool_content,
+                        "Model continuation on N+1 must emit at least one non-empty content delta before ResponseDone"
+                    );
                     received_final_response = true;
+                    tracing::info!(
+                        post_tool_continuation_success = true,
+                        "Model continuation turn completed post-tool on N+1"
+                    );
                     break;
                 }
                 _ => {}
@@ -1026,7 +1134,11 @@ async fn test_live_gemini_managed_recovery_interruption() {
 
     assert!(received_function_call, "Must receive real function call on generation N+1");
     assert!(
+        received_post_tool_content,
+        "Must receive non-empty post-tool content delta on generation N+1"
+    );
+    assert!(
         received_final_response,
-        "Must receive real model response after function response on N+1"
+        "Must receive ResponseDone after post-tool content delta on N+1"
     );
 }

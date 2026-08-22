@@ -300,7 +300,46 @@ pub struct GeminiRealtimeSession {
     /// best reconnect anchor).
     last_resume_handle: Arc<ParkingMutex<Option<String>>>,
     /// Association map between function call IDs and tool names for wire-conforming `FunctionResponse` payloads.
-    call_names: Arc<ParkingMutex<std::collections::HashMap<String, String>>>,
+    call_names: Arc<ParkingMutex<CallNamesMap>>,
+}
+
+const MAX_CALL_NAMES_CAPACITY: usize = 1000;
+
+#[derive(Debug, Default)]
+pub(crate) struct CallNamesMap {
+    order: std::collections::VecDeque<String>,
+    map: std::collections::HashMap<String, String>,
+}
+
+impl CallNamesMap {
+    pub(crate) fn new() -> Self {
+        Self { order: std::collections::VecDeque::new(), map: std::collections::HashMap::new() }
+    }
+
+    pub(crate) fn insert(&mut self, call_id: String, name: String) {
+        if !self.map.contains_key(&call_id) {
+            self.order.push_back(call_id.clone());
+            if self.order.len() > MAX_CALL_NAMES_CAPACITY
+                && let Some(oldest) = self.order.pop_front()
+            {
+                self.map.remove(&oldest);
+            }
+        }
+        self.map.insert(call_id, name);
+    }
+
+    pub(crate) fn remove(&mut self, call_id: &str) -> Option<String> {
+        let removed = self.map.remove(call_id);
+        if removed.is_some() {
+            self.order.retain(|id| id != call_id);
+        }
+        removed
+    }
+
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.map.len()
+    }
 }
 
 /// Ensure the model ID is prefixed with "models/" as required by Gemini Live setup frames.
@@ -329,7 +368,7 @@ impl GeminiRealtimeSession {
     }
 
     /// Constructs a mock `GeminiRealtimeSession` for testing connection lifecycle & recovery.
-    #[cfg(any(test, feature = "integration", feature = "gemini"))]
+    #[cfg(any(test, feature = "integration"))]
     pub fn new_for_test(
         session_id: String,
         reconnect_url: String,
@@ -359,7 +398,7 @@ impl GeminiRealtimeSession {
             dialect,
             reconnect_model,
             last_resume_handle: Arc::new(ParkingMutex::new(None)),
-            call_names: Arc::new(ParkingMutex::new(std::collections::HashMap::new())),
+            call_names: Arc::new(ParkingMutex::new(CallNamesMap::new())),
         }
     }
 
@@ -554,7 +593,7 @@ impl GeminiRealtimeSession {
             dialect,
             reconnect_model: normalized_model.clone(),
             last_resume_handle: Arc::new(ParkingMutex::new(None)),
-            call_names: Arc::new(ParkingMutex::new(std::collections::HashMap::new())),
+            call_names: Arc::new(ParkingMutex::new(CallNamesMap::new())),
         };
 
         session.send_setup_with_compiled_tools(&normalized_model, config, tools).await?;
@@ -781,7 +820,10 @@ impl GeminiRealtimeSession {
                 ServerEvent::SessionUpdated { session, .. } => {
                     if let Some(handle) = session.get("resumeHandle").and_then(|h| h.as_str()) {
                         *self.last_resume_handle.lock() = Some(handle.to_string());
-                        tracing::debug!(handle = %handle, "Cached resumable handle for reconnect");
+                        tracing::debug!(
+                            resume_checkpoint_observed = true,
+                            "Cached resumable handle for reconnect"
+                        );
                     }
                 }
                 ServerEvent::FunctionCallDone { call_id, name, .. } => {
@@ -2554,6 +2596,19 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_call_names_map_fifo_eviction() {
+        let mut map = CallNamesMap::new();
+        for i in 0..1005 {
+            map.insert(format!("call_{i}"), format!("tool_{i}"));
+        }
+        assert_eq!(map.len(), 1000);
+        assert!(map.remove("call_0").is_none());
+        assert!(map.remove("call_4").is_none());
+        assert_eq!(map.remove("call_5"), Some("tool_5".to_string()));
+        assert_eq!(map.remove("call_1004"), Some("tool_1004".to_string()));
+    }
+
     #[tokio::test]
     async fn test_tool_call_cancellation_evicts_call_names() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2792,7 +2847,7 @@ mod teardown_tests {
             dialect: GeminiSchemaDialect::OpenApiSubset,
             reconnect_model: "models/gemini-3.1-flash-live-preview".into(),
             last_resume_handle: Arc::new(ParkingMutex::new(None)),
-            call_names: Arc::new(ParkingMutex::new(std::collections::HashMap::new())),
+            call_names: Arc::new(ParkingMutex::new(CallNamesMap::new())),
         };
 
         // Execution of close() must complete quickly despite channel full & writer blocked

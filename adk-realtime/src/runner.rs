@@ -753,7 +753,6 @@ impl RealtimeRunner {
 
             match event_res {
                 Some(Ok(event)) => {
-                    self.handle_internal_event(&event).await;
                     return Some(Ok(event));
                 }
                 Some(Err(e)) => {
@@ -1027,32 +1026,6 @@ impl RealtimeRunner {
         result
     }
 
-    /// Helper to handle internal events such as resume token updates.
-    async fn handle_internal_event(&self, event: &ServerEvent) {
-        if let ServerEvent::SessionUpdated { session, .. } = event {
-            let token = session
-                .get("resumeToken")
-                .or_else(|| session.get("resumeHandle"))
-                .and_then(|t| t.as_str());
-
-            if let Some(token) = token {
-                tracing::info!(
-                    token = %token,
-                    "Received Gemini sessionResumption token, saving for future reconnects."
-                );
-                self.supervisor
-                    .update_config(|config| {
-                        let mut extra =
-                            config.extra.clone().unwrap_or_else(|| serde_json::json!({}));
-                        extra["resumeToken"] = serde_json::Value::String(token.to_string());
-                        extra["resumeHandle"] = serde_json::Value::String(token.to_string());
-                        config.extra = Some(extra);
-                    })
-                    .await;
-            }
-        }
-    }
-
     /// Process a single event.
     async fn handle_event(&self, event: ServerEvent) -> Result<Option<PendingToolCall>> {
         match &event {
@@ -1118,9 +1091,6 @@ impl RealtimeRunner {
                 if self.runner_config.auto_execute_tools =>
             {
                 return Ok(Some(PendingToolCall { call_id, name, arguments }));
-            }
-            ServerEvent::SessionUpdated { .. } => {
-                self.handle_internal_event(&event).await;
             }
             ServerEvent::Error { error, .. } => {
                 let err = RealtimeError::server(error.code.unwrap_or_default(), error.message);
