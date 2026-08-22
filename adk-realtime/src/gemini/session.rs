@@ -814,18 +814,25 @@ impl GeminiRealtimeSession {
     /// caches the handle on `self.last_resume_handle` so that
     /// `reconnect_with_backoff` can present it on the next connection attempt.
     pub(crate) fn translate_gemini_event(&self, raw: &str) -> Result<Vec<ServerEvent>> {
+        if let Ok(value) = serde_json::from_str::<Value>(raw)
+            && let Some(resumption_update) = value.get("sessionResumptionUpdate")
+        {
+            let resumable =
+                resumption_update.get("resumable").and_then(|r| r.as_bool()).unwrap_or(false);
+            if resumable
+                && let Some(handle) = resumption_update.get("newHandle").and_then(|h| h.as_str())
+            {
+                *self.last_resume_handle.lock() = Some(handle.to_string());
+                tracing::debug!(
+                    resume_checkpoint_observed = true,
+                    "Stored resumable Gemini session handle for reconnect"
+                );
+            }
+        }
+
         let events = Self::translate_event_logged(raw, Some(&self.frame_log))?;
         for event in &events {
             match event {
-                ServerEvent::SessionUpdated { session, .. } => {
-                    if let Some(handle) = session.get("resumeHandle").and_then(|h| h.as_str()) {
-                        *self.last_resume_handle.lock() = Some(handle.to_string());
-                        tracing::debug!(
-                            resume_checkpoint_observed = true,
-                            "Cached resumable handle for reconnect"
-                        );
-                    }
-                }
                 ServerEvent::FunctionCallDone { call_id, name, .. } => {
                     self.call_names.lock().insert(call_id.clone(), name.clone());
                 }
@@ -856,7 +863,6 @@ impl GeminiRealtimeSession {
         raw: &str,
         frame_log: Option<&FrameLog>,
     ) -> Result<Vec<ServerEvent>> {
-        tracing::debug!(%raw, "Translating Gemini event");
         let value: Value = serde_json::from_str(raw)
             .map_err(|e| RealtimeError::protocol(describe_unparseable_frame(raw, &e)))?;
         log_frame_shape(&value, frame_log);
@@ -992,22 +998,15 @@ impl GeminiRealtimeSession {
                 resumption_update.get("resumable").and_then(|r| r.as_bool()).unwrap_or(false);
             let handle = resumption_update.get("newHandle").and_then(|h| h.as_str());
             match (resumable, handle) {
-                (true, Some(handle)) => {
-                    // Store the handle on the session so reconnect_with_backoff
-                    // can present it in the new setup frame — this is the second
-                    // half of session resumption support (the first was parsing
-                    // the correct field name above).
+                (true, Some(_handle)) => {
                     if let Some(frame_log) = frame_log {
                         let _ = frame_log; // suppress unused warning in non-session context
                     }
-                    tracing::debug!(handle = %handle, "Received a resumable Gemini session handle; storing for reconnect");
-                    return Ok(vec![ServerEvent::SessionUpdated {
-                        event_id: uuid::Uuid::new_v4().to_string(),
-                        session: json!({
-                            "resumeToken": handle,
-                            "resumeHandle": handle
-                        }),
-                    }]);
+                    tracing::debug!(
+                        resume_checkpoint_observed = true,
+                        "Received a resumable sessionResumptionUpdate; handle stored privately"
+                    );
+                    return Ok(vec![]);
                 }
                 _ => {
                     tracing::debug!(
@@ -2193,22 +2192,15 @@ mod tests {
         assert_ne!(first, second);
     }
 
-    /// The field the server actually sends. `resumptionToken` was never sent, so
-    /// this branch never fired and no handle was ever captured.
+    /// Resumable sessionResumptionUpdate control frame produces no public ServerEvent.
     #[test]
-    fn resumable_session_update_yields_the_new_handle() {
+    fn resumable_session_update_yields_no_public_event() {
         let raw = r#"{"sessionResumptionUpdate":{"newHandle":"handle-abc","resumable":true}}"#;
         let events = GeminiRealtimeSession::translate_event_static(raw).unwrap();
-
-        match events.as_slice() {
-            [ServerEvent::SessionUpdated { session, .. }] => {
-                assert_eq!(
-                    session.get("resumeHandle").and_then(|h| h.as_str()),
-                    Some("handle-abc")
-                );
-            }
-            other => panic!("expected one SessionUpdated, got {other:?}"),
-        }
+        assert!(
+            events.is_empty(),
+            "expected no public events for resumable update, got {events:?}"
+        );
     }
 
     /// `resumable: false` means "no safe resume point right now". Emitting the
@@ -2760,8 +2752,30 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_session_resumption_update_emits_both_token_keys() {
+    #[tokio::test]
+    async fn test_session_resumption_update_stores_last_resume_handle_privately() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let _server = tokio::spawn(async move {
+            if let Ok((stream, _)) = listener.accept().await {
+                let _ = tokio_tungstenite::accept_async(stream).await;
+            }
+        });
+
+        let ws = tokio_tungstenite::connect_async(format!("ws://{}", addr)).await.unwrap().0;
+        let (_sink, source) = ws.split();
+        let (tx, _rx) = tokio::sync::mpsc::channel(10);
+        let writer_task = tokio::spawn(async {});
+
+        let session = GeminiRealtimeSession::new_for_test(
+            "test-session".to_string(),
+            format!("ws://{}", addr),
+            "models/gemini-3.1-flash-live-preview".to_string(),
+            tx,
+            writer_task,
+            source,
+        );
+
         let raw = json!({
             "sessionResumptionUpdate": {
                 "resumable": true,
@@ -2770,20 +2784,9 @@ mod tests {
         })
         .to_string();
 
-        let events = GeminiRealtimeSession::translate_event_static(&raw).unwrap();
-        assert_eq!(events.len(), 1);
-        if let ServerEvent::SessionUpdated { session, .. } = &events[0] {
-            assert_eq!(
-                session.get("resumeToken").and_then(|v| v.as_str()),
-                Some("test_handle_abc123")
-            );
-            assert_eq!(
-                session.get("resumeHandle").and_then(|v| v.as_str()),
-                Some("test_handle_abc123")
-            );
-        } else {
-            panic!("Expected SessionUpdated event");
-        }
+        let events = session.translate_gemini_event(&raw).unwrap();
+        assert!(events.is_empty());
+        assert_eq!(session.last_resume_handle(), Some("test_handle_abc123".to_string()));
     }
 }
 

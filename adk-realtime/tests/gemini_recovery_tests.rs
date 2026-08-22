@@ -48,6 +48,7 @@ where
 pub struct GeminiLiveWsProxy {
     addr: SocketAddr,
     disconnect_notify: Arc<tokio::sync::Notify>,
+    armed_for_checkpoint: Arc<std::sync::atomic::AtomicBool>,
     resume_checkpoint_observed: Arc<std::sync::atomic::AtomicBool>,
     candidate_resume_handle_match: Arc<std::sync::atomic::AtomicBool>,
     proxy_handle: tokio::task::JoinHandle<()>,
@@ -60,12 +61,14 @@ impl GeminiLiveWsProxy {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("proxy TcpListener bind");
         let addr = listener.local_addr().expect("proxy local_addr");
         let disconnect_notify = Arc::new(tokio::sync::Notify::new());
+        let armed_for_checkpoint = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let resume_checkpoint_observed = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let candidate_resume_handle_match = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
         let target_url = format!("{}?key={}", adk_realtime::gemini::GEMINI_LIVE_URL, api_key);
 
         let disconnect_notify_clone = Arc::clone(&disconnect_notify);
+        let armed_clone = Arc::clone(&armed_for_checkpoint);
         let resume_obs_clone = Arc::clone(&resume_checkpoint_observed);
         let candidate_match_clone = Arc::clone(&candidate_resume_handle_match);
 
@@ -77,6 +80,7 @@ impl GeminiLiveWsProxy {
                 let conn_id = conn_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
                 let target_url = target_url.clone();
                 let disconnect_notify = Arc::clone(&disconnect_notify_clone);
+                let armed = Arc::clone(&armed_clone);
                 let resume_obs = Arc::clone(&resume_obs_clone);
                 let candidate_match = Arc::clone(&candidate_match_clone);
                 let captured_handle = Arc::clone(&captured_handle);
@@ -137,8 +141,10 @@ impl GeminiLiveWsProxy {
                                                 && let Some(handle) = update.get("newHandle").and_then(|h| h.as_str())
                                             {
                                                 *captured_handle.lock() = Some(handle.to_string());
-                                                resume_obs.store(true, std::sync::atomic::Ordering::SeqCst);
-                                                tracing::info!(resume_checkpoint_observed = true, "Captured resumable handle in proxy");
+                                                if armed.load(std::sync::atomic::Ordering::SeqCst) {
+                                                    resume_obs.store(true, std::sync::atomic::Ordering::SeqCst);
+                                                    tracing::info!(resume_checkpoint_observed = true, "Captured post-marker resumable handle in proxy");
+                                                }
                                             }
                                             if client_sink.send(msg).await.is_err() {
                                                 break;
@@ -206,6 +212,7 @@ impl GeminiLiveWsProxy {
         Self {
             addr,
             disconnect_notify,
+            armed_for_checkpoint,
             resume_checkpoint_observed,
             candidate_resume_handle_match,
             proxy_handle,
@@ -214,6 +221,10 @@ impl GeminiLiveWsProxy {
 
     pub fn url(&self) -> String {
         format!("ws://{}", self.addr)
+    }
+
+    pub fn arm_checkpoint_capture(&self) {
+        self.armed_for_checkpoint.store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     pub fn trigger_abrupt_disconnect(&self) {
@@ -437,9 +448,8 @@ async fn test_consecutive_recovery_carries_resume_handle_anchor() {
     let ev1 = session_n.next_event().await.unwrap().unwrap();
     assert!(matches!(ev1, ServerEvent::SessionCreated { .. }));
 
-    // Read SessionUpdated carrying handle-H-123 over WebSocket wire
-    let ev2 = session_n.next_event().await.unwrap().unwrap();
-    assert!(matches!(ev2, ServerEvent::SessionUpdated { .. }));
+    // Read until sessionResumptionUpdate is processed internally
+    let _ = session_n.next_event().await;
     assert_eq!(session_n.last_resume_handle(), Some("handle-H-123".to_string()));
 
     // 1st Recovery: N -> N+1
@@ -946,6 +956,9 @@ async fn test_live_gemini_managed_recovery_interruption() {
         "Generation N marker turn must reach ResponseDone before interruption"
     );
 
+    // Arm proxy to capture sessionResumptionUpdate AFTER marker turn completes
+    proxy.arm_checkpoint_capture();
+
     // Wait until proxy observes a valid sessionResumptionUpdate checkpoint frame after marker turn
     let checkpoint_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     while tokio::time::Instant::now() < checkpoint_deadline && !proxy.resume_checkpoint_observed() {
@@ -1020,7 +1033,7 @@ async fn test_live_gemini_managed_recovery_interruption() {
 
     // 9. Post-recovery conversation continuity proof: prompt Gemini on N+1 WITHOUT repeating the secret marker
     runner
-        .send_text("Please call recovery_probe with the secret recovery marker I gave you before the disconnect.")
+        .send_text("Please call recovery_probe with the secret recovery marker I gave you before the disconnect, then confirm verbally or in text.")
         .await
         .expect("Send text on N+1 must succeed");
 
