@@ -159,6 +159,11 @@ pub trait EventHandler: Send + Sync {
         Ok(())
     }
 
+    /// Called when the provider signals a planned connection rotation (e.g. Gemini goAway).
+    async fn on_planned_rotation(&self, _time_left: Option<&str>) -> Result<()> {
+        Ok(())
+    }
+
     /// Called when a response is cancelled or interrupted.
     async fn on_response_cancelled(&self) -> Result<()> {
         Ok(())
@@ -753,6 +758,21 @@ impl RealtimeRunner {
 
             match event_res {
                 Some(Ok(event)) => {
+                    if let ServerEvent::PlannedRotation { ref time_left } = event {
+                        let _ = self.event_handler.on_planned_rotation(time_left.as_deref()).await;
+                        let supervisor = Arc::clone(&self.supervisor);
+                        let gen_id = current_gen_id;
+                        let time_left_clone = time_left.clone();
+                        tokio::spawn(async move {
+                            let cause =
+                                RecoveryCause::PlannedRotation { time_left: time_left_clone };
+                            if let Err(e) =
+                                supervisor.execute_planned_replacement(gen_id, cause).await
+                            {
+                                tracing::warn!(gen_id, error = %e, "proactive planned replacement attempt failed; keeping generation N authoritative");
+                            }
+                        });
+                    }
                     return Some(Ok(event));
                 }
                 Some(Err(e)) => {
@@ -1069,6 +1089,21 @@ impl RealtimeRunner {
             }
             ServerEvent::ToolCallCancelled { call_ids } => {
                 self.event_handler.on_tool_calls_cancelled(&call_ids).await?;
+            }
+            ServerEvent::PlannedRotation { time_left } => {
+                self.event_handler.on_planned_rotation(time_left.as_deref()).await?;
+                let supervisor = Arc::clone(&self.supervisor);
+                if let Ok(gen_item) = self.supervisor.get_active_generation().await {
+                    let gen_id = gen_item.id;
+                    let time_left_clone = time_left.clone();
+                    tokio::spawn(async move {
+                        let cause = RecoveryCause::PlannedRotation { time_left: time_left_clone };
+                        if let Err(e) = supervisor.execute_planned_replacement(gen_id, cause).await
+                        {
+                            tracing::warn!(gen_id, error = %e, "proactive planned replacement attempt failed; keeping generation N authoritative");
+                        }
+                    });
+                }
             }
             ServerEvent::ResponseCancelled { .. } => {
                 self.pending_tool_response.store(false, Ordering::Release);
@@ -2268,6 +2303,131 @@ mod runner_tests {
             }
             other => panic!("Expected PendingResumption B, got {:?}", other),
         }
+    }
+
+    struct CallNameTrackingSession {
+        counts: Arc<Counts>,
+        call_ids: Arc<parking_lot::Mutex<std::collections::HashSet<String>>>,
+    }
+
+    #[async_trait]
+    impl RealtimeSession for CallNameTrackingSession {
+        fn session_id(&self) -> &str {
+            "call-tracking-session"
+        }
+        fn is_connected(&self) -> bool {
+            true
+        }
+        async fn send_audio(&self, _audio: &AudioChunk) -> Result<()> {
+            Ok(())
+        }
+        async fn send_audio_base64(&self, _audio: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn send_text(&self, _text: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn send_tool_response(&self, response: ToolResponse) -> Result<()> {
+            if self.call_ids.lock().remove(&response.call_id) {
+                self.counts.tool_response.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            } else {
+                Err(RealtimeError::protocol(format!(
+                    "Missing tool name for call_id '{}' in session",
+                    response.call_id
+                )))
+            }
+        }
+        async fn send_tool_output(&self, response: ToolResponse) -> Result<()> {
+            if self.call_ids.lock().remove(&response.call_id) {
+                self.counts.tool_output.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            } else {
+                Err(RealtimeError::protocol(format!(
+                    "Missing tool name for call_id '{}' in session",
+                    response.call_id
+                )))
+            }
+        }
+        async fn commit_audio(&self) -> Result<()> {
+            Ok(())
+        }
+        async fn clear_audio(&self) -> Result<()> {
+            Ok(())
+        }
+        async fn create_response(&self) -> Result<()> {
+            self.counts.create_response.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+        async fn interrupt(&self) -> Result<()> {
+            Ok(())
+        }
+        async fn send_event(&self, _event: ClientEvent) -> Result<()> {
+            Ok(())
+        }
+        async fn next_event(&self) -> Option<Result<ServerEvent>> {
+            None
+        }
+        fn events(&self) -> Pin<Box<dyn futures::Stream<Item = Result<ServerEvent>> + Send + '_>> {
+            Box::pin(futures::stream::empty())
+        }
+        async fn close(&self) -> Result<()> {
+            Ok(())
+        }
+        async fn mutate_context(&self, _config: RealtimeConfig) -> Result<ContextMutationOutcome> {
+            Ok(ContextMutationOutcome::Applied)
+        }
+    }
+
+    #[tokio::test]
+    async fn stale_tool_response_from_replaced_generation_n_is_rejected_fail_closed_on_n_plus_1() {
+        let counts_n0 = Arc::new(Counts::default());
+        let counts_n1 = Arc::new(Counts::default());
+
+        let call_ids_n0 = Arc::new(parking_lot::Mutex::new(std::collections::HashSet::new()));
+        let call_ids_n1 = Arc::new(parking_lot::Mutex::new(std::collections::HashSet::new()));
+
+        let session_n0 = Arc::new(CallNameTrackingSession {
+            counts: counts_n0.clone(),
+            call_ids: call_ids_n0.clone(),
+        }) as Arc<dyn RealtimeSession>;
+
+        let session_n1 = Arc::new(CallNameTrackingSession {
+            counts: counts_n1.clone(),
+            call_ids: call_ids_n1.clone(),
+        }) as Arc<dyn RealtimeSession>;
+
+        let runner =
+            RealtimeRunner::builder().model(Arc::new(MockModel) as BoxedModel).build().unwrap();
+
+        let gen0_id = runner.set_initial_session(session_n0.clone()).await.unwrap();
+        assert_eq!(gen0_id, 0);
+
+        // Record function call_gen0_123 on Generation 0
+        call_ids_n0.lock().insert("call_gen0_123".to_string());
+
+        // Supervisor publishes replacement Generation 1
+        let gen1_id =
+            runner.supervisor.publish_replacement(session_n1.clone(), 0).await.unwrap().id;
+        assert_eq!(gen1_id, 1);
+
+        // Attempt send_tool_response for call_gen0_123 targeting active Generation 1
+        let tool_response = ToolResponse {
+            call_id: "call_gen0_123".to_string(),
+            output: serde_json::json!({ "result": "stale" }),
+        };
+
+        let send_res = runner.send_tool_response(tool_response).await;
+
+        // Must be rejected because Generation 1's call_ids map does not contain call_gen0_123
+        assert!(
+            send_res.is_err(),
+            "Tool response from Generation 0 must be rejected on Generation 1"
+        );
+
+        // Zero tool output/response writes reach Generation 1
+        assert_eq!(counts_n1.tool_response.load(Ordering::SeqCst), 0);
+        assert_eq!(counts_n1.tool_output.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
