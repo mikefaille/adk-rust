@@ -902,6 +902,13 @@ impl GeminiRealtimeSession {
             }]);
         }
 
+        // Check for goAway planned rotation signal
+        if let Some(go_away) = value.get("goAway") {
+            let time_left = go_away.get("timeLeft").and_then(|t| t.as_str()).map(|s| s.to_string());
+            tracing::info!(time_left = ?time_left, "Gemini Live goAway frame received");
+            return Ok(vec![ServerEvent::PlannedRotation { time_left }]);
+        }
+
         // Check for server content (audio/text)
         if let Some(content) = value.get("serverContent") {
             let mut events = Vec::new();
@@ -1134,7 +1141,9 @@ impl RealtimeRecovery for GeminiRealtimeSession {
                     RecoveryDisposition::Fatal
                 }
             }
-            RecoveryCause::UnexpectedEof => RecoveryDisposition::Recoverable,
+            RecoveryCause::UnexpectedEof | RecoveryCause::PlannedRotation { .. } => {
+                RecoveryDisposition::Recoverable
+            }
         }
     }
 
@@ -2598,6 +2607,32 @@ mod tests {
     }
 
     #[test]
+    fn go_away_translates_to_planned_rotation() {
+        let raw = json!({ "goAway": { "timeLeft": "10s" } }).to_string();
+        let events = GeminiRealtimeSession::translate_event_static(&raw).unwrap();
+
+        match events.as_slice() {
+            [ServerEvent::PlannedRotation { time_left }] => {
+                assert_eq!(time_left.as_deref(), Some("10s"));
+            }
+            other => panic!("expected PlannedRotation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn go_away_without_time_left_translates_to_planned_rotation() {
+        let raw = json!({ "goAway": {} }).to_string();
+        let events = GeminiRealtimeSession::translate_event_static(&raw).unwrap();
+
+        match events.as_slice() {
+            [ServerEvent::PlannedRotation { time_left }] => {
+                assert_eq!(time_left.as_deref(), None);
+            }
+            other => panic!("expected PlannedRotation, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn test_call_names_map_fifo_eviction() {
         let mut map = CallNamesMap::new();
         for i in 0..1005 {
@@ -2608,6 +2643,85 @@ mod tests {
         assert!(map.remove("call_4").is_none());
         assert_eq!(map.remove("call_5"), Some("tool_5".to_string()));
         assert_eq!(map.remove("call_1004"), Some("tool_1004".to_string()));
+    }
+
+    #[tokio::test]
+    async fn gemini_session_rejects_stale_tool_response_from_prior_generation_without_wire_writes()
+    {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let _server = tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    if let Ok(ws) = tokio_tungstenite::accept_async(stream).await {
+                        let (_sink, mut stream) = ws.split();
+                        while stream.next().await.is_some() {}
+                    }
+                });
+            }
+        });
+
+        let ws0 = tokio_tungstenite::connect_async(format!("ws://{}", addr)).await.unwrap().0;
+        let (_sink0, source0) = ws0.split();
+        let (tx0, _rx0) = tokio::sync::mpsc::channel(10);
+        let writer_task0 = tokio::spawn(async {});
+
+        let session0 = GeminiRealtimeSession::new_for_test(
+            "session-gen-0".to_string(),
+            format!("ws://{}", addr),
+            "models/gemini-3.1-flash-live-preview".to_string(),
+            tx0,
+            writer_task0,
+            source0,
+        );
+
+        let ws1 = tokio_tungstenite::connect_async(format!("ws://{}", addr)).await.unwrap().0;
+        let (_sink1, source1) = ws1.split();
+        let (tx1, mut rx1) = tokio::sync::mpsc::channel(10);
+        let writer_task1 = tokio::spawn(async {});
+
+        let session1 = GeminiRealtimeSession::new_for_test(
+            "session-gen-1".to_string(),
+            format!("ws://{}", addr),
+            "models/gemini-3.1-flash-live-preview".to_string(),
+            tx1,
+            writer_task1,
+            source1,
+        );
+
+        // Receive FunctionCallDone on Session 0
+        let fc_raw = json!({
+            "toolCall": {
+                "functionCalls": [{
+                    "name": "lookup_user",
+                    "id": "call_gen0_789",
+                    "args": {}
+                }]
+            }
+        })
+        .to_string();
+
+        let events0 = session0.translate_gemini_event(&fc_raw).unwrap();
+        assert_eq!(events0.len(), 1);
+
+        // Session 0 has call_gen0_789 in call_names; Session 1 does NOT
+        assert_eq!(session0.call_names_count(), 1);
+        assert_eq!(session1.call_names_count(), 0);
+
+        // Attempt send_tool_response for call_gen0_789 on Session 1
+        let tool_response = ToolResponse {
+            call_id: "call_gen0_789".to_string(),
+            output: json!({ "user": "alice" }),
+        };
+
+        let err = session1.send_tool_response(tool_response).await.unwrap_err();
+        assert!(err.to_string().contains("Missing tool name for call_id 'call_gen0_789'"));
+
+        // Verify zero messages reached Session 1's outbound tx queue
+        assert!(
+            rx1.try_recv().is_err(),
+            "Zero tool response messages must reach Session 1's write queue"
+        );
     }
 
     #[tokio::test]
