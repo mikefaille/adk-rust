@@ -58,8 +58,7 @@ fn test_tcp_connection_reset_classification() {
 
 #[tokio::test]
 async fn test_mock_resumption_token_alignment() {
-    // Verify dual-key framing: when Google sends newHandle in sessionResumptionUpdate,
-    // translate_event emits ServerEvent::SessionUpdated with both resumeToken and resumeHandle.
+    // Verify sessionResumptionUpdate control frame produces no public application events
     let server_frame = json!({
         "sessionResumptionUpdate": {
             "resumable": true,
@@ -70,20 +69,7 @@ async fn test_mock_resumption_token_alignment() {
 
     let events =
         adk_realtime::gemini::GeminiRealtimeSession::translate_event_static(&server_frame).unwrap();
-    assert_eq!(events.len(), 1);
-
-    if let ServerEvent::SessionUpdated { session, .. } = &events[0] {
-        assert_eq!(
-            session.get("resumeToken").and_then(|v| v.as_str()),
-            Some("test_resumption_token_xyz987")
-        );
-        assert_eq!(
-            session.get("resumeHandle").and_then(|v| v.as_str()),
-            Some("test_resumption_token_xyz987")
-        );
-    } else {
-        panic!("Expected SessionUpdated event");
-    }
+    assert!(events.is_empty());
 }
 
 #[tokio::test]
@@ -172,12 +158,13 @@ async fn test_mock_websocket_server_e2e_reconnect_resumption() {
         source,
     );
 
-    // Read the server events (setupComplete and sessionResumptionUpdate) from session to cache resumeHandle
+    // Read the server event (setupComplete) from session
     let event1 = session.next_event().await.unwrap().unwrap();
     assert!(matches!(event1, ServerEvent::SessionCreated { .. }));
 
-    let event2 = session.next_event().await.unwrap().unwrap();
-    assert!(matches!(event2, ServerEvent::SessionUpdated { .. }));
+    // Poll next_event to consume sessionResumptionUpdate (which returns None after server disconnect)
+    let event2 = session.next_event().await;
+    assert!(event2.is_none());
 
     // Verify last_resume_handle is cached on session
     assert_eq!(session.last_resume_handle().as_deref(), Some("mock_resume_handle_e2e_123"));

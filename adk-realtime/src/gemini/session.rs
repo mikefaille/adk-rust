@@ -300,7 +300,46 @@ pub struct GeminiRealtimeSession {
     /// best reconnect anchor).
     last_resume_handle: Arc<ParkingMutex<Option<String>>>,
     /// Association map between function call IDs and tool names for wire-conforming `FunctionResponse` payloads.
-    call_names: Arc<ParkingMutex<std::collections::HashMap<String, String>>>,
+    call_names: Arc<ParkingMutex<CallNamesMap>>,
+}
+
+const MAX_CALL_NAMES_CAPACITY: usize = 1000;
+
+#[derive(Debug, Default)]
+pub(crate) struct CallNamesMap {
+    order: std::collections::VecDeque<String>,
+    map: std::collections::HashMap<String, String>,
+}
+
+impl CallNamesMap {
+    pub(crate) fn new() -> Self {
+        Self { order: std::collections::VecDeque::new(), map: std::collections::HashMap::new() }
+    }
+
+    pub(crate) fn insert(&mut self, call_id: String, name: String) {
+        if !self.map.contains_key(&call_id) {
+            self.order.push_back(call_id.clone());
+            if self.order.len() > MAX_CALL_NAMES_CAPACITY
+                && let Some(oldest) = self.order.pop_front()
+            {
+                self.map.remove(&oldest);
+            }
+        }
+        self.map.insert(call_id, name);
+    }
+
+    pub(crate) fn remove(&mut self, call_id: &str) -> Option<String> {
+        let removed = self.map.remove(call_id);
+        if removed.is_some() {
+            self.order.retain(|id| id != call_id);
+        }
+        removed
+    }
+
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.map.len()
+    }
 }
 
 /// Ensure the model ID is prefixed with "models/" as required by Gemini Live setup frames.
@@ -324,12 +363,18 @@ impl GeminiRealtimeSession {
     }
 
     /// Returns the last resumable handle received via `sessionResumptionUpdate`.
+    #[cfg(any(test, feature = "recovery-test-utils"))]
     pub fn last_resume_handle(&self) -> Option<String> {
         self.last_resume_handle.lock().clone()
     }
 
+    #[cfg(not(any(test, feature = "recovery-test-utils")))]
+    pub(crate) fn last_resume_handle(&self) -> Option<String> {
+        self.last_resume_handle.lock().clone()
+    }
+
     /// Constructs a mock `GeminiRealtimeSession` for testing connection lifecycle & recovery.
-    #[cfg(any(test, feature = "integration"))]
+    #[cfg(any(test, feature = "recovery-test-utils"))]
     pub fn new_for_test(
         session_id: String,
         reconnect_url: String,
@@ -359,7 +404,7 @@ impl GeminiRealtimeSession {
             dialect,
             reconnect_model,
             last_resume_handle: Arc::new(ParkingMutex::new(None)),
-            call_names: Arc::new(ParkingMutex::new(std::collections::HashMap::new())),
+            call_names: Arc::new(ParkingMutex::new(CallNamesMap::new())),
         }
     }
 
@@ -400,6 +445,17 @@ impl GeminiRealtimeSession {
         model: &str,
         config: RealtimeConfig,
         dialect: GeminiSchemaDialect,
+    ) -> Result<Self> {
+        Self::connect_with_dialect_and_resume(backend, model, config, dialect, None).await
+    }
+
+    /// Private internal connector that passes a provider-private `private_resume_handle`.
+    async fn connect_with_dialect_and_resume(
+        backend: GeminiLiveBackend,
+        model: &str,
+        config: RealtimeConfig,
+        dialect: GeminiSchemaDialect,
+        private_resume_handle: Option<String>,
     ) -> Result<Self> {
         let normalized_model = normalize_model_id(model);
         let schema_cache = Arc::new(adk_core::SchemaCache::new());
@@ -553,11 +609,13 @@ impl GeminiRealtimeSession {
             backend: backend.clone(),
             dialect,
             reconnect_model: normalized_model.clone(),
-            last_resume_handle: Arc::new(ParkingMutex::new(None)),
-            call_names: Arc::new(ParkingMutex::new(std::collections::HashMap::new())),
+            last_resume_handle: Arc::new(ParkingMutex::new(private_resume_handle.clone())),
+            call_names: Arc::new(ParkingMutex::new(CallNamesMap::new())),
         };
 
-        session.send_setup_with_compiled_tools(&normalized_model, config, tools).await?;
+        session
+            .send_setup_with_compiled_tools(&normalized_model, config, tools, private_resume_handle)
+            .await?;
         Ok(session)
     }
 
@@ -580,12 +638,13 @@ impl GeminiRealtimeSession {
         Ok(())
     }
 
-    /// Send initial setup message with pre-compiled tools.
+    /// Send initial setup message with pre-compiled tools and provider-private resume handle.
     async fn send_setup_with_compiled_tools(
         &self,
         model: &str,
         config: RealtimeConfig,
         compiled_tools: Option<Vec<Value>>,
+        private_resume_handle: Option<String>,
     ) -> Result<()> {
         let mut generation_config = json!({
             "responseModalities": gemini_response_modalities(config.modalities.as_deref()),
@@ -626,15 +685,8 @@ impl GeminiRealtimeSession {
 
         let normalized_model = normalize_model_id(model);
 
-        // Functionally extract the token if it exists in the prior state map
-        let handle = config
-            .extra
-            .as_ref()
-            .and_then(|ext| ext.get("resumeToken").or_else(|| ext.get("resumeHandle")))
-            .and_then(|val| val.as_str())
-            .map(|s| s.to_string());
-
-        let session_resumption = Some(SessionResumptionConfig { handle });
+        // Session resumption handle is strictly supplied by the Gemini adapter itself.
+        let session_resumption = Some(SessionResumptionConfig { handle: private_resume_handle });
 
         // When transcription is requested, enable both input (user speech) and
         // output (model speech) transcription so consumers get clean text for
@@ -662,7 +714,21 @@ impl GeminiRealtimeSession {
         self.send_raw(&setup).await
     }
 
-    /// Send a raw message.
+    /// Send a raw message to the writer task via local mpsc queue.
+    ///
+    /// # Admission & Delivery Semantics
+    ///
+    /// Returning `Ok(())` indicates only that the message was accepted by the
+    /// local writer `mpsc` queue for asynchronous transmission.
+    ///
+    /// `Ok(())` **does NOT guarantee or prove**:
+    /// - `WebSocket` socket-sink completion or TCP write
+    /// - Network arrival or peer socket acceptance
+    /// - Provider/Gemini service reception or protocol handling
+    /// - Model turn execution or business-logic processing
+    ///
+    /// If local queue enqueue fails (e.g. channel closed due to writer exit),
+    /// this method returns `RealtimeError::ConnectionError`.
     async fn send_raw<T: Serialize>(&self, value: &T) -> Result<()> {
         let msg = serde_json::to_string(value)
             .map_err(|e| RealtimeError::protocol(format!("JSON serialize error: {}", e)))?;
@@ -775,22 +841,44 @@ impl GeminiRealtimeSession {
     /// caches the handle on `self.last_resume_handle` so that
     /// `reconnect_with_backoff` can present it on the next connection attempt.
     pub(crate) fn translate_gemini_event(&self, raw: &str) -> Result<Vec<ServerEvent>> {
+        if let Ok(value) = serde_json::from_str::<Value>(raw)
+            && let Some(resumption_update) = value.get("sessionResumptionUpdate")
+        {
+            let resumable =
+                resumption_update.get("resumable").and_then(|r| r.as_bool()).unwrap_or(false);
+            if resumable
+                && let Some(handle) = resumption_update.get("newHandle").and_then(|h| h.as_str())
+            {
+                *self.last_resume_handle.lock() = Some(handle.to_string());
+                tracing::debug!(
+                    resume_checkpoint_observed = true,
+                    "Stored resumable Gemini session handle for reconnect"
+                );
+            }
+        }
+
         let events = Self::translate_event_logged(raw, Some(&self.frame_log))?;
         for event in &events {
             match event {
-                ServerEvent::SessionUpdated { session, .. } => {
-                    if let Some(handle) = session.get("resumeHandle").and_then(|h| h.as_str()) {
-                        *self.last_resume_handle.lock() = Some(handle.to_string());
-                        tracing::debug!(handle = %handle, "Cached resumable handle for reconnect");
-                    }
-                }
                 ServerEvent::FunctionCallDone { call_id, name, .. } => {
                     self.call_names.lock().insert(call_id.clone(), name.clone());
+                }
+                ServerEvent::ToolCallCancelled { call_ids } => {
+                    let mut names = self.call_names.lock();
+                    for id in call_ids {
+                        names.remove(id.as_str());
+                    }
                 }
                 _ => {}
             }
         }
         Ok(events)
+    }
+
+    /// Returns the current number of tracked function call names (test helper).
+    #[cfg(test)]
+    pub fn call_names_count(&self) -> usize {
+        self.call_names.lock().len()
     }
 
     /// Test entry point: no session, so no per-connection telemetry identity.
@@ -802,7 +890,6 @@ impl GeminiRealtimeSession {
         raw: &str,
         frame_log: Option<&FrameLog>,
     ) -> Result<Vec<ServerEvent>> {
-        tracing::debug!(%raw, "Translating Gemini event");
         let value: Value = serde_json::from_str(raw)
             .map_err(|e| RealtimeError::protocol(describe_unparseable_frame(raw, &e)))?;
         log_frame_shape(&value, frame_log);
@@ -938,22 +1025,15 @@ impl GeminiRealtimeSession {
                 resumption_update.get("resumable").and_then(|r| r.as_bool()).unwrap_or(false);
             let handle = resumption_update.get("newHandle").and_then(|h| h.as_str());
             match (resumable, handle) {
-                (true, Some(handle)) => {
-                    // Store the handle on the session so reconnect_with_backoff
-                    // can present it in the new setup frame — this is the second
-                    // half of session resumption support (the first was parsing
-                    // the correct field name above).
+                (true, Some(_handle)) => {
                     if let Some(frame_log) = frame_log {
                         let _ = frame_log; // suppress unused warning in non-session context
                     }
-                    tracing::debug!(handle = %handle, "Received a resumable Gemini session handle; storing for reconnect");
-                    return Ok(vec![ServerEvent::SessionUpdated {
-                        event_id: uuid::Uuid::new_v4().to_string(),
-                        session: json!({
-                            "resumeToken": handle,
-                            "resumeHandle": handle
-                        }),
-                    }]);
+                    tracing::debug!(
+                        resume_checkpoint_observed = true,
+                        "Received a resumable sessionResumptionUpdate; handle stored privately"
+                    );
+                    return Ok(vec![]);
                 }
                 _ => {
                     tracing::debug!(
@@ -1102,25 +1182,13 @@ impl RealtimeRecovery for GeminiRealtimeSession {
         }
 
         let attempt_fut = async {
-            let mut effective_config = config.clone();
-            if let Some(ref resume_handle) = prior_handle {
-                let extra_obj =
-                    effective_config.extra.get_or_insert_with(|| json!({})).as_object_mut();
-
-                if let Some(extra) = extra_obj
-                    && !extra.contains_key("resumeToken")
-                    && !extra.contains_key("resumeHandle")
-                {
-                    extra.insert("resumeHandle".to_string(), json!(resume_handle));
-                }
-            }
-
-            // Construct private candidate session with updated config & setup frame
-            let candidate_session = Self::connect_with_dialect(
+            // Construct private candidate session passing prior_handle directly to provider setup
+            let candidate_session = Self::connect_with_dialect_and_resume(
                 self.backend.clone(),
                 &self.reconnect_model,
-                effective_config,
+                config.clone(),
                 self.dialect,
+                prior_handle.clone(),
             )
             .await?;
 
@@ -1168,6 +1236,7 @@ impl RealtimeSession for GeminiRealtimeSession {
         Some(self)
     }
 
+    #[cfg(any(test, feature = "recovery-test-utils"))]
     async fn force_transport_break(&self) -> Result<()> {
         self.connected.store(false, Ordering::SeqCst);
         self.cancel_token.lock().await.cancel();
@@ -1429,15 +1498,8 @@ impl RealtimeSession for GeminiRealtimeSession {
                 // RE-USE the same retained compiler target for updates/resumption
                 let tools = convert_tools(config.tools, &self.schema_cache, self.adapter.as_ref())?;
 
-                let handle = config
-                    .extra
-                    .as_ref()
-                    .and_then(|ext| ext.get("resumeToken"))
-                    .and_then(|val| val.as_str())
-                    .map(|s| s.to_string());
-
-                let session_resumption =
-                    if handle.is_some() { Some(SessionResumptionConfig { handle }) } else { None };
+                let handle = self.last_resume_handle();
+                let session_resumption = Some(SessionResumptionConfig { handle });
 
                 let setup = GeminiClientMessage {
                     setup: Some(GeminiSetup {
@@ -2139,22 +2201,15 @@ mod tests {
         assert_ne!(first, second);
     }
 
-    /// The field the server actually sends. `resumptionToken` was never sent, so
-    /// this branch never fired and no handle was ever captured.
+    /// Resumable sessionResumptionUpdate control frame produces no public ServerEvent.
     #[test]
-    fn resumable_session_update_yields_the_new_handle() {
+    fn resumable_session_update_yields_no_public_event() {
         let raw = r#"{"sessionResumptionUpdate":{"newHandle":"handle-abc","resumable":true}}"#;
         let events = GeminiRealtimeSession::translate_event_static(raw).unwrap();
-
-        match events.as_slice() {
-            [ServerEvent::SessionUpdated { session, .. }] => {
-                assert_eq!(
-                    session.get("resumeHandle").and_then(|h| h.as_str()),
-                    Some("handle-abc")
-                );
-            }
-            other => panic!("expected one SessionUpdated, got {other:?}"),
-        }
+        assert!(
+            events.is_empty(),
+            "expected no public events for resumable update, got {events:?}"
+        );
     }
 
     /// `resumable: false` means "no safe resume point right now". Emitting the
@@ -2543,6 +2598,70 @@ mod tests {
     }
 
     #[test]
+    fn test_call_names_map_fifo_eviction() {
+        let mut map = CallNamesMap::new();
+        for i in 0..1005 {
+            map.insert(format!("call_{i}"), format!("tool_{i}"));
+        }
+        assert_eq!(map.len(), 1000);
+        assert!(map.remove("call_0").is_none());
+        assert!(map.remove("call_4").is_none());
+        assert_eq!(map.remove("call_5"), Some("tool_5".to_string()));
+        assert_eq!(map.remove("call_1004"), Some("tool_1004".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_tool_call_cancellation_evicts_call_names() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            if let Ok((stream, _)) = listener.accept().await {
+                let _ = tokio_tungstenite::accept_async(stream).await;
+            }
+        });
+
+        let ws = tokio_tungstenite::connect_async(format!("ws://{}", addr)).await.unwrap().0;
+        let (_sink, source) = ws.split();
+        let (tx, _rx) = tokio::sync::mpsc::channel(10);
+        let writer_task = tokio::spawn(async {});
+
+        let session = GeminiRealtimeSession::new_for_test(
+            "test-session".to_string(),
+            format!("ws://{}", addr),
+            "models/gemini-3.1-flash-live-preview".to_string(),
+            tx,
+            writer_task,
+            source,
+        );
+
+        let fc_raw = json!({
+            "toolCall": {
+                "functionCalls": [{
+                    "name": "my_tool",
+                    "id": "call_123",
+                    "args": {}
+                }]
+            }
+        })
+        .to_string();
+
+        let _ = session.translate_gemini_event(&fc_raw).unwrap();
+        assert_eq!(session.call_names_count(), 1);
+
+        let cancel_raw = json!({
+            "toolCallCancellation": {
+                "ids": ["call_123"]
+            }
+        })
+        .to_string();
+
+        let _ = session.translate_gemini_event(&cancel_raw).unwrap();
+        assert_eq!(session.call_names_count(), 0);
+
+        server.abort();
+    }
+
+    #[test]
     fn cancellation_dto_tolerates_fields_google_adds_later() {
         // Gemini Live is a Preview surface. A strict DTO would refuse the whole
         // frame over a field this adapter does not need, taking a live call
@@ -2642,8 +2761,30 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_session_resumption_update_emits_both_token_keys() {
+    #[tokio::test]
+    async fn test_session_resumption_update_stores_last_resume_handle_privately() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let _server = tokio::spawn(async move {
+            if let Ok((stream, _)) = listener.accept().await {
+                let _ = tokio_tungstenite::accept_async(stream).await;
+            }
+        });
+
+        let ws = tokio_tungstenite::connect_async(format!("ws://{}", addr)).await.unwrap().0;
+        let (_sink, source) = ws.split();
+        let (tx, _rx) = tokio::sync::mpsc::channel(10);
+        let writer_task = tokio::spawn(async {});
+
+        let session = GeminiRealtimeSession::new_for_test(
+            "test-session".to_string(),
+            format!("ws://{}", addr),
+            "models/gemini-3.1-flash-live-preview".to_string(),
+            tx,
+            writer_task,
+            source,
+        );
+
         let raw = json!({
             "sessionResumptionUpdate": {
                 "resumable": true,
@@ -2652,20 +2793,79 @@ mod tests {
         })
         .to_string();
 
-        let events = GeminiRealtimeSession::translate_event_static(&raw).unwrap();
-        assert_eq!(events.len(), 1);
-        if let ServerEvent::SessionUpdated { session, .. } = &events[0] {
-            assert_eq!(
-                session.get("resumeToken").and_then(|v| v.as_str()),
-                Some("test_handle_abc123")
-            );
-            assert_eq!(
-                session.get("resumeHandle").and_then(|v| v.as_str()),
-                Some("test_handle_abc123")
-            );
-        } else {
-            panic!("Expected SessionUpdated event");
-        }
+        let events = session.translate_gemini_event(&raw).unwrap();
+        assert!(events.is_empty());
+        assert_eq!(session.last_resume_handle(), Some("test_handle_abc123".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_candidate_setup_uses_provider_cached_handle_not_stale_config_extra() {
+        let setup_received_handle = Arc::new(parking_lot::Mutex::new(None::<String>));
+        let setup_capture = Arc::clone(&setup_received_handle);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let _server = tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                let setup_capture = Arc::clone(&setup_capture);
+                tokio::spawn(async move {
+                    if let Ok(mut ws) = tokio_tungstenite::accept_async(stream).await {
+                        if let Some(Ok(Message::Text(msg))) = ws.next().await
+                            && let Ok(val) = serde_json::from_str::<Value>(&msg)
+                        {
+                            let handle = val
+                                .get("setup")
+                                .and_then(|s| s.get("sessionResumption"))
+                                .and_then(|r| r.get("handle"))
+                                .and_then(|h| h.as_str())
+                                .map(|s| s.to_string());
+                            *setup_capture.lock() = handle;
+                        }
+                        let setup_complete = json!({ "setupComplete": {} });
+                        let _ = ws.send(Message::Text(setup_complete.to_string().into())).await;
+                    }
+                });
+            }
+        });
+
+        let ws = tokio_tungstenite::connect_async(format!("ws://{}", addr)).await.unwrap().0;
+        let (_sink, source) = ws.split();
+        let (tx, _rx) = tokio::sync::mpsc::channel(10);
+        let writer_task = tokio::spawn(async {});
+
+        let session = GeminiRealtimeSession::new_for_test(
+            "test-session".to_string(),
+            format!("ws://{}", addr),
+            "models/gemini-3.1-flash-live-preview".to_string(),
+            tx,
+            writer_task,
+            source,
+        );
+
+        // Simulate provider caching fresh handle H2 ("fresh_provider_h2")
+        *session.last_resume_handle.lock() = Some("fresh_provider_h2".to_string());
+
+        // Construct generic config containing stale handle H1 ("stale_config_h1") in config.extra
+        let stale_config = RealtimeConfig {
+            extra: Some(
+                json!({ "resumeHandle": "stale_config_h1", "resumeToken": "stale_config_h1" }),
+            ),
+            ..Default::default()
+        };
+
+        use std::num::NonZeroU32;
+        use std::time::Duration;
+
+        let recovery = session.recovery().unwrap();
+        let cause = RecoveryCause::UnexpectedEof;
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let context =
+            RecoveryContext::new(NonZeroU32::new(1).unwrap(), &cause, &stale_config, deadline);
+
+        let _recovered = recovery.recover(context).await.unwrap();
+
+        let received = setup_received_handle.lock().clone();
+        assert_eq!(received, Some("fresh_provider_h2".to_string()));
     }
 }
 
@@ -2729,7 +2929,7 @@ mod teardown_tests {
             dialect: GeminiSchemaDialect::OpenApiSubset,
             reconnect_model: "models/gemini-3.1-flash-live-preview".into(),
             last_resume_handle: Arc::new(ParkingMutex::new(None)),
-            call_names: Arc::new(ParkingMutex::new(std::collections::HashMap::new())),
+            call_names: Arc::new(ParkingMutex::new(CallNamesMap::new())),
         };
 
         // Execution of close() must complete quickly despite channel full & writer blocked
