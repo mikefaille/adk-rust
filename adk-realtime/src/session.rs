@@ -16,6 +16,17 @@ pub enum ContextMutationOutcome {
     RequiresResumption(Box<crate::config::RealtimeConfig>),
 }
 
+/// Capability interface for session lifecycle monitoring (e.g. lease expiry / planned rotation deadlines).
+pub trait RealtimeLifecycle: Send + Sync {
+    /// Subscribe to replacement deadline updates.
+    ///
+    /// Yields `Some(Instant)` when a provider announces a target replacement deadline
+    /// (e.g. Gemini `goAway.timeLeft` or fixed connection lease expiry), or `None` if no deadline is set.
+    fn subscribe_replacement_deadline(
+        &self,
+    ) -> tokio::sync::watch::Receiver<Option<std::time::Instant>>;
+}
+
 /// A real-time bidirectional streaming session.
 ///
 /// This trait provides a unified interface for real-time voice/audio sessions
