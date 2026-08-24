@@ -72,6 +72,16 @@ impl std::fmt::Display for DisconnectReason {
     }
 }
 
+pub trait RealtimeLifecycle: Send + Sync {
+    /// Subscribe to the monotonic deadline before which this live session
+    /// should be replaced.
+    ///
+    /// `None` means no planned replacement deadline is currently known.
+    fn subscribe_replacement_deadline(
+        &self,
+    ) -> tokio::sync::watch::Receiver<Option<std::time::Instant>>;
+}
+
 #[async_trait]
 pub trait RealtimeSession: Send + Sync {
     /// Get the session ID.
@@ -84,6 +94,13 @@ pub trait RealtimeSession: Send + Sync {
     ///
     /// By default, a session does not support recovery and returns `None`.
     fn recovery(&self) -> Option<&dyn crate::recovery::RealtimeRecovery> {
+        None
+    }
+
+    /// Retrieve the lifecycle capability of the session if supported.
+    ///
+    /// By default, a session does not provide advance lifecycle information and returns `None`.
+    fn lifecycle(&self) -> Option<&dyn RealtimeLifecycle> {
         None
     }
 
