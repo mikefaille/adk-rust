@@ -120,11 +120,6 @@ pub enum RecoveryCause {
     WriteFailed(Arc<crate::error::RealtimeError>),
     /// Unexpected end-of-file on the connection stream.
     UnexpectedEof,
-    /// Planned rotation requested by provider (e.g., Gemini goAway).
-    PlannedRotation {
-        /// Time remaining before connection close if specified by provider.
-        time_left: Option<String>,
-    },
 }
 
 /// Opaque/defaultable policy for scheduling managed recovery attempts.
