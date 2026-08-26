@@ -531,6 +531,14 @@ pub struct GeminiRealtimeSession {
     /// Makes the outbound signal edge-triggered: several observers of one
     /// barge-in collapse to a single frame. See [`ActivitySignaller`].
     activity_open: Arc<AtomicBool>,
+    /// Whether this connection ever received `setupComplete`.
+    ///
+    /// The discriminator between "the provider dropped a working session" and
+    /// "the provider rejected our setup". Both surface as the same end of
+    /// stream, but only the first is worth recovering: recovery replays the
+    /// current effective configuration, which is precisely the request the
+    /// server just refused. See [`RealtimeRecovery::classify`].
+    setup_complete_seen: Arc<AtomicBool>,
 }
 
 const MAX_CALL_NAMES_CAPACITY: usize = 1000;
@@ -640,6 +648,7 @@ impl GeminiRealtimeSession {
             replacement_deadline_rx,
             activity_detection: ActivityDetection::Automatic,
             activity_open: Arc::new(AtomicBool::new(false)),
+            setup_complete_seen: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -853,6 +862,7 @@ impl GeminiRealtimeSession {
             replacement_deadline_rx,
             activity_detection,
             activity_open: Arc::new(AtomicBool::new(false)),
+            setup_complete_seen: Arc::new(AtomicBool::new(false)),
         };
 
         session
@@ -1201,6 +1211,12 @@ impl GeminiRealtimeSession {
         let events = Self::translate_event_logged(raw, Some(&self.frame_log))?;
         for event in &events {
             match event {
+                // Latched, never cleared: a session that completed setup once
+                // has proved the configuration is acceptable, and a later close
+                // is about the connection rather than the request.
+                ServerEvent::SessionCreated { .. } => {
+                    self.setup_complete_seen.store(true, Ordering::SeqCst);
+                }
                 ServerEvent::FunctionCallDone { call_id, name, .. } => {
                     self.call_names.lock().insert(call_id.clone(), name.clone());
                 }
@@ -1481,6 +1497,24 @@ impl RealtimeRecovery for GeminiRealtimeSession {
                 } else {
                     RecoveryDisposition::Fatal
                 }
+            }
+            // A stream that ends before `setupComplete` is the server refusing
+            // the setup frame, not a transport that died mid-session. Gemini
+            // reports both as a bare close, and 1008 covers both an aborted
+            // live session and a rejected setup, so the close code cannot
+            // decide this on its own -- whether setup ever completed can.
+            //
+            // Recovering is worse than useless here. `recover` rebuilds the
+            // candidate from the same effective configuration, so it re-sends
+            // the request that was just refused; the attempt fails on the
+            // candidate's own pre-setup close and the session ends anyway,
+            // having replaced the server's stated reason with a generic
+            // "closed before setupComplete" from the retry. Failing fast keeps
+            // `disconnect_reason()` pointing at the close the server actually
+            // sent -- the only thing that says whether the model name, the tool
+            // schema, or the quota was at fault.
+            RecoveryCause::UnexpectedEof if !self.setup_complete_seen.load(Ordering::SeqCst) => {
+                RecoveryDisposition::Fatal
             }
             RecoveryCause::UnexpectedEof | RecoveryCause::PlannedRotation { .. } => {
                 RecoveryDisposition::Recoverable
@@ -3469,6 +3503,100 @@ mod tests {
         assert!(rendered.contains("ws://127.0.0.1:9999/mock"), "endpoint lost: {rendered}");
         assert!(!rendered.contains("secret"), "Debug leaked the API key: {rendered}");
     }
+
+    /// A session that never reached `setupComplete`, wired to a mock that is
+    /// never spoken to. The transport is irrelevant to these tests: what
+    /// `classify` reads is whether setup ever completed, and the only way to
+    /// set that is to put a frame through `translate_gemini_event`.
+    async fn session_for_classify() -> GeminiRealtimeSession {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let _server = tokio::spawn(async move {
+            if let Ok((stream, _)) = listener.accept().await {
+                let _ = tokio_tungstenite::accept_async(stream).await;
+            }
+        });
+
+        let ws = tokio_tungstenite::connect_async(format!("ws://{}", addr)).await.unwrap().0;
+        let (_sink, source) = ws.split();
+        let (tx, _rx) = tokio::sync::mpsc::channel(10);
+        let writer_task = tokio::spawn(async {});
+
+        GeminiRealtimeSession::new_for_test(
+            "classify-session".to_string(),
+            format!("ws://{}", addr),
+            "models/gemini-3.1-flash-live-preview".to_string(),
+            tx,
+            writer_task,
+            source,
+        )
+    }
+
+    /// The setup frame was refused. Retrying re-sends it, so the only thing a
+    /// recovery attempt can add is a second refusal and a generic error in
+    /// place of the server's stated reason.
+    #[tokio::test]
+    async fn an_eof_before_setup_complete_is_fatal_not_recoverable() {
+        let session = session_for_classify().await;
+
+        assert_eq!(
+            session.classify(&RecoveryCause::UnexpectedEof),
+            RecoveryDisposition::Fatal,
+            "a stream that ended before setupComplete must not be retried"
+        );
+    }
+
+    /// The counterpart, and the case that must keep working: a session that
+    /// completed setup and later lost its transport is exactly what managed
+    /// recovery exists for.
+    #[tokio::test]
+    async fn an_eof_after_setup_complete_stays_recoverable() {
+        let session = session_for_classify().await;
+        session.translate_gemini_event(&json!({ "setupComplete": {} }).to_string()).unwrap();
+
+        assert_eq!(
+            session.classify(&RecoveryCause::UnexpectedEof),
+            RecoveryDisposition::Recoverable,
+            "an established session losing its transport is the recoverable case"
+        );
+    }
+
+    /// `goAway` can arrive before this connection has completed setup -- it is
+    /// the server scheduling a replacement, not refusing a request -- so the
+    /// pre-setup guard must not swallow a planned rotation.
+    #[tokio::test]
+    async fn a_planned_rotation_before_setup_complete_is_still_recoverable() {
+        let session = session_for_classify().await;
+
+        assert_eq!(
+            session.classify(&RecoveryCause::PlannedRotation { time_left: None }),
+            RecoveryDisposition::Recoverable,
+            "a planned rotation is recoverable regardless of setup state"
+        );
+    }
+
+    /// Latched, not sampled. Frames keep arriving after `setupComplete`, and
+    /// none of them may quietly return the session to "setup never completed"
+    /// and make a mid-session drop unrecoverable.
+    #[tokio::test]
+    async fn setup_complete_survives_the_frames_that_follow_it() {
+        let session = session_for_classify().await;
+        session.translate_gemini_event(&json!({ "setupComplete": {} }).to_string()).unwrap();
+        session
+            .translate_gemini_event(
+                &json!({ "sessionResumptionUpdate": { "resumable": false } }).to_string(),
+            )
+            .unwrap();
+        session
+            .translate_gemini_event(&json!({ "goAway": { "timeLeft": "10s" } }).to_string())
+            .unwrap();
+
+        assert_eq!(
+            session.classify(&RecoveryCause::UnexpectedEof),
+            RecoveryDisposition::Recoverable,
+            "later frames must not clear the setup-complete latch"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -3539,6 +3667,7 @@ mod teardown_tests {
             replacement_deadline_rx,
             activity_detection: ActivityDetection::Automatic,
             activity_open: Arc::new(AtomicBool::new(false)),
+            setup_complete_seen: Arc::new(AtomicBool::new(false)),
         };
 
         // Execution of close() must complete quickly despite channel full & writer blocked
@@ -3728,6 +3857,7 @@ mod teardown_tests {
             replacement_deadline_rx,
             activity_detection,
             activity_open: Arc::new(AtomicBool::new(false)),
+            setup_complete_seen: Arc::new(AtomicBool::new(false)),
         };
 
         (session, server_ws)
