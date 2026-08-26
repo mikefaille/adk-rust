@@ -172,6 +172,12 @@ jobs:
           # the adk-guardrail integration and `tool_guardrail_tests` ran in no required check.
           - { package: adk-agent, features: guardrails }
           - { package: adk-model, features: openrouter }
+          # `anthropic` is in no workspace member's default features, so the
+          # `--workspace` run compiles neither `anthropic_schema_projection_loss`
+          # nor its sibling — `required-features` makes nextest skip the target
+          # silently, so the coverage reads as present and never executes.
+          # (`openai` needs no entry: adk-agent enables it unconditionally.)
+          - { package: adk-model, features: anthropic }
           - { package: adk-sandbox, features: wasm }
           # The background run store and its persistence are behind `background`, so a
           # default --workspace build skips their tests entirely. Nothing compiled them
