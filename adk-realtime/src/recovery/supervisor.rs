@@ -450,6 +450,7 @@ impl Drop for CandidateCleanupGuard {
 pub(crate) struct RecoverySupervisor {
     policy: RecoveryPolicy,
     core: Arc<tokio::sync::RwLock<SupervisorCore>>,
+    replacement_lock: Arc<tokio::sync::Mutex<()>>,
     generation_tx: tokio::sync::watch::Sender<u64>,
     #[cfg(any(test, feature = "recovery-test-utils"))]
     test_recovery_barrier:
@@ -492,6 +493,7 @@ impl RecoverySupervisor {
                 next_generation_id: 0,
                 next_txn_id: 1,
             })),
+            replacement_lock: Arc::new(tokio::sync::Mutex::new(())),
             generation_tx,
             #[cfg(any(test, feature = "recovery-test-utils"))]
             test_recovery_barrier: Arc::new(parking_lot::Mutex::new(None)),
@@ -519,6 +521,7 @@ impl RecoverySupervisor {
                 next_generation_id: 1,
                 next_txn_id: 1,
             })),
+            replacement_lock: Arc::new(tokio::sync::Mutex::new(())),
             generation_tx,
             #[cfg(any(test, feature = "recovery-test-utils"))]
             test_recovery_barrier: Arc::new(parking_lot::Mutex::new(None)),
@@ -652,6 +655,7 @@ impl RecoverySupervisor {
         new_session: Arc<dyn RealtimeSession>,
         expected_revision: u64,
     ) -> Result<SessionGeneration> {
+        let _flight_permit = self.replacement_lock.lock().await;
         let mut candidate_guard = CandidateCleanupGuard::new(new_session.clone());
 
         let (new_gen, old_session) = {
@@ -712,6 +716,10 @@ impl RecoverySupervisor {
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = Result<Arc<dyn RealtimeSession>>>,
     {
+        // Enforce unified single-flight replacement boundary: only one candidate producer across
+        // intentional context resumption and planned/reactive recovery can connect at a time.
+        let _flight_permit = self.replacement_lock.lock().await;
+
         let current_active = {
             let core = self.core.read().await;
             if core.config.revision != queued_snapshot.revision {
@@ -728,7 +736,9 @@ impl RecoverySupervisor {
             }
         };
 
-        tracing::info!("Executing intentional context resumption under supervisor.");
+        tracing::info!(
+            "Executing intentional context resumption under supervisor single-flight boundary."
+        );
         let new_session_arc = connect_fn().await?;
 
         let mut candidate_guard = CandidateCleanupGuard::new(new_session_arc.clone());
@@ -966,6 +976,7 @@ impl RecoverySupervisor {
         txn: Arc<ReplacementTxn>,
     ) {
         let core_lock = Arc::clone(&self.core);
+        let replacement_lock = Arc::clone(&self.replacement_lock);
         let generation_tx = self.generation_tx.clone();
         let policy = self.policy.clone();
         #[cfg(any(test, feature = "recovery-test-utils"))]
@@ -1090,6 +1101,9 @@ impl RecoverySupervisor {
                             .await;
                     return;
                 }
+
+                // Enforce unified single-flight candidate production permit across intentional resumption and recovery.
+                let _flight_permit = replacement_lock.lock().await;
 
                 #[cfg(any(test, feature = "recovery-test-utils"))]
                 {
@@ -3340,5 +3354,181 @@ mod tests {
         assert!(matches!(phase.cause(), RecoveryCause::UnexpectedEof));
         assert_eq!(phase.deadline(), deadline);
         assert!(phase.remaining_duration() <= Duration::from_secs(5));
+    }
+
+    #[tokio::test]
+    async fn test_resumption_and_planned_replacement_serialization() {
+        let policy = RecoveryPolicy::default();
+        let config = Arc::new(tokio::sync::RwLock::new(crate::config::RealtimeConfig::default()));
+        let initial_session = Arc::new(MockSession { id: "gen-0".to_string(), recovery: None });
+        let supervisor =
+            Arc::new(RecoverySupervisor::with_initial_session(policy, config, initial_session));
+
+        let unblock_resumption = Arc::new(tokio::sync::Notify::new());
+        let unblock_resumption_clone = Arc::clone(&unblock_resumption);
+
+        let resumption_started = Arc::new(tokio::sync::Notify::new());
+        let resumption_started_clone = Arc::clone(&resumption_started);
+
+        let sup = Arc::clone(&supervisor);
+        let resumption_task = tokio::spawn(async move {
+            let snapshot = sup.get_config().await;
+            sup.execute_resumption_with(snapshot, move || async move {
+                resumption_started_clone.notify_one();
+                unblock_resumption_clone.notified().await;
+                Ok(Arc::new(MockSession { id: "gen-1-resumed".to_string(), recovery: None })
+                    as Arc<dyn RealtimeSession>)
+            })
+            .await
+        });
+
+        resumption_started.notified().await;
+
+        // While resumption is in flight connecting under the supervisor, trigger planned rotation
+        let sup_planned = Arc::clone(&supervisor);
+        let planned_task = tokio::spawn(async move {
+            sup_planned
+                .execute_planned_replacement(
+                    0,
+                    RecoveryCause::PlannedRotation { time_left: Some("30s".to_string()) },
+                )
+                .await
+        });
+
+        // Small yield to allow planned task to attempt execution
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Unblock resumption connect
+        unblock_resumption.notify_one();
+
+        let resumption_res = resumption_task.await.unwrap();
+        assert!(resumption_res.is_ok(), "resumption should succeed");
+        assert_eq!(resumption_res.unwrap().id, 1);
+
+        let _ = planned_task.await;
+
+        // Active generation should be 1 (published by resumption)
+        let active = supervisor.get_active_generation().await.unwrap();
+        assert_eq!(active.id, 1);
+    }
+
+    #[tokio::test]
+    async fn test_planned_replacement_and_resumption_serialization() {
+        let policy = RecoveryPolicy::default();
+        let config = Arc::new(tokio::sync::RwLock::new(crate::config::RealtimeConfig::default()));
+        let recover_count = Arc::new(AtomicUsize::new(0));
+        let mock_rec = Arc::new(CoalescingRecovery {
+            recover_count: Arc::clone(&recover_count),
+            active_recoveries: Arc::new(AtomicUsize::new(0)),
+            max_active_recoveries: Arc::new(AtomicUsize::new(0)),
+        });
+        let initial_session = Arc::new(MockSession {
+            id: "gen-0".to_string(),
+            recovery: Some(Arc::clone(&mock_rec) as Arc<dyn RealtimeRecovery>),
+        });
+        let supervisor =
+            Arc::new(RecoverySupervisor::with_initial_session(policy, config, initial_session));
+
+        let barrier = Arc::new(crate::recovery::TestRecoveryBarrier::new());
+        supervisor.set_recovery_barrier_for_testing(Arc::clone(&barrier));
+
+        let sup_planned = Arc::clone(&supervisor);
+        let planned_task = tokio::spawn(async move {
+            sup_planned
+                .execute_planned_replacement(
+                    0,
+                    RecoveryCause::PlannedRotation { time_left: Some("30s".to_string()) },
+                )
+                .await
+        });
+
+        // Wait until planned candidate producer has acquired flight permit and entered barrier
+        barrier.wait_until_planned_entered().await;
+
+        let resumption_attempted = Arc::new(AtomicBool::new(false));
+        let resumption_attempted_clone = Arc::clone(&resumption_attempted);
+
+        let sup_resumption = Arc::clone(&supervisor);
+        let resumption_task = tokio::spawn(async move {
+            let snapshot = sup_resumption.get_config().await;
+            sup_resumption
+                .execute_resumption_with(snapshot, move || async move {
+                    resumption_attempted_clone.store(true, Ordering::SeqCst);
+                    Ok(Arc::new(MockSession { id: "gen-2-resumed".to_string(), recovery: None })
+                        as Arc<dyn RealtimeSession>)
+                })
+                .await
+        });
+
+        // Yield to allow resumption task to schedule: it should be blocked on replacement_lock
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            !resumption_attempted.load(Ordering::SeqCst),
+            "resumption connect must not start while planned replacement holds the flight permit"
+        );
+
+        barrier.release();
+        let _ = planned_task.await;
+        let _ = resumption_task.await;
+    }
+
+    #[tokio::test]
+    async fn test_reactive_recovery_and_resumption_serialization() {
+        let policy = RecoveryPolicy::default();
+        let config = Arc::new(tokio::sync::RwLock::new(crate::config::RealtimeConfig::default()));
+        let recover_count = Arc::new(AtomicUsize::new(0));
+        let mock_rec = Arc::new(CoalescingRecovery {
+            recover_count: Arc::clone(&recover_count),
+            active_recoveries: Arc::new(AtomicUsize::new(0)),
+            max_active_recoveries: Arc::new(AtomicUsize::new(0)),
+        });
+        let initial_session = Arc::new(MockSession {
+            id: "gen-0".to_string(),
+            recovery: Some(Arc::clone(&mock_rec) as Arc<dyn RealtimeRecovery>),
+        });
+        let supervisor =
+            Arc::new(RecoverySupervisor::with_initial_session(policy, config, initial_session));
+
+        let barrier = Arc::new(crate::recovery::TestRecoveryBarrier::new());
+        supervisor.set_recovery_barrier_for_testing(Arc::clone(&barrier));
+
+        let sup_reactive = Arc::clone(&supervisor);
+        let reactive_task = tokio::spawn(async move {
+            sup_reactive
+                .report_failure(FailureReport {
+                    generation: 0,
+                    cause: RecoveryCause::UnexpectedEof,
+                })
+                .await
+        });
+
+        // Wait until reactive recovery has acquired flight permit and entered barrier
+        barrier.wait_until_recovering_entered().await;
+
+        let resumption_attempted = Arc::new(AtomicBool::new(false));
+        let resumption_attempted_clone = Arc::clone(&resumption_attempted);
+
+        let sup_resumption = Arc::clone(&supervisor);
+        let resumption_task = tokio::spawn(async move {
+            let snapshot = sup_resumption.get_config().await;
+            sup_resumption
+                .execute_resumption_with(snapshot, move || async move {
+                    resumption_attempted_clone.store(true, Ordering::SeqCst);
+                    Ok(Arc::new(MockSession { id: "gen-2-resumed".to_string(), recovery: None })
+                        as Arc<dyn RealtimeSession>)
+                })
+                .await
+        });
+
+        // Yield to allow resumption task to schedule: it should be blocked on replacement_lock
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            !resumption_attempted.load(Ordering::SeqCst),
+            "resumption connect must not start while reactive recovery holds the flight permit"
+        );
+
+        barrier.release();
+        let _ = reactive_task.await;
+        let _ = resumption_task.await;
     }
 }
