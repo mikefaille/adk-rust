@@ -204,6 +204,14 @@ jobs:
           # never compiled them and no job ever *ran* their tests. The nightly `full`
           # clippy build compiles them but executes nothing.
           - { package: adk-realtime, features: openai }
+          # `gemini` is likewise not a default, and nothing in the workspace
+          # turns it on, so `--workspace` compiled none of the Gemini Live
+          # surface: `cargo nextest list --workspace` showed 0 `gemini::session`
+          # tests against 70 with the feature enabled. GoAway rotation, the
+          # managed-recovery classification, and the setup/teardown paths all
+          # sat outside every required check, and two clippy errors accumulated
+          # in the lib because of it.
+          - { package: adk-realtime, features: gemini }
           # Two entries on purpose. `memory` alone looked like coverage while leaving
           # `sandbox` unbuilt: adk-sandbox renamed a field of EnforcedLimits in #485 and
           # a call site behind `sandbox` kept the old name for two releases, because
