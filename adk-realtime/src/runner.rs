@@ -742,7 +742,7 @@ impl RealtimeRunner {
     }
 
     /// Authoritatively spawn planned proactive replacement and notify the application event handler.
-    async fn handle_planned_rotation(&self, gen_id: u64, time_left: Option<String>) {
+    async fn handle_planned_rotation(&self, gen_id: u64, time_left: Option<String>) -> Result<()> {
         let supervisor = Arc::clone(&self.supervisor);
         let time_left_clone = time_left.clone();
         tokio::spawn(async move {
@@ -755,7 +755,7 @@ impl RealtimeRunner {
                 );
             }
         });
-        let _ = self.event_handler.on_planned_rotation(time_left.as_deref()).await;
+        self.event_handler.on_planned_rotation(time_left.as_deref()).await
     }
 
     /// Report read failure to supervisor, returning true if recovered/stale (caller should loop).
@@ -792,7 +792,7 @@ impl RealtimeRunner {
 
             match self.poll_session_next(&mut watcher, current_gen_id, &session).await {
                 Some(Ok(ServerEvent::PlannedRotation { time_left })) => {
-                    self.handle_planned_rotation(current_gen_id, time_left.clone()).await;
+                    let _ = self.handle_planned_rotation(current_gen_id, time_left.clone()).await;
                     return Some(Ok(ServerEvent::PlannedRotation { time_left }));
                 }
                 Some(Ok(event)) => return Some(Ok(event)),
@@ -1051,9 +1051,9 @@ impl RealtimeRunner {
                     None => self.supervisor.get_active_generation().await.ok().map(|g| g.id),
                 };
                 if let Some(target_gen_id) = target_gen {
-                    self.handle_planned_rotation(target_gen_id, time_left).await;
+                    self.handle_planned_rotation(target_gen_id, time_left).await?;
                 } else {
-                    let _ = self.event_handler.on_planned_rotation(time_left.as_deref()).await;
+                    self.event_handler.on_planned_rotation(time_left.as_deref()).await?;
                 }
             }
             ServerEvent::ResponseCancelled { .. } => {
@@ -2602,6 +2602,85 @@ mod runner_tests {
         assert_eq!(*rx.borrow(), 1, "ready published candidate advances watcher to generation 1");
     }
 
+    struct SignallingRecovery {
+        replacement_started: Arc<tokio::sync::Notify>,
+        session2: Arc<dyn RealtimeSession>,
+    }
+
+    #[async_trait]
+    impl crate::recovery::RealtimeRecovery for SignallingRecovery {
+        fn classify(&self, _cause: &RecoveryCause) -> crate::recovery::RecoveryDisposition {
+            crate::recovery::RecoveryDisposition::Recoverable
+        }
+        async fn recover(
+            &self,
+            _context: crate::recovery::RecoveryContext<'_>,
+        ) -> Result<crate::recovery::RecoveredSession> {
+            self.replacement_started.notify_one();
+            Ok(crate::recovery::RecoveredSession::new(
+                self.session2.clone(),
+                crate::recovery::RecoveryContinuity::Reconnected,
+            ))
+        }
+    }
+
+    struct RecoverableSessionWithSignalling {
+        inner: ScriptedSession,
+        rec: SignallingRecovery,
+    }
+
+    #[async_trait]
+    impl RealtimeSession for RecoverableSessionWithSignalling {
+        fn session_id(&self) -> &str {
+            self.inner.session_id()
+        }
+        fn is_connected(&self) -> bool {
+            self.inner.is_connected()
+        }
+        fn recovery(&self) -> Option<&dyn crate::recovery::RealtimeRecovery> {
+            Some(&self.rec)
+        }
+        async fn send_audio(&self, a: &AudioChunk) -> Result<()> {
+            self.inner.send_audio(a).await
+        }
+        async fn send_audio_base64(&self, a: &str) -> Result<()> {
+            self.inner.send_audio_base64(a).await
+        }
+        async fn send_text(&self, t: &str) -> Result<()> {
+            self.inner.send_text(t).await
+        }
+        async fn send_tool_response(&self, r: ToolResponse) -> Result<()> {
+            self.inner.send_tool_response(r).await
+        }
+        async fn commit_audio(&self) -> Result<()> {
+            self.inner.commit_audio().await
+        }
+        async fn clear_audio(&self) -> Result<()> {
+            self.inner.clear_audio().await
+        }
+        async fn create_response(&self) -> Result<()> {
+            self.inner.create_response().await
+        }
+        async fn interrupt(&self) -> Result<()> {
+            self.inner.interrupt().await
+        }
+        async fn send_event(&self, e: ClientEvent) -> Result<()> {
+            self.inner.send_event(e).await
+        }
+        async fn next_event(&self) -> Option<Result<ServerEvent>> {
+            self.inner.next_event().await
+        }
+        fn events(&self) -> Pin<Box<dyn futures::Stream<Item = Result<ServerEvent>> + Send + '_>> {
+            self.inner.events()
+        }
+        async fn close(&self) -> Result<()> {
+            self.inner.close().await
+        }
+        async fn mutate_context(&self, c: RealtimeConfig) -> Result<ContextMutationOutcome> {
+            self.inner.mutate_context(c).await
+        }
+    }
+
     #[tokio::test]
     async fn test_planned_rotation_launches_replacement_when_event_handler_blocks() {
         let replacement_started = Arc::new(tokio::sync::Notify::new());
@@ -2619,87 +2698,6 @@ mod runner_tests {
                 self.handler_started.notify_one();
                 self.handler_allow_exit.notified().await;
                 Ok(())
-            }
-        }
-
-        struct SignallingRecovery {
-            replacement_started: Arc<tokio::sync::Notify>,
-            session2: Arc<dyn RealtimeSession>,
-        }
-
-        #[async_trait]
-        impl crate::recovery::RealtimeRecovery for SignallingRecovery {
-            fn classify(&self, _cause: &RecoveryCause) -> crate::recovery::RecoveryDisposition {
-                crate::recovery::RecoveryDisposition::Recoverable
-            }
-            async fn recover(
-                &self,
-                _context: crate::recovery::RecoveryContext<'_>,
-            ) -> Result<crate::recovery::RecoveredSession> {
-                self.replacement_started.notify_one();
-                Ok(crate::recovery::RecoveredSession::new(
-                    self.session2.clone(),
-                    crate::recovery::RecoveryContinuity::Reconnected,
-                ))
-            }
-        }
-
-        struct RecoverableSessionWithSignalling {
-            inner: ScriptedSession,
-            rec: SignallingRecovery,
-        }
-
-        #[async_trait]
-        impl RealtimeSession for RecoverableSessionWithSignalling {
-            fn session_id(&self) -> &str {
-                self.inner.session_id()
-            }
-            fn is_connected(&self) -> bool {
-                self.inner.is_connected()
-            }
-            fn recovery(&self) -> Option<&dyn crate::recovery::RealtimeRecovery> {
-                Some(&self.rec)
-            }
-            async fn send_audio(&self, a: &AudioChunk) -> Result<()> {
-                self.inner.send_audio(a).await
-            }
-            async fn send_audio_base64(&self, a: &str) -> Result<()> {
-                self.inner.send_audio_base64(a).await
-            }
-            async fn send_text(&self, t: &str) -> Result<()> {
-                self.inner.send_text(t).await
-            }
-            async fn send_tool_response(&self, r: ToolResponse) -> Result<()> {
-                self.inner.send_tool_response(r).await
-            }
-            async fn commit_audio(&self) -> Result<()> {
-                self.inner.commit_audio().await
-            }
-            async fn clear_audio(&self) -> Result<()> {
-                self.inner.clear_audio().await
-            }
-            async fn create_response(&self) -> Result<()> {
-                self.inner.create_response().await
-            }
-            async fn interrupt(&self) -> Result<()> {
-                self.inner.interrupt().await
-            }
-            async fn send_event(&self, e: ClientEvent) -> Result<()> {
-                self.inner.send_event(e).await
-            }
-            async fn next_event(&self) -> Option<Result<ServerEvent>> {
-                self.inner.next_event().await
-            }
-            fn events(
-                &self,
-            ) -> Pin<Box<dyn futures::Stream<Item = Result<ServerEvent>> + Send + '_>> {
-                self.inner.events()
-            }
-            async fn close(&self) -> Result<()> {
-                self.inner.close().await
-            }
-            async fn mutate_context(&self, c: RealtimeConfig) -> Result<ContextMutationOutcome> {
-                self.inner.mutate_context(c).await
             }
         }
 
@@ -2787,5 +2785,57 @@ mod runner_tests {
 
         let active = runner.supervisor.get_active_generation().await.unwrap();
         assert_eq!(active.id, 1, "stale generation 0 rotation report must not rotate generation 1");
+    }
+
+    #[derive(Clone)]
+    struct FailingPlannedRotationHandler {
+        barrier: Arc<crate::recovery::TestRecoveryBarrier>,
+    }
+
+    #[async_trait]
+    impl EventHandler for FailingPlannedRotationHandler {
+        async fn on_planned_rotation(&self, _time_left: Option<&str>) -> Result<()> {
+            self.barrier.wait_until_planned_entered().await;
+            Err(RealtimeError::connection("deliberate callback failure"))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_planned_rotation_event_handler_error_propagates_and_spawns_replacement() {
+        let barrier = Arc::new(crate::recovery::TestRecoveryBarrier::new());
+        let handler = FailingPlannedRotationHandler { barrier: Arc::clone(&barrier) };
+
+        let runner = RealtimeRunner::builder()
+            .model(Arc::new(MockModel) as BoxedModel)
+            .event_handler(handler)
+            .build()
+            .unwrap();
+
+        runner.supervisor.set_recovery_barrier_for_testing(Arc::clone(&barrier));
+
+        let session2 = Arc::new(ScriptedSession::new(Arc::new(Counts::default()), vec![]));
+        let replacement_started = Arc::new(tokio::sync::Notify::new());
+        let session0 = Arc::new(RecoverableSessionWithSignalling {
+            inner: ScriptedSession::new(Arc::new(Counts::default()), vec![]),
+            rec: SignallingRecovery { replacement_started, session2 },
+        });
+        let gen0_id = runner.set_initial_session(session0).await.unwrap();
+        assert_eq!(gen0_id, 0);
+
+        let res = runner
+            .handle_event_for_generation(
+                ServerEvent::PlannedRotation { time_left: Some("30s".into()) },
+                Some(0),
+            )
+            .await;
+
+        assert!(res.is_err(), "event handling must propagate callback error");
+        let err_msg = res.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("deliberate callback failure"),
+            "propagated error must be the callback failure, got: {err_msg}"
+        );
+
+        barrier.release();
     }
 }

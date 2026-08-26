@@ -336,6 +336,8 @@ pub(crate) mod supervisor;
 pub struct TestRecoveryBarrier {
     recovering_entered: tokio::sync::Notify,
     planned_entered: tokio::sync::Notify,
+    resumption_flight_entering: tokio::sync::Notify,
+    recovery_flight_entering: tokio::sync::Notify,
     release: tokio::sync::Notify,
 }
 
@@ -356,20 +358,40 @@ impl TestRecoveryBarrier {
         self.planned_entered.notified().await;
     }
 
+    /// Wait until `execute_resumption_with` is about to acquire `replacement_lock`.
+    pub async fn wait_until_resumption_flight_entering(&self) {
+        self.resumption_flight_entering.notified().await;
+    }
+
+    /// Wait until `spawn_replacement_worker` is about to acquire `replacement_lock`.
+    pub async fn wait_until_recovery_flight_entering(&self) {
+        self.recovery_flight_entering.notified().await;
+    }
+
     /// Release the held recovery episode, allowing provider candidate connection & publication to proceed.
     pub fn release(&self) {
-        self.release.notify_one();
+        self.release.notify_waiters();
+    }
+
+    /// Invoked by `RecoverySupervisor` immediately before attempting to acquire the flight permit for resumption.
+    pub fn on_resumption_flight_entering(&self) {
+        self.resumption_flight_entering.notify_waiters();
+    }
+
+    /// Invoked by `RecoverySupervisor` immediately before attempting to acquire the flight permit for recovery/planned replacement.
+    pub fn on_recovery_flight_entering(&self) {
+        self.recovery_flight_entering.notify_waiters();
     }
 
     /// Invoked by `RecoverySupervisor` to signal `Recovering` state entry and pause until released.
     pub async fn on_recovering(&self) {
-        self.recovering_entered.notify_one();
+        self.recovering_entered.notify_waiters();
         self.release.notified().await;
     }
 
     /// Invoked by `RecoverySupervisor` to signal `Planned` state entry and pause until released.
     pub async fn on_planned(&self) {
-        self.planned_entered.notify_one();
+        self.planned_entered.notify_waiters();
         self.release.notified().await;
     }
 }
