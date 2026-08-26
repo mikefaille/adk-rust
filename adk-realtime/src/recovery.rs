@@ -339,6 +339,7 @@ pub struct TestRecoveryBarrier {
     resumption_flight_entering: tokio::sync::Notify,
     recovery_flight_entering: tokio::sync::Notify,
     release: tokio::sync::Notify,
+    phase_hold_claimed: std::sync::atomic::AtomicBool,
 }
 
 #[cfg(any(test, feature = "recovery-test-utils"))]
@@ -370,28 +371,32 @@ impl TestRecoveryBarrier {
 
     /// Release the held recovery episode, allowing provider candidate connection & publication to proceed.
     pub fn release(&self) {
-        self.release.notify_waiters();
+        self.release.notify_one();
     }
 
     /// Invoked by `RecoverySupervisor` immediately before attempting to acquire the flight permit for resumption.
     pub fn on_resumption_flight_entering(&self) {
-        self.resumption_flight_entering.notify_waiters();
+        self.resumption_flight_entering.notify_one();
     }
 
     /// Invoked by `RecoverySupervisor` immediately before attempting to acquire the flight permit for recovery/planned replacement.
     pub fn on_recovery_flight_entering(&self) {
-        self.recovery_flight_entering.notify_waiters();
+        self.recovery_flight_entering.notify_one();
     }
 
-    /// Invoked by `RecoverySupervisor` to signal `Recovering` state entry and pause until released.
+    /// Invoked by `RecoverySupervisor` to signal `Recovering` state entry and pause until released (one-shot).
     pub async fn on_recovering(&self) {
-        self.recovering_entered.notify_waiters();
-        self.release.notified().await;
+        if !self.phase_hold_claimed.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            self.recovering_entered.notify_one();
+            self.release.notified().await;
+        }
     }
 
-    /// Invoked by `RecoverySupervisor` to signal `Planned` state entry and pause until released.
+    /// Invoked by `RecoverySupervisor` to signal `Planned` state entry and pause until released (one-shot).
     pub async fn on_planned(&self) {
-        self.planned_entered.notify_waiters();
-        self.release.notified().await;
+        if !self.phase_hold_claimed.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            self.planned_entered.notify_one();
+            self.release.notified().await;
+        }
     }
 }
