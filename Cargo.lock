@@ -700,6 +700,7 @@ dependencies = [
  "adk-anthropic",
  "adk-core",
  "adk-gemini",
+ "adk-schema",
  "adk-telemetry",
  "anyhow",
  "async-openai",
