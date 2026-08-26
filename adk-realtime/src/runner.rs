@@ -741,6 +741,23 @@ impl RealtimeRunner {
         }
     }
 
+    /// Authoritatively spawn planned proactive replacement and notify the application event handler.
+    async fn handle_planned_rotation(&self, gen_id: u64, time_left: Option<String>) {
+        let supervisor = Arc::clone(&self.supervisor);
+        let time_left_clone = time_left.clone();
+        tokio::spawn(async move {
+            let cause = RecoveryCause::PlannedRotation { time_left: time_left_clone };
+            if let Err(e) = supervisor.execute_planned_replacement(gen_id, cause).await {
+                tracing::warn!(
+                    gen_id,
+                    error = %e,
+                    "proactive planned replacement attempt failed; keeping generation N authoritative"
+                );
+            }
+        });
+        let _ = self.event_handler.on_planned_rotation(time_left.as_deref()).await;
+    }
+
     /// Report read failure to supervisor, returning true if recovered/stale (caller should loop).
     async fn report_read_failure(&self, gen_id: u64, cause: RecoveryCause) -> bool {
         let report = FailureReport { generation: gen_id, cause };
@@ -775,21 +792,7 @@ impl RealtimeRunner {
 
             match self.poll_session_next(&mut watcher, current_gen_id, &session).await {
                 Some(Ok(ServerEvent::PlannedRotation { time_left })) => {
-                    let supervisor = Arc::clone(&self.supervisor);
-                    let time_left_clone = time_left.clone();
-                    tokio::spawn(async move {
-                        let cause = RecoveryCause::PlannedRotation { time_left: time_left_clone };
-                        if let Err(e) =
-                            supervisor.execute_planned_replacement(current_gen_id, cause).await
-                        {
-                            tracing::warn!(
-                                current_gen_id,
-                                error = %e,
-                                "proactive planned replacement attempt failed; keeping generation N authoritative"
-                            );
-                        }
-                    });
-                    let _ = self.event_handler.on_planned_rotation(time_left.as_deref()).await;
+                    self.handle_planned_rotation(current_gen_id, time_left.clone()).await;
                     return Some(Ok(ServerEvent::PlannedRotation { time_left }));
                 }
                 Some(Ok(event)) => return Some(Ok(event)),
@@ -1043,23 +1046,15 @@ impl RealtimeRunner {
                 self.event_handler.on_tool_calls_cancelled(&call_ids).await?;
             }
             ServerEvent::PlannedRotation { time_left } => {
-                let supervisor = Arc::clone(&self.supervisor);
-                let time_left_clone = time_left.clone();
                 let target_gen = match gen_id {
                     Some(id) => Some(id),
                     None => self.supervisor.get_active_generation().await.ok().map(|g| g.id),
                 };
                 if let Some(target_gen_id) = target_gen {
-                    tokio::spawn(async move {
-                        let cause = RecoveryCause::PlannedRotation { time_left: time_left_clone };
-                        if let Err(e) =
-                            supervisor.execute_planned_replacement(target_gen_id, cause).await
-                        {
-                            tracing::warn!(target_gen_id, error = %e, "proactive planned replacement attempt failed; keeping generation N authoritative");
-                        }
-                    });
+                    self.handle_planned_rotation(target_gen_id, time_left).await;
+                } else {
+                    let _ = self.event_handler.on_planned_rotation(time_left.as_deref()).await;
                 }
-                self.event_handler.on_planned_rotation(time_left.as_deref()).await?;
             }
             ServerEvent::ResponseCancelled { .. } => {
                 self.pending_tool_response.store(false, Ordering::Release);
