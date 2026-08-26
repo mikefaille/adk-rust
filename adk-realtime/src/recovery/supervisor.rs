@@ -7,7 +7,7 @@ use crate::recovery::{
 use crate::session::RealtimeSession;
 use std::num::NonZeroU32;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
@@ -166,6 +166,14 @@ pub(crate) enum ManagedState {
     Terminal { reason: TerminalReason, _last_generation: Option<Arc<SessionGeneration>> },
 }
 
+/// Unified core protected under a single `tokio::sync::RwLock` to prevent lock inversion.
+pub(crate) struct SupervisorCore {
+    pub(crate) state: ManagedState,
+    pub(crate) config: ConfigSnapshot,
+    pub(crate) next_generation_id: u64,
+    pub(crate) next_txn_id: u64,
+}
+
 /// RAII cleanup guard for un-published candidate sessions.
 struct CandidateCleanupGuard(Option<Arc<dyn RealtimeSession>>);
 
@@ -192,10 +200,7 @@ impl Drop for CandidateCleanupGuard {
 /// The algebraic recovery supervisor.
 pub(crate) struct RecoverySupervisor {
     policy: RecoveryPolicy,
-    state: Arc<tokio::sync::RwLock<ManagedState>>,
-    config: Arc<tokio::sync::RwLock<ConfigSnapshot>>,
-    next_generation_id: Arc<AtomicU64>,
-    next_txn_id: Arc<AtomicU64>,
+    core: Arc<tokio::sync::RwLock<SupervisorCore>>,
     generation_tx: tokio::sync::watch::Sender<u64>,
     #[cfg(any(test, feature = "recovery-test-utils"))]
     test_recovery_barrier:
@@ -232,13 +237,12 @@ impl RecoverySupervisor {
         let (generation_tx, _) = tokio::sync::watch::channel(0);
         Self {
             policy,
-            state: Arc::new(tokio::sync::RwLock::new(ManagedState::Uninitialized)),
-            config: Arc::new(tokio::sync::RwLock::new(ConfigSnapshot {
-                config: initial_config,
-                revision: 0,
+            core: Arc::new(tokio::sync::RwLock::new(SupervisorCore {
+                state: ManagedState::Uninitialized,
+                config: ConfigSnapshot { config: initial_config, revision: 0 },
+                next_generation_id: 0,
+                next_txn_id: 1,
             })),
-            next_generation_id: Arc::new(AtomicU64::new(0)),
-            next_txn_id: Arc::new(AtomicU64::new(1)),
             generation_tx,
             #[cfg(any(test, feature = "recovery-test-utils"))]
             test_recovery_barrier: Arc::new(parking_lot::Mutex::new(None)),
@@ -260,16 +264,12 @@ impl RecoverySupervisor {
         let gen_0 = Arc::new(SessionGeneration::new(0, initial_session));
         Self {
             policy,
-            state: Arc::new(tokio::sync::RwLock::new(ManagedState::Serving {
-                active: gen_0,
-                planned: None,
+            core: Arc::new(tokio::sync::RwLock::new(SupervisorCore {
+                state: ManagedState::Serving { active: gen_0, planned: None },
+                config: ConfigSnapshot { config: initial_cfg, revision: 0 },
+                next_generation_id: 1,
+                next_txn_id: 1,
             })),
-            config: Arc::new(tokio::sync::RwLock::new(ConfigSnapshot {
-                config: initial_cfg,
-                revision: 0,
-            })),
-            next_generation_id: Arc::new(AtomicU64::new(1)),
-            next_txn_id: Arc::new(AtomicU64::new(1)),
             generation_tx,
             #[cfg(any(test, feature = "recovery-test-utils"))]
             test_recovery_barrier: Arc::new(parking_lot::Mutex::new(None)),
@@ -290,13 +290,15 @@ impl RecoverySupervisor {
         &self,
         session: Arc<dyn RealtimeSession>,
     ) -> Result<SessionGeneration> {
-        let mut state = self.state.write().await;
-        if !matches!(*state, ManagedState::Uninitialized) {
+        let mut core_guard = self.core.write().await;
+        let SupervisorCore { state, next_generation_id, .. } = &mut *core_guard;
+        if !matches!(state, ManagedState::Uninitialized) {
             return Err(RealtimeError::config(
                 "cannot set initial session unless supervisor status is strictly Uninitialized",
             ));
         }
-        let gen_id = self.next_generation_id.fetch_add(1, Ordering::SeqCst);
+        let gen_id = *next_generation_id;
+        *next_generation_id += 1;
         let gen_item = Arc::new(SessionGeneration::new(gen_id, session));
         *state = ManagedState::Serving { active: Arc::clone(&gen_item), planned: None };
         let _ = self.generation_tx.send(gen_id);
@@ -310,8 +312,8 @@ impl RecoverySupervisor {
 
     /// Check current transport status projection.
     pub(crate) async fn status(&self) -> TransportStatus {
-        let state = self.state.read().await;
-        match &*state {
+        let core = self.core.read().await;
+        match &core.state {
             ManagedState::Uninitialized => TransportStatus::Uninitialized,
             ManagedState::Serving { active, .. } => {
                 if active.is_writable() {
@@ -330,8 +332,8 @@ impl RecoverySupervisor {
 
     /// Check if currently connected and healthy for writes.
     pub(crate) async fn is_connected(&self) -> bool {
-        let state = self.state.read().await;
-        match &*state {
+        let core = self.core.read().await;
+        match &core.state {
             ManagedState::Serving { active, .. } => {
                 active.is_writable() && active.session.is_connected()
             }
@@ -344,8 +346,8 @@ impl RecoverySupervisor {
     /// Unlike `admit_write()`, this returns the generation even during recovery so that
     /// pending server events can be drained without returning false EOF.
     pub(crate) async fn get_active_generation(&self) -> Result<SessionGeneration> {
-        let state = self.state.read().await;
-        match &*state {
+        let core = self.core.read().await;
+        match &core.state {
             ManagedState::Uninitialized => Err(RealtimeError::NotConnected),
             ManagedState::Serving { active, .. } => Ok((**active).clone()),
             ManagedState::Recovering { failed, .. } => Ok((**failed).clone()),
@@ -360,8 +362,8 @@ impl RecoverySupervisor {
     ///
     /// Fails closed if the active generation's write gate is closed or if supervisor is recovering.
     pub(crate) async fn admit_write(&self) -> Result<SessionGeneration> {
-        let state = self.state.read().await;
-        match &*state {
+        let core = self.core.read().await;
+        match &core.state {
             ManagedState::Uninitialized | ManagedState::Recovering { .. } => {
                 Err(RealtimeError::NotConnected)
             }
@@ -384,15 +386,15 @@ impl RecoverySupervisor {
     where
         F: FnOnce(&mut crate::config::RealtimeConfig),
     {
-        let mut cfg = self.config.write().await;
-        mutate(&mut cfg.config);
-        cfg.revision = cfg.revision.wrapping_add(1);
-        cfg.clone()
+        let mut core = self.core.write().await;
+        mutate(&mut core.config.config);
+        core.config.revision = core.config.revision.wrapping_add(1);
+        core.config.clone()
     }
 
     /// Get coherent configuration and revision snapshot.
     pub(crate) async fn get_config(&self) -> ConfigSnapshot {
-        self.config.read().await.clone()
+        self.core.read().await.config.clone()
     }
 
     /// Atomically publish a newly created replacement session.
@@ -401,41 +403,43 @@ impl RecoverySupervisor {
         new_session: Arc<dyn RealtimeSession>,
         expected_revision: u64,
     ) -> Result<SessionGeneration> {
-        let current_rev = self.config.read().await.revision;
-        if current_rev != expected_revision {
-            return Err(RealtimeError::config("stale config revision during publication"));
-        }
-
         let mut candidate_guard = CandidateCleanupGuard::new(new_session.clone());
 
-        let (next_gen, old_session) = {
-            let mut state = self.state.write().await;
-            match &mut *state {
+        let (new_gen, old_session) = {
+            let mut core_guard = self.core.write().await;
+            let SupervisorCore { state, config, next_generation_id, .. } = &mut *core_guard;
+            if config.revision != expected_revision {
+                return Err(RealtimeError::config("stale config revision during publication"));
+            }
+
+            match state {
                 ManagedState::Terminal { .. } => return Err(RealtimeError::SessionClosed),
                 ManagedState::Uninitialized => return Err(RealtimeError::NotConnected),
                 ManagedState::Serving { active, planned } => {
                     if let Some(p) = planned.take() {
                         p.cancel_token.cancel();
                     }
-                    let next_gen = self.next_generation_id.fetch_add(1, Ordering::SeqCst);
-                    let new_gen = Arc::new(SessionGeneration::new(next_gen, new_session.clone()));
+                    let next_gen = *next_generation_id;
+                    *next_generation_id += 1;
+                    let gen_item = Arc::new(SessionGeneration::new(next_gen, new_session.clone()));
                     let old = active.session.clone();
-                    *state = ManagedState::Serving { active: new_gen, planned: None };
-                    (next_gen, Some(old))
+                    *state = ManagedState::Serving { active: Arc::clone(&gen_item), planned: None };
+                    (gen_item, Some(old))
                 }
                 ManagedState::Recovering { failed, txn } => {
                     txn.cancel_token.cancel();
-                    let next_gen = self.next_generation_id.fetch_add(1, Ordering::SeqCst);
-                    let new_gen = Arc::new(SessionGeneration::new(next_gen, new_session.clone()));
+                    let next_gen = *next_generation_id;
+                    *next_generation_id += 1;
+                    let gen_item = Arc::new(SessionGeneration::new(next_gen, new_session.clone()));
                     let old = failed.session.clone();
-                    *state = ManagedState::Serving { active: new_gen, planned: None };
-                    (next_gen, Some(old))
+                    *state = ManagedState::Serving { active: Arc::clone(&gen_item), planned: None };
+                    (gen_item, Some(old))
                 }
             }
         };
 
         candidate_guard.disarm();
-        let _ = self.generation_tx.send(next_gen);
+        let _ = self.generation_tx.send(new_gen.id);
 
         if let Some(old) = old_session {
             tokio::spawn(async move {
@@ -443,11 +447,7 @@ impl RecoverySupervisor {
             });
         }
 
-        Ok(SessionGeneration {
-            id: next_gen,
-            session: new_session,
-            write_gate: WriteGate::new_open(),
-        })
+        Ok((*new_gen).clone())
     }
 
     /// Execute an intentional context resumption under the supervisor.
@@ -456,21 +456,21 @@ impl RecoverySupervisor {
         model: &crate::model::BoxedModel,
         queued_snapshot: ConfigSnapshot,
     ) -> Result<SessionGeneration> {
-        let (current_active, current_rev) = {
-            let state = self.state.read().await;
-            match &*state {
+        let current_active = {
+            let core = self.core.read().await;
+            if core.config.revision != queued_snapshot.revision {
+                return Err(RealtimeError::config(
+                    "stale config revision prior to resumption connect",
+                ));
+            }
+            match &core.state {
                 ManagedState::Terminal { .. } => return Err(RealtimeError::SessionClosed),
-                ManagedState::Uninitialized => return Err(RealtimeError::NotConnected),
-                ManagedState::Recovering { .. } => return Err(RealtimeError::NotConnected),
-                ManagedState::Serving { active, .. } => {
-                    (Arc::clone(active), self.config.read().await.revision)
+                ManagedState::Uninitialized | ManagedState::Recovering { .. } => {
+                    return Err(RealtimeError::NotConnected);
                 }
+                ManagedState::Serving { active, .. } => Arc::clone(active),
             }
         };
-
-        if current_rev != queued_snapshot.revision {
-            return Err(RealtimeError::config("stale config revision prior to resumption connect"));
-        }
 
         tracing::info!("Executing intentional context resumption under supervisor.");
         let new_session = model.connect(queued_snapshot.config).await?;
@@ -478,14 +478,14 @@ impl RecoverySupervisor {
 
         let mut candidate_guard = CandidateCleanupGuard::new(new_session_arc.clone());
 
-        let (next_gen, old_session) = {
-            let mut state = self.state.write().await;
-            let current_rev_after = self.config.read().await.revision;
-            if current_rev_after != queued_snapshot.revision {
+        let (new_gen, old_session) = {
+            let mut core_guard = self.core.write().await;
+            let SupervisorCore { state, config, next_generation_id, .. } = &mut *core_guard;
+            if config.revision != queued_snapshot.revision {
                 return Err(RealtimeError::config("stale config revision post-resumption connect"));
             }
 
-            match &mut *state {
+            match state {
                 ManagedState::Terminal { .. } => return Err(RealtimeError::SessionClosed),
                 ManagedState::Serving { active, planned } => {
                     if active.id != current_active.id {
@@ -496,29 +496,26 @@ impl RecoverySupervisor {
                     if let Some(p) = planned.take() {
                         p.cancel_token.cancel();
                     }
-                    let next_gen = self.next_generation_id.fetch_add(1, Ordering::SeqCst);
-                    let new_gen =
+                    let next_gen = *next_generation_id;
+                    *next_generation_id += 1;
+                    let gen_item =
                         Arc::new(SessionGeneration::new(next_gen, new_session_arc.clone()));
                     let old = active.session.clone();
-                    *state = ManagedState::Serving { active: new_gen, planned: None };
-                    (next_gen, old)
+                    *state = ManagedState::Serving { active: Arc::clone(&gen_item), planned: None };
+                    (gen_item, old)
                 }
                 _ => return Err(RealtimeError::NotConnected),
             }
         };
 
         candidate_guard.disarm();
-        let _ = self.generation_tx.send(next_gen);
+        let _ = self.generation_tx.send(new_gen.id);
 
         tokio::spawn(async move {
             let _ = tokio::time::timeout(Duration::from_secs(2), old_session.close()).await;
         });
 
-        Ok(SessionGeneration {
-            id: next_gen,
-            session: new_session_arc,
-            write_gate: WriteGate::new_open(),
-        })
+        Ok((*new_gen).clone())
     }
 
     /// Execute a proactive planned replacement (make-before-break).
@@ -528,8 +525,9 @@ impl RecoverySupervisor {
         cause: RecoveryCause,
     ) -> Result<RecoveryOutcome> {
         let (txn, mut outcome_rx) = {
-            let mut state = self.state.write().await;
-            match &mut *state {
+            let mut core_guard = self.core.write().await;
+            let SupervisorCore { state, next_txn_id, .. } = &mut *core_guard;
+            match state {
                 ManagedState::Terminal { reason, .. } => {
                     return match reason {
                         TerminalReason::ExplicitClose => Err(RealtimeError::SessionClosed),
@@ -561,13 +559,16 @@ impl RecoverySupervisor {
                         let deadline = match &cause {
                             RecoveryCause::PlannedRotation { time_left: Some(dur_str) } => {
                                 if let Some(provider_dur) = parse_duration_string(dur_str) {
-                                    let provider_deadline =
-                                        tokio::time::Instant::now() + provider_dur;
                                     let safety_margin = Duration::from_secs(2);
-                                    let capped = provider_deadline
-                                        .checked_sub(safety_margin)
-                                        .unwrap_or(provider_deadline);
-                                    policy_deadline.min(capped)
+                                    let min_window = Duration::from_millis(100);
+                                    let capped_dur = if provider_dur > safety_margin {
+                                        provider_dur - safety_margin
+                                    } else {
+                                        provider_dur.min(min_window)
+                                    };
+                                    let provider_deadline =
+                                        tokio::time::Instant::now() + capped_dur;
+                                    policy_deadline.min(provider_deadline)
                                 } else {
                                     policy_deadline
                                 }
@@ -575,9 +576,10 @@ impl RecoverySupervisor {
                             _ => policy_deadline,
                         };
 
-                        let next_txn_id = self.next_txn_id.fetch_add(1, Ordering::SeqCst);
+                        let txn_id = *next_txn_id;
+                        *next_txn_id += 1;
                         let txn = Arc::new(ReplacementTxn::new(
-                            next_txn_id,
+                            txn_id,
                             active.id + 1,
                             cause.clone(),
                             deadline,
@@ -586,7 +588,7 @@ impl RecoverySupervisor {
                         let active_arc = Arc::clone(active);
                         *planned = Some(Arc::clone(&txn));
 
-                        self.spawn_planned_worker(active_arc, Arc::clone(&txn), cause);
+                        self.spawn_replacement_worker(active_arc, Arc::clone(&txn), cause);
 
                         (txn, rx)
                     }
@@ -600,8 +602,9 @@ impl RecoverySupervisor {
     /// Report a failure in the active session.
     pub(crate) async fn report_failure(&self, report: FailureReport) -> Result<RecoveryOutcome> {
         let (txn, mut outcome_rx) = {
-            let mut state = self.state.write().await;
-            match &mut *state {
+            let mut core_guard = self.core.write().await;
+            let SupervisorCore { state, next_txn_id, .. } = &mut *core_guard;
+            match state {
                 ManagedState::Terminal { reason, .. } => {
                     return match reason {
                         TerminalReason::ExplicitClose => Err(RealtimeError::SessionClosed),
@@ -642,10 +645,11 @@ impl RecoverySupervisor {
                         *state = ManagedState::Recovering { failed: active_arc, txn: planned_txn };
                         (txn, rx)
                     } else {
-                        let next_txn_id = self.next_txn_id.fetch_add(1, Ordering::SeqCst);
+                        let txn_id = *next_txn_id;
+                        *next_txn_id += 1;
                         let deadline = tokio::time::Instant::now() + self.policy.deadline();
                         let txn = Arc::new(ReplacementTxn::new(
-                            next_txn_id,
+                            txn_id,
                             active_arc.id + 1,
                             report.cause.clone(),
                             deadline,
@@ -656,7 +660,7 @@ impl RecoverySupervisor {
                             txn: Arc::clone(&txn),
                         };
 
-                        self.spawn_recovery_worker(
+                        self.spawn_replacement_worker(
                             Arc::clone(&active_arc),
                             Arc::clone(&txn),
                             report.cause.clone(),
@@ -701,88 +705,102 @@ impl RecoverySupervisor {
         }
     }
 
-    fn spawn_recovery_worker(
+    /// Single unified worker owning both planned preparation and reactive recovery attempts.
+    fn spawn_replacement_worker(
         &self,
-        failed_gen: Arc<SessionGeneration>,
+        originating_gen: Arc<SessionGeneration>,
         txn: Arc<ReplacementTxn>,
-        cause: RecoveryCause,
+        initial_cause: RecoveryCause,
     ) {
-        let state_lock = Arc::clone(&self.state);
-        let config_lock = Arc::clone(&self.config);
-        let next_gen_atomic = Arc::clone(&self.next_generation_id);
+        let core_lock = Arc::clone(&self.core);
         let generation_tx = self.generation_tx.clone();
         let policy = self.policy.clone();
         #[cfg(any(test, feature = "recovery-test-utils"))]
         let test_recovery_barrier = Arc::clone(&self.test_recovery_barrier);
 
         tokio::spawn(async move {
-            #[cfg(any(test, feature = "recovery-test-utils"))]
-            {
-                let maybe_barrier = test_recovery_barrier.lock().take();
-                if let Some(barrier) = maybe_barrier {
-                    barrier.on_recovering().await;
-                }
-            }
-
-            let recovery_impl = match failed_gen.session.recovery() {
+            let recovery_impl = match originating_gen.session.recovery() {
                 Some(r) => r,
                 None => {
                     let err = RealtimeError::provider("active session does not support recovery");
-                    tracing::error!(generation = failed_gen.id, err = %err, "recovery not supported");
-                    let mut state = state_lock.write().await;
-                    if let ManagedState::Recovering { txn: current_txn, .. } = &*state
-                        && current_txn.id == txn.id
-                    {
-                        *state = ManagedState::Terminal {
-                            reason: TerminalReason::Exhausted,
-                            _last_generation: Some(Arc::clone(&failed_gen)),
-                        };
-                    }
-                    let _ = txn.outcome_tx.send(Some(Err(err)));
+                    tracing::error!(generation = originating_gen.id, err = %err, "recovery not supported");
+                    Self::finish_txn_internal(
+                        &core_lock,
+                        &generation_tx,
+                        &txn,
+                        Err(err),
+                        None,
+                        Some(originating_gen.id),
+                    )
+                    .await;
                     return;
                 }
             };
 
-            if recovery_impl.classify(&cause) == RecoveryDisposition::Fatal {
+            if recovery_impl.classify(&initial_cause) == RecoveryDisposition::Fatal {
                 let err = RealtimeError::provider(
                     "fatal recovery cause detected; performing zero provider attempts",
                 );
-                tracing::warn!(generation = failed_gen.id, err = %err, "fatal cause classification");
-                let mut state = state_lock.write().await;
-                if let ManagedState::Recovering { txn: current_txn, .. } = &*state
-                    && current_txn.id == txn.id
-                {
-                    *state = ManagedState::Terminal {
-                        reason: TerminalReason::Exhausted,
-                        _last_generation: Some(Arc::clone(&failed_gen)),
-                    };
-                }
-                let _ = txn.outcome_tx.send(Some(Err(err)));
+                tracing::warn!(generation = originating_gen.id, err = %err, "fatal cause classification");
+                Self::finish_txn_internal(
+                    &core_lock,
+                    &generation_tx,
+                    &txn,
+                    Err(err),
+                    None,
+                    Some(originating_gen.id),
+                )
+                .await;
                 return;
             }
 
             let max_attempts = policy.max_attempts().get();
             let mut attempts_launched = 0;
             let mut last_provider_error: Option<RealtimeError> = None;
-            let mut stop_reason = None;
+            let mut stop_reason: Option<RealtimeError> = None;
 
             for attempt_idx in 1..=max_attempts {
                 if txn.cancel_token.is_cancelled() {
-                    tracing::info!(generation = failed_gen.id, "recovery transaction cancelled");
-                    let _ = txn.outcome_tx.send(Some(Err(RealtimeError::SessionClosed)));
+                    tracing::info!(
+                        generation = originating_gen.id,
+                        "replacement transaction cancelled"
+                    );
+                    Self::finish_txn_internal(
+                        &core_lock,
+                        &generation_tx,
+                        &txn,
+                        Err(RealtimeError::SessionClosed),
+                        None,
+                        Some(originating_gen.id),
+                    )
+                    .await;
                     return;
+                }
+
+                #[cfg(any(test, feature = "recovery-test-utils"))]
+                {
+                    let is_recovering = {
+                        let core = core_lock.read().await;
+                        matches!(&core.state, ManagedState::Recovering { txn: cur, .. } if cur.id == txn.id)
+                    };
+                    if is_recovering {
+                        let maybe_barrier = test_recovery_barrier.lock().take();
+                        if let Some(barrier) = maybe_barrier {
+                            barrier.on_recovering().await;
+                        }
+                    }
                 }
 
                 let now = tokio::time::Instant::now();
                 if now >= txn.deadline {
-                    let msg = "recovery deadline expired before attempt".to_string();
-                    tracing::warn!(generation = failed_gen.id, attempt = attempt_idx, err = %msg, "recovery deadline expired");
+                    let msg = "replacement deadline expired before attempt".to_string();
+                    tracing::warn!(generation = originating_gen.id, attempt = attempt_idx, err = %msg, "deadline expired");
                     stop_reason = Some(RealtimeError::Timeout(msg));
                     break;
                 }
 
                 let attempt_nz = NonZeroU32::new(attempt_idx).unwrap();
-                let snapshot = config_lock.read().await.clone();
+                let snapshot = core_lock.read().await.config.clone();
 
                 attempts_launched += 1;
                 let remaining_dur =
@@ -791,26 +809,38 @@ impl RecoverySupervisor {
                     .checked_add(remaining_dur)
                     .unwrap_or_else(std::time::Instant::now);
 
-                let context =
-                    RecoveryContext::new(attempt_nz, &cause, &snapshot.config, context_deadline);
+                let current_cause = initial_cause.clone();
+                let context = RecoveryContext::new(
+                    attempt_nz,
+                    &current_cause,
+                    &snapshot.config,
+                    context_deadline,
+                );
 
                 tracing::info!(
-                    generation = failed_gen.id,
+                    generation = originating_gen.id,
                     attempt = attempt_idx,
-                    "provider recovery attempt initiated"
+                    "provider replacement attempt initiated"
                 );
-                let recover_fut = recovery_impl.recover(context);
 
+                let recover_fut = recovery_impl.recover(context);
                 let attempt_res = tokio::select! {
                     _ = txn.cancel_token.cancelled() => {
-                        let _ = txn.outcome_tx.send(Some(Err(RealtimeError::SessionClosed)));
+                        Self::finish_txn_internal(
+                            &core_lock,
+                            &generation_tx,
+                            &txn,
+                            Err(RealtimeError::SessionClosed),
+                            None,
+                            Some(originating_gen.id),
+                        ).await;
                         return;
                     }
                     res = tokio::time::timeout_at(txn.deadline, recover_fut) => {
                         match res {
                             Ok(r) => r,
                             Err(_) => {
-                                let msg = "provider recovery attempt timed out".to_string();
+                                let msg = "provider replacement attempt timed out".to_string();
                                 stop_reason = Some(RealtimeError::Timeout(msg));
                                 break;
                             }
@@ -822,66 +852,66 @@ impl RecoverySupervisor {
                     Ok(recovered) => {
                         let new_session = recovered.session();
                         let continuity = recovered.continuity();
-                        let mut candidate_guard = CandidateCleanupGuard::new(new_session.clone());
 
-                        let (next_gen, old_session) = {
-                            let mut state = state_lock.write().await;
-                            let current_rev = config_lock.read().await.revision;
-                            if current_rev != snapshot.revision {
-                                tracing::warn!(
-                                    "recovery candidate rejected due to stale config revision during attempt"
-                                );
-                                last_provider_error =
-                                    Some(RealtimeError::config("stale config revision"));
-                                continue;
+                        let published = Self::finish_txn_internal(
+                            &core_lock,
+                            &generation_tx,
+                            &txn,
+                            Ok(RecoveryOutcome::Recovered {
+                                session: new_session.clone(),
+                                continuity,
+                            }),
+                            Some(snapshot.revision),
+                            Some(originating_gen.id),
+                        )
+                        .await;
+
+                        if published {
+                            return;
+                        } else {
+                            // Publication was rejected (e.g. stale config revision).
+                            // If still Serving, planned candidate failed cleanly.
+                            // If Recovering, continue to next retry attempt!
+                            let is_recovering_now = {
+                                let core = core_lock.read().await;
+                                matches!(&core.state, ManagedState::Recovering { txn: cur, .. } if cur.id == txn.id)
+                            };
+                            if !is_recovering_now {
+                                return;
                             }
-
-                            match &mut *state {
-                                ManagedState::Terminal { .. } => {
-                                    return;
-                                }
-                                ManagedState::Recovering { failed, txn: cur_txn } => {
-                                    if cur_txn.id != txn.id {
-                                        return;
-                                    }
-                                    let next_gen = next_gen_atomic.fetch_add(1, Ordering::SeqCst);
-                                    let new_gen = Arc::new(SessionGeneration::new(
-                                        next_gen,
-                                        new_session.clone(),
-                                    ));
-                                    let old = failed.session.clone();
-                                    *state =
-                                        ManagedState::Serving { active: new_gen, planned: None };
-                                    (next_gen, old)
-                                }
-                                _ => return,
-                            }
-                        };
-
-                        candidate_guard.disarm();
-                        let _ = generation_tx.send(next_gen);
-
-                        tokio::spawn(async move {
-                            let _ =
-                                tokio::time::timeout(Duration::from_secs(2), old_session.close())
-                                    .await;
-                        });
-
-                        let outcome =
-                            RecoveryOutcome::Recovered { session: new_session, continuity };
-                        let _ = txn.outcome_tx.send(Some(Ok(outcome)));
-                        return;
+                            last_provider_error = Some(RealtimeError::config(
+                                "stale config revision during candidate publication",
+                            ));
+                            continue;
+                        }
                     }
                     Err(err) => {
                         let disposition = recovery_impl.classify_attempt_error(&err);
                         last_provider_error = Some(err);
 
+                        // Check if we are still Serving (planned mode) or Recovering (reactive mode)
+                        let is_recovering_now = {
+                            let core = core_lock.read().await;
+                            matches!(&core.state, ManagedState::Recovering { txn: cur, .. } if cur.id == txn.id)
+                        };
+
+                        if !is_recovering_now {
+                            // Still in Serving planned mode:
+                            // Clean up planned candidate, keep healthy generation N!
+                            Self::finish_txn_internal(
+                                &core_lock,
+                                &generation_tx,
+                                &txn,
+                                Err(last_provider_error.unwrap()),
+                                None,
+                                Some(originating_gen.id),
+                            )
+                            .await;
+                            return;
+                        }
+
+                        // In Recovering mode!
                         if disposition == RecoveryDisposition::Fatal {
-                            tracing::warn!(
-                                generation = failed_gen.id,
-                                attempt = attempt_idx,
-                                "fatal attempt error classification; no retry"
-                            );
                             stop_reason = Some(RealtimeError::ProviderError(format!(
                                 "recovery aborted after {} attempt(s) due to fatal error",
                                 attempts_launched
@@ -908,7 +938,14 @@ impl RecoverySupervisor {
                             if !backoff.is_zero() {
                                 tokio::select! {
                                     _ = txn.cancel_token.cancelled() => {
-                                        let _ = txn.outcome_tx.send(Some(Err(RealtimeError::SessionClosed)));
+                                        Self::finish_txn_internal(
+                                            &core_lock,
+                                            &generation_tx,
+                                            &txn,
+                                            Err(RealtimeError::SessionClosed),
+                                            None,
+                                            Some(originating_gen.id),
+                                        ).await;
                                         return;
                                     }
                                     _ = tokio::time::sleep(backoff) => {}
@@ -933,170 +970,154 @@ impl RecoverySupervisor {
                 }
             });
 
-            {
-                let mut state = state_lock.write().await;
-                if let ManagedState::Recovering { txn: cur_txn, .. } = &*state
-                    && cur_txn.id == txn.id
-                {
-                    *state = ManagedState::Terminal {
-                        reason: TerminalReason::Exhausted,
-                        _last_generation: Some(Arc::clone(&failed_gen)),
-                    };
-                }
-            }
-
-            let _ = txn.outcome_tx.send(Some(Err(final_err)));
+            Self::finish_txn_internal(
+                &core_lock,
+                &generation_tx,
+                &txn,
+                Err(final_err),
+                None,
+                Some(originating_gen.id),
+            )
+            .await;
         });
     }
 
-    fn spawn_planned_worker(
-        &self,
-        active_gen: Arc<SessionGeneration>,
-        txn: Arc<ReplacementTxn>,
-        cause: RecoveryCause,
-    ) {
-        let state_lock = Arc::clone(&self.state);
-        let config_lock = Arc::clone(&self.config);
-        let next_gen_atomic = Arc::clone(&self.next_generation_id);
-        let generation_tx = self.generation_tx.clone();
+    /// Centralized atomic transaction finalization and state transition.
+    ///
+    /// Ensures that no worker can send an outcome without finalizing `ManagedState`.
+    #[allow(clippy::too_many_arguments)]
+    async fn finish_txn_internal(
+        core_lock: &Arc<tokio::sync::RwLock<SupervisorCore>>,
+        generation_tx: &tokio::sync::watch::Sender<u64>,
+        txn: &Arc<ReplacementTxn>,
+        outcome: Result<RecoveryOutcome>,
+        expected_revision: Option<u64>,
+        originating_gen_id: Option<u64>,
+    ) -> bool {
+        let mut candidate_guard = match &outcome {
+            Ok(RecoveryOutcome::Recovered { session, .. }) => {
+                Some(CandidateCleanupGuard::new(session.clone()))
+            }
+            _ => None,
+        };
 
-        tokio::spawn(async move {
-            let recovery_impl = match active_gen.session.recovery() {
-                Some(r) => r,
-                None => {
-                    let err = RealtimeError::provider("active session does not support recovery");
-                    let _ = txn.outcome_tx.send(Some(Err(err)));
-                    return;
-                }
-            };
+        let mut old_session_to_close = None;
+        let mut final_outcome_to_send = None;
+        let mut published_next_gen = None;
 
-            if recovery_impl.classify(&cause) == RecoveryDisposition::Fatal {
-                let err = RealtimeError::provider(
-                    "fatal cause detected for planned replacement; performing zero provider attempts",
+        {
+            let mut core_guard = core_lock.write().await;
+            let SupervisorCore { state, config, next_generation_id, .. } = &mut *core_guard;
+            if let Some(expected_rev) = expected_revision
+                && config.revision != expected_rev
+            {
+                tracing::warn!(
+                    expected = expected_rev,
+                    current = config.revision,
+                    "candidate publication rejected: stale config revision"
                 );
-                let _ = txn.outcome_tx.send(Some(Err(err)));
-                return;
+                return false;
             }
 
-            let snapshot = config_lock.read().await.clone();
-            let remaining_dur = txn.deadline.saturating_duration_since(tokio::time::Instant::now());
-            let context_deadline = std::time::Instant::now()
-                .checked_add(remaining_dur)
-                .unwrap_or_else(std::time::Instant::now);
-
-            let context = RecoveryContext::new(
-                NonZeroU32::new(1).unwrap(),
-                &cause,
-                &snapshot.config,
-                context_deadline,
-            );
-
-            let recover_fut = recovery_impl.recover(context);
-            let attempt_res = tokio::select! {
-                _ = txn.cancel_token.cancelled() => {
-                    let _ = txn.outcome_tx.send(Some(Err(RealtimeError::SessionClosed)));
-                    return;
+            match state {
+                ManagedState::Terminal { .. } => {
+                    final_outcome_to_send = Some(Err(RealtimeError::SessionClosed));
                 }
-                res = tokio::time::timeout_at(txn.deadline, recover_fut) => {
-                    match res {
-                        Ok(r) => r,
-                        Err(_) => {
-                            let msg = "planned replacement attempt timed out waiting for setupComplete".to_string();
-                            let _ = txn.outcome_tx.send(Some(Err(RealtimeError::Timeout(msg))));
-                            return;
+                ManagedState::Uninitialized => {
+                    final_outcome_to_send = Some(Err(RealtimeError::NotConnected));
+                }
+                ManagedState::Serving { active, planned } => {
+                    if let Some(p) = planned {
+                        if p.id != txn.id {
+                            return false;
                         }
+                    } else {
+                        return false;
                     }
-                }
-            };
 
-            match attempt_res {
-                Ok(recovered) => {
-                    let new_session = recovered.session();
-                    let continuity = recovered.continuity();
-                    let mut candidate_guard = CandidateCleanupGuard::new(new_session.clone());
-
-                    let (next_gen, old_session) = {
-                        let mut state = state_lock.write().await;
-                        let current_rev = config_lock.read().await.revision;
-                        if current_rev != snapshot.revision {
-                            let _ = txn
-                                .outcome_tx
-                                .send(Some(Err(RealtimeError::config("stale config revision"))));
-                            return;
+                    match outcome {
+                        Ok(RecoveryOutcome::Recovered { session, continuity }) => {
+                            if let Some(orig_id) = originating_gen_id
+                                && orig_id != active.id
+                            {
+                                return false;
+                            }
+                            let next_gen = *next_generation_id;
+                            *next_generation_id += 1;
+                            let new_gen =
+                                Arc::new(SessionGeneration::new(next_gen, session.clone()));
+                            old_session_to_close = Some(active.session.clone());
+                            *state = ManagedState::Serving { active: new_gen, planned: None };
+                            published_next_gen = Some(next_gen);
+                            if let Some(ref mut cg) = candidate_guard {
+                                cg.disarm();
+                            }
+                            final_outcome_to_send =
+                                Some(Ok(RecoveryOutcome::Recovered { session, continuity }));
                         }
-
-                        match &mut *state {
-                            ManagedState::Terminal { .. } => {
-                                return;
-                            }
-                            ManagedState::Serving { active, planned } => {
-                                if let Some(p) = planned
-                                    && p.id != txn.id
-                                {
-                                    return;
-                                }
-                                if active.id != active_gen.id {
-                                    let current_session = active.session.clone();
-                                    let _ = txn
-                                        .outcome_tx
-                                        .send(Some(Ok(RecoveryOutcome::Stale(current_session))));
-                                    return;
-                                }
-                                let next_gen = next_gen_atomic.fetch_add(1, Ordering::SeqCst);
-                                let new_gen =
-                                    Arc::new(SessionGeneration::new(next_gen, new_session.clone()));
-                                let old = active.session.clone();
-                                *state = ManagedState::Serving { active: new_gen, planned: None };
-                                (next_gen, old)
-                            }
-                            ManagedState::Recovering { failed, txn: cur_txn } => {
-                                if cur_txn.id != txn.id {
-                                    return;
-                                }
-                                let next_gen = next_gen_atomic.fetch_add(1, Ordering::SeqCst);
-                                let new_gen =
-                                    Arc::new(SessionGeneration::new(next_gen, new_session.clone()));
-                                let old = failed.session.clone();
-                                *state = ManagedState::Serving { active: new_gen, planned: None };
-                                (next_gen, old)
-                            }
-                            _ => return,
-                        }
-                    };
-
-                    candidate_guard.disarm();
-                    let _ = generation_tx.send(next_gen);
-
-                    tokio::spawn(async move {
-                        let _ =
-                            tokio::time::timeout(Duration::from_secs(2), old_session.close()).await;
-                    });
-
-                    let outcome = RecoveryOutcome::Recovered { session: new_session, continuity };
-                    let _ = txn.outcome_tx.send(Some(Ok(outcome)));
-                }
-                Err(err) => {
-                    {
-                        let mut state = state_lock.write().await;
-                        if let ManagedState::Serving { planned, .. } = &mut *state
-                            && let Some(p) = planned
-                            && p.id == txn.id
-                        {
+                        Err(err) => {
                             *planned = None;
+                            final_outcome_to_send = Some(Err(err));
                         }
+                        _ => {}
                     }
-                    let _ = txn.outcome_tx.send(Some(Err(err)));
+                }
+                ManagedState::Recovering { failed, txn: cur_txn } => {
+                    if cur_txn.id != txn.id {
+                        return false;
+                    }
+
+                    match outcome {
+                        Ok(RecoveryOutcome::Recovered { session, continuity }) => {
+                            let next_gen = *next_generation_id;
+                            *next_generation_id += 1;
+                            let new_gen =
+                                Arc::new(SessionGeneration::new(next_gen, session.clone()));
+                            old_session_to_close = Some(failed.session.clone());
+                            *state = ManagedState::Serving { active: new_gen, planned: None };
+                            published_next_gen = Some(next_gen);
+                            if let Some(ref mut cg) = candidate_guard {
+                                cg.disarm();
+                            }
+                            final_outcome_to_send =
+                                Some(Ok(RecoveryOutcome::Recovered { session, continuity }));
+                        }
+                        Err(err) => {
+                            *state = ManagedState::Terminal {
+                                reason: TerminalReason::Exhausted,
+                                _last_generation: Some(Arc::clone(failed)),
+                            };
+                            final_outcome_to_send = Some(Err(err));
+                        }
+                        _ => {}
+                    }
                 }
             }
-        });
+        }
+
+        if let Some(next_gen) = published_next_gen {
+            let _ = generation_tx.send(next_gen);
+        }
+
+        if let Some(old) = old_session_to_close {
+            tokio::spawn(async move {
+                let _ = tokio::time::timeout(Duration::from_secs(2), old.close()).await;
+            });
+        }
+
+        if let Some(out) = final_outcome_to_send {
+            let _ = txn.outcome_tx.send(Some(out));
+        }
+
+        true
     }
 
     /// Close the session gracefully and mark supervisor as closed.
     pub(crate) async fn close(&self) -> Result<()> {
         let (old_session, old_planned) = {
-            let mut state = self.state.write().await;
+            let mut core = self.core.write().await;
             match std::mem::replace(
-                &mut *state,
+                &mut core.state,
                 ManagedState::Terminal {
                     reason: TerminalReason::ExplicitClose,
                     _last_generation: None,
@@ -1353,12 +1374,34 @@ mod tests {
         }
     }
 
+    struct BarrierRecovery {
+        entered_notify: Arc<tokio::sync::Notify>,
+        unblock_notify: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait]
+    impl RealtimeRecovery for BarrierRecovery {
+        fn classify(&self, _cause: &RecoveryCause) -> RecoveryDisposition {
+            RecoveryDisposition::Recoverable
+        }
+
+        async fn recover(&self, _context: RecoveryContext<'_>) -> Result<RecoveredSession> {
+            self.entered_notify.notify_one();
+            self.unblock_notify.notified().await;
+            let session =
+                Arc::new(MockSession { id: "gen-1-recovered".to_string(), recovery: None });
+            Ok(RecoveredSession::new(session, RecoveryContinuity::Reconnected))
+        }
+    }
+
     #[tokio::test]
     async fn test_monotonic_failure_prevents_write_resurrection() {
-        let mock_rec = Arc::new(CoalescingRecovery {
-            recover_count: Arc::new(AtomicUsize::new(0)),
-            active_recoveries: Arc::new(AtomicUsize::new(0)),
-            max_active_recoveries: Arc::new(AtomicUsize::new(0)),
+        let entered_notify = Arc::new(tokio::sync::Notify::new());
+        let unblock_notify = Arc::new(tokio::sync::Notify::new());
+
+        let mock_rec = Arc::new(BarrierRecovery {
+            entered_notify: Arc::clone(&entered_notify),
+            unblock_notify: Arc::clone(&unblock_notify),
         });
 
         let initial_session = Arc::new(MockSession {
@@ -1384,28 +1427,31 @@ mod tests {
             sup_clone.report_failure(report).await
         });
 
-        // Wait until supervisor enters Recovering
-        while supervisor.status().await != TransportStatus::Recovering {
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
+        // Wait until recover is entered deterministically
+        entered_notify.notified().await;
+
+        // Invariant: Generation 0 write gate is CLOSED immediately and cannot be resurrected
+        assert!(supervisor.admit_write().await.is_err(), "Dead generation 0 must be non-writable");
 
         // Abort the caller future mid-recovery
         reporter_handle.abort();
         let _ = reporter_handle.await;
 
-        // Invariant 1: Generation 0 write gate is CLOSED forever and cannot be resurrected
-        let write_res = supervisor.admit_write().await;
-        if let Ok(gen_item) = write_res {
-            assert_eq!(gen_item.id, 1, "resurrected generation 0 is illegal");
-        }
+        // Generation 0 remains closed
+        assert!(supervisor.admit_write().await.is_err());
+
+        // Unblock worker to finish
+        unblock_notify.notify_one();
     }
 
     #[tokio::test]
     async fn test_caller_drop_does_not_strand_recovery() {
-        let mock_rec = Arc::new(CoalescingRecovery {
-            recover_count: Arc::new(AtomicUsize::new(0)),
-            active_recoveries: Arc::new(AtomicUsize::new(0)),
-            max_active_recoveries: Arc::new(AtomicUsize::new(0)),
+        let entered_notify = Arc::new(tokio::sync::Notify::new());
+        let unblock_notify = Arc::new(tokio::sync::Notify::new());
+
+        let mock_rec = Arc::new(BarrierRecovery {
+            entered_notify: Arc::clone(&entered_notify),
+            unblock_notify: Arc::clone(&unblock_notify),
         });
 
         let initial_session = Arc::new(MockSession {
@@ -1430,14 +1476,15 @@ mod tests {
             sup_clone.report_failure(report).await
         });
 
-        while supervisor.status().await != TransportStatus::Recovering {
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
+        entered_notify.notified().await;
 
         reporter_handle.abort();
         let _ = reporter_handle.await;
 
-        // Invariant 2: Supervisor-owned recovery continues in background and publishes generation 1
+        // Unblock worker to complete
+        unblock_notify.notify_one();
+
+        // Invariant: Supervisor-owned recovery continues in background and publishes generation 1
         let timeout_res = tokio::time::timeout(Duration::from_secs(2), gen_rx.changed()).await;
         assert!(timeout_res.is_ok(), "supervisor background recovery must not strand");
         assert_eq!(*gen_rx.borrow(), 1);
@@ -1446,10 +1493,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_authority_snapshot_during_recovery() {
-        let mock_rec = Arc::new(CoalescingRecovery {
-            recover_count: Arc::new(AtomicUsize::new(0)),
-            active_recoveries: Arc::new(AtomicUsize::new(0)),
-            max_active_recoveries: Arc::new(AtomicUsize::new(0)),
+        let entered_notify = Arc::new(tokio::sync::Notify::new());
+        let unblock_notify = Arc::new(tokio::sync::Notify::new());
+
+        let mock_rec = Arc::new(BarrierRecovery {
+            entered_notify: Arc::clone(&entered_notify),
+            unblock_notify: Arc::clone(&unblock_notify),
         });
 
         let initial_session = Arc::new(MockSession {
@@ -1471,25 +1520,68 @@ mod tests {
             sup_clone.report_failure(report).await
         });
 
-        while supervisor.status().await != TransportStatus::Recovering {
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
+        entered_notify.notified().await;
 
-        // Invariant 3: get_active_generation returns generation 0 so readers do not hit synthetic EOF
+        // Invariant: get_active_generation returns generation 0 so readers do not hit synthetic EOF
         let auth_gen = supervisor.get_active_generation().await.unwrap();
         assert_eq!(auth_gen.id, 0);
         assert_eq!(auth_gen.session.session_id(), "gen-0");
 
         // But writes are properly rejected
         assert!(supervisor.admit_write().await.is_err());
+
+        unblock_notify.notify_one();
+    }
+
+    struct MultiAttemptRecovery {
+        attempts: Arc<AtomicUsize>,
+        fail_first_k: usize,
+        entered_notify: Arc<tokio::sync::Notify>,
+        unblock_attempt_1: Option<Arc<tokio::sync::Notify>>,
+    }
+
+    #[async_trait]
+    impl RealtimeRecovery for MultiAttemptRecovery {
+        fn classify(&self, _cause: &RecoveryCause) -> RecoveryDisposition {
+            RecoveryDisposition::Recoverable
+        }
+
+        fn classify_attempt_error(
+            &self,
+            _error: &crate::error::RealtimeError,
+        ) -> RecoveryDisposition {
+            RecoveryDisposition::Recoverable
+        }
+
+        async fn recover(&self, _context: RecoveryContext<'_>) -> Result<RecoveredSession> {
+            let attempt = self.attempts.fetch_add(1, Ordering::SeqCst) + 1;
+            self.entered_notify.notify_one();
+            if attempt == 1
+                && let Some(ref unblock) = self.unblock_attempt_1
+            {
+                unblock.notified().await;
+            }
+            if attempt <= self.fail_first_k {
+                Err(RealtimeError::provider(format!("simulated failure on attempt {}", attempt)))
+            } else {
+                let session =
+                    Arc::new(MockSession { id: "gen-1-recovered".to_string(), recovery: None });
+                Ok(RecoveredSession::new(session, RecoveryContinuity::Reconnected))
+            }
+        }
     }
 
     #[tokio::test]
-    async fn test_planned_rotation_seamless_promotion() {
-        let mock_rec = Arc::new(CoalescingRecovery {
-            recover_count: Arc::new(AtomicUsize::new(0)),
-            active_recoveries: Arc::new(AtomicUsize::new(0)),
-            max_active_recoveries: Arc::new(AtomicUsize::new(0)),
+    async fn test_planned_rotation_promotion_candidate_fails_reactive_retry_succeeds() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let entered_notify = Arc::new(tokio::sync::Notify::new());
+        let unblock_attempt_1 = Arc::new(tokio::sync::Notify::new());
+
+        let mock_rec = Arc::new(MultiAttemptRecovery {
+            attempts: Arc::clone(&attempts),
+            fail_first_k: 1, // Attempt 1 fails, attempt 2 succeeds!
+            entered_notify: Arc::clone(&entered_notify),
+            unblock_attempt_1: Some(Arc::clone(&unblock_attempt_1)),
         });
 
         let initial_session = Arc::new(MockSession {
@@ -1499,6 +1591,7 @@ mod tests {
 
         let policy = RecoveryPolicy::default()
             .with_max_attempts(NonZeroU32::new(3).unwrap())
+            .with_initial_delay(Duration::from_millis(10))
             .with_deadline(Duration::from_secs(5));
 
         let config = Arc::new(tokio::sync::RwLock::new(crate::config::RealtimeConfig::default()));
@@ -1516,17 +1609,31 @@ mod tests {
                 .await
         });
 
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        // Wait until planned candidate attempt 1 is in-flight
+        entered_notify.notified().await;
 
-        // Active generation fails while planned replacement is in-flight:
-        // Report failure promotes the planned replacement to recovery transaction!
-        let report = FailureReport { generation: 0, cause: RecoveryCause::UnexpectedEof };
-        let fail_res = supervisor.report_failure(report).await.unwrap();
+        // Active generation N fails while planned candidate attempt 1 is in-flight:
+        let sup_fail = Arc::clone(&supervisor);
+        let fail_handle = tokio::spawn(async move {
+            let report = FailureReport { generation: 0, cause: RecoveryCause::UnexpectedEof };
+            sup_fail.report_failure(report).await
+        });
+
+        // Wait until supervisor state has been promoted to Recovering
+        while supervisor.status().await != TransportStatus::Recovering {
+            tokio::task::yield_now().await;
+        }
+
+        // Unblock attempt 1 to fail now that state is strictly Recovering
+        unblock_attempt_1.notify_one();
+
+        // Attempt 1 fails, worker continues into attempt 2 and succeeds!
+        let fail_res = fail_handle.await.unwrap().unwrap();
         match fail_res {
             RecoveryOutcome::Recovered { session, .. } => {
                 assert_eq!(session.session_id(), "gen-1-recovered");
             }
-            _ => panic!("Expected Recovered"),
+            _ => panic!("Expected Recovered after attempt 2"),
         }
 
         let planned_res = planned_handle.await.unwrap().unwrap();
@@ -1537,15 +1644,146 @@ mod tests {
             _ => panic!("Expected Recovered"),
         }
 
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
         assert_eq!(supervisor.status().await, TransportStatus::Healthy);
     }
 
     #[tokio::test]
-    async fn test_supreme_close_cancels_candidate() {
+    async fn test_planned_rotation_promotion_all_attempts_fail_exhausts() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let entered_notify = Arc::new(tokio::sync::Notify::new());
+        let unblock_attempt_1 = Arc::new(tokio::sync::Notify::new());
+
+        let mock_rec = Arc::new(MultiAttemptRecovery {
+            attempts: Arc::clone(&attempts),
+            fail_first_k: 10, // All attempts fail!
+            entered_notify: Arc::clone(&entered_notify),
+            unblock_attempt_1: Some(Arc::clone(&unblock_attempt_1)),
+        });
+
+        let initial_session = Arc::new(MockSession {
+            id: "gen-0".to_string(),
+            recovery: Some(Arc::clone(&mock_rec) as Arc<dyn RealtimeRecovery>),
+        });
+
+        let policy = RecoveryPolicy::default()
+            .with_max_attempts(NonZeroU32::new(2).unwrap())
+            .with_initial_delay(Duration::from_millis(10))
+            .with_deadline(Duration::from_secs(5));
+
+        let config = Arc::new(tokio::sync::RwLock::new(crate::config::RealtimeConfig::default()));
+        let supervisor =
+            Arc::new(RecoverySupervisor::with_initial_session(policy, config, initial_session));
+
+        // Start planned replacement
+        let sup_clone = Arc::clone(&supervisor);
+        let planned_handle = tokio::spawn(async move {
+            sup_clone
+                .execute_planned_replacement(
+                    0,
+                    RecoveryCause::PlannedRotation { time_left: Some("30s".into()) },
+                )
+                .await
+        });
+
+        entered_notify.notified().await;
+
+        // Active generation N fails while planned candidate is running
+        let sup_fail = Arc::clone(&supervisor);
+        let fail_handle = tokio::spawn(async move {
+            let report = FailureReport { generation: 0, cause: RecoveryCause::UnexpectedEof };
+            sup_fail.report_failure(report).await
+        });
+
+        while supervisor.status().await != TransportStatus::Recovering {
+            tokio::task::yield_now().await;
+        }
+
+        unblock_attempt_1.notify_one();
+
+        // Both attempts fail -> outcome is Err and state is Terminal::Exhausted
+        let fail_res = fail_handle.await.unwrap();
+        assert!(fail_res.is_err());
+        assert_eq!(supervisor.status().await, TransportStatus::Exhausted);
+        let _ = planned_handle.await;
+    }
+
+    #[tokio::test]
+    async fn test_planned_candidate_failure_keeps_healthy_n() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let entered_notify = Arc::new(tokio::sync::Notify::new());
+
+        let mock_rec = Arc::new(MultiAttemptRecovery {
+            attempts: Arc::clone(&attempts),
+            fail_first_k: 1, // Planned candidate fails
+            entered_notify: Arc::clone(&entered_notify),
+            unblock_attempt_1: None,
+        });
+
+        let initial_session = Arc::new(MockSession {
+            id: "gen-0".to_string(),
+            recovery: Some(Arc::clone(&mock_rec) as Arc<dyn RealtimeRecovery>),
+        });
+
+        let policy = RecoveryPolicy::default()
+            .with_max_attempts(NonZeroU32::new(3).unwrap())
+            .with_deadline(Duration::from_secs(5));
+
+        let config = Arc::new(tokio::sync::RwLock::new(crate::config::RealtimeConfig::default()));
+        let supervisor =
+            Arc::new(RecoverySupervisor::with_initial_session(policy, config, initial_session));
+
+        // Start planned replacement
+        let res = supervisor
+            .execute_planned_replacement(
+                0,
+                RecoveryCause::PlannedRotation { time_left: Some("30s".into()) },
+            )
+            .await;
+
+        assert!(res.is_err(), "Planned candidate failure returns error");
+
+        // Invariant: Generation 0 is still healthy and writable!
+        assert_eq!(supervisor.status().await, TransportStatus::Healthy);
+        assert!(supervisor.admit_write().await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_returned_generation_shares_write_gate_identity() {
         let mock_rec = Arc::new(CoalescingRecovery {
             recover_count: Arc::new(AtomicUsize::new(0)),
             active_recoveries: Arc::new(AtomicUsize::new(0)),
             max_active_recoveries: Arc::new(AtomicUsize::new(0)),
+        });
+
+        let initial_session = Arc::new(MockSession {
+            id: "gen-0".to_string(),
+            recovery: Some(Arc::clone(&mock_rec) as Arc<dyn RealtimeRecovery>),
+        });
+
+        let policy = RecoveryPolicy::default();
+        let config = Arc::new(tokio::sync::RwLock::new(crate::config::RealtimeConfig::default()));
+        let supervisor = RecoverySupervisor::with_initial_session(policy, config, initial_session);
+
+        let gen_handle = supervisor.admit_write().await.unwrap();
+        assert!(gen_handle.is_writable());
+
+        // Report failure on generation 0
+        let report = FailureReport { generation: 0, cause: RecoveryCause::UnexpectedEof };
+        let _ = supervisor.report_failure(report).await;
+
+        // Invariant: The handle previously returned shares the EXACT same WriteGate that was closed!
+        assert!(!gen_handle.is_writable(), "Returned handle must see the closed write gate");
+    }
+
+    #[tokio::test]
+    async fn test_supreme_close_cancels_candidate() {
+        let entered_notify = Arc::new(tokio::sync::Notify::new());
+        let unblock_notify = Arc::new(tokio::sync::Notify::new());
+
+        let mock_rec = Arc::new(BarrierRecovery {
+            entered_notify: Arc::clone(&entered_notify),
+            unblock_notify: Arc::clone(&unblock_notify),
         });
 
         let initial_session = Arc::new(MockSession {
@@ -1572,12 +1810,88 @@ mod tests {
                 .await
         });
 
-        // Close immediately
+        entered_notify.notified().await;
+
+        // Close immediately while candidate is in-flight
         sup_arc.close().await.unwrap();
 
         // Invariant: Status is Closed, and no candidate can publish
         assert_eq!(sup_arc.status().await, TransportStatus::Closed);
         assert!(!sup_arc.is_connected().await);
+
+        unblock_notify.notify_one();
         let _ = planned_handle.await;
+    }
+
+    #[tokio::test]
+    async fn test_planned_rotation_deadline_safety_margins() {
+        let test_cases = [
+            ("500ms", Duration::from_millis(100)),
+            ("1s", Duration::from_millis(100)),
+            ("2s", Duration::from_millis(100)),
+            ("5s", Duration::from_secs(3)),
+            ("30s", Duration::from_secs(5)), // capped by policy deadline 5s
+        ];
+
+        for (dur_str, expected_min_dur) in test_cases {
+            let parsed = parse_duration_string(dur_str).unwrap();
+            let safety_margin = Duration::from_secs(2);
+            let min_window = Duration::from_millis(100);
+            let capped_dur = if parsed > safety_margin {
+                parsed - safety_margin
+            } else {
+                parsed.min(min_window)
+            };
+            assert!(capped_dur >= expected_min_dur);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_config_revision_change_rejects_stale_candidate() {
+        let entered_notify = Arc::new(tokio::sync::Notify::new());
+        let unblock_notify = Arc::new(tokio::sync::Notify::new());
+
+        let mock_rec = Arc::new(BarrierRecovery {
+            entered_notify: Arc::clone(&entered_notify),
+            unblock_notify: Arc::clone(&unblock_notify),
+        });
+
+        let initial_session = Arc::new(MockSession {
+            id: "gen-0".to_string(),
+            recovery: Some(Arc::clone(&mock_rec) as Arc<dyn RealtimeRecovery>),
+        });
+
+        let policy = RecoveryPolicy::default().with_deadline(Duration::from_secs(5));
+        let config = Arc::new(tokio::sync::RwLock::new(crate::config::RealtimeConfig::default()));
+        let supervisor =
+            Arc::new(RecoverySupervisor::with_initial_session(policy, config, initial_session));
+
+        // Start planned replacement
+        let sup_clone = Arc::clone(&supervisor);
+        let planned_handle = tokio::spawn(async move {
+            sup_clone
+                .execute_planned_replacement(
+                    0,
+                    RecoveryCause::PlannedRotation { time_left: Some("30s".into()) },
+                )
+                .await
+        });
+
+        // Wait until candidate construction is in-flight
+        entered_notify.notified().await;
+
+        // Force config revision to change concurrently while candidate was building
+        supervisor.update_config(|cfg| cfg.voice = Some("updated_voice".into())).await;
+
+        // Unblock candidate to try to publish
+        unblock_notify.notify_one();
+
+        // Invariant: Publication is rejected due to stale config revision!
+        let planned_res = planned_handle.await.unwrap();
+        assert!(planned_res.is_err(), "Stale candidate publication must be rejected");
+
+        // Generation 0 remains healthy and writable
+        assert_eq!(supervisor.status().await, TransportStatus::Healthy);
+        assert!(supervisor.admit_write().await.is_ok());
     }
 }
