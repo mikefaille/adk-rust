@@ -275,11 +275,11 @@ impl OpenAITransportLink for OpenAIRealtimeSession {
 
         // Ensure deterministic teardown: await writer task completion under 1s timeout, aborting if stalled
         let mut writer_task = self.writer_task.lock().await;
-        if let Some(mut handle) = writer_task.take()
-            && tokio::time::timeout(std::time::Duration::from_secs(1), &mut handle).await.is_err()
-        {
-            tracing::warn!("OpenAI writer task did not exit within 1s; aborting handle");
-            handle.abort();
+        if let Some(mut handle) = writer_task.take() {
+            if tokio::time::timeout(std::time::Duration::from_secs(1), &mut handle).await.is_err() {
+                tracing::warn!("OpenAI writer task did not exit within 1s; aborting handle");
+                handle.abort();
+            }
         }
         Ok(())
     }

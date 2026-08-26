@@ -2822,10 +2822,9 @@ mod runner_tests {
                 Some(0),
             )
             .await;
-
         assert!(res.is_ok());
 
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::task::yield_now().await;
 
         let active = runner.supervisor.get_active_generation().await.unwrap();
         assert_eq!(active.id, 1, "stale generation 0 rotation report must not rotate generation 1");

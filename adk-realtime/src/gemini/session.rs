@@ -11,7 +11,7 @@ use crate::recovery::{
     RealtimeRecovery, RecoveredSession, RecoveryCause, RecoveryContext, RecoveryContinuity,
     RecoveryDisposition,
 };
-use crate::session::{ContextMutationOutcome, RealtimeSession};
+use crate::session::{ContextMutationOutcome, RealtimeLifecycle, RealtimeSession};
 use adk_gemini::schema_adapter::GeminiSchemaDialect;
 use async_trait::async_trait;
 use base64::Engine;
@@ -301,6 +301,9 @@ pub struct GeminiRealtimeSession {
     last_resume_handle: Arc<ParkingMutex<Option<String>>>,
     /// Association map between function call IDs and tool names for wire-conforming `FunctionResponse` payloads.
     call_names: Arc<ParkingMutex<CallNamesMap>>,
+    /// Watch channel broadcasting replacement deadlines announced by Gemini Live `goAway` frames.
+    replacement_deadline_tx: tokio::sync::watch::Sender<Option<std::time::Instant>>,
+    replacement_deadline_rx: tokio::sync::watch::Receiver<Option<std::time::Instant>>,
 }
 
 const MAX_CALL_NAMES_CAPACITY: usize = 1000;
@@ -387,6 +390,7 @@ impl GeminiRealtimeSession {
         let cancel_token = tokio_util::sync::CancellationToken::new();
         let backend = GeminiLiveBackend::studio("mock-api-key").with_endpoint_url(reconnect_url);
         let dialect = GeminiSchemaDialect::OpenApiSubset;
+        let (replacement_deadline_tx, replacement_deadline_rx) = tokio::sync::watch::channel(None);
         Self {
             session_id: session_id.clone(),
             connected: Arc::new(AtomicBool::new(true)),
@@ -405,6 +409,8 @@ impl GeminiRealtimeSession {
             reconnect_model,
             last_resume_handle: Arc::new(ParkingMutex::new(None)),
             call_names: Arc::new(ParkingMutex::new(CallNamesMap::new())),
+            replacement_deadline_tx,
+            replacement_deadline_rx,
         }
     }
 
@@ -593,6 +599,8 @@ impl GeminiRealtimeSession {
             normalized_model.clone(),
         );
 
+        let (replacement_deadline_tx, replacement_deadline_rx) = tokio::sync::watch::channel(None);
+
         let session = Self {
             session_id,
             connected,
@@ -611,6 +619,8 @@ impl GeminiRealtimeSession {
             reconnect_model: normalized_model.clone(),
             last_resume_handle: Arc::new(ParkingMutex::new(private_resume_handle.clone())),
             call_names: Arc::new(ParkingMutex::new(CallNamesMap::new())),
+            replacement_deadline_tx,
+            replacement_deadline_rx,
         };
 
         session
@@ -841,18 +851,37 @@ impl GeminiRealtimeSession {
     /// caches the handle on `self.last_resume_handle` so that
     /// `reconnect_with_backoff` can present it on the next connection attempt.
     pub(crate) fn translate_gemini_event(&self, raw: &str) -> Result<Vec<ServerEvent>> {
-        if let Ok(value) = serde_json::from_str::<Value>(raw)
-            && let Some(resumption_update) = value.get("sessionResumptionUpdate")
-        {
-            let resumable =
-                resumption_update.get("resumable").and_then(|r| r.as_bool()).unwrap_or(false);
-            if resumable
-                && let Some(handle) = resumption_update.get("newHandle").and_then(|h| h.as_str())
-            {
-                *self.last_resume_handle.lock() = Some(handle.to_string());
-                tracing::debug!(
-                    resume_checkpoint_observed = true,
-                    "Stored resumable Gemini session handle for reconnect"
+        if let Ok(value) = serde_json::from_str::<Value>(raw) {
+            if let Some(resumption_update) = value.get("sessionResumptionUpdate") {
+                let resumable =
+                    resumption_update.get("resumable").and_then(|r| r.as_bool()).unwrap_or(false);
+                if resumable
+                    && let Some(handle) =
+                        resumption_update.get("newHandle").and_then(|h| h.as_str())
+                {
+                    *self.last_resume_handle.lock() = Some(handle.to_string());
+                    tracing::debug!(
+                        resume_checkpoint_observed = true,
+                        "Stored resumable Gemini session handle for reconnect"
+                    );
+                }
+            }
+
+            if let Some(go_away) = value.get("goAway") {
+                let deadline =
+                    if let Some(time_left_str) = go_away.get("timeLeft").and_then(|t| t.as_str()) {
+                        parse_duration_string(time_left_str)
+                            .map(|d| std::time::Instant::now() + d)
+                            .unwrap_or_else(|| {
+                                std::time::Instant::now() + std::time::Duration::from_secs(30)
+                            })
+                    } else {
+                        std::time::Instant::now()
+                    };
+                let _ = self.replacement_deadline_tx.send(Some(deadline));
+                tracing::info!(
+                    deadline = ?deadline,
+                    "Broadcasted planned replacement deadline from Gemini goAway frame"
                 );
             }
         }
@@ -1239,8 +1268,20 @@ impl RealtimeRecovery for GeminiRealtimeSession {
     }
 }
 
+impl RealtimeLifecycle for GeminiRealtimeSession {
+    fn subscribe_replacement_deadline(
+        &self,
+    ) -> tokio::sync::watch::Receiver<Option<std::time::Instant>> {
+        self.replacement_deadline_rx.clone()
+    }
+}
+
 #[async_trait]
 impl RealtimeSession for GeminiRealtimeSession {
+    fn lifecycle(&self) -> Option<&dyn RealtimeLifecycle> {
+        Some(self)
+    }
+
     fn recovery(&self) -> Option<&dyn RealtimeRecovery> {
         Some(self)
     }
@@ -1682,6 +1723,24 @@ fn describe_unparseable_frame(raw: &str, error: &serde_json::Error) -> String {
         error.line(),
         error.column(),
     )
+}
+
+/// Parse a human-readable or protobuf duration string (e.g. "10s", "120s", "500ms", "1m").
+fn parse_duration_string(s: &str) -> Option<std::time::Duration> {
+    let s = s.trim();
+    if let Some(stripped) = s.strip_suffix("ms") {
+        stripped
+            .trim()
+            .parse::<f64>()
+            .ok()
+            .map(|ms| std::time::Duration::from_secs_f64(ms / 1000.0))
+    } else if let Some(stripped) = s.strip_suffix('s') {
+        stripped.trim().parse::<f64>().ok().map(std::time::Duration::from_secs_f64)
+    } else if let Some(stripped) = s.strip_suffix('m') {
+        stripped.trim().parse::<f64>().ok().map(|m| std::time::Duration::from_secs_f64(m * 60.0))
+    } else {
+        s.parse::<f64>().ok().map(std::time::Duration::from_secs_f64)
+    }
 }
 
 /// Frame-shape telemetry: what arrived, never what it said.
@@ -2632,6 +2691,45 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn go_away_broadcasts_lifecycle_replacement_deadline() {
+        use crate::session::RealtimeLifecycle;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let _server = tokio::spawn(async move {
+            if let Ok((stream, _)) = listener.accept().await {
+                let _ = tokio_tungstenite::accept_async(stream).await;
+            }
+        });
+        let (ws_stream, _) =
+            tokio_tungstenite::connect_async(format!("ws://{}", addr)).await.unwrap();
+        let (_sink, source) = ws_stream.split();
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let writer_task = tokio::spawn(async {});
+
+        let session = GeminiRealtimeSession::new_for_test(
+            "test-lifecycle-session".into(),
+            format!("ws://{}", addr),
+            "models/test".into(),
+            tx,
+            writer_task,
+            source,
+        );
+
+        assert!(session.lifecycle().is_some());
+        let deadline_rx = session.subscribe_replacement_deadline();
+        assert_eq!(*deadline_rx.borrow(), None);
+
+        let raw = json!({ "goAway": { "timeLeft": "15s" } }).to_string();
+        let _ = session.translate_gemini_event(&raw).unwrap();
+
+        let deadline = *deadline_rx.borrow();
+        assert!(deadline.is_some());
+        let remaining = deadline.unwrap().saturating_duration_since(std::time::Instant::now());
+        assert!(remaining <= std::time::Duration::from_secs(16));
+        assert!(remaining >= std::time::Duration::from_secs(10));
+    }
+
     #[test]
     fn test_call_names_map_fifo_eviction() {
         let mut map = CallNamesMap::new();
@@ -3044,6 +3142,14 @@ mod teardown_tests {
             reconnect_model: "models/gemini-3.1-flash-live-preview".into(),
             last_resume_handle: Arc::new(ParkingMutex::new(None)),
             call_names: Arc::new(ParkingMutex::new(CallNamesMap::new())),
+            replacement_deadline_tx: {
+                let (tx, _) = tokio::sync::watch::channel(None);
+                tx
+            },
+            replacement_deadline_rx: {
+                let (_, rx) = tokio::sync::watch::channel(None);
+                rx
+            },
         };
 
         // Execution of close() must complete quickly despite channel full & writer blocked
