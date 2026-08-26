@@ -11,7 +11,7 @@ use crate::recovery::{
     RealtimeRecovery, RecoveredSession, RecoveryCause, RecoveryContext, RecoveryContinuity,
     RecoveryDisposition,
 };
-use crate::session::{ContextMutationOutcome, RealtimeSession};
+use crate::session::{ContextMutationOutcome, RealtimeLifecycle, RealtimeSession};
 use adk_gemini::schema_adapter::GeminiSchemaDialect;
 use async_trait::async_trait;
 use base64::Engine;
@@ -301,6 +301,9 @@ pub struct GeminiRealtimeSession {
     last_resume_handle: Arc<ParkingMutex<Option<String>>>,
     /// Association map between function call IDs and tool names for wire-conforming `FunctionResponse` payloads.
     call_names: Arc<ParkingMutex<CallNamesMap>>,
+    /// Watch channel broadcasting replacement deadlines announced by Gemini Live `goAway` frames.
+    replacement_deadline_tx: tokio::sync::watch::Sender<Option<std::time::Instant>>,
+    replacement_deadline_rx: tokio::sync::watch::Receiver<Option<std::time::Instant>>,
 }
 
 const MAX_CALL_NAMES_CAPACITY: usize = 1000;
@@ -387,6 +390,7 @@ impl GeminiRealtimeSession {
         let cancel_token = tokio_util::sync::CancellationToken::new();
         let backend = GeminiLiveBackend::studio("mock-api-key").with_endpoint_url(reconnect_url);
         let dialect = GeminiSchemaDialect::OpenApiSubset;
+        let (replacement_deadline_tx, replacement_deadline_rx) = tokio::sync::watch::channel(None);
         Self {
             session_id: session_id.clone(),
             connected: Arc::new(AtomicBool::new(true)),
@@ -405,6 +409,8 @@ impl GeminiRealtimeSession {
             reconnect_model,
             last_resume_handle: Arc::new(ParkingMutex::new(None)),
             call_names: Arc::new(ParkingMutex::new(CallNamesMap::new())),
+            replacement_deadline_tx,
+            replacement_deadline_rx,
         }
     }
 
@@ -593,6 +599,8 @@ impl GeminiRealtimeSession {
             normalized_model.clone(),
         );
 
+        let (replacement_deadline_tx, replacement_deadline_rx) = tokio::sync::watch::channel(None);
+
         let session = Self {
             session_id,
             connected,
@@ -611,6 +619,8 @@ impl GeminiRealtimeSession {
             reconnect_model: normalized_model.clone(),
             last_resume_handle: Arc::new(ParkingMutex::new(private_resume_handle.clone())),
             call_names: Arc::new(ParkingMutex::new(CallNamesMap::new())),
+            replacement_deadline_tx,
+            replacement_deadline_rx,
         };
 
         session
@@ -841,19 +851,37 @@ impl GeminiRealtimeSession {
     /// caches the handle on `self.last_resume_handle` so that
     /// `reconnect_with_backoff` can present it on the next connection attempt.
     pub(crate) fn translate_gemini_event(&self, raw: &str) -> Result<Vec<ServerEvent>> {
-        if let Ok(value) = serde_json::from_str::<Value>(raw)
-            && let Some(resumption_update) = value.get("sessionResumptionUpdate")
-        {
-            let resumable =
-                resumption_update.get("resumable").and_then(|r| r.as_bool()).unwrap_or(false);
-            if resumable
-                && let Some(handle) = resumption_update.get("newHandle").and_then(|h| h.as_str())
+        if let Ok(value) = serde_json::from_str::<Value>(raw) {
+            if let Some(resumption_update) = value.get("sessionResumptionUpdate") {
+                let resumable =
+                    resumption_update.get("resumable").and_then(Value::as_bool).unwrap_or(false);
+                if resumable
+                    && let Some(handle) = resumption_update.get("newHandle").and_then(Value::as_str)
+                {
+                    *self.last_resume_handle.lock() = Some(handle.to_owned());
+                    tracing::debug!(
+                        resume_checkpoint_observed = true,
+                        "Stored resumable Gemini session handle for reconnect"
+                    );
+                }
+            }
+
+            if let Some(go_away) = value.get("goAway")
+                && let Some(time_left_str) = go_away.get("timeLeft").and_then(Value::as_str)
             {
-                *self.last_resume_handle.lock() = Some(handle.to_string());
-                tracing::debug!(
-                    resume_checkpoint_observed = true,
-                    "Stored resumable Gemini session handle for reconnect"
-                );
+                if let Some(duration) = parse_duration_string(time_left_str) {
+                    let deadline = std::time::Instant::now() + duration;
+                    let _ = self.replacement_deadline_tx.send(Some(deadline));
+                    tracing::info!(
+                        deadline = ?deadline,
+                        "Broadcasted planned replacement deadline from Gemini goAway frame"
+                    );
+                } else {
+                    tracing::warn!(
+                        raw_time_left = time_left_str,
+                        "Ignored unparseable timeLeft in Gemini goAway frame"
+                    );
+                }
             }
         }
 
@@ -902,13 +930,20 @@ impl GeminiRealtimeSession {
             }]);
         }
 
+        // Check for goAway planned rotation signal
+        if let Some(go_away) = value.get("goAway") {
+            let time_left = go_away.get("timeLeft").and_then(Value::as_str).map(str::to_owned);
+            tracing::info!(time_left = ?time_left, "gemini live goAway frame received");
+            return Ok(vec![ServerEvent::PlannedRotation { time_left }]);
+        }
+
         // Check for server content (audio/text)
         if let Some(content) = value.get("serverContent") {
             let mut events = Vec::new();
 
             // Barge-in: the caller spoke over the model, so this generation is
             // abandoned and the client must empty its playback queue.
-            let interrupted = content.get("interrupted").and_then(|i| i.as_bool()).unwrap_or(false);
+            let interrupted = content.get("interrupted").and_then(Value::as_bool).unwrap_or(false);
             if interrupted {
                 events.push(ServerEvent::ResponseCancelled {
                     event_id: uuid::Uuid::new_v4().to_string(),
@@ -1134,7 +1169,9 @@ impl RealtimeRecovery for GeminiRealtimeSession {
                     RecoveryDisposition::Fatal
                 }
             }
-            RecoveryCause::UnexpectedEof => RecoveryDisposition::Recoverable,
+            RecoveryCause::UnexpectedEof | RecoveryCause::PlannedRotation { .. } => {
+                RecoveryDisposition::Recoverable
+            }
         }
     }
 
@@ -1230,8 +1267,20 @@ impl RealtimeRecovery for GeminiRealtimeSession {
     }
 }
 
+impl RealtimeLifecycle for GeminiRealtimeSession {
+    fn subscribe_replacement_deadline(
+        &self,
+    ) -> tokio::sync::watch::Receiver<Option<std::time::Instant>> {
+        self.replacement_deadline_rx.clone()
+    }
+}
+
 #[async_trait]
 impl RealtimeSession for GeminiRealtimeSession {
+    fn lifecycle(&self) -> Option<&dyn RealtimeLifecycle> {
+        Some(self)
+    }
+
     fn recovery(&self) -> Option<&dyn RealtimeRecovery> {
         Some(self)
     }
@@ -1673,6 +1722,30 @@ fn describe_unparseable_frame(raw: &str, error: &serde_json::Error) -> String {
         error.line(),
         error.column(),
     )
+}
+
+/// Parse a human-readable or protobuf duration string (e.g. "10s", "120s", "500ms", "1m", "15.5s").
+///
+/// Safely returns `None` for negative, non-finite (NaN/infinity), overflowing, or malformed inputs without panicking.
+fn parse_duration_string(s: &str) -> Option<std::time::Duration> {
+    let s = s.trim();
+    let secs = if let Some(stripped) = s.strip_suffix("ms") {
+        let ms = stripped.trim().parse::<f64>().ok()?;
+        ms / 1000.0
+    } else if let Some(stripped) = s.strip_suffix('s') {
+        stripped.trim().parse::<f64>().ok()?
+    } else if let Some(stripped) = s.strip_suffix('m') {
+        let m = stripped.trim().parse::<f64>().ok()?;
+        m * 60.0
+    } else {
+        s.parse::<f64>().ok()?
+    };
+
+    if secs.is_finite() && (0.0..=86400.0 * 365.0).contains(&secs) {
+        Some(std::time::Duration::from_secs_f64(secs))
+    } else {
+        None
+    }
 }
 
 /// Frame-shape telemetry: what arrived, never what it said.
@@ -2598,6 +2671,135 @@ mod tests {
     }
 
     #[test]
+    fn go_away_translates_to_planned_rotation() {
+        let raw = json!({ "goAway": { "timeLeft": "10s" } }).to_string();
+        let events = GeminiRealtimeSession::translate_event_static(&raw).unwrap();
+
+        match events.as_slice() {
+            [ServerEvent::PlannedRotation { time_left }] => {
+                assert_eq!(time_left.as_deref(), Some("10s"));
+            }
+            other => panic!("expected PlannedRotation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_duration_string() {
+        use std::time::Duration;
+        assert_eq!(parse_duration_string("15s"), Some(Duration::from_secs(15)));
+        assert_eq!(parse_duration_string(" 15s "), Some(Duration::from_secs(15)));
+        assert_eq!(parse_duration_string("500ms"), Some(Duration::from_millis(500)));
+        assert_eq!(parse_duration_string("2m"), Some(Duration::from_secs(120)));
+        assert_eq!(parse_duration_string("1.5s"), Some(Duration::from_millis(1500)));
+        assert_eq!(parse_duration_string("0.5s"), Some(Duration::from_millis(500)));
+        assert_eq!(parse_duration_string("100"), Some(Duration::from_secs(100)));
+        // Panic-safety checks for negative, NaN, infinity, overflow, and garbage
+        assert_eq!(parse_duration_string("-5s"), None);
+        assert_eq!(parse_duration_string("-100"), None);
+        assert_eq!(parse_duration_string("NaNs"), None);
+        assert_eq!(parse_duration_string("infs"), None);
+        assert_eq!(parse_duration_string("-infs"), None);
+        assert_eq!(parse_duration_string("1e999s"), None);
+        assert_eq!(parse_duration_string(""), None);
+        assert_eq!(parse_duration_string("invalid"), None);
+    }
+
+    #[test]
+    fn go_away_without_time_left_translates_to_planned_rotation() {
+        let raw = json!({ "goAway": {} }).to_string();
+        let events = GeminiRealtimeSession::translate_event_static(&raw).unwrap();
+
+        match events.as_slice() {
+            [ServerEvent::PlannedRotation { time_left }] => {
+                assert_eq!(time_left.as_deref(), None);
+            }
+            other => panic!("expected PlannedRotation, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn go_away_broadcasts_lifecycle_replacement_deadline() {
+        use crate::session::RealtimeLifecycle;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let _server = tokio::spawn(async move {
+            if let Ok((stream, _)) = listener.accept().await {
+                let _ = tokio_tungstenite::accept_async(stream).await;
+            }
+        });
+        let (ws_stream, _) =
+            tokio_tungstenite::connect_async(format!("ws://{}", addr)).await.unwrap();
+        let (_sink, source) = ws_stream.split();
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let writer_task = tokio::spawn(async {});
+
+        let session = GeminiRealtimeSession::new_for_test(
+            "test-lifecycle-session".into(),
+            format!("ws://{}", addr),
+            "models/test".into(),
+            tx,
+            writer_task,
+            source,
+        );
+
+        assert!(session.lifecycle().is_some());
+        let deadline_rx = session.subscribe_replacement_deadline();
+        assert_eq!(*deadline_rx.borrow(), None);
+
+        let raw = json!({ "goAway": { "timeLeft": "15s" } }).to_string();
+        let _ = session.translate_gemini_event(&raw).unwrap();
+
+        let deadline = *deadline_rx.borrow();
+        assert!(deadline.is_some());
+        let remaining = deadline.unwrap().saturating_duration_since(std::time::Instant::now());
+        assert!(remaining <= std::time::Duration::from_secs(16));
+        assert!(remaining >= std::time::Duration::from_secs(10));
+    }
+
+    #[tokio::test]
+    async fn go_away_without_valid_time_left_does_not_fabricate_deadline() {
+        use crate::session::RealtimeLifecycle;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let _server = tokio::spawn(async move {
+            if let Ok((stream, _)) = listener.accept().await {
+                let _ = tokio_tungstenite::accept_async(stream).await;
+            }
+        });
+        let (ws_stream, _) =
+            tokio_tungstenite::connect_async(format!("ws://{}", addr)).await.unwrap();
+        let (_sink, source) = ws_stream.split();
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let writer_task = tokio::spawn(async {});
+
+        let session = GeminiRealtimeSession::new_for_test(
+            "test-lifecycle-session".into(),
+            format!("ws://{}", addr),
+            "models/test".into(),
+            tx,
+            writer_task,
+            source,
+        );
+
+        let deadline_rx = session.subscribe_replacement_deadline();
+
+        // 1. Missing timeLeft
+        let raw = json!({ "goAway": {} }).to_string();
+        let _ = session.translate_gemini_event(&raw).unwrap();
+        assert_eq!(*deadline_rx.borrow(), None);
+
+        // 2. Unparseable timeLeft
+        let raw = json!({ "goAway": { "timeLeft": "garbage" } }).to_string();
+        let _ = session.translate_gemini_event(&raw).unwrap();
+        assert_eq!(*deadline_rx.borrow(), None);
+
+        // 3. Negative timeLeft
+        let raw = json!({ "goAway": { "timeLeft": "-10s" } }).to_string();
+        let _ = session.translate_gemini_event(&raw).unwrap();
+        assert_eq!(*deadline_rx.borrow(), None);
+    }
+
+    #[test]
     fn test_call_names_map_fifo_eviction() {
         let mut map = CallNamesMap::new();
         for i in 0..1005 {
@@ -2608,6 +2810,85 @@ mod tests {
         assert!(map.remove("call_4").is_none());
         assert_eq!(map.remove("call_5"), Some("tool_5".to_string()));
         assert_eq!(map.remove("call_1004"), Some("tool_1004".to_string()));
+    }
+
+    #[tokio::test]
+    async fn gemini_session_rejects_stale_tool_response_from_prior_generation_without_wire_writes()
+    {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let _server = tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    if let Ok(ws) = tokio_tungstenite::accept_async(stream).await {
+                        let (_sink, mut stream) = ws.split();
+                        while stream.next().await.is_some() {}
+                    }
+                });
+            }
+        });
+
+        let ws0 = tokio_tungstenite::connect_async(format!("ws://{}", addr)).await.unwrap().0;
+        let (_sink0, source0) = ws0.split();
+        let (tx0, _rx0) = tokio::sync::mpsc::channel(10);
+        let writer_task0 = tokio::spawn(async {});
+
+        let session0 = GeminiRealtimeSession::new_for_test(
+            "session-gen-0".to_string(),
+            format!("ws://{}", addr),
+            "models/gemini-3.1-flash-live-preview".to_string(),
+            tx0,
+            writer_task0,
+            source0,
+        );
+
+        let ws1 = tokio_tungstenite::connect_async(format!("ws://{}", addr)).await.unwrap().0;
+        let (_sink1, source1) = ws1.split();
+        let (tx1, mut rx1) = tokio::sync::mpsc::channel(10);
+        let writer_task1 = tokio::spawn(async {});
+
+        let session1 = GeminiRealtimeSession::new_for_test(
+            "session-gen-1".to_string(),
+            format!("ws://{}", addr),
+            "models/gemini-3.1-flash-live-preview".to_string(),
+            tx1,
+            writer_task1,
+            source1,
+        );
+
+        // Receive FunctionCallDone on Session 0
+        let fc_raw = json!({
+            "toolCall": {
+                "functionCalls": [{
+                    "name": "lookup_user",
+                    "id": "call_gen0_789",
+                    "args": {}
+                }]
+            }
+        })
+        .to_string();
+
+        let events0 = session0.translate_gemini_event(&fc_raw).unwrap();
+        assert_eq!(events0.len(), 1);
+
+        // Session 0 has call_gen0_789 in call_names; Session 1 does NOT
+        assert_eq!(session0.call_names_count(), 1);
+        assert_eq!(session1.call_names_count(), 0);
+
+        // Attempt send_tool_response for call_gen0_789 on Session 1
+        let tool_response = ToolResponse {
+            call_id: "call_gen0_789".to_string(),
+            output: json!({ "user": "alice" }),
+        };
+
+        let err = session1.send_tool_response(tool_response).await.unwrap_err();
+        assert!(err.to_string().contains("Missing tool name for call_id 'call_gen0_789'"));
+
+        // Verify zero messages reached Session 1's outbound tx queue
+        assert!(
+            rx1.try_recv().is_err(),
+            "Zero tool response messages must reach Session 1's write queue"
+        );
     }
 
     #[tokio::test]
@@ -2908,6 +3189,8 @@ mod teardown_tests {
             }
         });
 
+        let (replacement_deadline_tx, replacement_deadline_rx) = tokio::sync::watch::channel(None);
+
         let session = GeminiRealtimeSession {
             session_id: "test-gemini-session".into(),
             connected,
@@ -2930,6 +3213,8 @@ mod teardown_tests {
             reconnect_model: "models/gemini-3.1-flash-live-preview".into(),
             last_resume_handle: Arc::new(ParkingMutex::new(None)),
             call_names: Arc::new(ParkingMutex::new(CallNamesMap::new())),
+            replacement_deadline_tx,
+            replacement_deadline_rx,
         };
 
         // Execution of close() must complete quickly despite channel full & writer blocked

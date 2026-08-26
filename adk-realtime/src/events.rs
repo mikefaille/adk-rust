@@ -292,6 +292,14 @@ pub enum ServerEvent {
         session: Value,
     },
 
+    /// Planned rotation requested by provider (e.g., Gemini goAway).
+    #[serde(rename = "session.planned_rotation")]
+    PlannedRotation {
+        /// Optional time remaining before server closes the connection (e.g. "10s").
+        #[serde(skip_serializing_if = "Option::is_none")]
+        time_left: Option<String>,
+    },
+
     /// Error occurred.
     #[serde(rename = "error")]
     Error {

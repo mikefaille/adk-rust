@@ -120,6 +120,11 @@ pub enum RecoveryCause {
     WriteFailed(Arc<crate::error::RealtimeError>),
     /// Unexpected end-of-file on the connection stream.
     UnexpectedEof,
+    /// Planned rotation requested by provider (e.g., Gemini goAway).
+    PlannedRotation {
+        /// Time remaining before connection close if specified by provider.
+        time_left: Option<String>,
+    },
 }
 
 /// Opaque/defaultable policy for scheduling managed recovery attempts.
@@ -325,12 +330,16 @@ pub trait RealtimeRecovery: Send + Sync {
 pub(crate) mod supervisor;
 
 /// Integration test barrier for holding managed recovery in `TransportStatus::Recovering`
-/// before candidate connection/publication completes.
+/// or `ReplacementPhase::Planned` before candidate connection/publication completes.
 #[cfg(any(test, feature = "recovery-test-utils"))]
 #[derive(Debug, Default)]
 pub struct TestRecoveryBarrier {
     recovering_entered: tokio::sync::Notify,
+    planned_entered: tokio::sync::Notify,
+    resumption_flight_entering: tokio::sync::Notify,
+    recovery_flight_entering: tokio::sync::Notify,
     release: tokio::sync::Notify,
+    phase_hold_claimed: std::sync::atomic::AtomicBool,
 }
 
 #[cfg(any(test, feature = "recovery-test-utils"))]
@@ -345,14 +354,49 @@ impl TestRecoveryBarrier {
         self.recovering_entered.notified().await;
     }
 
+    /// Wait until `RecoverySupervisor` has entered `ReplacementPhase::Planned`.
+    pub async fn wait_until_planned_entered(&self) {
+        self.planned_entered.notified().await;
+    }
+
+    /// Wait until `execute_resumption_with` is about to acquire `replacement_lock`.
+    pub async fn wait_until_resumption_flight_entering(&self) {
+        self.resumption_flight_entering.notified().await;
+    }
+
+    /// Wait until `spawn_replacement_worker` is about to acquire `replacement_lock`.
+    pub async fn wait_until_recovery_flight_entering(&self) {
+        self.recovery_flight_entering.notified().await;
+    }
+
     /// Release the held recovery episode, allowing provider candidate connection & publication to proceed.
     pub fn release(&self) {
         self.release.notify_one();
     }
 
-    /// Invoked by `RecoverySupervisor::report_failure` to signal `Recovering` state entry and pause until released.
+    /// Invoked by `RecoverySupervisor` immediately before attempting to acquire the flight permit for resumption.
+    pub fn on_resumption_flight_entering(&self) {
+        self.resumption_flight_entering.notify_one();
+    }
+
+    /// Invoked by `RecoverySupervisor` immediately before attempting to acquire the flight permit for recovery/planned replacement.
+    pub fn on_recovery_flight_entering(&self) {
+        self.recovery_flight_entering.notify_one();
+    }
+
+    /// Invoked by `RecoverySupervisor` to signal `Recovering` state entry and pause until released (one-shot).
     pub async fn on_recovering(&self) {
-        self.recovering_entered.notify_one();
-        self.release.notified().await;
+        if !self.phase_hold_claimed.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            self.recovering_entered.notify_one();
+            self.release.notified().await;
+        }
+    }
+
+    /// Invoked by `RecoverySupervisor` to signal `Planned` state entry and pause until released (one-shot).
+    pub async fn on_planned(&self) {
+        if !self.phase_hold_claimed.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            self.planned_entered.notify_one();
+            self.release.notified().await;
+        }
     }
 }
