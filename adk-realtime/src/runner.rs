@@ -11,7 +11,7 @@ use crate::recovery::supervisor::{
     ConfigSnapshot, FailureReport, RecoveryOutcome, RecoverySupervisor, TransportStatus,
 };
 use crate::recovery::{DeliveryCertainty, RecoveryCause, RecoveryPolicy};
-use crate::session::ContextMutationOutcome;
+use crate::session::{ContextMutationOutcome, RealtimeSession};
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -598,9 +598,14 @@ impl RealtimeRunner {
                     drop(state_guard);
                     tracing::info!("Runner is idle. Executing resumption immediately.");
 
+                    let model = Arc::clone(&self.model);
+                    let cfg = queued_snapshot.config.clone();
                     match self
                         .supervisor
-                        .execute_context_resumption(&self.model, queued_snapshot.clone())
+                        .execute_resumption_with(queued_snapshot.clone(), move || async move {
+                            let s = model.connect(cfg).await?;
+                            Ok(Arc::from(s) as Arc<dyn RealtimeSession>)
+                        })
                         .await
                     {
                         Ok(_) => {
@@ -712,6 +717,39 @@ impl RealtimeRunner {
             .and_then(|g| g.session.disconnect_reason())
     }
 
+    /// Read next event from active generation session, handling generation switches.
+    async fn poll_session_next(
+        &self,
+        watcher: &mut tokio::sync::watch::Receiver<u64>,
+        current_gen_id: u64,
+        session: &Arc<dyn crate::session::RealtimeSession>,
+    ) -> Option<Result<ServerEvent>> {
+        tokio::select! {
+            biased;
+            _ = watcher.changed() => {
+                if *watcher.borrow() != current_gen_id {
+                    tracing::info!(
+                        from = current_gen_id,
+                        to = *watcher.borrow(),
+                        "generation changed; switching to active generation"
+                    );
+                    return None;
+                }
+                session.next_event().await
+            }
+            ev = session.next_event() => ev,
+        }
+    }
+
+    /// Report read failure to supervisor, returning true if recovered/stale (caller should loop).
+    async fn report_read_failure(&self, gen_id: u64, cause: RecoveryCause) -> bool {
+        let report = FailureReport { generation: gen_id, cause };
+        matches!(
+            self.supervisor.report_failure(report).await,
+            Ok(RecoveryOutcome::Recovered { .. }) | Ok(RecoveryOutcome::Stale(_))
+        )
+    }
+
     /// Get the next managed event from the session with generation awareness and automatic recovery.
     ///
     /// Provides pull-based reading parity with [`run`](Self::run). `next_event` subscribes to generation
@@ -729,75 +767,53 @@ impl RealtimeRunner {
             };
 
             if *watcher.borrow_and_update() != gen_item.id {
-                tracing::info!(
-                    watch_gen = *watcher.borrow(),
-                    snapshot_gen = gen_item.id,
-                    "generation changed during subscription/snapshot in next_event; retrying"
-                );
                 continue;
             }
 
             let current_gen_id = gen_item.id;
             let session = gen_item.session;
 
-            let event_res = tokio::select! {
-                biased;
-                _ = watcher.changed() => {
-                    if *watcher.borrow() != current_gen_id {
-                        tracing::info!(
-                            from = current_gen_id,
-                            to = *watcher.borrow(),
-                            "generation changed in next_event; switching to active generation"
-                        );
+            match self.poll_session_next(&mut watcher, current_gen_id, &session).await {
+                Some(Ok(ServerEvent::PlannedRotation { time_left })) => {
+                    let supervisor = Arc::clone(&self.supervisor);
+                    let time_left_clone = time_left.clone();
+                    tokio::spawn(async move {
+                        let cause = RecoveryCause::PlannedRotation { time_left: time_left_clone };
+                        if let Err(e) =
+                            supervisor.execute_planned_replacement(current_gen_id, cause).await
+                        {
+                            tracing::warn!(
+                                current_gen_id,
+                                error = %e,
+                                "proactive planned replacement attempt failed; keeping generation N authoritative"
+                            );
+                        }
+                    });
+                    let _ = self.event_handler.on_planned_rotation(time_left.as_deref()).await;
+                    return Some(Ok(ServerEvent::PlannedRotation { time_left }));
+                }
+                Some(Ok(event)) => return Some(Ok(event)),
+                Some(Err(e)) => {
+                    if self
+                        .report_read_failure(
+                            current_gen_id,
+                            RecoveryCause::ReadFailed(Arc::new(e.clone())),
+                        )
+                        .await
+                    {
                         continue;
                     }
-                    session.next_event().await
-                }
-                ev = session.next_event() => ev,
-            };
-
-            match event_res {
-                Some(Ok(event)) => {
-                    if let ServerEvent::PlannedRotation { ref time_left } = event {
-                        let supervisor = Arc::clone(&self.supervisor);
-                        let gen_id = current_gen_id;
-                        let time_left_clone = time_left.clone();
-                        tokio::spawn(async move {
-                            let cause =
-                                RecoveryCause::PlannedRotation { time_left: time_left_clone };
-                            if let Err(e) =
-                                supervisor.execute_planned_replacement(gen_id, cause).await
-                            {
-                                tracing::warn!(gen_id, error = %e, "proactive planned replacement attempt failed; keeping generation N authoritative");
-                            }
-                        });
-                        let _ = self.event_handler.on_planned_rotation(time_left.as_deref()).await;
-                    }
-                    return Some(Ok(event));
-                }
-                Some(Err(e)) => {
-                    let report = FailureReport {
-                        generation: current_gen_id,
-                        cause: RecoveryCause::ReadFailed(Arc::new(e.clone())),
-                    };
-                    match self.supervisor.report_failure(report).await {
-                        Ok(RecoveryOutcome::Recovered { .. }) | Ok(RecoveryOutcome::Stale(_)) => {
-                            continue;
-                        }
-                        _ => return Some(Err(e)),
-                    }
+                    return Some(Err(e));
                 }
                 None => {
-                    let report = FailureReport {
-                        generation: current_gen_id,
-                        cause: RecoveryCause::UnexpectedEof,
-                    };
-                    match self.supervisor.report_failure(report).await {
-                        Ok(RecoveryOutcome::Recovered { .. }) | Ok(RecoveryOutcome::Stale(_)) => {
-                            continue;
-                        }
-                        _ => return None,
+                    if *watcher.borrow() != current_gen_id {
+                        continue;
                     }
+                    if self.report_read_failure(current_gen_id, RecoveryCause::UnexpectedEof).await
+                    {
+                        continue;
+                    }
+                    return None;
                 }
             }
         }
@@ -877,140 +893,64 @@ impl RealtimeRunner {
             };
 
             if *watcher.borrow_and_update() != gen_item.id {
-                tracing::info!(
-                    watch_gen = *watcher.borrow(),
-                    snapshot_gen = gen_item.id,
-                    "generation changed during subscription/snapshot in run_loop; retrying"
-                );
                 continue;
             }
 
             let current_gen_id = gen_item.id;
             let session = gen_item.session;
 
-            let event = if running_tools.is_empty() {
-                if let Some(token) = &cancel_token {
-                    tokio::select! {
-                        biased;
-                        _ = token.cancelled() => {
-                            tracing::info!("RealtimeRunner run loop cancelled via cancellation token.");
-                            self.close().await?;
-                            self.event_handler.on_disconnect().await?;
-                            return Ok(());
-                        }
-                        _ = watcher.changed() => {
-                            if *watcher.borrow() != current_gen_id {
-                                tracing::info!(from = current_gen_id, to = *watcher.borrow(), "generation changed in run_loop; switching generation");
-                                continue;
-                            }
-                            session.next_event().await
-                        }
-                        ev = session.next_event() => ev,
+            tokio::select! {
+                biased;
+                _ = async {
+                    match &cancel_token {
+                        Some(token) => token.cancelled().await,
+                        None => futures::future::pending().await,
                     }
-                } else {
-                    tokio::select! {
-                        biased;
-                        _ = watcher.changed() => {
-                            if *watcher.borrow() != current_gen_id {
-                                tracing::info!(from = current_gen_id, to = *watcher.borrow(), "generation changed in run_loop; switching generation");
-                                continue;
-                            }
-                            session.next_event().await
-                        }
-                        ev = session.next_event() => ev,
-                    }
+                } => {
+                    tracing::info!("RealtimeRunner run loop cancelled via cancellation token.");
+                    self.close().await?;
+                    self.event_handler.on_disconnect().await?;
+                    return Ok(());
                 }
-            } else if let Some(token) = &cancel_token {
-                tokio::select! {
-                    biased;
-                    _ = token.cancelled() => {
-                        tracing::info!("RealtimeRunner run loop cancelled via cancellation token.");
-                        self.close().await?;
-                        self.event_handler.on_disconnect().await?;
-                        return Ok(());
-                    }
-                    Some(finished) = running_tools.next() => {
-                        if let Err(e) = finished {
-                            self.event_handler.on_error(&e).await?;
-                            if !self.supervisor.is_connected().await {
-                                return Err(e);
-                            }
-                        }
-                        continue;
-                    }
-                    _ = watcher.changed() => {
-                        if *watcher.borrow() != current_gen_id {
-                            tracing::info!(from = current_gen_id, to = *watcher.borrow(), "generation changed in run_loop; switching generation");
-                            continue;
-                        }
-                        session.next_event().await
-                    }
-                    event = session.next_event() => event,
-                }
-            } else {
-                tokio::select! {
-                    biased;
-                    Some(finished) = running_tools.next() => {
-                        if let Err(e) = finished {
-                            self.event_handler.on_error(&e).await?;
-                            if !self.supervisor.is_connected().await {
-                                return Err(e);
-                            }
-                        }
-                        continue;
-                    }
-                    _ = watcher.changed() => {
-                        if *watcher.borrow() != current_gen_id {
-                            tracing::info!(from = current_gen_id, to = *watcher.borrow(), "generation changed in run_loop; switching generation");
-                            continue;
-                        }
-                        session.next_event().await
-                    }
-                    event = session.next_event() => event,
-                }
-            };
-
-            match event {
-                Some(Ok(event)) => {
-                    if let Some(call) =
-                        self.handle_event_for_generation(event, Some(current_gen_id)).await?
-                    {
-                        running_tools.push(self.run_tool_call(call));
-                    }
-                }
-                Some(Err(e)) => {
-                    let report = FailureReport {
-                        generation: current_gen_id,
-                        cause: RecoveryCause::ReadFailed(Arc::new(e.clone())),
-                    };
-                    match self.supervisor.report_failure(report).await {
-                        Ok(RecoveryOutcome::Recovered { .. }) | Ok(RecoveryOutcome::Stale(_)) => {
-                            continue;
-                        }
-                        _ => {
-                            self.event_handler.on_error(&e).await?;
+                Some(finished) = running_tools.next(), if !running_tools.is_empty() => {
+                    if let Err(e) = finished {
+                        self.event_handler.on_error(&e).await?;
+                        if !self.supervisor.is_connected().await {
                             return Err(e);
                         }
                     }
                 }
-                None => {
-                    while let Some(finished) = running_tools.next().await {
-                        if let Err(e) = finished {
-                            self.event_handler.on_error(&e).await?;
-                            if !self.supervisor.is_connected().await {
-                                return Err(e);
+                event_res = self.poll_session_next(&mut watcher, current_gen_id, &session) => {
+                    match event_res {
+                        Some(Ok(event)) => {
+                            if let Some(call) =
+                                self.handle_event_for_generation(event, Some(current_gen_id)).await?
+                            {
+                                running_tools.push(self.run_tool_call(call));
                             }
                         }
-                    }
-                    let report = FailureReport {
-                        generation: current_gen_id,
-                        cause: RecoveryCause::UnexpectedEof,
-                    };
-                    match self.supervisor.report_failure(report).await {
-                        Ok(RecoveryOutcome::Recovered { .. }) | Ok(RecoveryOutcome::Stale(_)) => {
-                            continue;
+                        Some(Err(e)) => {
+                            if self.report_read_failure(current_gen_id, RecoveryCause::ReadFailed(Arc::new(e.clone()))).await {
+                                continue;
+                            }
+                            self.event_handler.on_error(&e).await?;
+                            return Err(e);
                         }
-                        _ => {
+                        None => {
+                            if *watcher.borrow() != current_gen_id {
+                                continue;
+                            }
+                            while let Some(finished) = running_tools.next().await {
+                                if let Err(e) = finished {
+                                    self.event_handler.on_error(&e).await?;
+                                    if !self.supervisor.is_connected().await {
+                                        return Err(e);
+                                    }
+                                }
+                            }
+                            if self.report_read_failure(current_gen_id, RecoveryCause::UnexpectedEof).await {
+                                continue;
+                            }
                             self.event_handler.on_disconnect().await?;
                             break;
                         }
@@ -1174,7 +1114,16 @@ impl RealtimeRunner {
 
             let snapshot = self.supervisor.get_config().await;
 
-            match self.supervisor.execute_context_resumption(&self.model, snapshot).await {
+            let model = Arc::clone(&self.model);
+            let cfg = snapshot.config.clone();
+            match self
+                .supervisor
+                .execute_resumption_with(snapshot, move || async move {
+                    let s = model.connect(cfg).await?;
+                    Ok(Arc::from(s) as Arc<dyn RealtimeSession>)
+                })
+                .await
+            {
                 Ok(_) => {
                     if let Some(msg) = bridge_message {
                         tracing::info!("Sending bridge message post-resumption via invoke_write.");

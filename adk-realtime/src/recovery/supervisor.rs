@@ -86,6 +86,55 @@ pub(crate) struct FailureReport {
     pub(crate) cause: RecoveryCause,
 }
 
+/// A wire-format duration wrapper that can be parsed from strings like "30s", "500ms", "1.5m".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct WireDuration(pub Duration);
+
+impl std::fmt::Display for WireDuration {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self.0)
+    }
+}
+
+impl From<Duration> for WireDuration {
+    fn from(d: Duration) -> Self {
+        Self(d)
+    }
+}
+
+impl From<WireDuration> for Duration {
+    fn from(wd: WireDuration) -> Self {
+        wd.0
+    }
+}
+
+impl std::ops::Deref for WireDuration {
+    type Target = Duration;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+/// Error returned when parsing a wire duration string fails.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParseWireDurationError;
+
+impl std::fmt::Display for ParseWireDurationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "invalid wire duration string format")
+    }
+}
+
+impl std::error::Error for ParseWireDurationError {}
+
+impl std::str::FromStr for WireDuration {
+    type Err = ParseWireDurationError;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        parse_duration_string(s).map(WireDuration).ok_or(ParseWireDurationError)
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct ConfigSnapshot {
     pub(crate) config: crate::config::RealtimeConfig,
@@ -101,6 +150,25 @@ pub(crate) enum RecoveryOutcome {
     Stale(Arc<dyn RealtimeSession>),
     /// A report for a generation that was already terminally exhausted / handled.
     Exhausted,
+}
+
+#[allow(dead_code)]
+impl RecoveryOutcome {
+    /// True if the recovery or replacement established a valid session generation (fresh or stale).
+    #[inline]
+    pub fn is_recovered(&self) -> bool {
+        matches!(self, Self::Recovered { .. } | Self::Stale(_))
+    }
+
+    /// Access the underlying recovered or stale session if present.
+    #[inline]
+    pub fn session(&self) -> Option<&Arc<dyn RealtimeSession>> {
+        match self {
+            Self::Recovered { session, .. } => Some(session),
+            Self::Stale(session) => Some(session),
+            Self::Exhausted => None,
+        }
+    }
 }
 
 impl std::fmt::Debug for RecoveryOutcome {
@@ -128,6 +196,14 @@ pub(crate) enum ReplacementPhase {
 impl ReplacementPhase {
     pub fn is_recovering(&self) -> bool {
         matches!(self, Self::Recovering { .. })
+    }
+
+    #[allow(dead_code)]
+    pub fn kind(&self) -> AttemptKind {
+        match self {
+            Self::Planned { .. } => AttemptKind::Planned,
+            Self::Recovering { .. } => AttemptKind::Recovering,
+        }
     }
 
     pub fn cause(&self) -> &RecoveryCause {
@@ -281,6 +357,36 @@ pub(crate) enum ManagedState {
     Recovering { failed: Arc<SessionGeneration>, txn: Arc<ReplacementTxn> },
 
     Terminal { reason: TerminalReason, _last_generation: Option<Arc<SessionGeneration>> },
+}
+
+#[allow(dead_code)]
+impl ManagedState {
+    /// True if the supervisor is actively serving a healthy session.
+    #[inline]
+    pub fn is_serving(&self) -> bool {
+        matches!(self, Self::Serving { .. })
+    }
+
+    /// True if the supervisor is actively performing failure recovery.
+    #[inline]
+    pub fn is_recovering(&self) -> bool {
+        matches!(self, Self::Recovering { .. })
+    }
+
+    /// True if the supervisor is in a terminal state (explicit close or exhausted).
+    #[inline]
+    pub fn is_terminal(&self) -> bool {
+        matches!(self, Self::Terminal { .. })
+    }
+
+    /// Access the active generation if serving.
+    #[inline]
+    pub fn active_generation(&self) -> Option<&Arc<SessionGeneration>> {
+        match self {
+            Self::Serving { active, .. } => Some(active),
+            _ => None,
+        }
+    }
 }
 
 /// Unified core protected under a single `tokio::sync::RwLock` to prevent lock inversion.
@@ -593,12 +699,19 @@ impl RecoverySupervisor {
         Ok((*new_gen).clone())
     }
 
-    /// Execute an intentional context resumption under the supervisor.
-    pub(crate) async fn execute_context_resumption(
+    /// Execute an intentional context resumption under the supervisor using a connection factory.
+    ///
+    /// Enforces strict replacement serialization within the supervisor while allowing the caller
+    /// to provide a model-agnostic connection future.
+    pub(crate) async fn execute_resumption_with<F, Fut>(
         &self,
-        model: &crate::model::BoxedModel,
         queued_snapshot: ConfigSnapshot,
-    ) -> Result<SessionGeneration> {
+        connect_fn: F,
+    ) -> Result<SessionGeneration>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<Arc<dyn RealtimeSession>>>,
+    {
         let current_active = {
             let core = self.core.read().await;
             if core.config.revision != queued_snapshot.revision {
@@ -616,8 +729,7 @@ impl RecoverySupervisor {
         };
 
         tracing::info!("Executing intentional context resumption under supervisor.");
-        let new_session = model.connect(queued_snapshot.config).await?;
-        let new_session_arc: Arc<dyn RealtimeSession> = Arc::from(new_session);
+        let new_session_arc = connect_fn().await?;
 
         let mut candidate_guard = CandidateCleanupGuard::new(new_session_arc.clone());
 
