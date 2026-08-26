@@ -171,8 +171,15 @@ pub(crate) enum AttemptTransition {
     Terminal,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AttemptKind {
+    Planned,
+    Recovering,
+}
+
 pub(crate) struct AttemptContext<'a> {
     pub(crate) originating_gen_id: u64,
+    pub(crate) kind: AttemptKind,
     pub(crate) attempt_idx: u32,
     pub(crate) max_attempts: u32,
     pub(crate) expected_revision: Option<u64>,
@@ -741,6 +748,12 @@ impl RecoverySupervisor {
         let test_recovery_barrier = Arc::clone(&self.test_recovery_barrier);
 
         tokio::spawn(async move {
+            let initial_phase = txn.snapshot_phase();
+            let initial_kind = match &initial_phase {
+                ReplacementPhase::Planned { .. } => AttemptKind::Planned,
+                ReplacementPhase::Recovering { .. } => AttemptKind::Recovering,
+            };
+
             let recovery_impl = match originating_gen.session.recovery() {
                 Some(r) => r,
                 None => {
@@ -748,6 +761,7 @@ impl RecoverySupervisor {
                     tracing::error!(generation = originating_gen.id, err = %err, "recovery not supported");
                     let ctx = AttemptContext {
                         originating_gen_id: originating_gen.id,
+                        kind: initial_kind,
                         attempt_idx: 1,
                         max_attempts: 1,
                         expected_revision: None,
@@ -760,7 +774,6 @@ impl RecoverySupervisor {
                 }
             };
 
-            let initial_phase = txn.snapshot_phase();
             let initial_cause = match &initial_phase {
                 ReplacementPhase::Planned { cause, .. } => cause,
                 ReplacementPhase::Recovering { cause, .. } => cause,
@@ -773,6 +786,7 @@ impl RecoverySupervisor {
                 tracing::warn!(generation = originating_gen.id, err = %err, "fatal cause classification");
                 let ctx = AttemptContext {
                     originating_gen_id: originating_gen.id,
+                    kind: initial_kind,
                     attempt_idx: 1,
                     max_attempts: 1,
                     expected_revision: None,
@@ -797,6 +811,15 @@ impl RecoverySupervisor {
                     break;
                 }
 
+                let phase = txn.snapshot_phase();
+                let (current_cause, current_deadline, is_recovering) = match phase {
+                    ReplacementPhase::Planned { cause, deadline } => (cause, deadline, false),
+                    ReplacementPhase::Recovering { cause, deadline } => (cause, deadline, true),
+                };
+
+                let attempt_kind =
+                    if is_recovering { AttemptKind::Recovering } else { AttemptKind::Planned };
+
                 if txn.cancel_token.is_cancelled() {
                     tracing::info!(
                         generation = originating_gen.id,
@@ -804,6 +827,7 @@ impl RecoverySupervisor {
                     );
                     let ctx = AttemptContext {
                         originating_gen_id: originating_gen.id,
+                        kind: attempt_kind,
                         attempt_idx,
                         max_attempts: current_max,
                         expected_revision: None,
@@ -819,12 +843,6 @@ impl RecoverySupervisor {
                     .await;
                     return;
                 }
-
-                let phase = txn.snapshot_phase();
-                let (current_cause, current_deadline, is_recovering) = match phase {
-                    ReplacementPhase::Planned { cause, deadline } => (cause, deadline, false),
-                    ReplacementPhase::Recovering { cause, deadline } => (cause, deadline, true),
-                };
 
                 // When promoted to Recovering, give recovery its own fresh budget.
                 if is_recovering && !reactive_budget_started {
@@ -852,6 +870,7 @@ impl RecoverySupervisor {
                     );
                     let ctx = AttemptContext {
                         originating_gen_id: originating_gen.id,
+                        kind: attempt_kind,
                         attempt_idx,
                         max_attempts: current_max,
                         expected_revision: None,
@@ -895,6 +914,7 @@ impl RecoverySupervisor {
                     tracing::warn!(generation = originating_gen.id, attempt = attempt_idx, err = %msg, "deadline expired");
                     let ctx = AttemptContext {
                         originating_gen_id: originating_gen.id,
+                        kind: attempt_kind,
                         attempt_idx,
                         max_attempts: current_max,
                         expected_revision: None,
@@ -941,6 +961,7 @@ impl RecoverySupervisor {
                         );
                         let ctx = AttemptContext {
                             originating_gen_id: originating_gen.id,
+                            kind: attempt_kind,
                             attempt_idx,
                             max_attempts: current_max,
                             expected_revision: None,
@@ -983,6 +1004,7 @@ impl RecoverySupervisor {
                         );
                         let ctx = AttemptContext {
                             originating_gen_id: originating_gen.id,
+                            kind: attempt_kind,
                             attempt_idx,
                             max_attempts: current_max,
                             expected_revision: None,
@@ -1002,6 +1024,7 @@ impl RecoverySupervisor {
 
                 let ctx = AttemptContext {
                     originating_gen_id: originating_gen.id,
+                    kind: attempt_kind,
                     attempt_idx,
                     max_attempts: current_max,
                     expected_revision: Some(snapshot.revision),
@@ -1018,6 +1041,17 @@ impl RecoverySupervisor {
                         return;
                     }
                     AttemptTransition::RetryRecovering => {
+                        if attempt_kind == AttemptKind::Planned {
+                            tracing::info!(
+                                generation = originating_gen.id,
+                                "planned-origin attempt completed after promotion to recovery; resetting to fresh reactive budget"
+                            );
+                            reactive_budget_started = true;
+                            attempt_idx = 0; // Will be incremented to 1 at loop top
+                            current_max = max_attempts;
+                            continue;
+                        }
+
                         if attempt_idx < current_max {
                             let base_delay = policy.initial_delay();
                             let factor = 2u32.checked_pow(attempt_idx - 1).unwrap_or(u32::MAX);
@@ -1033,6 +1067,7 @@ impl RecoverySupervisor {
                                     .to_string();
                                 let ctx = AttemptContext {
                                     originating_gen_id: originating_gen.id,
+                                    kind: attempt_kind,
                                     attempt_idx,
                                     max_attempts: current_max,
                                     expected_revision: None,
@@ -1055,6 +1090,7 @@ impl RecoverySupervisor {
                                     _ = txn.cancel_token.cancelled() => {
                                         let ctx = AttemptContext {
                                             originating_gen_id: originating_gen.id,
+                                            kind: attempt_kind,
                                             attempt_idx,
                                             max_attempts: current_max,
                                             expected_revision: None,
@@ -1073,6 +1109,7 @@ impl RecoverySupervisor {
                                         let msg = "recovery deadline expired during backoff sleep".to_string();
                                         let ctx = AttemptContext {
                                             originating_gen_id: originating_gen.id,
+                                            kind: attempt_kind,
                                             attempt_idx,
                                             max_attempts: current_max,
                                             expected_revision: None,
@@ -1238,7 +1275,9 @@ impl RecoverySupervisor {
                                         max_attempts = ctx.max_attempts,
                                         "candidate publication rejected: stale config revision"
                                     );
-                                    if ctx.attempt_idx >= ctx.max_attempts {
+                                    let is_exhausted = ctx.kind == AttemptKind::Recovering
+                                        && ctx.attempt_idx >= ctx.max_attempts;
+                                    if is_exhausted {
                                         *state = ManagedState::Terminal {
                                             reason: TerminalReason::Exhausted,
                                             _last_generation: Some(Arc::clone(failed)),
@@ -1290,9 +1329,12 @@ impl RecoverySupervisor {
                                     }
                                 };
 
+                                let is_exhausted = ctx.kind == AttemptKind::Recovering
+                                    && ctx.attempt_idx >= ctx.max_attempts;
+
                                 if cause_disposition == RecoveryDisposition::Fatal
                                     || error_disposition == RecoveryDisposition::Fatal
-                                    || ctx.attempt_idx >= ctx.max_attempts
+                                    || is_exhausted
                                 {
                                     *state = ManagedState::Terminal {
                                         reason: TerminalReason::Exhausted,
@@ -2820,5 +2862,231 @@ mod tests {
 
         // Only 1 attempt was made (max_attempts = 1)
         assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    }
+
+    /// Proves that when max_attempts = 1 and a planned attempt is in-flight when
+    /// promoted to Recovering, a recoverable Err returned by that planned-origin
+    /// attempt does NOT exhaust the supervisor. Instead, the reactive recovery phase
+    /// gets its dedicated attempt budget and succeeds.
+    #[tokio::test]
+    async fn test_promoted_in_flight_planned_error_with_max_attempts_one_gets_reactive_attempt() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let entered_notify = Arc::new(tokio::sync::Notify::new());
+        let unblock_notify = Arc::new(tokio::sync::Notify::new());
+
+        struct PromotedErrorRecovery {
+            attempts: Arc<AtomicUsize>,
+            entered_notify: Arc<tokio::sync::Notify>,
+            unblock_notify: Arc<tokio::sync::Notify>,
+        }
+
+        #[async_trait]
+        impl RealtimeRecovery for PromotedErrorRecovery {
+            fn classify(&self, _cause: &RecoveryCause) -> RecoveryDisposition {
+                RecoveryDisposition::Recoverable
+            }
+
+            fn classify_attempt_error(
+                &self,
+                _error: &crate::error::RealtimeError,
+            ) -> RecoveryDisposition {
+                RecoveryDisposition::Recoverable
+            }
+
+            async fn recover(&self, _context: RecoveryContext<'_>) -> Result<RecoveredSession> {
+                let attempt = self.attempts.fetch_add(1, Ordering::SeqCst) + 1;
+                if attempt == 1 {
+                    self.entered_notify.notify_one();
+                    self.unblock_notify.notified().await;
+                    Err(RealtimeError::provider("transient planned connection failure"))
+                } else {
+                    let session = Arc::new(MockSession {
+                        id: format!("reactive-gen-1-attempt-{}", attempt),
+                        recovery: None,
+                    });
+                    Ok(RecoveredSession::new(session, RecoveryContinuity::Reconnected))
+                }
+            }
+        }
+
+        let mock_rec = Arc::new(PromotedErrorRecovery {
+            attempts: Arc::clone(&attempts),
+            entered_notify: Arc::clone(&entered_notify),
+            unblock_notify: Arc::clone(&unblock_notify),
+        });
+
+        let initial_session = Arc::new(MockSession {
+            id: "gen-0".to_string(),
+            recovery: Some(Arc::clone(&mock_rec) as Arc<dyn RealtimeRecovery>),
+        });
+
+        // max_attempts = 1: each phase gets at most 1 attempt
+        let policy = RecoveryPolicy::default()
+            .with_max_attempts(NonZeroU32::new(1).unwrap())
+            .with_deadline(Duration::from_secs(5));
+
+        let config = Arc::new(tokio::sync::RwLock::new(crate::config::RealtimeConfig::default()));
+        let supervisor =
+            Arc::new(RecoverySupervisor::with_initial_session(policy, config, initial_session));
+
+        // 1. Start planned replacement (attempt 1 launched with AttemptKind::Planned)
+        let sup_planned = Arc::clone(&supervisor);
+        let planned_handle = tokio::spawn(async move {
+            sup_planned
+                .execute_planned_replacement(
+                    0,
+                    RecoveryCause::PlannedRotation { time_left: Some("30s".into()) },
+                )
+                .await
+        });
+
+        // 2. Wait until attempt 1 is blocked in-flight
+        entered_notify.notified().await;
+
+        // 3. Concurrently fail generation 0 and promote transaction to Recovering
+        let sup_fail = Arc::clone(&supervisor);
+        let fail_handle = tokio::spawn(async move {
+            let report = FailureReport { generation: 0, cause: RecoveryCause::UnexpectedEof };
+            sup_fail.report_failure(report).await
+        });
+
+        while supervisor.status().await != TransportStatus::Recovering {
+            tokio::task::yield_now().await;
+        }
+
+        // 4. Release planned-origin attempt 1 to return recoverable Err
+        unblock_notify.notify_one();
+
+        // 5. Invariant: Supervisor MUST NOT be exhausted! It must grant reactive attempt 1
+        let fail_res = fail_handle.await.unwrap().unwrap();
+        match fail_res {
+            RecoveryOutcome::Recovered { session, .. } => {
+                assert_eq!(
+                    session.session_id(),
+                    "reactive-gen-1-attempt-2",
+                    "Expected reactive recovery session to publish"
+                );
+            }
+            _ => panic!("Expected Recovered session on reactive attempt, got {:?}", fail_res),
+        }
+
+        assert_eq!(supervisor.status().await, TransportStatus::Healthy);
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        let _ = planned_handle.await;
+    }
+
+    /// Proves that when max_attempts = 1 and a planned candidate is built under rev 0
+    /// when promoted to Recovering and config revision is bumped to rev 1, the stale
+    /// planned-origin candidate does NOT exhaust the supervisor. Instead, the reactive
+    /// phase builds a fresh candidate under rev 1 and succeeds.
+    #[tokio::test]
+    async fn test_promoted_in_flight_planned_stale_config_with_max_attempts_one_gets_reactive_attempt()
+     {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let entered_notify = Arc::new(tokio::sync::Notify::new());
+        let unblock_notify = Arc::new(tokio::sync::Notify::new());
+
+        struct PromotedStaleRecovery {
+            attempts: Arc<AtomicUsize>,
+            entered_notify: Arc<tokio::sync::Notify>,
+            unblock_notify: Arc<tokio::sync::Notify>,
+        }
+
+        #[async_trait]
+        impl RealtimeRecovery for PromotedStaleRecovery {
+            fn classify(&self, _cause: &RecoveryCause) -> RecoveryDisposition {
+                RecoveryDisposition::Recoverable
+            }
+
+            fn classify_attempt_error(
+                &self,
+                _error: &crate::error::RealtimeError,
+            ) -> RecoveryDisposition {
+                RecoveryDisposition::Recoverable
+            }
+
+            async fn recover(&self, _context: RecoveryContext<'_>) -> Result<RecoveredSession> {
+                let attempt = self.attempts.fetch_add(1, Ordering::SeqCst) + 1;
+                if attempt == 1 {
+                    self.entered_notify.notify_one();
+                    self.unblock_notify.notified().await;
+                }
+                let session = Arc::new(MockSession {
+                    id: format!("gen-1-attempt-{}", attempt),
+                    recovery: None,
+                });
+                Ok(RecoveredSession::new(session, RecoveryContinuity::Reconnected))
+            }
+        }
+
+        let mock_rec = Arc::new(PromotedStaleRecovery {
+            attempts: Arc::clone(&attempts),
+            entered_notify: Arc::clone(&entered_notify),
+            unblock_notify: Arc::clone(&unblock_notify),
+        });
+
+        let initial_session = Arc::new(MockSession {
+            id: "gen-0".to_string(),
+            recovery: Some(Arc::clone(&mock_rec) as Arc<dyn RealtimeRecovery>),
+        });
+
+        // max_attempts = 1: only 1 attempt per phase
+        let policy = RecoveryPolicy::default()
+            .with_max_attempts(NonZeroU32::new(1).unwrap())
+            .with_deadline(Duration::from_secs(5));
+
+        let config = Arc::new(tokio::sync::RwLock::new(crate::config::RealtimeConfig::default()));
+        let supervisor =
+            Arc::new(RecoverySupervisor::with_initial_session(policy, config, initial_session));
+
+        // 1. Start planned replacement under revision 0
+        let sup_planned = Arc::clone(&supervisor);
+        let planned_handle = tokio::spawn(async move {
+            sup_planned
+                .execute_planned_replacement(
+                    0,
+                    RecoveryCause::PlannedRotation { time_left: Some("30s".into()) },
+                )
+                .await
+        });
+
+        // 2. Wait until attempt 1 is blocked in-flight
+        entered_notify.notified().await;
+
+        // 3. Bump config revision to 1 and promote to Recovering via failure report
+        {
+            let mut core = supervisor.core.write().await;
+            core.config.revision += 1;
+        }
+
+        let sup_fail = Arc::clone(&supervisor);
+        let fail_handle = tokio::spawn(async move {
+            let report = FailureReport { generation: 0, cause: RecoveryCause::UnexpectedEof };
+            sup_fail.report_failure(report).await
+        });
+
+        while supervisor.status().await != TransportStatus::Recovering {
+            tokio::task::yield_now().await;
+        }
+
+        // 4. Release planned attempt 1 (built under rev 0, rejected as stale against rev 1)
+        unblock_notify.notify_one();
+
+        // 5. Invariant: Supervisor MUST NOT be exhausted! It must grant reactive attempt 1
+        let fail_res = fail_handle.await.unwrap().unwrap();
+        match fail_res {
+            RecoveryOutcome::Recovered { session, .. } => {
+                assert_eq!(
+                    session.session_id(),
+                    "gen-1-attempt-2",
+                    "Expected reactive candidate under fresh revision to publish"
+                );
+            }
+            _ => panic!("Expected Recovered session on reactive attempt, got {:?}", fail_res),
+        }
+
+        assert_eq!(supervisor.status().await, TransportStatus::Healthy);
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        let _ = planned_handle.await;
     }
 }
