@@ -759,7 +759,6 @@ impl RealtimeRunner {
             match event_res {
                 Some(Ok(event)) => {
                     if let ServerEvent::PlannedRotation { ref time_left } = event {
-                        let _ = self.event_handler.on_planned_rotation(time_left.as_deref()).await;
                         let supervisor = Arc::clone(&self.supervisor);
                         let gen_id = current_gen_id;
                         let time_left_clone = time_left.clone();
@@ -772,6 +771,7 @@ impl RealtimeRunner {
                                 tracing::warn!(gen_id, error = %e, "proactive planned replacement attempt failed; keeping generation N authoritative");
                             }
                         });
+                        let _ = self.event_handler.on_planned_rotation(time_left.as_deref()).await;
                     }
                     return Some(Ok(event));
                 }
@@ -972,7 +972,9 @@ impl RealtimeRunner {
 
             match event {
                 Some(Ok(event)) => {
-                    if let Some(call) = self.handle_event(event).await? {
+                    if let Some(call) =
+                        self.handle_event_for_generation(event, Some(current_gen_id)).await?
+                    {
                         running_tools.push(self.run_tool_call(call));
                     }
                 }
@@ -1046,8 +1048,18 @@ impl RealtimeRunner {
         result
     }
 
-    /// Process a single event.
+    /// Process a single event (test utility).
+    #[cfg(test)]
     async fn handle_event(&self, event: ServerEvent) -> Result<Option<PendingToolCall>> {
+        self.handle_event_for_generation(event, None).await
+    }
+
+    /// Process a single event tagged with its source generation ID.
+    async fn handle_event_for_generation(
+        &self,
+        event: ServerEvent,
+        gen_id: Option<u64>,
+    ) -> Result<Option<PendingToolCall>> {
         match &event {
             ServerEvent::ResponseCreated { .. } => {
                 let mut state = self.state.write().await;
@@ -1091,19 +1103,23 @@ impl RealtimeRunner {
                 self.event_handler.on_tool_calls_cancelled(&call_ids).await?;
             }
             ServerEvent::PlannedRotation { time_left } => {
-                self.event_handler.on_planned_rotation(time_left.as_deref()).await?;
                 let supervisor = Arc::clone(&self.supervisor);
-                if let Ok(gen_item) = self.supervisor.get_active_generation().await {
-                    let gen_id = gen_item.id;
-                    let time_left_clone = time_left.clone();
+                let time_left_clone = time_left.clone();
+                let target_gen = match gen_id {
+                    Some(id) => Some(id),
+                    None => self.supervisor.get_active_generation().await.ok().map(|g| g.id),
+                };
+                if let Some(target_gen_id) = target_gen {
                     tokio::spawn(async move {
                         let cause = RecoveryCause::PlannedRotation { time_left: time_left_clone };
-                        if let Err(e) = supervisor.execute_planned_replacement(gen_id, cause).await
+                        if let Err(e) =
+                            supervisor.execute_planned_replacement(target_gen_id, cause).await
                         {
-                            tracing::warn!(gen_id, error = %e, "proactive planned replacement attempt failed; keeping generation N authoritative");
+                            tracing::warn!(target_gen_id, error = %e, "proactive planned replacement attempt failed; keeping generation N authoritative");
                         }
                     });
                 }
+                self.event_handler.on_planned_rotation(time_left.as_deref()).await?;
             }
             ServerEvent::ResponseCancelled { .. } => {
                 self.pending_tool_response.store(false, Ordering::Release);
@@ -1367,6 +1383,7 @@ mod runner_tests {
     use crate::session::{BoxedSession, ContextMutationOutcome, RealtimeSession};
     use std::pin::Pin;
     use std::sync::atomic::AtomicUsize;
+    use std::time::Duration;
 
     struct MockModel;
 
@@ -2639,5 +2656,178 @@ mod runner_tests {
             .expect("watcher changed")
             .unwrap();
         assert_eq!(*rx.borrow(), 1, "ready published candidate advances watcher to generation 1");
+    }
+
+    #[tokio::test]
+    async fn test_planned_rotation_launches_replacement_when_event_handler_blocks() {
+        let replacement_started = Arc::new(tokio::sync::Notify::new());
+        let handler_started = Arc::new(tokio::sync::Notify::new());
+        let handler_allow_exit = Arc::new(tokio::sync::Notify::new());
+
+        struct BlockingRotationHandler {
+            handler_started: Arc<tokio::sync::Notify>,
+            handler_allow_exit: Arc<tokio::sync::Notify>,
+        }
+
+        #[async_trait]
+        impl EventHandler for BlockingRotationHandler {
+            async fn on_planned_rotation(&self, _time_left: Option<&str>) -> Result<()> {
+                self.handler_started.notify_one();
+                self.handler_allow_exit.notified().await;
+                Ok(())
+            }
+        }
+
+        struct SignallingRecovery {
+            replacement_started: Arc<tokio::sync::Notify>,
+            session2: Arc<dyn RealtimeSession>,
+        }
+
+        #[async_trait]
+        impl crate::recovery::RealtimeRecovery for SignallingRecovery {
+            fn classify(&self, _cause: &RecoveryCause) -> crate::recovery::RecoveryDisposition {
+                crate::recovery::RecoveryDisposition::Recoverable
+            }
+            async fn recover(
+                &self,
+                _context: crate::recovery::RecoveryContext<'_>,
+            ) -> Result<crate::recovery::RecoveredSession> {
+                self.replacement_started.notify_one();
+                Ok(crate::recovery::RecoveredSession::new(
+                    self.session2.clone(),
+                    crate::recovery::RecoveryContinuity::Reconnected,
+                ))
+            }
+        }
+
+        struct RecoverableSessionWithSignalling {
+            inner: ScriptedSession,
+            rec: SignallingRecovery,
+        }
+
+        #[async_trait]
+        impl RealtimeSession for RecoverableSessionWithSignalling {
+            fn session_id(&self) -> &str {
+                self.inner.session_id()
+            }
+            fn is_connected(&self) -> bool {
+                self.inner.is_connected()
+            }
+            fn recovery(&self) -> Option<&dyn crate::recovery::RealtimeRecovery> {
+                Some(&self.rec)
+            }
+            async fn send_audio(&self, a: &AudioChunk) -> Result<()> {
+                self.inner.send_audio(a).await
+            }
+            async fn send_audio_base64(&self, a: &str) -> Result<()> {
+                self.inner.send_audio_base64(a).await
+            }
+            async fn send_text(&self, t: &str) -> Result<()> {
+                self.inner.send_text(t).await
+            }
+            async fn send_tool_response(&self, r: ToolResponse) -> Result<()> {
+                self.inner.send_tool_response(r).await
+            }
+            async fn commit_audio(&self) -> Result<()> {
+                self.inner.commit_audio().await
+            }
+            async fn clear_audio(&self) -> Result<()> {
+                self.inner.clear_audio().await
+            }
+            async fn create_response(&self) -> Result<()> {
+                self.inner.create_response().await
+            }
+            async fn interrupt(&self) -> Result<()> {
+                self.inner.interrupt().await
+            }
+            async fn send_event(&self, e: ClientEvent) -> Result<()> {
+                self.inner.send_event(e).await
+            }
+            async fn next_event(&self) -> Option<Result<ServerEvent>> {
+                self.inner.next_event().await
+            }
+            fn events(
+                &self,
+            ) -> Pin<Box<dyn futures::Stream<Item = Result<ServerEvent>> + Send + '_>> {
+                self.inner.events()
+            }
+            async fn close(&self) -> Result<()> {
+                self.inner.close().await
+            }
+            async fn mutate_context(&self, c: RealtimeConfig) -> Result<ContextMutationOutcome> {
+                self.inner.mutate_context(c).await
+            }
+        }
+
+        let session2 = Arc::new(ScriptedSession::new(Arc::new(Counts::default()), vec![]));
+        let session1 = Arc::new(RecoverableSessionWithSignalling {
+            inner: ScriptedSession::new(Arc::new(Counts::default()), vec![]),
+            rec: SignallingRecovery {
+                replacement_started: Arc::clone(&replacement_started),
+                session2,
+            },
+        });
+
+        let runner = RealtimeRunner::builder()
+            .model(Arc::new(MockModel) as BoxedModel)
+            .event_handler(BlockingRotationHandler {
+                handler_started: Arc::clone(&handler_started),
+                handler_allow_exit: Arc::clone(&handler_allow_exit),
+            })
+            .build()
+            .unwrap();
+
+        let _ = runner.set_initial_session(session1).await.unwrap();
+
+        let runner_arc = Arc::new(runner);
+        let r_clone = Arc::clone(&runner_arc);
+        let event_task = tokio::spawn(async move {
+            r_clone
+                .handle_event_for_generation(
+                    ServerEvent::PlannedRotation { time_left: Some("30s".into()) },
+                    Some(0),
+                )
+                .await
+        });
+
+        tokio::time::timeout(Duration::from_secs(2), handler_started.notified())
+            .await
+            .expect("handler started");
+
+        tokio::time::timeout(Duration::from_secs(2), replacement_started.notified())
+            .await
+            .expect("replacement task must be launched concurrently without waiting for handler");
+
+        handler_allow_exit.notify_one();
+        event_task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_planned_rotation_uses_originating_generation_preventing_cascade() {
+        let session0 = Arc::new(ScriptedSession::new(Arc::new(Counts::default()), vec![]));
+        let session1 = Arc::new(ScriptedSession::new(Arc::new(Counts::default()), vec![]));
+
+        let runner =
+            RealtimeRunner::builder().model(Arc::new(MockModel) as BoxedModel).build().unwrap();
+
+        let gen0_id = runner.set_initial_session(session0).await.unwrap();
+        assert_eq!(gen0_id, 0);
+
+        let gen1_id = runner.supervisor.publish_replacement(session1, 0).await.unwrap().id;
+        assert_eq!(gen1_id, 1);
+
+        let res = runner
+            .handle_event_for_generation(
+                ServerEvent::PlannedRotation { time_left: Some("30s".into()) },
+                Some(0),
+            )
+            .await;
+
+        assert!(res.is_ok());
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let active = runner.supervisor.get_active_generation().await.unwrap();
+        assert_eq!(active.id, 1, "stale generation 0 rotation report must not rotate generation 1");
     }
 }
