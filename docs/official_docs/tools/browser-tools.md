@@ -19,9 +19,9 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-adk-browser = "3.0.0"
-adk-agent = "3.0.0"
-adk-model = "3.0.0"
+adk-browser = "2.1.0"
+adk-agent = "2.1.0"
+adk-model = "2.1.0"
 ```
 
 ### Prerequisites
@@ -62,7 +62,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create AI agent with browser tools
     let api_key = std::env::var("GOOGLE_API_KEY")?;
-    let model = Arc::new(GeminiModel::new(&api_key, "gemini-2.5-flash")?);
+    let model = Arc::new(GeminiModel::new(&api_key, "gemini-3.7-flash")?);
 
     let mut builder = LlmAgentBuilder::new("web_agent")
         .model(model)

@@ -5,11 +5,13 @@ use crate::error::{RealtimeError, Result};
 use crate::events::ServerEvent;
 use crate::openai::protocol::OpenAITransportLink;
 use async_trait::async_trait;
-use futures::{SinkExt, StreamExt};
+use futures::{Sink, SinkExt, StreamExt};
 use serde_json::Value;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tokio::sync::Mutex;
+use std::time::Duration;
+use tokio::sync::{Mutex, mpsc, oneshot};
+use tokio::task::JoinHandle;
 use tokio_tungstenite::{
     connect_async,
     tungstenite::{
@@ -18,11 +20,25 @@ use tokio_tungstenite::{
     },
 };
 
-type WsSource = Box<
-    dyn futures::Stream<Item = std::result::Result<Message, tokio_tungstenite::tungstenite::Error>>
-        + Send
-        + Unpin,
->;
+type WsStream =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+type WsSource = futures::stream::SplitStream<WsStream>;
+
+/// Outbound queue depth, in frames.
+///
+/// Matches `WRITER_CHANNEL_CAPACITY` in the Gemini session, which already uses this
+/// pattern. Sized against realtime audio rather than throughput: at 20 ms frames this
+/// is ~1.3 s of buffered speech, past which a producer should feel backpressure rather
+/// than keep queueing audio that will be stale by the time it reaches the wire.
+const OUTBOUND_CAPACITY: usize = 64;
+
+/// How long [`OpenAITransportLink::close`] waits for the writer to finish before
+/// abandoning it.
+///
+/// Teardown has to terminate. A peer that has stopped reading stalls the in-flight
+/// write for as long as it likes, so an unbounded wait here would reintroduce the
+/// hang the writer task exists to remove.
+const CLOSE_GRACE: Duration = Duration::from_secs(5);
 
 /// OpenAI Realtime session.
 ///
@@ -30,9 +46,14 @@ type WsSource = Box<
 pub struct OpenAIRealtimeSession {
     session_id: String,
     connected: Arc<AtomicBool>,
-    cancel_token: tokio_util::sync::CancellationToken,
-    outbound_tx: tokio::sync::mpsc::Sender<Message>,
-    writer_task: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    outbound: mpsc::Sender<Message>,
+    /// Signals the writer to stop draining the queue and close.
+    ///
+    /// Deliberately not the outbound queue: a close that queues behind the backlog is
+    /// exactly as slow as the backlog, and a realtime session's queue is full in the
+    /// ordinary case of a healthy-but-slow link, not only when the peer is dead.
+    close: Mutex<Option<oneshot::Sender<()>>>,
+    writer: Mutex<Option<JoinHandle<()>>>,
     receiver: Arc<Mutex<WsSource>>,
 }
 
@@ -65,6 +86,95 @@ fn redacted_payload(text: &str) -> String {
     "<redacted>".to_string()
 }
 
+/// Owns the write half of the socket and drains `outbound` into it.
+///
+/// Sole owner by construction: no caller can hold a lock on the sink across the
+/// network write, so no caller can block another — which is what lets `close` run
+/// while a send is still in flight.
+///
+/// Stops on `close` (which preempts the queue), on a peer error, or when every sender
+/// has been dropped. Writes a Close frame on the way out and marks the session
+/// disconnected.
+async fn writer_loop<S>(
+    mut sink: S,
+    mut outbound: mpsc::Receiver<Message>,
+    mut close: oneshot::Receiver<()>,
+    connected: Arc<AtomicBool>,
+) where
+    S: Sink<Message> + Unpin,
+    S::Error: std::fmt::Display,
+{
+    let mut peer_is_gone = false;
+
+    loop {
+        // `biased` so a pending close wins against a backlog that is still draining;
+        // without it teardown is at the mercy of random branch order.
+        let message = tokio::select! {
+            biased;
+            _ = &mut close => break,
+            message = outbound.recv() => match message {
+                Some(message) => message,
+                None => break,
+            },
+        };
+
+        if let Err(error) = sink.send(message).await {
+            tracing::warn!(error = %error, "openai realtime write failed; connection is gone");
+            peer_is_gone = true;
+            break;
+        }
+    }
+
+    // Best effort: a peer that already failed a write will not accept this either, and
+    // a stalled peer never resolves it — which is why `shutdown_writer` bounds the wait
+    // rather than trusting this to return.
+    if !peer_is_gone {
+        let _ = sink.send(Message::Close(None)).await;
+    }
+
+    connected.store(false, Ordering::SeqCst);
+}
+
+/// Signals the writer to close, then waits a bounded time for it to finish.
+///
+/// Split out from [`OpenAITransportLink::close`] so the bound can be tested against a
+/// stalled peer without a live socket.
+///
+/// Returns an error when the grace period expires, so a caller that cares about a
+/// clean shutdown can still tell the difference — `RealtimeRunner` logs it during
+/// session resumption.
+///
+/// Aborting does **not** close the connection: `SplitSink` and `SplitStream` share the
+/// stream through a `BiLock`, and this session keeps the read half, so the socket stays
+/// open until the session itself is dropped. What the bound guarantees is only that
+/// teardown returns to its caller.
+async fn shutdown_writer(
+    close: &Mutex<Option<oneshot::Sender<()>>>,
+    writer: &Mutex<Option<JoinHandle<()>>>,
+    grace: Duration,
+) -> Result<()> {
+    if let Some(signal) = close.lock().await.take() {
+        let _ = signal.send(());
+    }
+
+    // Taken out of the mutex before awaiting: holding a lock across the grace period
+    // would reintroduce, at five seconds, exactly the shape this change removes.
+    let handle = writer.lock().await.take();
+
+    if let Some(mut handle) = handle
+        && tokio::time::timeout(grace, &mut handle).await.is_err()
+    {
+        tracing::warn!(
+            grace_secs = grace.as_secs_f64(),
+            "openai realtime writer did not finish; abandoning it"
+        );
+        handle.abort();
+        return Err(RealtimeError::connection("Close timed out; writer abandoned"));
+    }
+
+    Ok(())
+}
+
 impl OpenAIRealtimeSession {
     /// Connect to OpenAI Realtime API.
     pub async fn connect(url: &str, api_key: &str, config: RealtimeConfig) -> Result<Self> {
@@ -90,43 +200,12 @@ impl OpenAIRealtimeSession {
             .await
             .map_err(|e| RealtimeError::connection(format!("WebSocket connect error: {}", e)))?;
 
-        let (mut sink, source) = ws_stream.split();
+        let (sink, source) = ws_stream.split();
+
         let connected = Arc::new(AtomicBool::new(true));
-        let cancel_token = tokio_util::sync::CancellationToken::new();
-        let writer_cancel = cancel_token.clone();
-        // Single-writer pattern (Realtime Concurrency Rule 3): Sink ownership is moved to a
-        // dedicated writer task fed by a bounded MPSC channel. This prevents send_raw() from
-        // holding a Mutex guard across .await network calls, which previously caused
-        // session.close() to deadlock on slow socket teardown.
-        let (outbound_tx, mut outbound_rx) = tokio::sync::mpsc::channel::<Message>(256);
-        let writer_connected = Arc::clone(&connected);
-        let writer_task = tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    _ = writer_cancel.cancelled() => {
-                        tracing::info!("openai websocket writer task cancelled via token");
-                        break;
-                    }
-                    msg = outbound_rx.recv() => {
-                        match msg {
-                            Some(message) => {
-                                let should_close = matches!(message, Message::Close(_));
-                                if let Err(error) = sink.send(message).await {
-                                    writer_connected.store(false, Ordering::SeqCst);
-                                    tracing::warn!(error = %error, "openai websocket writer send failed");
-                                    break;
-                                }
-                                if should_close {
-                                    break;
-                                }
-                            }
-                            None => break,
-                        }
-                    }
-                }
-            }
-            writer_connected.store(false, Ordering::SeqCst);
-        });
+        let (outbound, outbound_rx) = mpsc::channel(OUTBOUND_CAPACITY);
+        let (close, close_rx) = oneshot::channel();
+        let writer = tokio::spawn(writer_loop(sink, outbound_rx, close_rx, Arc::clone(&connected)));
 
         // Generate session ID (will be updated when we receive session.created)
         let session_id = uuid::Uuid::new_v4().to_string();
@@ -134,10 +213,10 @@ impl OpenAIRealtimeSession {
         let session = Self {
             session_id,
             connected,
-            cancel_token,
-            outbound_tx,
-            writer_task: Arc::new(Mutex::new(Some(writer_task))),
-            receiver: Arc::new(Mutex::new(Box::new(source))),
+            outbound,
+            close: Mutex::new(Some(close)),
+            writer: Mutex::new(Some(writer)),
+            receiver: Arc::new(Mutex::new(source)),
         };
 
         // Send initial session configuration via the trait default implementation
@@ -158,13 +237,13 @@ impl OpenAITransportLink for OpenAIRealtimeSession {
     }
 
     async fn send_raw(&self, value: &Value) -> Result<()> {
-        if !self.is_connected() {
-            return Err(RealtimeError::connection("Session disconnected"));
-        }
         let msg = serde_json::to_string(value)
             .map_err(|e| RealtimeError::protocol(format!("JSON serialize error: {}", e)))?;
 
-        self.outbound_tx
+        // Hands the frame to the writer task and returns. Applies backpressure only
+        // when the queue is genuinely full, and never holds a lock across the network
+        // write, so a slow peer cannot block an unrelated caller or teardown.
+        self.outbound
             .send(Message::Text(msg.into()))
             .await
             .map_err(|e| RealtimeError::connection(format!("Send error: {}", e)))?;
@@ -195,30 +274,7 @@ impl OpenAITransportLink for OpenAIRealtimeSession {
                         );
                         Some(Ok(ServerEvent::Unknown))
                     }
-                    Ok(mut event) => {
-                        // Normalize FunctionCallDone arguments: OpenAI sends them as a JSON-encoded string.
-                        if let ServerEvent::FunctionCallDone { arguments, name, .. } = &mut event
-                            && let serde_json::Value::String(s) = arguments
-                        {
-                            match serde_json::from_str::<serde_json::Value>(s) {
-                                Ok(parsed) => {
-                                    *arguments = parsed;
-                                }
-                                Err(e) => {
-                                    tracing::error!(
-                                        name = %name,
-                                        error = %e,
-                                        "failed to parse OpenAI function arguments as JSON"
-                                    );
-                                    return Some(Err(RealtimeError::protocol(format!(
-                                        "malformed function arguments for {}: {}",
-                                        name, e
-                                    ))));
-                                }
-                            }
-                        }
-                        Some(Ok(event))
-                    }
+                    Ok(event) => Some(Ok(event)),
                     Err(e) => {
                         // The type IS one we model but the fields didn't match —
                         // genuine schema drift worth surfacing.
@@ -261,27 +317,25 @@ impl OpenAITransportLink for OpenAIRealtimeSession {
 
     async fn close(&self) -> Result<()> {
         self.connected.store(false, Ordering::SeqCst);
+        shutdown_writer(&self.close, &self.writer, CLOSE_GRACE).await
+    }
+}
 
-        // Attempt graceful close frame enqueue under a short timeout (500ms) so a full
-        // channel never blocks teardown indefinitely.
-        let _ = tokio::time::timeout(
-            std::time::Duration::from_millis(500),
-            self.outbound_tx.send(Message::Close(None)),
-        )
-        .await;
-
-        // Signal cancellation token to wake writer task if blocked on channel read or network I/O
-        self.cancel_token.cancel();
-
-        // Ensure deterministic teardown: await writer task completion under 1s timeout, aborting if stalled
-        let mut writer_task = self.writer_task.lock().await;
-        if let Some(mut handle) = writer_task.take()
-            && tokio::time::timeout(std::time::Duration::from_secs(1), &mut handle).await.is_err()
-        {
-            tracing::warn!("OpenAI writer task did not exit within 1s; aborting handle");
+impl Drop for OpenAIRealtimeSession {
+    /// Stops the writer when the session is dropped without `close()`.
+    ///
+    /// A spawned task outlives the handle that is dropped rather than awaited, and a
+    /// writer parked mid-send on a stalled peer has nothing left to wake it — it would
+    /// hold the sink, the TLS session and the socket for the life of the process.
+    /// Before this change there was no task to leak: dropping the session dropped both
+    /// halves of the stream.
+    ///
+    /// `get_mut` rather than `try_lock`: `Drop` has exclusive access, so this cannot
+    /// lose a race with a concurrent `close()`.
+    fn drop(&mut self) {
+        if let Some(handle) = self.writer.get_mut().take() {
             handle.abort();
         }
-        Ok(())
     }
 }
 
@@ -299,6 +353,190 @@ impl std::fmt::Debug for OpenAIRealtimeSession {
             .field("session_id", &self.session_id)
             .field("connected", &self.connected.load(Ordering::SeqCst))
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod writer_tests {
+    //! Teardown must not be blocked by a peer that stopped reading.
+    //!
+    //! The sink used to sit behind an `Arc<Mutex<SplitSink<..>>>` that both `send_raw`
+    //! and `close` locked *across* their `.await` on the network write. Even with no
+    //! concurrency at all, `close` then hung on its own write against a peer that had
+    //! stopped draining — there was no timeout anywhere on the path. With a concurrent
+    //! sender it was worse: `tokio::sync::Mutex` hands the lock out in order, so `close`
+    //! also had to wait out an in-flight `send_raw` first.
+    //!
+    //! These tests pin what replaced it: teardown terminates and reports, close preempts
+    //! a full queue rather than joining it, and the queue is bounded.
+
+    use super::{CLOSE_GRACE, OUTBOUND_CAPACITY, shutdown_writer, writer_loop};
+    use futures::Sink;
+    use std::pin::Pin;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::task::{Context, Poll};
+    use std::time::{Duration, Instant};
+    use tokio::sync::{Mutex, mpsc, oneshot};
+    use tokio_tungstenite::tungstenite::Message;
+
+    /// A sink whose `send` never resolves — the peer that has stopped reading.
+    ///
+    /// It stalls at `poll_ready` where a real `SplitSink` stalls at `poll_flush`;
+    /// `SinkExt::send` never resolves either way, which is the only property under test.
+    struct StalledSink;
+
+    impl Sink<Message> for StalledSink {
+        type Error = std::io::Error;
+
+        fn poll_ready(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Pending
+        }
+        fn start_send(self: Pin<&mut Self>, _: Message) -> Result<(), Self::Error> {
+            unreachable!("poll_ready never resolves, so start_send is never reached")
+        }
+        fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Pending
+        }
+        fn poll_close(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Pending
+        }
+    }
+
+    /// A peer that accepts everything, recording what it was given.
+    #[derive(Clone, Default)]
+    struct RecordingSink(Arc<std::sync::Mutex<Vec<Message>>>);
+
+    impl Sink<Message> for RecordingSink {
+        type Error = std::io::Error;
+
+        fn poll_ready(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+        fn start_send(self: Pin<&mut Self>, item: Message) -> Result<(), Self::Error> {
+            self.0.lock().unwrap().push(item);
+            Ok(())
+        }
+        fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+        fn poll_close(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    /// Spawns a writer over `sink` and returns the handles `shutdown_writer` needs.
+    #[allow(clippy::type_complexity)]
+    fn spawn_writer<S>(
+        sink: S,
+    ) -> (
+        mpsc::Sender<Message>,
+        Mutex<Option<oneshot::Sender<()>>>,
+        Mutex<Option<tokio::task::JoinHandle<()>>>,
+        Arc<AtomicBool>,
+    )
+    where
+        S: Sink<Message> + Unpin + Send + 'static,
+        S::Error: std::fmt::Display,
+    {
+        let connected = Arc::new(AtomicBool::new(true));
+        let (outbound, outbound_rx) = mpsc::channel(OUTBOUND_CAPACITY);
+        let (close, close_rx) = oneshot::channel();
+        let writer = tokio::spawn(writer_loop(sink, outbound_rx, close_rx, Arc::clone(&connected)));
+        (outbound, Mutex::new(Some(close)), Mutex::new(Some(writer)), connected)
+    }
+
+    /// The regression. Under the old code this call sat on the socket — and, with a
+    /// concurrent sender, on the mutex — and never returned.
+    ///
+    /// Asserts more than "it did not hang": the grace period must actually elapse and
+    /// the failure must be *reported*, so a `shutdown_writer` that silently did nothing
+    /// fails this test.
+    #[tokio::test]
+    async fn teardown_reports_and_terminates_while_the_peer_is_still_stalled() {
+        let (outbound, close, writer, _connected) = spawn_writer(StalledSink);
+
+        // A frame the writer picks up and then blocks on forever.
+        outbound.send(Message::Text("in flight".into())).await.expect("queued");
+        tokio::task::yield_now().await;
+
+        let grace = Duration::from_millis(200);
+        let started = Instant::now();
+        let outcome =
+            tokio::time::timeout(Duration::from_secs(5), shutdown_writer(&close, &writer, grace))
+                .await
+                .expect("teardown must terminate even though the peer never drains");
+
+        assert!(outcome.is_err(), "an abandoned writer must be reported, not swallowed");
+        assert!(started.elapsed() >= grace, "the grace period must actually be honoured");
+        assert!(writer.lock().await.is_none(), "the writer handle must be released");
+    }
+
+    /// Close must *preempt* the backlog, not queue behind it.
+    ///
+    /// A realtime queue is full in the ordinary case of a healthy-but-slow link, so a
+    /// close carried by the outbound queue would be dropped or would wait out the whole
+    /// backlog. The signal is separate, and `biased` select makes it win.
+    #[tokio::test]
+    async fn close_preempts_a_completely_full_queue() {
+        let sink = RecordingSink::default();
+        let (outbound, close, writer, _connected) = spawn_writer(sink.clone());
+
+        // Fill the queue past capacity while the writer is not draining it yet.
+        for frame in 0..OUTBOUND_CAPACITY {
+            outbound
+                .try_send(Message::Text(format!("frame {frame}").into()))
+                .expect("queue accepts up to capacity");
+        }
+        assert!(
+            outbound.try_send(Message::Text("overflow".into())).is_err(),
+            "the queue must be bounded — an unbounded queue would hide the very stall \
+             this design exists to survive"
+        );
+
+        tokio::time::timeout(Duration::from_secs(5), shutdown_writer(&close, &writer, CLOSE_GRACE))
+            .await
+            .expect("teardown must not wait out the backlog")
+            .expect("a healthy peer must close cleanly");
+
+        let written = sink.0.lock().unwrap().clone();
+        assert!(
+            matches!(written.last(), Some(Message::Close(_))),
+            "the close frame must be written: {written:?}"
+        );
+        assert!(
+            written.len() < OUTBOUND_CAPACITY,
+            "close must preempt the backlog rather than drain all {OUTBOUND_CAPACITY} \
+             queued frames first; wrote {}",
+            written.len()
+        );
+    }
+
+    /// The happy path: a healthy peer gets its Close frame, well inside the grace
+    /// period, and the session is marked down.
+    #[tokio::test]
+    async fn a_healthy_peer_receives_the_close_frame_promptly() {
+        let sink = RecordingSink::default();
+        let (outbound, close, writer, connected) = spawn_writer(sink.clone());
+
+        outbound.send(Message::Text("hello".into())).await.expect("queued");
+
+        // Grace far exceeds the assertion window, so passing means teardown was prompt
+        // rather than merely bounded.
+        tokio::time::timeout(
+            Duration::from_millis(500),
+            shutdown_writer(&close, &writer, Duration::from_secs(30)),
+        )
+        .await
+        .expect("a healthy peer must close promptly, not merely within the grace period")
+        .expect("a healthy peer must close cleanly");
+
+        let written = sink.0.lock().unwrap().clone();
+        assert!(
+            matches!(written.last(), Some(Message::Close(_))),
+            "the close frame must reach a peer that is reading: {written:?}"
+        );
+        assert!(!connected.load(Ordering::SeqCst), "the writer marks the session disconnected");
     }
 }
 
@@ -404,59 +642,5 @@ mod redaction_tests {
         let frame = r#"{"type":"response.done","response":{"unexpected":true}}"#;
         assert_eq!(payload_digest(frame), payload_digest(frame));
         assert_ne!(payload_digest(frame), payload_digest(r#"{"type":"response.done"}"#));
-    }
-}
-
-#[cfg(test)]
-mod teardown_tests {
-    use super::*;
-    use std::time::Duration;
-    use tokio::sync::mpsc;
-    use tokio_util::sync::CancellationToken;
-
-    #[tokio::test]
-    async fn close_is_bounded_even_when_channel_is_full() {
-        let (outbound_tx, _outbound_rx) = mpsc::channel::<Message>(1);
-        // Fill channel to capacity
-        outbound_tx.try_send(Message::Text("blocker".into())).unwrap();
-
-        let connected = Arc::new(AtomicBool::new(true));
-        let cancel_token = CancellationToken::new();
-        let writer_cancel = cancel_token.clone();
-
-        // Spawn a writer task that simulates being stuck on a slow/blocked socket send without draining channel
-        let writer_task = tokio::spawn(async move {
-            tokio::select! {
-                _ = writer_cancel.cancelled() => {},
-                _ = tokio::time::sleep(Duration::from_secs(60)) => {},
-            }
-        });
-
-        let session = OpenAIRealtimeSession {
-            session_id: "test-session".into(),
-            connected,
-            cancel_token,
-            outbound_tx,
-            writer_task: Arc::new(Mutex::new(Some(writer_task))),
-            receiver: Arc::new(Mutex::new(Box::new(futures::stream::pending()))),
-        };
-
-        // Execution of close() must complete quickly despite channel full & writer blocked
-        let start = std::time::Instant::now();
-        let close_result = session.close().await;
-        let elapsed = start.elapsed();
-
-        assert!(close_result.is_ok());
-        assert!(
-            elapsed >= Duration::from_millis(450),
-            "close() should wait out channel send timeout (500ms), took {:?}",
-            elapsed
-        );
-        assert!(
-            elapsed < Duration::from_secs(3),
-            "close() took too long ({:?}); must be bounded under 3s",
-            elapsed
-        );
-        assert!(!session.connected.load(Ordering::SeqCst));
     }
 }

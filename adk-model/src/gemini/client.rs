@@ -209,9 +209,107 @@ fn interaction_terminal_error(code: &'static str, message: &str) -> adk_core::Ad
     .with_provider("gemini")
 }
 
+/// Returns the value of the environment variable `name` when it is set and
+/// non-empty (after trimming whitespace).
+fn env_non_empty(name: &str) -> Option<String> {
+    std::env::var(name).ok().filter(|v| !v.trim().is_empty())
+}
+
+/// Returns `true` when an opt-in flag value selects the Vertex AI backend:
+/// `1` or a case-insensitive `true`.
+fn env_flag_truthy(value: &str) -> bool {
+    let v = value.trim();
+    v == "1" || v.eq_ignore_ascii_case("true")
+}
+
+/// Reports whether the environment opts in to the Vertex AI backend.
+///
+/// Consults `GOOGLE_GENAI_USE_ENTERPRISE` first and, when that variable is
+/// unset or empty, the deprecated `GOOGLE_GENAI_USE_VERTEXAI`. A flag is
+/// truthy when its value is `1` or a case-insensitive `true`.
+/// `GOOGLE_GENAI_USE_ENTERPRISE` takes precedence when both are set.
+///
+/// # Example
+///
+/// ```rust,no_run
+/// if adk_model::gemini::vertex_env_requested() {
+///     // route Gemini traffic through Vertex AI
+/// }
+/// ```
+pub fn vertex_env_requested() -> bool {
+    // `GOOGLE_GENAI_USE_VERTEXAI` is the deprecated name adk-python still
+    // honors. Deliberately no deprecation warning for it —
+    // google/adk-python#6168 documents the churn such a warning caused.
+    if let Some(v) = env_non_empty("GOOGLE_GENAI_USE_ENTERPRISE") {
+        return env_flag_truthy(&v);
+    }
+    env_non_empty("GOOGLE_GENAI_USE_VERTEXAI").is_some_and(|v| env_flag_truthy(&v))
+}
+
+/// Reads `GOOGLE_CLOUD_PROJECT` and `GOOGLE_CLOUD_LOCATION`, erroring with a
+/// message that names whichever variable is missing.
+#[cfg(feature = "gemini-vertex")]
+fn vertex_target_from_env() -> Result<(String, String)> {
+    let project = env_non_empty("GOOGLE_CLOUD_PROJECT");
+    let location = env_non_empty("GOOGLE_CLOUD_LOCATION");
+    if let (Some(project), Some(location)) = (&project, &location) {
+        return Ok((project.clone(), location.clone()));
+    }
+    let mut missing = Vec::new();
+    if project.is_none() {
+        missing.push("GOOGLE_CLOUD_PROJECT");
+    }
+    if location.is_none() {
+        missing.push("GOOGLE_CLOUD_LOCATION");
+    }
+    Err(adk_core::AdkError::new(
+        ErrorComponent::Model,
+        ErrorCategory::InvalidInput,
+        "model.gemini.vertex_env_incomplete",
+        format!(
+            "Vertex AI backend selected via GOOGLE_GENAI_USE_ENTERPRISE/GOOGLE_GENAI_USE_VERTEXAI, but {} not set. Set the missing variable(s) to your Google Cloud project ID and region (e.g. us-central1).",
+            missing.join(" and ")
+        ),
+    )
+    .with_provider("gemini"))
+}
+
 impl GeminiModel {
     fn gemini_part_thought_signature(value: &serde_json::Value) -> Option<String> {
         value.get("thoughtSignature").and_then(serde_json::Value::as_str).map(str::to_string)
+    }
+
+    fn validate_request_contract(&self, req: &LlmRequest) -> Result<()> {
+        let model = self.model_name.strip_prefix("models/").unwrap_or(&self.model_name);
+        if !matches!(model, "gemini-3.6-flash" | "gemini-3.7-flash") {
+            return Ok(());
+        }
+
+        if let Some(config) = &req.config
+            && (config.temperature.is_some() || config.top_p.is_some() || config.top_k.is_some())
+        {
+            return Err(adk_core::AdkError::new(
+                ErrorComponent::Model,
+                ErrorCategory::InvalidInput,
+                "model.gemini.sampling_unsupported",
+                format!(
+                    "{model} does not accept temperature, top_p, or top_k; remove explicit sampling parameters"
+                ),
+            )
+            .with_provider("gemini"));
+        }
+        if self.thinking_config.as_ref().is_some_and(|config| config.thinking_budget.is_some()) {
+            return Err(adk_core::AdkError::new(
+                ErrorComponent::Model,
+                ErrorCategory::InvalidInput,
+                "model.gemini.thinking_budget_unsupported",
+                format!(
+                    "{model} uses thinking levels instead of token budgets; set thinking_level and clear thinking_budget"
+                ),
+            )
+            .with_provider("gemini"));
+        }
+        Ok(())
     }
 
     /// Builds a `GeminiModel` from a constructed client and model name with all
@@ -237,6 +335,7 @@ impl GeminiModel {
     /// Create a new Gemini model client with an API key and model name.
     pub fn new(api_key: impl Into<String>, model: impl Into<String>) -> Result<Self> {
         let model_name = model.into();
+        crate::catalog::warn_if_obsolete("gemini", &model_name);
         let client = Gemini::with_model(api_key.into(), model_name.clone())
             .map_err(|e| adk_core::AdkError::model(e.to_string()))?;
 
@@ -327,6 +426,74 @@ impl GeminiModel {
         .map_err(|e| adk_core::AdkError::model(e.to_string()))?;
 
         Ok(Self::from_client(client, model_name))
+    }
+
+    /// Create a Gemini model from environment variables.
+    ///
+    /// When `GOOGLE_GENAI_USE_ENTERPRISE` or `GOOGLE_GENAI_USE_VERTEXAI` is
+    /// truthy (`1` or a case-insensitive `true`), builds a Vertex AI client
+    /// with Application Default Credentials from `GOOGLE_CLOUD_PROJECT` and
+    /// `GOOGLE_CLOUD_LOCATION` — this path requires the `gemini-vertex`
+    /// feature. Otherwise builds a Gemini API (AI Studio) client from
+    /// `GOOGLE_API_KEY` or `GEMINI_API_KEY`.
+    ///
+    /// `GOOGLE_GENAI_USE_ENTERPRISE` takes precedence when both flags are set.
+    ///
+    /// The Vertex path builds Application Default Credentials, which requires
+    /// a Tokio runtime to be current — call from async code or under
+    /// `#[tokio::main]`.
+    ///
+    /// # Errors
+    ///
+    /// - A Vertex flag is truthy but `GOOGLE_CLOUD_PROJECT` or
+    ///   `GOOGLE_CLOUD_LOCATION` is not set.
+    /// - A Vertex flag is truthy but the `gemini-vertex` feature is not
+    ///   compiled.
+    /// - No Vertex flag is truthy and neither `GOOGLE_API_KEY` nor
+    ///   `GEMINI_API_KEY` is set.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use adk_model::gemini::GeminiModel;
+    ///
+    /// # #[tokio::main]
+    /// # async fn main() -> adk_core::Result<()> {
+    /// let model = GeminiModel::from_env("gemini-2.5-flash")?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn from_env(model: &str) -> Result<Self> {
+        if vertex_env_requested() {
+            #[cfg(feature = "gemini-vertex")]
+            {
+                let (project, location) = vertex_target_from_env()?;
+                return Self::new_google_cloud_adc(project, location, model);
+            }
+            #[cfg(not(feature = "gemini-vertex"))]
+            {
+                return Err(adk_core::AdkError::new(
+                    ErrorComponent::Model,
+                    ErrorCategory::Unsupported,
+                    "model.gemini.vertex_feature_missing",
+                    "Vertex AI backend selected via GOOGLE_GENAI_USE_ENTERPRISE/GOOGLE_GENAI_USE_VERTEXAI, but the `gemini-vertex` feature is not compiled. Enable the `gemini-vertex` feature (or `gemini-agent-platform` on the adk-rust umbrella crate) to route Gemini traffic through Vertex AI.",
+                )
+                .with_provider("gemini"));
+            }
+        }
+
+        let Some(api_key) =
+            env_non_empty("GOOGLE_API_KEY").or_else(|| env_non_empty("GEMINI_API_KEY"))
+        else {
+            return Err(adk_core::AdkError::new(
+                ErrorComponent::Model,
+                ErrorCategory::InvalidInput,
+                "model.gemini.api_key_missing",
+                "No Gemini API key found. Set GOOGLE_API_KEY or GEMINI_API_KEY, or set GOOGLE_GENAI_USE_ENTERPRISE=true with GOOGLE_CLOUD_PROJECT/GOOGLE_CLOUD_LOCATION for Vertex AI.",
+            )
+            .with_provider("gemini"));
+        };
+        Self::new(api_key, model)
     }
 
     /// Set the retry configuration (builder pattern).
@@ -579,6 +746,7 @@ impl GeminiModel {
         } else {
             Some(Content { role: "model".to_string(), parts: converted_parts })
         };
+        let tool_call_turn = content.as_ref().is_some_and(Content::has_function_calls);
 
         let usage_metadata = resp.usage_metadata.as_ref().map(|u| UsageMetadata {
             prompt_token_count: u.prompt_token_count.unwrap_or(0),
@@ -630,7 +798,7 @@ impl GeminiModel {
             finish_reason,
             citation_metadata,
             partial: false,
-            turn_complete: true,
+            turn_complete: !tool_call_turn,
             interrupted: false,
             error_code: None,
             error_message: None,
@@ -764,7 +932,8 @@ impl GeminiModel {
         }
 
         response.partial = false;
-        response.turn_complete = true;
+        response.turn_complete =
+            response.content.as_ref().is_none_or(|content| !content.has_function_calls());
 
         if saw_partial_chunk {
             return (vec![response], true);
@@ -1435,6 +1604,7 @@ impl Llm for GeminiModel {
     )]
     async fn generate_content(&self, req: LlmRequest, stream: bool) -> Result<LlmResponseStream> {
         adk_telemetry::info!("Generating content");
+        self.validate_request_contract(&req)?;
         let usage_span = adk_telemetry::llm_generate_span("gemini", &self.model_name, stream);
 
         // Dispatch on the configured transport. The default `GenerateContent`
@@ -1722,6 +1892,16 @@ mod tests {
     };
 
     #[test]
+    fn env_flag_truthy_accepts_one_and_case_insensitive_true() {
+        for truthy in ["1", "true", "TRUE", "True", " true ", "tRuE"] {
+            assert!(env_flag_truthy(truthy), "expected {truthy:?} to be truthy");
+        }
+        for falsy in ["0", "false", "FALSE", "yes", "on", "", "2", "vertex"] {
+            assert!(!env_flag_truthy(falsy), "expected {falsy:?} to be falsy");
+        }
+    }
+
+    #[test]
     fn constructor_is_backward_compatible_and_sync() {
         fn accepts_sync_constructor<F>(_f: F)
         where
@@ -1779,6 +1959,30 @@ mod tests {
         assert_eq!(chunks.len(), 1);
         assert!(!chunks[0].partial);
         assert!(chunks[0].turn_complete);
+    }
+
+    #[test]
+    fn stream_chunks_from_response_keeps_tool_call_turn_open() {
+        let response = LlmResponse {
+            content: Some(Content {
+                role: "model".to_string(),
+                parts: vec![Part::FunctionCall {
+                    name: "get_weather".to_string(),
+                    args: serde_json::json!({"city": "Boston"}),
+                    id: Some("call-1".to_string()),
+                    thought_signature: None,
+                }],
+            }),
+            finish_reason: Some(FinishReason::Stop),
+            turn_complete: true,
+            ..Default::default()
+        };
+
+        let (chunks, _) = GeminiModel::stream_chunks_from_response(response, true);
+
+        assert_eq!(chunks.len(), 1);
+        assert!(!chunks[0].partial);
+        assert!(!chunks[0].turn_complete);
     }
 
     #[tokio::test]
@@ -1887,6 +2091,41 @@ mod tests {
         assert_eq!(metadata.citation_sources[0].uri.as_deref(), Some("https://example.com"));
         assert_eq!(metadata.citation_sources[0].start_index, Some(0));
         assert_eq!(metadata.citation_sources[0].end_index, Some(5));
+    }
+
+    #[test]
+    fn convert_response_keeps_function_call_turn_open() {
+        let response = adk_gemini::GenerationResponse {
+            candidates: vec![adk_gemini::Candidate {
+                content: adk_gemini::Content {
+                    role: Some(adk_gemini::Role::Model),
+                    parts: Some(vec![adk_gemini::Part::FunctionCall {
+                        function_call: adk_gemini::FunctionCall {
+                            name: "get_weather".to_string(),
+                            args: serde_json::json!({"city": "Boston"}),
+                            id: Some("call-1".to_string()),
+                            thought_signature: None,
+                        },
+                        thought_signature: None,
+                    }]),
+                },
+                safety_ratings: None,
+                citation_metadata: None,
+                grounding_metadata: None,
+                finish_reason: Some(adk_gemini::FinishReason::Stop),
+                index: Some(0),
+            }],
+            prompt_feedback: None,
+            usage_metadata: None,
+            model_version: None,
+            response_id: None,
+        };
+
+        let converted =
+            GeminiModel::convert_response(&response).expect("conversion should succeed");
+
+        assert!(!converted.turn_complete);
+        assert!(converted.content.is_some_and(|content| content.has_function_calls()));
     }
 
     #[test]
@@ -2092,6 +2331,7 @@ mod tests {
 #[cfg(all(test, feature = "gemini-interactions"))]
 mod interactions_transport_tests {
     use super::*;
+    use adk_core::GenerateContentConfig;
 
     /// **Feature: gemini-interactions-runtime, Property 2: Default options match the API**
     /// *For any* default `InteractionOptions`, `store == true`, `stateful == true`,
@@ -2280,5 +2520,33 @@ mod interactions_transport_tests {
             .expect_err("failed interaction must surface an error");
         assert_eq!(err.category, adk_core::ErrorCategory::Internal);
         assert_eq!(err.details.provider.as_deref(), Some("gemini"));
+    }
+    #[test]
+    fn gemini_37_rejects_sampling_before_network_io() {
+        let model = GeminiModel::new("test-key", "gemini-3.7-flash").expect("construct model");
+        let mut request = LlmRequest::new("gemini-3.7-flash", Vec::new());
+        request.config =
+            Some(GenerateContentConfig { temperature: Some(0.2), ..Default::default() });
+
+        let error = model
+            .validate_request_contract(&request)
+            .expect_err("sampling must be rejected locally");
+        assert_eq!(error.code, "model.gemini.sampling_unsupported");
+    }
+
+    #[test]
+    fn gemini_37_rejects_token_budget_thinking() {
+        let model = GeminiModel::new("test-key", "gemini-3.7-flash")
+            .expect("construct model")
+            .with_thinking_config(adk_gemini::ThinkingConfig {
+                thinking_budget: Some(1024),
+                include_thoughts: None,
+                thinking_level: None,
+            });
+
+        let error = model
+            .validate_request_contract(&LlmRequest::new("gemini-3.7-flash", Vec::new()))
+            .expect_err("token budgets must be rejected locally");
+        assert_eq!(error.code, "model.gemini.thinking_budget_unsupported");
     }
 }

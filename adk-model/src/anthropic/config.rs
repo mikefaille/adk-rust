@@ -66,7 +66,7 @@ pub enum Effort {
 pub struct AnthropicConfig {
     /// Anthropic API key.
     pub api_key: String,
-    /// Model name (e.g., `"claude-opus-4-7"`, `"claude-sonnet-4-6"`).
+    /// Model name (e.g., `"claude-opus-5"`, `"claude-sonnet-5"`).
     pub model: String,
     /// Maximum tokens to generate.
     #[serde(default = "default_max_tokens")]
@@ -92,8 +92,8 @@ pub struct AnthropicConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub effort: Option<Effort>,
 
-    /// Enable fast mode (Opus 4.6+ only, beta).
-    /// Delivers up to 2.5× higher output tokens/sec at 6× pricing.
+    /// Enable fast mode for Claude Opus 5 or Claude Opus 4.8 (research preview).
+    /// Delivers up to 2.5× higher output tokens/sec at premium pricing.
     #[serde(default)]
     pub fast_mode: bool,
 
@@ -141,7 +141,7 @@ impl Default for AnthropicConfig {
     fn default() -> Self {
         Self {
             api_key: String::new(),
-            model: "claude-sonnet-4-6".to_string(),
+            model: crate::catalog::ANTHROPIC_DEFAULT.to_string(),
             max_tokens: default_max_tokens(),
             base_url: None,
             prompt_caching: true,
@@ -201,7 +201,7 @@ impl AnthropicConfig {
         self
     }
 
-    /// Enable fast mode (Opus 4.6+ only, beta).
+    /// Enable fast mode for Claude Opus 5 or Claude Opus 4.8.
     pub fn with_fast_mode(mut self, enabled: bool) -> Self {
         self.fast_mode = enabled;
         self

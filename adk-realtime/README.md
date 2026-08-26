@@ -1,6 +1,6 @@
 # adk-realtime
 
-Real-time bidirectional audio streaming and managed session lifecycle for Rust Agent Development Kit (ADK-Rust) agents.
+Real-time bidirectional audio streaming for Rust Agent Development Kit (ADK-Rust) agents.
 
 [![Crates.io](https://img.shields.io/crates/v/adk-realtime.svg)](https://crates.io/crates/adk-realtime)
 [![Documentation](https://docs.rs/adk-realtime/badge.svg)](https://docs.rs/adk-realtime)
@@ -8,9 +8,7 @@ Real-time bidirectional audio streaming and managed session lifecycle for Rust A
 
 ## Overview
 
-`adk-realtime` provides a unified interface for building voice-enabled AI agents using real-time streaming APIs. It supports provider-specific raw sessions together with a managed `RealtimeRunner` lifecycle for application-facing voice sessions.
-
-The crate follows the **OpenAI Agents SDK pattern** with a separate, decoupled implementation that integrates with the ADK agent ecosystem.
+`adk-realtime` provides a unified interface for building voice-enabled AI agents using real-time streaming APIs. It follows the **OpenAI Agents SDK pattern** with a separate, decoupled implementation that integrates seamlessly with the ADK agent ecosystem.
 
 ## Features
 
@@ -21,17 +19,14 @@ The crate follows the **OpenAI Agents SDK pattern** with a separate, decoupled i
 - **Voice Activity Detection** — Server-side VAD for natural conversation flow
 - **Tool Calling** — Real-time function/tool execution during voice conversations
 - **Agent Handoff** — Transfer between agents using `sub_agents`
-- **Context Mutation** — Swap instructions and tools mid-session (OpenAI: in-place update, providers that require it: managed resumption)
-- **Managed Recovery Orchestration** — Generation-fenced recovery, bounded retries, atomic ready-session replacement, and deterministic terminal state
-- **Delivery Certainty** — Managed write failures distinguish `NotAttempted` from `Indeterminate` so applications can make safer replay decisions
-- **Generation-Safe Managed Reads** — `RealtimeRunner::next_event()` wakes on generation publication without waiting for an old session to close
+- **Context Mutation** — Swap instructions and tools mid-session without dropping the call (OpenAI: in-place update, Gemini: session resumption)
 - **Zero-Allocation LiveKit Audio** — `bytemuck` zero-copy PCM path for LiveKit output
 - **Interruption Detection** — `Manual` or `Automatic` VAD-based interruption handling
 - **Feature Flags** — Pay only for what you use; all transports are opt-in
 
 ## Architecture
 
-```text
+```
               ┌─────────────────────────────────────────┐
               │              Agent Trait                 │
               │  (name, description, run, sub_agents)    │
@@ -41,34 +36,15 @@ The crate follows the **OpenAI Agents SDK pattern** with a separate, decoupled i
        │                       │                       │
 ┌──────▼──────┐      ┌─────────▼─────────┐   ┌─────────▼─────────┐
 │  LlmAgent   │      │  RealtimeAgent    │   │  SequentialAgent  │
-│ (text-based)│      │  (voice-based)    │   │   (workflow)      │
+│ (text-based) │      │  (voice-based)    │   │   (workflow)      │
 └─────────────┘      └───────────────────┘   └───────────────────┘
 ```
 
-### Raw provider sessions and managed lifecycle
-
-```text
-RealtimeSession
-  raw provider I/O
-  fail-fast transport API
-  optional RealtimeRecovery capability
-        │
-        ▼
-RealtimeRunner
-  managed session generation authority
-  write admission + delivery certainty
-  recovery/resumption serialization
-  config revision fencing
-  terminal lifecycle
-```
-
-The split is intentional. Raw `RealtimeSession` APIs remain useful when an application wants direct provider control. `RealtimeRunner` is the managed abstraction for applications that want lifecycle and recovery semantics.
-
 ### Transport Layer
 
-```text
+```
 ┌──────────────────────────────────────────────────────────────┐
-│                    RealtimeSession trait                     │
+│                    RealtimeSession trait                      │
 ├──────────────┬──────────────┬──────────────┬─────────────────┤
 │ OpenAI WS    │ OpenAI WebRTC│ Gemini Live  │ Vertex AI Live  │
 │ (openai)     │ (openai-     │ (gemini)     │ (vertex-live)   │
@@ -76,7 +52,7 @@ The split is intentional. Raw `RealtimeSession` APIs remain useful when an appli
 └──────────────┴──────────────┴──────────────┴─────────────────┘
 
 ┌──────────────────────────────────────────────────────────────┐
-│              LiveKit WebRTC Bridge (livekit)                 │
+│              LiveKit WebRTC Bridge (livekit)                  │
 │  LiveKitEventHandler · bridge_input · bridge_gemini_input    │
 └──────────────────────────────────────────────────────────────┘
 ```
@@ -85,11 +61,11 @@ The split is intentional. Raw `RealtimeSession` APIs remain useful when an appli
 
 | Provider | Model | Transport | Feature Flag | Description |
 |----------|-------|-----------|--------------|-------------|
-| OpenAI | `gpt-realtime` | WebSocket | `openai` | OpenAI realtime transport |
-| OpenAI | `gpt-4o-realtime-*` | WebRTC | `openai-webrtc` | Browser-grade transport with Opus codec |
-| Google | Gemini Live | WebSocket | `gemini` | Gemini Live API |
+| OpenAI | `gpt-realtime-2.1` | WebSocket | `openai` | Current production realtime model |
+| OpenAI | `gpt-realtime-2.1` | WebRTC | `openai-webrtc` | Browser-grade transport with Opus codec |
+| Google | `gemini-3.1-flash-live-preview` | WebSocket | `gemini` | Gemini Live API |
 | Google | Gemini via Vertex AI | WebSocket + OAuth2 | `vertex-live` | Vertex AI Live with ADC authentication |
-| LiveKit | Any supported realtime model (bridge) | WebRTC | `livekit` | Production WebRTC bridge to provider sessions |
+| LiveKit | Any (bridge) | WebRTC | `livekit` | Production WebRTC bridge to Gemini/OpenAI |
 
 ## Quick Start
 
@@ -97,7 +73,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-adk-realtime = { version = "3.0.0", features = ["openai"] }
+adk-realtime = { version = "2.1.0", features = ["openai"] }
 ```
 
 ### Using RealtimeAgent (Recommended)
@@ -109,7 +85,7 @@ use std::sync::Arc;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let api_key = std::env::var("OPENAI_API_KEY")?;
-    let model = Arc::new(OpenAIRealtimeModel::new(&api_key, "gpt-realtime"));
+    let model = Arc::new(OpenAIRealtimeModel::new(&api_key, "gpt-realtime-2.1"));
 
     let agent = RealtimeAgent::builder("voice_assistant")
         .model(model)
@@ -125,8 +101,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### Using Low-Level Session API
 
-Use the raw session API when you deliberately want fail-fast provider control and own reconnect/replay policy yourself:
-
 ```rust
 use adk_realtime::{RealtimeModel, RealtimeConfig, ServerEvent};
 use adk_realtime::openai::OpenAIRealtimeModel;
@@ -135,7 +109,7 @@ use adk_realtime::openai::OpenAIRealtimeModel;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let model = OpenAIRealtimeModel::new(
         std::env::var("OPENAI_API_KEY")?,
-        "gpt-realtime",
+        "gpt-realtime-2.1",
     );
 
     let config = RealtimeConfig::default()
@@ -157,102 +131,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-## Managed Recovery & Session Continuity
-
-The managed recovery layer is designed for long-lived realtime sessions where a transient transport failure should not create competing reconnect loops or ambiguous session ownership.
-
-A managed recovery episode follows this shape:
-
-```text
-operation on generation N
-        │
-        ▼
-transport read/write/EOF failure
-        │
-        ▼
-Recovering(N, epoch E)
-        │
-        ├─ new managed writes rejected before raw invocation
-        │    → DeliveryCertainty::NotAttempted
-        │
-        ▼
-provider builds one private candidate attempt
-        │
-        ▼
-candidate reaches provider readiness boundary
-        │
-        ▼
-config revision revalidated
-        │
-        ▼
-atomically publish generation N+1
-        │
-        ▼
-notify readers → asynchronously retire N
-```
-
-### What the managed layer guarantees
-
-- one writable active session + generation authority
-- failures are reported against the exact generation that performed the operation
-- new writes are not admitted while the managed transport is `Recovering`
-- recovery attempts are bounded by policy and a whole-episode deadline
-- intentional context resumption and network recovery cannot independently publish competing replacements
-- a ready candidate cannot publish if its configuration revision is stale
-- generation publication wakes managed readers without waiting for old-session shutdown
-- unpublished ready candidates are cleaned up if recovery is cancelled before publication
-- `Closed` and `Exhausted` are deterministic non-admittable terminal states
-
-### Provider capability boundary
-
-Managed recovery does **not** mean every provider automatically reconnects today.
-
-`RealtimeSession::recovery()` returns `None` by default. A provider participates in automatic managed recovery only when its concrete session implements the `RealtimeRecovery` SPI and returns a fully ready `RecoveredSession`.
-
-One `RealtimeRecovery::recover()` call represents exactly one provider candidate attempt. The provider owns authentication, transport setup, required provider setup frames, readiness detection, and truthful continuity classification. The supervisor owns retries, deadlines, generation publication, and terminal state.
-
-### Continuity
-
-`RecoveryContinuity` distinguishes:
-
-- **`Resumed`** — provider-native logical session continuity was actually confirmed
-- **`Reconnected`** — a new ready transport exists with the current effective config, but previous provider history is not guaranteed
-
-Do not interpret a successful reconnect as proof that provider-side conversation history survived.
-
-### Delivery certainty and replay
-
-A managed `RealtimeError::WriteFailed` can carry:
-
-- **`NotAttempted`** — the managed runner rejected the write before invoking the raw provider session
-- **`Indeterminate`** — the raw provider session was invoked, but remote acceptance/processing cannot be proven
-
-`Indeterminate` must not be blindly replayed when duplicate side effects would be harmful.
-
-Recovery is not application replay. Caller audio, business commands, and other domain events remain application-owned.
-
-See **[MANAGED_RECOVERY.md](MANAGED_RECOVERY.md)** for the complete maintenance contract, provider extension checklist, race invariants, test expectations, and supported product claims.
-
-## Operational capability claims
-
-The current managed layer supports precise commercial descriptions such as:
-
-- **managed realtime recovery orchestration**
-- **generation-safe session replacement**
-- **bounded recovery retries and deadlines**
-- **delivery-certainty-aware managed writes**
-- **config-safe recovery and context resumption**
-- **cancellation-safe unpublished-candidate cleanup**
-- **deterministic managed terminal states**
-
-Those are properties of the provider-neutral managed layer and its tests.
-
-Do not infer broader runtime guarantees from them. Claims such as “zero dropped calls”, “exactly-once delivery”, “all providers reconnect automatically”, or provider-specific mid-call recovery require the corresponding provider implementation and real endpoint validation.
-
-A concise truthful description is:
-
-> `adk-realtime` provides a generation-safe managed session layer that can bound recovery work, reject new writes safely while recovering, atomically publish ready replacement sessions, and distinguish writes that were never attempted from writes whose provider outcome is indeterminate.
-
 ## Transport Guides
 
 ### Vertex AI Live
@@ -260,7 +138,7 @@ A concise truthful description is:
 Connect to Gemini Live API via Vertex AI with Application Default Credentials:
 
 ```toml
-adk-realtime = { version = "3.0.0", features = ["vertex-live"] }
+adk-realtime = { version = "2.1.0", features = ["vertex-live"] }
 ```
 
 ```rust
@@ -290,13 +168,13 @@ Prerequisites:
 Lower-latency audio transport using Sans-IO WebRTC with Opus codec:
 
 ```toml
-adk-realtime = { version = "3.0.0", features = ["openai-webrtc"] }
+adk-realtime = { version = "2.1.0", features = ["openai-webrtc"] }
 ```
 
 ```rust
 use adk_realtime::openai::{OpenAIRealtimeModel, OpenAITransport};
 
-let model = OpenAIRealtimeModel::new(api_key, "gpt-realtime")
+let model = OpenAIRealtimeModel::new(api_key, "gpt-realtime-2.1")
     .with_transport(OpenAITransport::WebRTC);
 let session = model.connect(config).await?;
 ```
@@ -312,7 +190,7 @@ export CMAKE_POLICY_VERSION_MINIMUM=3.5
 Bridge any `EventHandler` to a LiveKit room for production voice apps:
 
 ```toml
-adk-realtime = { version = "3.0.0", features = ["livekit", "openai"] }
+adk-realtime = { version = "2.1.0", features = ["livekit", "openai"] }
 ```
 
 #### LiveKitConfig and LiveKitRoomBuilder
@@ -353,25 +231,26 @@ For Gemini's 16 kHz format, use `bridge_gemini_input` instead.
 
 ## Mid-Session Context Mutation
 
-Swap instructions and tools during a live voice session:
+Swap instructions and tools during a live voice session without dropping the call:
 
 ```rust
 use adk_realtime::config::{SessionUpdateConfig, RealtimeConfig};
 
+// Create a delta config with only the fields you want to change
 let update = SessionUpdateConfig(
     RealtimeConfig::default()
         .with_instruction("You are now a billing specialist.")
 );
 
+// Apply mid-session — provider handles the rest
 runner.update_session(update).await?;
 ```
 
-The runner handles provider differences through `ContextMutationOutcome`:
+The runner handles provider differences automatically:
+- **OpenAI**: Updates the session in place via `session.update` → `ContextMutationOutcome::Applied`
+- **Gemini**: Queues a session resumption with `SessionResumptionConfig` → `ContextMutationOutcome::RequiresResumption`
 
-- **`Applied`** — provider updated the active session in place
-- **`RequiresResumption`** — the managed runner serializes intentional resumption through the same replacement authority used by recovery
-
-See `SESSION_MANAGEMENT.md` for the full context-mutation architecture and `examples/openai_session_update.rs` / `examples/gemini_context_mutation.rs` for examples.
+See `SESSION_MANAGEMENT.md` for the full architecture and `examples/openai_session_update.rs` / `examples/gemini_context_mutation.rs` for working examples.
 
 ## Interruption Detection
 
@@ -401,14 +280,15 @@ let config = RealtimeConfig::default()
 
 Default features: none. You opt in to exactly what you need.
 
+
 ### Feature Flag Dependency Graph
 
-```text
-vertex-live   ──► gemini + google-cloud-auth
+```
+vertex-live  ──► gemini + google-cloud-auth
 openai-webrtc ──► openai + str0m + audiopus + reqwest
-livekit       ──► livekit + livekit-api
-full          ──► openai + gemini + vertex-live + livekit
-full-webrtc   ──► full + openai-webrtc
+livekit      ──► livekit + livekit-api
+full         ──► openai + gemini + vertex-live + livekit
+full-webrtc  ──► full + openai-webrtc
 ```
 
 ## RealtimeAgent Features
@@ -480,19 +360,16 @@ full-webrtc   ──► full + openai-webrtc
 
 ## Error Types
 
-Transport-specific errors carry their normal provider/transport context. Managed write failures additionally carry delivery certainty.
+Transport-specific error variants with actionable context:
 
 | Variant | Feature | Description |
 |---------|---------|-------------|
-| `WriteFailed` | all managed runner writes | Wraps a failed managed write with `NotAttempted` or `Indeterminate` delivery certainty |
 | `OpusCodecError` | `openai-webrtc` | Opus encoding/decoding failures |
 | `WebRTCError` | `openai-webrtc` | WebRTC connection and signaling failures |
 | `LiveKitError` | `livekit` | LiveKit bridge failures |
 | `AuthError` | `vertex-live` | OAuth2/ADC credential failures |
 | `ConfigError` | all | Missing or invalid configuration |
 | `ConnectionError` | all | Transport connection failures |
-
-For retry-sensitive managed writes, inspect `RealtimeError::delivery_certainty()` rather than assuming every connection error is replay-safe.
 
 ## Examples
 
@@ -516,25 +393,19 @@ cargo run --example gemini_context_mutation --features gemini
 ## Testing
 
 ```bash
-# Workspace-quality gates used by managed recovery changes
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo nextest run --workspace
-cargo clippy -p adk-realtime --features integration --all-targets -- -D warnings
-cargo nextest run -p adk-realtime --features integration
-
-# Focused property / transport tests (no credentials unless noted)
+# Property tests (no credentials needed)
 cargo test -p adk-realtime --test error_context_tests
 cargo test -p adk-realtime --features vertex-live --test vertex_url_property_tests
 cargo test -p adk-realtime --features livekit --test livekit_delegation_tests
 CMAKE_POLICY_VERSION_MINIMUM=3.5 cargo test -p adk-realtime --features openai-webrtc --test opus_roundtrip_tests
 CMAKE_POLICY_VERSION_MINIMUM=3.5 cargo test -p adk-realtime --features openai-webrtc --test sdp_offer_tests
 
-# Integration tests that require real credentials are marked #[ignore]
+# All features
+CMAKE_POLICY_VERSION_MINIMUM=3.5 cargo test -p adk-realtime --features full
+
+# Integration tests (require real credentials, marked #[ignore])
 cargo test -p adk-realtime --features vertex-live -- --ignored
 ```
-
-The managed recovery integration suite proves the provider-neutral state machine and concurrency boundaries. It does not substitute for a real endpoint interruption test when making provider-specific reconnect claims.
 
 ## Compilation Verification
 
@@ -550,15 +421,43 @@ CMAKE_POLICY_VERSION_MINIMUM=3.5 \
   cargo check -p adk-realtime --features full            # everything
 ```
 
-## Maintenance
+## Feature Flags
 
-Contributors touching session lifecycle, recovery, context resumption, write certainty, or generation management should read:
+| Flag | Description | Requires |
+|------|-------------|----------|
+| `openai` | OpenAI Realtime API (WebSocket) | |
+| `gemini` | Gemini Live API (WebSocket) | |
+| `vertex-live` | Vertex AI Live API (OAuth2 via ADC) | GCP credentials |
+| `livekit` | LiveKit WebRTC bridge | LiveKit server |
+| `openai-webrtc` | OpenAI WebRTC transport with Opus codec | cmake |
+| `full` | All providers except WebRTC (no cmake needed) | |
+| `full-webrtc` | Everything including WebRTC | cmake |
 
-- **[MANAGED_RECOVERY.md](MANAGED_RECOVERY.md)** — managed recovery architecture, invariants, provider SPI, testing, and product-claim boundaries
-- **[SESSION_MANAGEMENT.md](SESSION_MANAGEMENT.md)** — mid-session context mutation and resumption architecture
-- **[AGENTS.md](AGENTS.md)** — crate-local concurrency, audio, and recovery maintenance rules
+### Vertex AI Live
 
-The most important recovery rule is simple: **one active session-generation authority, one replacement/publication authority, and no application replay hidden inside the generic recovery layer.**
+Connect to Gemini via Vertex AI with Application Default Credentials:
+
+```rust
+use adk_realtime::gemini::{GeminiLiveBackend, GeminiLiveModel, build_vertex_live_url};
+
+// Uses ADC — no API key needed, just `gcloud auth application-default login`
+let model = GeminiLiveModel::new(GeminiLiveBackend::Vertex {
+    project_id: "my-project".into(),
+    region: "us-central1".into(),
+    model: "gemini-live-2.5-flash-native-audio".into(),
+});
+```
+
+### Feature Flag Graph
+
+```
+vertex-live  → gemini + google-cloud-auth
+livekit      → livekit + livekit-api
+openai-webrtc → openai + str0m + audiopus (requires cmake)
+full         → openai + gemini + vertex-live + livekit
+full-webrtc  → full + openai-webrtc
+```
+```
 
 ## License
 

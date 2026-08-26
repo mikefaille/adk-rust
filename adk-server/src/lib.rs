@@ -79,6 +79,15 @@ pub mod webhooks;
 #[cfg(feature = "background")]
 pub mod background;
 
+#[cfg(feature = "agent-engine")]
+pub mod agent_engine;
+
+#[cfg(feature = "agent-engine")]
+pub use agent_engine::{
+    AgentEngineOptions, AgentEngineState, agent_engine_router, build_agent_engine_app,
+    serve_agent_engine,
+};
+
 // Background runs and cron scheduling re-exports
 #[cfg(feature = "background")]
 pub use background::{
@@ -94,7 +103,7 @@ pub use background::{
 
 pub use a2a::{
     A2aClient, Executor, ExecutorConfig, RemoteA2aAgent, RemoteA2aAgentBuilder, RemoteA2aConfig,
-    build_agent_card, build_agent_skills,
+    agent_skills_from_index, build_agent_card, build_agent_skills,
 };
 #[cfg(feature = "a2a-v1")]
 pub use a2a::{A2aServer, A2aServerApp, A2aServerBuilder};

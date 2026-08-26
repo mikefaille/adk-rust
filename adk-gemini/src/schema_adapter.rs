@@ -7,19 +7,26 @@
 //!
 //! # Transform Order
 //!
-//! 1. Resolve `$ref` references (inline from definitions/$defs, break cycles at depth 10)
-//! 2. Strip `$schema` keyword
-//! 3. Collapse `anyOf`/`oneOf` combiners (select first non-null sub-schema)
-//! 4. Merge `allOf` sub-schemas
-//! 5. Collapse type arrays (`["string", "null"]` → `"string"`)
-//! 6. Strip conditional keywords (`if`/`then`/`else`)
-//! 7. Convert `const` to single-element `enum`
-//! 8. Strip null values from `enum` arrays
-//! 9. Add implicit `"type": "object"` when `properties` exists
-//! 10. Remove unsupported keywords recursively
-//! 11. Strip unsupported `format` values
-//! 12. Enforce nesting depth limit (5 levels)
-//! 13. Remove `definitions`/`$defs` blocks
+//! Steps 3-10 exist because Gemini's **OpenAPI subset** cannot express those
+//! keywords, so they are skipped for [`GeminiSchemaDialect::JsonSchema`], whose
+//! field accepts them. Steps 1, 2, 11, 12 and 13 are about what the *endpoint*
+//! rejects regardless of dialect, so they always run.
+//!
+//! | # | Transform | OpenAPI subset | JSON Schema |
+//! | --- | --- | --- | --- |
+//! | 1 | Resolve `$ref` (inline from definitions/`$defs`, break cycles at depth 10) | ✓ | ✓ |
+//! | 2 | Strip `$schema` keyword | ✓ | ✓ |
+//! | 3 | Collapse `anyOf`/`oneOf` combiners (select first non-null sub-schema) | ✓ | — |
+//! | 4 | Merge `allOf` sub-schemas | ✓ | — |
+//! | 5 | Collapse type arrays (`["string", "null"]` → `"string"`) | ✓ | — |
+//! | 6 | Strip conditional keywords (`if`/`then`/`else`) | ✓ | — |
+//! | 7 | Convert `const` to single-element `enum` | ✓ | — |
+//! | 8 | Strip null values from `enum` arrays | ✓ | — |
+//! | 9 | Add implicit `"type": "object"` when `properties` exists | ✓ | — |
+//! | 10 | Remove unsupported keywords recursively | ✓ | — |
+//! | 11 | Strip unsupported `format` values | ✓ | ✓ |
+//! | 12 | Enforce nesting depth limit (5 levels) | ✓ | ✓ |
+//! | 13 | Remove `definitions`/`$defs` blocks | ✓ | ✓ |
 //!
 //! # Example
 //!
@@ -135,97 +142,89 @@ const UNSUPPORTED_KEYWORDS_VERTEX: &[&str] = &[
     "writeOnly",
 ];
 
-/// Which schema dialect a Gemini function declaration is written in.
+/// The schema dialect a [`GeminiSchemaAdapter`] produces, and the
+/// function-declaration field its output must be posted under.
 ///
-/// Gemini accepts a tool's parameter schema under **two mutually exclusive**
-/// fields, and they are not the same language:
+/// Gemini accepts **two mutually exclusive** schema fields on a function
+/// declaration, and they are not two spellings of one thing:
 ///
-/// | Dialect | Wire field | Language |
+/// | Dialect | Field | Expresses |
 /// | --- | --- | --- |
-/// | [`OpenApiSubset`](Self::OpenApiSubset) | `parameters` | An OpenAPI-flavoured subset — `type`, `description`, `enum`, `items`, `properties`, `required`, `nullable`, `format` |
-/// | [`VertexOpenApiSubset`](Self::VertexOpenApiSubset) | `parameters` | The same subset, except Vertex AI wants `additionalProperties: false` present on objects rather than absent |
-/// | [`JsonSchema`](Self::JsonSchema) | `parametersJsonSchema` | JSON Schema — `additionalProperties`, `allOf`, `anyOf`, `if`/`then`, `minLength`, `minimum`/`maximum`, `$ref` |
+/// | [`OpenApiSubset`](Self::OpenApiSubset) | `parameters` | An OpenAPI subset. No `allOf`, no `if`/`then`, no `additionalProperties`, no string/numeric bounds. |
+/// | [`VertexOpenApiSubset`](Self::VertexOpenApiSubset) | `parameters` | The same subset, except `additionalProperties: false` is set on objects rather than removed. |
+/// | [`JsonSchema`](Self::JsonSchema) | `parametersJsonSchema` | Standard JSON Schema: `allOf`, `anyOf`, `if`/`then`, `additionalProperties`, `minLength`, numeric bounds. |
 ///
-/// Picking the dialect and picking the field are the same decision, so they are
-/// one value: [`SchemaAdapter::parameters_field`] derives the field name from
-/// the dialect and the caller never spells it out. Getting them out of step is
-/// not a soft failure — a constraint the `parameters` field does not know closes
-/// the Live socket with **WS 1007** during setup, killing the call before the
-/// first turn.
+/// Selecting the dialect and selecting the field is therefore **one decision**,
+/// which is why they live in one type. Posting a schema that kept its
+/// constraints under the legacy `parameters` field does not degrade — the Live
+/// socket closes with **WS 1007** (`Unknown name "additionalProperties"`), so
+/// the call dies before any audio flows.
 ///
-/// # Evidence
+/// # Choosing
 ///
-/// [`GeminiSchemaDialect::JsonSchema`] is verified empirically, not from the
-/// reference docs, which
-/// document only `parameters` and do not mention `parametersJsonSchema` at all.
-/// Against the real Live endpoint (`generativelanguage.googleapis.com`,
-/// `v1beta`, `models/gemini-3.1-flash-live-preview`, real setup frame):
+/// [`JsonSchema`](Self::JsonSchema) is verified on Google AI Studio `v1beta`
+/// with `gemini-3.1-flash-live-preview`. Google's function-calling reference
+/// documents only `parameters` and does not mention `parametersJsonSchema` at
+/// all; support is stated in the structured-outputs announcement and confirmed
+/// here by probing the live endpoint. Re-probe before assuming it on another
+/// model, surface, or endpoint version — and note that acceptance is not
+/// enforcement: `setupComplete` proves the schema *parsed*, not that the model
+/// honours every keyword while generating.
 ///
-/// ```text
-/// parameters,           reduced schema        -> setupComplete
-/// parameters,           + additionalProperties-> CLOSED 1007 Unknown name "additionalProperties"
-/// parametersJsonSchema, + additionalProperties-> setupComplete
-/// parametersJsonSchema, + minLength x4        -> setupComplete
-/// parametersJsonSchema, + allOf (if/then/const)-> setupComplete
-/// parametersJsonSchema, + anyOf               -> setupComplete
-/// ```
-///
-/// The probe that produces this table is kept runnable so the claim can be
-/// re-checked rather than trusted. **Acceptance is not enforcement**: a
-/// `setupComplete` proves the schema parsed, not that the model honours the
-/// keyword while generating — `minLength` in particular is absent from Google's
-/// published support list even though the frame is accepted. Callers that must
-/// enforce a constraint should still restate it in prose.
-///
-/// Verified on Studio `v1beta` only. Do not assume it for Vertex or for
-/// `generateContent` without re-probing that surface.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
+/// The default remains [`OpenApiSubset`](Self::OpenApiSubset), so existing
+/// callers see no behaviour change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum GeminiSchemaDialect {
-    /// `parameters` on the Gemini Developer API. The historical default:
-    /// everything outside the subset is stripped, silently loosening what the
-    /// model is shown relative to what the caller may still enforce.
+    /// OpenAPI subset on `parameters`. Removes `additionalProperties`.
+    #[default]
     OpenApiSubset,
-    /// `parameters` on Vertex AI: the same subset, but `additionalProperties`
-    /// is pinned to `false` on object schemas instead of being removed.
+    /// OpenAPI subset on `parameters`, Vertex AI flavour: sets
+    /// `additionalProperties: false` on object schemas instead of removing it.
     VertexOpenApiSubset,
-    /// `parametersJsonSchema` on the Gemini Developer API. Constraints survive,
-    /// so the model is shown the contract it will be judged against.
+    /// Standard JSON Schema on `parametersJsonSchema`.
     JsonSchema,
 }
 
 impl GeminiSchemaDialect {
-    /// The function-declaration field this dialect must be sent under.
-    pub const fn parameters_field(self) -> &'static str {
+    /// The function-declaration field a schema in this dialect belongs under.
+    pub fn parameters_field(self) -> &'static str {
         match self {
             Self::OpenApiSubset | Self::VertexOpenApiSubset => "parameters",
             Self::JsonSchema => "parametersJsonSchema",
         }
     }
 
-    /// Stable surface tag, used to key compiled-schema caches.
+    /// Whether this dialect is limited to Gemini's OpenAPI subset, and so needs
+    /// the combiners, conditionals and type arrays reduced away before sending.
     ///
-    /// Distinct per dialect on purpose: two dialects reduce the same input to
-    /// different output, so sharing a cache entry would serve one dialect's
-    /// schema under the other's field name.
-    pub const fn surface(self) -> &'static str {
+    /// Asked as a *capability* rather than by comparing against a variant, so
+    /// that adding a dialect means classifying it here once instead of hunting
+    /// for scattered equality checks.
+    pub fn requires_openapi_reduction(self) -> bool {
         match self {
-            Self::OpenApiSubset => "studio",
-            Self::VertexOpenApiSubset => "vertex",
-            Self::JsonSchema => "studio-json-schema",
+            Self::OpenApiSubset | Self::VertexOpenApiSubset => true,
+            Self::JsonSchema => false,
         }
     }
 }
 
 /// Schema adapter for the Gemini API surface.
 ///
-/// Applies the transforms required by the selected [`GeminiSchemaDialect`].
+/// Applies the transforms required by Gemini's function-calling API. How
+/// destructive those transforms are depends on the target
+/// [`GeminiSchemaDialect`]:
 ///
-/// - **Standard** (`GeminiSchemaAdapter::new()`): `parameters`, removes `additionalProperties` entirely.
-/// - **Vertex AI** (`GeminiSchemaAdapter::vertex_ai()`): `parameters`, sets `additionalProperties: false`
-///   on object schemas instead of removing it.
-/// - **JSON Schema** (`GeminiSchemaAdapter::json_schema()`): `parametersJsonSchema`, keeps the
-///   constraints the other two must drop.
+/// - **Standard** (`GeminiSchemaAdapter::new()`): OpenAPI subset; removes
+///   `additionalProperties` entirely.
+/// - **Vertex AI** (`GeminiSchemaAdapter::vertex_ai()`): OpenAPI subset; sets
+///   `additionalProperties: false` on object schemas instead of removing it.
+/// - **JSON Schema** (`GeminiSchemaAdapter::json_schema()`): keeps `allOf`,
+///   `anyOf`, `if`/`then`, `additionalProperties` and the string/numeric
+///   bounds, and its output must be posted under `parametersJsonSchema`.
+///
+/// Use [`parameters_field()`](adk_core::SchemaAdapter::parameters_field) rather
+/// than hardcoding a field name; it is derived from the dialect so the two
+/// cannot disagree.
 ///
 /// # Example
 ///
@@ -246,29 +245,9 @@ impl GeminiSchemaDialect {
 /// assert_eq!(normalized["type"], "string");
 /// assert!(normalized.get("anyOf").is_none());
 /// ```
-///
-/// The same schema on the JSON Schema dialect keeps both:
-///
-/// ```rust
-/// use adk_gemini::schema_adapter::GeminiSchemaAdapter;
-/// use adk_core::SchemaAdapter;
-/// use serde_json::json;
-///
-/// let adapter = GeminiSchemaAdapter::json_schema();
-/// let normalized = adapter.normalize_schema(json!({
-///     "anyOf": [
-///         {"type": "null"},
-///         {"type": "string", "minLength": 1}
-///     ]
-/// }));
-///
-/// assert_eq!(normalized["anyOf"][1]["minLength"], 1);
-/// assert_eq!(adapter.parameters_field(), "parametersJsonSchema");
-/// ```
 #[derive(Debug)]
 pub struct GeminiSchemaAdapter {
-    /// Which dialect this adapter reduces to, and therefore which wire field
-    /// the result must be sent under.
+    /// The dialect this adapter reduces to, which also decides the wire field.
     dialect: GeminiSchemaDialect,
 }
 
@@ -277,7 +256,7 @@ impl GeminiSchemaAdapter {
     ///
     /// This variant removes `additionalProperties` from all schema nodes.
     pub fn new() -> Self {
-        Self { dialect: GeminiSchemaDialect::OpenApiSubset }
+        Self::with_dialect(GeminiSchemaDialect::OpenApiSubset)
     }
 
     /// Creates a new `GeminiSchemaAdapter` for the Vertex AI surface.
@@ -285,26 +264,27 @@ impl GeminiSchemaAdapter {
     /// This variant sets `additionalProperties: false` on object schemas
     /// instead of removing the keyword entirely.
     pub fn vertex_ai() -> Self {
-        Self { dialect: GeminiSchemaDialect::VertexOpenApiSubset }
+        Self::with_dialect(GeminiSchemaDialect::VertexOpenApiSubset)
     }
 
-    /// Creates a new `GeminiSchemaAdapter` targeting `parametersJsonSchema`.
+    /// Creates a new `GeminiSchemaAdapter` targeting standard JSON Schema.
     ///
-    /// Keeps `additionalProperties`, `allOf`/`anyOf`/`oneOf`, `if`/`then`/`else`
-    /// and the string/numeric bounds, so the model is shown the same contract
-    /// the caller will validate against. See [`GeminiSchemaDialect::JsonSchema`]
-    /// for the endpoint evidence and its limits.
+    /// Keeps `allOf`, `anyOf`, `if`/`then`, `additionalProperties` and the
+    /// string/numeric bounds instead of stripping them, so a model is shown the
+    /// same contract the caller validates against. Its output belongs under
+    /// `parametersJsonSchema`; see [`GeminiSchemaDialect::JsonSchema`] for the
+    /// surfaces this is verified on.
     pub fn json_schema() -> Self {
-        Self { dialect: GeminiSchemaDialect::JsonSchema }
+        Self::with_dialect(GeminiSchemaDialect::JsonSchema)
     }
 
-    /// Creates an adapter for an explicitly named dialect.
-    pub const fn with_dialect(dialect: GeminiSchemaDialect) -> Self {
+    /// Creates a new `GeminiSchemaAdapter` for an explicitly chosen dialect.
+    pub fn with_dialect(dialect: GeminiSchemaDialect) -> Self {
         Self { dialect }
     }
 
     /// The dialect this adapter reduces to.
-    pub const fn dialect(&self) -> GeminiSchemaDialect {
+    pub fn dialect(&self) -> GeminiSchemaDialect {
         self.dialect
     }
 }
@@ -316,56 +296,91 @@ impl Default for GeminiSchemaAdapter {
 }
 
 impl SchemaAdapter for GeminiSchemaAdapter {
-    fn identifier(&self) -> &str {
-        "gemini"
-    }
+    fn normalize_schema(&self, mut schema: Value) -> Value {
+        // Which steps run depends on the target dialect, along one line: a
+        // transform that exists because the *OpenAPI subset cannot express* a
+        // keyword is skipped for JSON Schema, which can; a transform that
+        // exists because the *endpoint rejects* something runs for every
+        // dialect. Steps 3-10 below are the first kind. Steps 1, 2, 11 and 12
+        // are the second, so they are unconditional.
 
-    fn surface(&self) -> Option<&str> {
-        Some(self.dialect.surface())
-    }
+        // Step 1: Extract definitions and resolve $ref references.
+        // Always resolve refs — even with empty definitions — so that
+        // unresolvable $ref values are replaced with {"type": "object"}.
+        //
+        // Unconditional despite JSON Schema supporting `$ref`: Google's own
+        // guidance warns that large or deeply nested schemas may be rejected,
+        // and an inlined document is the shape both fields are known to accept.
+        let definitions = extract_definitions(&schema);
+        schema_utils::resolve_refs(&mut schema, &definitions, 0);
 
-    fn parameters_field(&self) -> &'static str {
-        self.dialect.parameters_field()
-    }
+        // Step 2: Strip $schema keyword — rejected on both fields.
+        schema_utils::strip_schema_keyword(&mut schema);
 
-    fn normalize_schema(&self, schema: Value) -> Value {
-        if self.dialect == GeminiSchemaDialect::JsonSchema {
-            return normalize_for_json_schema(schema);
+        if self.dialect.requires_openapi_reduction() {
+            // Step 3: Collapse anyOf/oneOf combiners
+            schema_utils::collapse_combiners(&mut schema);
+
+            // Step 4: Merge allOf sub-schemas
+            schema_utils::merge_all_of(&mut schema);
+
+            // Step 5: Collapse type arrays
+            schema_utils::collapse_type_arrays(&mut schema);
+
+            // Step 6: Strip conditional keywords (if/then/else)
+            schema_utils::strip_conditional_keywords(&mut schema);
+
+            // Step 7: Convert const to single-element enum
+            schema_utils::convert_const_to_enum(&mut schema);
+
+            // Step 8: Strip null from enum arrays
+            schema_utils::strip_null_from_enum(&mut schema);
+
+            // Step 9: Add implicit object type.
+            //
+            // Skipped for JSON Schema not merely as unnecessary but as
+            // *harmful*: it injects `type: "object"` into every schema-shaped
+            // node it walks, including the `if` clause of a conditional, which
+            // changes what that clause matches.
+            schema_utils::add_implicit_object_type(&mut schema);
         }
-        self.normalize_for_openapi_subset(schema)
-    }
 
-    fn compile_schema(&self, schema: &Value) -> Result<Value, adk_core::SchemaCompileError> {
-        // 1. Extract definitions for reference resolution.
-        let definitions = extract_definitions(schema);
-
-        // 2. Explicitly check for unresolved or recursive references.
-        //    Both dialects inline `$ref`, so both need this: a reference that
-        //    cannot be resolved is silently replaced with `{"type":"object"}`,
-        //    which would send the model an unconstrained field.
-        check_unresolved_refs(schema, &definitions)?;
-
-        // 3. The JSON Schema dialect keeps the keywords the subset cannot
-        //    express, so there is no semantic loss left to reject.
-        if self.dialect == GeminiSchemaDialect::JsonSchema {
-            return Ok(self.normalize_schema(schema.clone()));
+        // Step 10: Remove unsupported keywords recursively.
+        //
+        // Matched exhaustively rather than defaulted: a dialect added later
+        // must state what it strips, instead of silently inheriting the
+        // subset's answer and quietly dropping constraints again.
+        match self.dialect {
+            // Nothing to remove. `additionalProperties`, `minLength`, `pattern`
+            // and the numeric bounds are all expressible here, and stripping
+            // them is exactly what leaves a model guessing at rules the caller
+            // still enforces.
+            GeminiSchemaDialect::JsonSchema => {}
+            GeminiSchemaDialect::VertexOpenApiSubset => {
+                remove_unsupported_keywords_vertex(&mut schema)
+            }
+            GeminiSchemaDialect::OpenApiSubset => remove_unsupported_keywords(&mut schema),
         }
 
-        // 4. Inline references for strict semantic validation.
-        let mut resolved_schema = schema.clone();
-        adk_core::schema_utils::resolve_refs(&mut resolved_schema, &definitions, 0);
+        // Step 11: Strip unsupported format values
+        schema_utils::strip_unsupported_formats(&mut schema, GEMINI_ALLOWED_FORMATS);
 
-        // 5. Perform strict validation for semantic loss on the resolved schema.
-        validate_schema_strict(&resolved_schema)?;
+        // Step 12: Enforce nesting depth (max 5 levels)
+        schema_utils::enforce_nesting_depth(&mut schema, 5, 0);
 
-        // 6. Normalization is infallible but applies destructive transforms.
-        Ok(self.normalize_schema(schema.clone()))
+        // Step 13: Remove definitions/$defs blocks
+        if let Some(obj) = schema.as_object_mut() {
+            obj.remove("definitions");
+            obj.remove("$defs");
+        }
+
+        schema
     }
 
     fn validate_tool_name(&self, name: &str) -> Result<(), adk_core::SchemaCompileError> {
         if name.len() > 64 {
             return Err(adk_core::SchemaCompileError::new(format!(
-                "tool name '{}' exceeds Gemini's 64-byte limit",
+                "Tool name exceeds Gemini 64-character limit: {}",
                 name
             )));
         }
@@ -394,92 +409,11 @@ impl SchemaAdapter for GeminiSchemaAdapter {
     fn empty_schema(&self) -> Value {
         serde_json::json!({"type": "object", "properties": {}})
     }
-}
 
-/// Reduces a schema to `parametersJsonSchema`.
-///
-/// Only three things happen, and none of them changes which instances validate:
-/// `$ref` is inlined (the boundary doc keeps nested references on the risky
-/// list), identity/bundling keywords are removed, and `format` values Gemini
-/// does not know are dropped. Every validating keyword survives — that is the
-/// whole point of the dialect.
-fn normalize_for_json_schema(mut schema: Value) -> Value {
-    // 1. Inline `$ref` from `$defs`/`definitions` before anything removes them.
-    let definitions = extract_definitions(&schema);
-    schema_utils::resolve_refs(&mut schema, &definitions, 0);
-
-    // 2. `$schema` is rejected on both Gemini fields; the rest identify or
-    //    bundle a document rather than constrain an instance.
-    schema_utils::strip_schema_keyword(&mut schema);
-    schema_utils::strip_identity_keywords(&mut schema);
-
-    // 3. `format` is an annotation in 2020-12; an unknown one buys nothing and
-    //    has not been probed.
-    schema_utils::strip_unsupported_formats(&mut schema, GEMINI_ALLOWED_FORMATS);
-
-    // Deliberately NOT `add_implicit_object_type`. The subset dialect needs it
-    // because Gemini's Schema proto requires an explicit type; JSON Schema does
-    // not, and adding one is not free. An `if` clause written as bare
-    // `{"properties": {...}}` would gain `"type": "object"`, which the canonical
-    // document never said — the projection would then differ from the canonical
-    // in a way `substantive_losses()` reports, turning a clean regression
-    // detector into a permanently noisy one.
-
-    schema
-}
-
-impl GeminiSchemaAdapter {
-    fn normalize_for_openapi_subset(&self, mut schema: Value) -> Value {
-        // Step 1: Extract definitions and resolve $ref references.
-        // Always resolve refs — even with empty definitions — so that
-        // unresolvable $ref values are replaced with {"type": "object"}.
-        let definitions = extract_definitions(&schema);
-        schema_utils::resolve_refs(&mut schema, &definitions, 0);
-
-        // Step 2: Strip $schema keyword
-        schema_utils::strip_schema_keyword(&mut schema);
-
-        // Step 3: Collapse anyOf/oneOf combiners
-        schema_utils::collapse_combiners(&mut schema);
-
-        // Step 4: Merge allOf sub-schemas
-        schema_utils::merge_all_of(&mut schema);
-
-        // Step 5: Collapse type arrays
-        schema_utils::collapse_type_arrays(&mut schema);
-
-        // Step 6: Strip conditional keywords (if/then/else)
-        schema_utils::strip_conditional_keywords(&mut schema);
-
-        // Step 7: Convert const to single-element enum
-        schema_utils::convert_const_to_enum(&mut schema);
-
-        // Step 8: Strip null from enum arrays
-        schema_utils::strip_null_from_enum(&mut schema);
-
-        // Step 9: Add implicit object type
-        schema_utils::add_implicit_object_type(&mut schema);
-
-        // Step 10: Remove unsupported keywords recursively
-        if self.dialect == GeminiSchemaDialect::VertexOpenApiSubset {
-            remove_unsupported_keywords_vertex(&mut schema);
-        } else {
-            remove_unsupported_keywords(&mut schema);
-        }
-
-        // Step 11: Strip unsupported format values
-        schema_utils::strip_unsupported_formats(&mut schema, GEMINI_ALLOWED_FORMATS);
-
-        // Step 12: Enforce nesting depth (max 5 levels)
-        schema_utils::enforce_nesting_depth(&mut schema, 5, 0);
-
-        // Step 13: Remove definitions/$defs blocks
-        if let Some(obj) = schema.as_object_mut() {
-            obj.remove("definitions");
-            obj.remove("$defs");
-        }
-
-        schema
+    /// The function-declaration field this adapter's output belongs under,
+    /// derived from the dialect so the reduction and the field cannot disagree.
+    fn parameters_field(&self) -> &'static str {
+        self.dialect.parameters_field()
     }
 }
 
@@ -572,197 +506,6 @@ fn remove_unsupported_keywords(schema: &mut Value) {
             }
         }
     }
-}
-
-/// Performs strict validation of a JSON Schema for Gemini Live, returning
-/// `SchemaCompileError` if normalization would result in meaningful semantic loss.
-fn validate_schema_strict(schema: &Value) -> Result<(), adk_core::SchemaCompileError> {
-    validate_schema_node(schema, 0)
-}
-
-fn validate_schema_node(schema: &Value, depth: usize) -> Result<(), adk_core::SchemaCompileError> {
-    if depth > 5 {
-        return Err(adk_core::SchemaCompileError::new(
-            "Schema exceeds Gemini's maximum nesting depth of 5",
-        ));
-    }
-
-    let Some(obj) = schema.as_object() else {
-        return Ok(());
-    };
-
-    // 1. Reject polymorphic unions (anyOf/oneOf)
-    if obj.contains_key("anyOf") || obj.contains_key("oneOf") {
-        return Err(adk_core::SchemaCompileError::new(
-            "Gemini does not support polymorphic unions (anyOf/oneOf). Use a single object schema or multiple tools.",
-        ));
-    }
-
-    // 2. Reject tuple validation (items as array)
-    if let Some(items) = obj.get("items") {
-        if items.is_array() {
-            return Err(adk_core::SchemaCompileError::new(
-                "Gemini does not support JSON Schema tuple validation (items as an array). Use a single schema for all array elements.",
-            ));
-        }
-        // Items in an array don't necessarily increase OBJECT nesting depth,
-        // but for consistency with Mike's feedback "every schema-bearing keyword",
-        // we increment here.
-        validate_schema_node(items, depth + 1)?;
-    }
-
-    // 3. Reject other semantic-loss keywords
-    const SEMANTIC_LOSS_KEYWORDS: &[&str] = &[
-        "not",
-        "patternProperties",
-        "propertyNames",
-        "if",
-        "then",
-        "else",
-        "unevaluatedProperties",
-        "dependentRequired",
-        "dependentSchemas",
-        "contains",
-        "prefixItems",
-    ];
-
-    for keyword in SEMANTIC_LOSS_KEYWORDS {
-        if obj.contains_key(*keyword) {
-            return Err(adk_core::SchemaCompileError::new(format!(
-                "Gemini does not support JSON Schema keyword '{}'. Preserving this contract would require silent semantic loss.",
-                keyword
-            )));
-        }
-    }
-
-    // 4. Reject type arrays (polymorphism)
-    if let Some(type_val) = obj.get("type")
-        && type_val.is_array()
-    {
-        return Err(adk_core::SchemaCompileError::new(
-            "Gemini does not support JSON Schema type arrays. Each field must have exactly one type (nullable: true is supported).",
-        ));
-    }
-
-    // Recurse into properties
-    if let Some(props) = obj.get("properties").and_then(|p| p.as_object()) {
-        for value in props.values() {
-            validate_schema_node(value, depth + 1)?;
-        }
-    }
-
-    // Recurse into additionalProperties (if it's a schema)
-    if let Some(additional) = obj.get("additionalProperties")
-        && additional.is_object()
-    {
-        validate_schema_node(additional, depth + 1)?;
-    }
-
-    // Recurse into allOf
-    if let Some(all_of) = obj.get("allOf").and_then(|a| a.as_array()) {
-        for sub in all_of {
-            // allOf sub-schemas are merged into the current level, so depth doesn't increment.
-            validate_schema_node(sub, depth)?;
-        }
-    }
-
-    Ok(())
-}
-
-fn check_unresolved_refs(
-    schema: &Value,
-    definitions: &serde_json::Map<String, Value>,
-) -> Result<(), adk_core::SchemaCompileError> {
-    check_node_refs(schema, definitions, 0)
-}
-
-fn check_node_refs(
-    schema: &Value,
-    definitions: &serde_json::Map<String, Value>,
-    depth: usize,
-) -> Result<(), adk_core::SchemaCompileError> {
-    // 10 is the same limit used in resolve_refs
-    if depth > 10 {
-        return Err(adk_core::SchemaCompileError::new(
-            "Recursive references detected requiring truncation. Gemini requires acyclic local references.",
-        ));
-    }
-
-    let Some(obj) = schema.as_object() else {
-        return Ok(());
-    };
-
-    if let Some(ref_val) = obj.get("$ref").and_then(|v| v.as_str()) {
-        let name =
-            ref_val.strip_prefix("#/definitions/").or_else(|| ref_val.strip_prefix("#/$defs/"));
-
-        if let Some(def_name) = name
-            && let Some(def_schema) = definitions.get(def_name)
-        {
-            // Recursively check the inlined schema
-            return check_node_refs(def_schema, definitions, depth + 1);
-        }
-
-        return Err(adk_core::SchemaCompileError::new(format!(
-            "Unresolved or external $ref detected: '{}'. All references must be local and resolvable within the schema.",
-            ref_val
-        )));
-    }
-
-    // Recurse through all possible schema-bearing locations
-    if let Some(props) = obj.get("properties").and_then(|p| p.as_object()) {
-        for value in props.values() {
-            check_node_refs(value, definitions, depth)?;
-        }
-    }
-
-    if let Some(items) = obj.get("items") {
-        if let Some(arr) = items.as_array() {
-            for item in arr {
-                check_node_refs(item, definitions, depth)?;
-            }
-        } else {
-            check_node_refs(items, definitions, depth)?;
-        }
-    }
-
-    if let Some(additional) = obj.get("additionalProperties")
-        && additional.is_object()
-    {
-        check_node_refs(additional, definitions, depth + 1)?;
-    }
-
-    for keyword in &["allOf", "anyOf", "oneOf"] {
-        if let Some(arr) = obj.get(*keyword).and_then(|v| v.as_array()) {
-            for sub in arr {
-                check_node_refs(sub, definitions, depth)?;
-            }
-        }
-    }
-
-    if let Some(not_schema) = obj.get("not") {
-        check_node_refs(not_schema, definitions, depth)?;
-    }
-
-    if let Some(pattern_props) = obj.get("patternProperties").and_then(|p| p.as_object()) {
-        for value in pattern_props.values() {
-            check_node_refs(value, definitions, depth)?;
-        }
-    }
-
-    if let Some(prefix_items) = obj.get("prefixItems").and_then(|a| a.as_array()) {
-        for item in prefix_items {
-            check_node_refs(item, definitions, depth)?;
-        }
-    }
-
-    for keyword in &["if", "then", "else"] {
-        if let Some(sub) = obj.get(*keyword) {
-            check_node_refs(sub, definitions, depth)?;
-        }
-    }
-
-    Ok(())
 }
 
 /// Recursively removes unsupported keywords for the Vertex AI surface.
@@ -1673,271 +1416,83 @@ mod tests {
         assert!(result.get("contentEncoding").is_none());
     }
 
+    // --- Dialect selection -------------------------------------------------
+
+    /// The mapping that makes the reduction and the wire field one decision.
     #[test]
-    fn test_compile_schema_rejects_any_of() {
-        let adapter = GeminiSchemaAdapter::new();
-        let schema = json!({
-            "anyOf": [{"type": "string"}, {"type": "number"}]
-        });
-        let result = adapter.compile_schema(&schema);
-        assert!(result.is_err());
+    fn parameters_field_follows_the_dialect() {
+        assert_eq!(GeminiSchemaAdapter::new().parameters_field(), "parameters");
+        assert_eq!(GeminiSchemaAdapter::vertex_ai().parameters_field(), "parameters");
+        assert_eq!(GeminiSchemaAdapter::json_schema().parameters_field(), "parametersJsonSchema");
+        // The default must stay the legacy field: it is what every existing
+        // caller gets without asking.
+        assert_eq!(GeminiSchemaDialect::default(), GeminiSchemaDialect::OpenApiSubset);
     }
 
-    #[test]
-    fn test_compile_schema_rejects_unresolved_ref() {
-        let adapter = GeminiSchemaAdapter::new();
-        let schema = json!({
-            "type": "object",
-            "properties": { "x": { "$ref": "#/definitions/X" } }
-        });
-        let result = adapter.compile_schema(&schema);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().message.contains("Unresolved or external $ref"));
-    }
-
-    #[test]
-    fn test_compile_schema_supports_resolvable_ref() {
-        let adapter = GeminiSchemaAdapter::new();
-        let schema = json!({
-            "type": "object",
-            "properties": {
-                "x": { "$ref": "#/$defs/X" }
-            },
-            "$defs": {
-                "X": { "type": "string" }
-            }
-        });
-        let result = adapter.compile_schema(&schema);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_compile_schema_rejects_recursive_ref() {
-        let adapter = GeminiSchemaAdapter::new();
-        let schema = json!({
-            "type": "object",
-            "properties": {
-                "node": { "$ref": "#/$defs/Node" }
-            },
-            "$defs": {
-                "Node": {
-                    "type": "object",
-                    "properties": {
-                        "child": { "$ref": "#/$defs/Node" }
-                    }
-                }
-            }
-        });
-        let result = adapter.compile_schema(&schema);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().message.contains("Recursive references detected"));
-    }
-
-    #[test]
-    fn test_compile_schema_rejects_tuple_items() {
-        let adapter = GeminiSchemaAdapter::new();
-        let schema = json!({
-            "type": "array",
-            "items": [{"type": "string"}, {"type": "number"}]
-        });
-        let result = adapter.compile_schema(&schema);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_compile_schema_rejects_excessive_depth() {
-        let adapter = GeminiSchemaAdapter::new();
-        let mut schema = json!({"type": "string"});
-        for _ in 0..10 {
-            schema = json!({
-                "type": "object",
-                "properties": { "inner": schema }
-            });
-        }
-        let result = adapter.compile_schema(&schema);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_studio_projection() {
-        let adapter = GeminiSchemaAdapter::new();
-        let schema = json!({
-            "type": "object",
-            "properties": { "x": { "type": "string" } },
-            "additionalProperties": true
-        });
-        let result = adapter.compile_schema(&schema).unwrap();
-        // Studio should remove additionalProperties
-        assert!(result.get("additionalProperties").is_none());
-    }
-
-    // --- JSON Schema dialect (`parametersJsonSchema`) ---
-
-    /// The schema Anton's pilot sent, minus the parts that do not matter here.
-    /// Its six constraints are the ones the 2026-08-04 call lost.
-    fn constrained_intake() -> Value {
+    /// A realistic acquisition schema: a conditional rule, a closed object, and
+    /// a bounded string. Under the OpenAPI subset all three are stripped, which
+    /// is the whole defect — the caller keeps enforcing them while the model is
+    /// never shown them.
+    fn schema_with_constraints_the_subset_cannot_carry() -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
-                "request_kind": { "type": "string", "enum": ["information", "order"] },
-                "caller_name": { "type": "string" },
-                "callback_number": { "type": "string", "minLength": 7 },
-                "order_details": { "type": "string", "minLength": 3 }
+                "request_kind": {"type": "string", "enum": ["order", "information"]},
+                "callback_number": {"type": "string", "minLength": 7},
+                "party_size": {"type": "integer", "minimum": 1, "maximum": 40}
             },
             "required": ["request_kind"],
-            "additionalProperties": false,
             "allOf": [{
-                "if": {
-                    "properties": { "request_kind": { "const": "order" } },
-                    "required": ["request_kind"]
-                },
-                "then": { "required": ["caller_name", "callback_number", "order_details"] }
+                "if": {"properties": {"request_kind": {"const": "order"}}, "required": ["request_kind"]},
+                "then": {"required": ["callback_number"]}
             }]
         })
     }
 
-    /// The whole point of the dialect: the constraints the subset must strip
-    /// survive, so the model is shown the contract it will be judged against.
     #[test]
-    fn json_schema_dialect_keeps_every_constraint_the_subset_strips() {
-        let adapter = GeminiSchemaAdapter::json_schema();
-
-        let result = adapter.normalize_schema(constrained_intake());
-
-        assert_eq!(result["additionalProperties"], json!(false));
-        assert_eq!(result["properties"]["callback_number"]["minLength"], 7);
-        assert_eq!(result["properties"]["order_details"]["minLength"], 3);
-        assert_eq!(result["allOf"][0]["if"]["properties"]["request_kind"]["const"], "order");
-        assert_eq!(
-            result["allOf"][0]["then"]["required"],
-            json!(["caller_name", "callback_number", "order_details"])
-        );
-    }
-
-    /// The same input on the default dialect loses all of it — which is the
-    /// contrast the dialect exists to remove, and the reason the two are not
-    /// interchangeable.
-    #[test]
-    fn the_subset_dialect_still_strips_what_it_always_stripped() {
-        let result = GeminiSchemaAdapter::new().normalize_schema(constrained_intake());
-
-        assert!(result.get("additionalProperties").is_none());
-        assert!(result.get("allOf").is_none());
-        assert!(result["properties"]["callback_number"].get("minLength").is_none());
-    }
-
-    /// Sanitizing does not stop; only the *lossy* part does. `$schema` is
-    /// rejected on both fields, `$ref` is inlined because nested references stay
-    /// on the risky list, and `$defs` goes once it has been consumed.
-    #[test]
-    fn json_schema_dialect_still_sanitizes_identity_and_references() {
-        let adapter = GeminiSchemaAdapter::json_schema();
-
-        let result = adapter.normalize_schema(json!({
-            "$schema": "https://json-schema.org/draft/2020-12/schema",
-            "$id": "https://example.invalid/intake",
-            "type": "object",
-            "properties": { "address": { "$ref": "#/$defs/Address" } },
-            "$defs": {
-                "Address": { "type": "string", "minLength": 5 }
-            }
-        }));
-
-        assert!(result.get("$schema").is_none());
-        assert!(result.get("$id").is_none());
-        assert!(result.get("$defs").is_none());
-        assert_eq!(result["properties"]["address"]["type"], "string");
-        // Inlined, not flattened away: the constraint came with it.
-        assert_eq!(result["properties"]["address"]["minLength"], 5);
-    }
-
-    /// The dialect and the wire field are one decision. Reading them apart is
-    /// how a schema ends up posted under the field that cannot parse it, which
-    /// closes the Live socket rather than degrading.
-    #[test]
-    fn the_dialect_names_the_field_it_must_be_sent_under() {
-        assert_eq!(GeminiSchemaAdapter::new().parameters_field(), "parameters");
-        assert_eq!(GeminiSchemaAdapter::vertex_ai().parameters_field(), "parameters");
-        assert_eq!(GeminiSchemaAdapter::json_schema().parameters_field(), "parametersJsonSchema");
-    }
-
-    /// Compiled schemas are cached by the adapter's declared identity, so two
-    /// dialects that reduce the same input differently must not collide — one
-    /// would be served under the other's field name.
-    #[test]
-    fn each_dialect_declares_a_distinct_surface() {
-        let a1 = GeminiSchemaAdapter::new();
-        let a2 = GeminiSchemaAdapter::vertex_ai();
-        let a3 = GeminiSchemaAdapter::json_schema();
-        let surfaces = [a1.surface(), a2.surface(), a3.surface()];
-
-        assert_eq!(surfaces, [Some("studio"), Some("vertex"), Some("studio-json-schema")]);
-    }
-
-    /// `compile_schema` rejects `if`/`then` for the subset because sending it
-    /// would silently lose the rule. On the dialect that keeps the rule there is
-    /// nothing to lose, so the same schema must compile.
-    #[test]
-    fn json_schema_dialect_compiles_what_the_subset_refuses() {
-        let schema = constrained_intake();
-
-        assert!(
-            GeminiSchemaAdapter::new().compile_schema(&schema).is_err(),
-            "the subset cannot express if/then and must say so"
-        );
-        assert!(
-            GeminiSchemaAdapter::json_schema().compile_schema(&schema).is_ok(),
-            "the JSON Schema dialect keeps if/then, so there is no loss to reject"
-        );
-    }
-
-    /// A reference that cannot be resolved is replaced with an unconstrained
-    /// object, which would show the model a field with no rules at all. Both
-    /// dialects inline, so both must refuse it.
-    #[test]
-    fn json_schema_dialect_still_rejects_an_unresolvable_reference() {
-        let result = GeminiSchemaAdapter::json_schema().compile_schema(&json!({
-            "type": "object",
-            "properties": { "x": { "$ref": "#/$defs/Missing" } }
-        }));
-
-        assert!(result.is_err(), "an unresolved $ref survived compilation");
-    }
-
-    /// Running the reduction over its own output changes nothing, so a schema
-    /// that passes through twice is not quietly different the second time.
-    #[test]
-    fn json_schema_dialect_is_idempotent() {
-        let adapter = GeminiSchemaAdapter::json_schema();
-
-        let first = adapter.normalize_schema(constrained_intake());
-        let second = adapter.normalize_schema(first.clone());
-
-        assert_eq!(first, second);
-    }
-
-    /// A bare `{"properties": ...}` keeps its shape. The subset injects an
-    /// explicit type because Gemini's proto needs one; adding it here would make
-    /// the projection differ from the canonical document over a keyword nobody
-    /// wrote, and the loss report is only useful while it stays quiet.
-    #[test]
-    fn json_schema_dialect_does_not_invent_an_object_type() {
+    fn json_schema_dialect_keeps_what_the_subset_strips() {
         let result = GeminiSchemaAdapter::json_schema()
-            .normalize_schema(json!({ "properties": { "x": { "type": "string" } } }));
+            .normalize_schema(schema_with_constraints_the_subset_cannot_carry());
 
-        assert!(result.get("type").is_none(), "{result}");
+        assert_eq!(result["additionalProperties"], json!(false));
+        assert!(result.get("allOf").is_some(), "conditional rule dropped: {result}");
+        assert_eq!(result["properties"]["callback_number"]["minLength"], 7);
+        assert_eq!(result["properties"]["party_size"]["minimum"], 1);
+        assert_eq!(result["properties"]["party_size"]["maximum"], 40);
     }
 
+    /// `add_implicit_object_type` is skipped for JSON Schema because it is
+    /// actively wrong there, not merely redundant: it stamps `type: "object"`
+    /// onto every schema-shaped node it walks, including an `if` clause, which
+    /// changes what that clause matches.
     #[test]
-    fn test_vertex_projection() {
-        let adapter = GeminiSchemaAdapter::vertex_ai();
-        let schema = json!({
-            "type": "object",
-            "properties": { "x": { "type": "string" } },
-            "additionalProperties": true
-        });
-        let result = adapter.compile_schema(&schema).unwrap();
-        // Vertex should set additionalProperties: false
-        assert_eq!(result["additionalProperties"], json!(false));
+    fn json_schema_dialect_does_not_stamp_a_type_onto_conditionals() {
+        let result = GeminiSchemaAdapter::json_schema()
+            .normalize_schema(schema_with_constraints_the_subset_cannot_carry());
+
+        let if_clause = &result["allOf"][0]["if"];
+        assert!(
+            if_clause.get("type").is_none(),
+            "an implicit object type was injected into the `if` clause: {if_clause}"
+        );
+    }
+
+    /// The non-breaking claim, held by a test rather than by assertion: the two
+    /// pre-existing constructors reduce exactly as before.
+    #[test]
+    fn openapi_subset_dialects_still_reduce_as_before() {
+        for adapter in [GeminiSchemaAdapter::new(), GeminiSchemaAdapter::vertex_ai()] {
+            // Still the legacy field, so the reduction and the field stay
+            // consistent for callers who never opt in.
+            assert_eq!(adapter.parameters_field(), "parameters");
+
+            let result =
+                adapter.normalize_schema(schema_with_constraints_the_subset_cannot_carry());
+
+            assert!(result.get("allOf").is_none(), "{result}");
+            assert!(result["properties"]["callback_number"].get("minLength").is_none());
+            assert!(result["properties"]["party_size"].get("minimum").is_none());
+        }
     }
 }

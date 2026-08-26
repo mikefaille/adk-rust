@@ -7,8 +7,629 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v3.0.0
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-08-25
+
+### Added
+
+- **ADK-Rust runtime UI** (`adk-server`): replaces the opaque copied Angular
+  bundle with an owned React/TypeScript frontend using the Studio Next design
+  language. The responsive system/light/dark interface streams conversations,
+  tool activity, failures, and handoffs, and inspects event timelines, session
+  and shared state, artifacts, prior sessions, runtime capabilities, and UI
+  protocols. `Agent::topology()` is an additive provider-neutral metadata hook;
+  `CompiledTeam` exposes its exact members and delegation-versus-handoff edges,
+  and `/api/ui/agents/{name}` serves that data without coupling the server to
+  `TeamSpec`. The embedded build uses local assets only and ships with CSP,
+  no-sniff, referrer, and immutable-cache headers. Strict TypeScript and
+  provider-free SSE parser tests accompany the existing Rust server tests.
+  Model responses render safe GitHub-flavored Markdown, and live team runs
+  animate the active member and incoming edge using Studio Next's directional
+  flow pattern while honoring reduced-motion preferences. Transcript messages
+  keep a readable minimum height instead of collapsing around long responses.
+  `GraphAgent` also exports its entry and declared control-flow edges through
+  the same portable topology contract, allowing the UI to render workflow nodes
+  by execution level. `examples/runtime_ui_showcase` documents and illustrates
+  tool-calling, graph, and team runs through the embedded interface. Realtime
+  agents now declare their interaction mode through the shared `Agent` contract;
+  the interface coalesces their transcript stream and exposes completed PCM16
+  output as playable WAV audio. Dedicated **Telemetry** and **Protocols** views
+  make spans, configured artifact/memory services, A2A discovery, and UI/MCP
+  Apps support explicit. The ADK Runtime brand links to adk-rust.com.
+  `examples/advanced_agents` runs OpenAI chat, an ambient schedule, OpenAI
+  Realtime voice, A2A, and MCP `2026-07-28`/SEP-2663 tasks through one server.
+
+- **Anthropic request customization and server-side refusal fallback**
+  (`adk-anthropic`): additive client methods now support caller-selected beta
+  headers, exact per-request header replacement, bearer-only authentication,
+  and API-version overrides without adding fields to the exhaustive
+  `MessageCreateParams` struct. `ServerFallbackRequest` models both
+  `"default"` routing and one-to-three explicit fallback models, validates
+  duplicates and primary-model loops, and has fallback-aware response and SSE
+  types so handoff markers and per-attempt usage are not discarded. Fallback
+  is documented and tested as a safety-refusal feature, not a retry mechanism
+  for rate limits, overloads, or server errors. New live examples read
+  credentials from the environment; provider-free wire tests cover headers,
+  bodies, responses, and streams.
+- **Vertex AI Agent Engine sandbox client** (`adk-code`, feature
+  `vertex-sandbox`; same-named umbrella feature, part of
+  `gemini-agent-platform`): `VertexSandboxClient` against the v1beta1
+  `sandboxEnvironments` surface — create and delete wait their long-running
+  operations, get and list (paginated) are plain reads, and `:execute` is
+  synchronous. `execute_code` implements the code-execution chunk
+  conventions shared with adk-python and the Vertex AI SDK (JSON code
+  chunk, `file_name`-attributed file chunks, `msg_out`/`msg_err` console
+  output) with the 100 MB per-request file limit enforced before sending.
+  `SandboxCodeExecutor` mirrors adk-python's
+  `AgentEngineSandboxCodeExecutor`: per-session lazy sandbox creation
+  (display name `default_sandbox`, TTL one year) with recreate when the
+  sandbox is missing or not running. `VertexSandboxTool` exposes execution
+  to LLM agents keyed by the calling session. Built on the shared `adk-gcp`
+  plumbing. New example: `examples/vertex_sandbox`.
+
+- **`adk-gcp` crate**: shared Google Cloud REST plumbing for Vertex AI
+  backends — `GcpHttpClient` (ADC with cached auth headers per
+  `CacheableResource` semantics, redirect-disabled bounded transport,
+  HTTPS-or-loopback endpoint validation), `LroPoller` (long-running-operation
+  polling with capped backoff, operation identity pinning, and
+  project/location scope validation), `VertexResourceName`
+  (`projects/*/locations/*/reasoningEngines/*` parse/format), and
+  `GcpErrorContext` (consumer-branded errors across the `AdkError`
+  boundary). Purely additive: consolidates the pattern duplicated across
+  `adk-session`, `adk-memory`, `adk-tool`, `adk-deploy`, and `adk-artifact`;
+  call-site migrations follow in later PRs.
+
+- **CLI deploy subcommand** (`adk-cli`, feature `gcp-deploy`):
+  `adk-rust deploy agent-engine --image-uri <uri> --project <p> --location <l>
+  [--service-account <sa>] [--kms-key <key>] [--display-name <n>]` deploys a
+  pushed container image as a Gemini Enterprise Agent Platform engine via the
+  adk-deploy `gcp` client — declares the full class-method contract, waits
+  for the create operation, and prints the engine resource name. The display
+  name defaults to the image name. Install with
+  `cargo install adk-cli --features gcp-deploy`.
+
+- **Agent Engine deployment client** (`adk-deploy`, feature `gcp`; umbrella
+  feature `gcp-deploy` — host-side tooling, deliberately not part of
+  `gemini-agent-platform`): `GcpDeployClient` with exactly four operations
+  against the v1beta1 `reasoningEngines` surface — `create_reasoning_engine`,
+  `poll_operation` (plus a backoff-polling `wait_for_operation`),
+  `get_reasoning_engine`, `delete_reasoning_engine`. Typed camelCase wire
+  DTOs for the BYOC create body (`containerSpec.imageUri`, `deploymentSpec`
+  env/secret-env/scaling/resource limits/PSC-I, `classMethods`,
+  `agentFramework`, `serviceAccount`, CMEK `encryptionSpec`);
+  `CreateReasoningEngineRequest::byoc` declares the full WP1 class-method
+  contract by default. Image build/push stays with Cloud Build
+  (`gcloud_build_submit_command` renders the documented command).
+  `reasoningEngines:asyncQuery` is deliberately not declared (cannot be
+  added post-create; adk-python parity excludes it).
+
+- **cargo-adk `agent-engine` template** (`cargo adk new my-agent --template
+  agent-engine`): scaffolds a Gemini Enterprise Agent Engine BYOC container — a
+  binary whose `main` is `serve_agent_engine(agent, AgentEngineOptions::new())`
+  (features `["minimal", "agent-engine"]`), the docker addon's `Dockerfile` and
+  `.dockerignore`, and `deploy/terraform/` with a
+  `google_vertex_ai_reasoning_engine` BYOC resource (`spec.container_spec.image_uri`,
+  the full 14-method `class_methods` contract in `jsonencode`,
+  `agent_framework = "google-adk"`, optional `service_account`), plus
+  `variables.tf`/`outputs.tf` mirroring the containerized-agent codelab. The
+  generated README covers `gcloud builds submit`, `terraform apply`, the
+  platform-set environment variables, the `/api` passthrough for querying the
+  deployed engine, and the optional A2A-routes setup via
+  `ServerBuilder::with_agent_engine(true)` + `.with_a2a(...)`. Template and
+  addon file fragments now support `{name}` substitution and path override
+  (a template file replaces a base file with the same path).
+- **Tool guardrails** (`adk-guardrail`; `adk-agent` feature `guardrails`):
+  `Guardrail` validates `Content` and never sees a tool call, and
+  `ToolConfirmationPolicy` decides per tool *name*, so neither could express
+  "this tool may run, but not with these arguments" — argument-level policy had
+  nowhere to live inside the framework. `ToolGuardrail::validate_call` receives
+  the tool name and arguments and returns `Allow`, `Deny`, or `ReviseArgs`;
+  `ToolGuardrailSet::evaluate` runs guardrails in order so revisions compose, and
+  stops at the first denial. `LlmAgentBuilder::tool_guardrails` wires a set in.
+  Screening happens before the concurrency permit is acquired and before
+  confirmation is resolved, so a denied call neither queues behind other work nor
+  prompts the user, and the denial is reported as the tool's result so the model
+  can correct the call instead of the run stalling. Two implementations ship:
+  `DeniedArgumentPattern` (regex over the serialized arguments, optionally scoped
+  to named tools) and `PathAllowList` (confines path-valued arguments to allowed
+  roots, comparing by path component rather than string prefix so
+  `/etc/passwd-backup` is not admitted by a root of `/etc/passwd`, and refusing
+  any path containing a `..` component. It also resolves every existing candidate
+  component to reject symlink escapes; hostile local races still require secure-open
+  primitives in the filesystem tool itself).
+
+- **Skill write path** (`adk-skill`): the crate was read-only — every `fs::write`
+  lived behind `#[cfg(test)]` — so an agent could not persist a skill it derived
+  at runtime and an operator could not generate one programmatically.
+  `SkillWriter` writes into the `.skills` directory `load_skill_index` already
+  discovers, through a unique temporary file that is synchronized and atomically
+  replaces the destination on Unix and Windows, so a crash mid-write cannot leave
+  a half-written skill that breaks the whole index load. `SkillDraft` is a builder
+  for the document; `SkillDraft::to_markdown`
+  renders frontmatter plus body and omits unset fields, and round-trips through
+  `parse_skill_markdown`. `validate_skill_name` enforces the specification's
+  `[a-z0-9-]` rule (1–64 characters, no leading or trailing hyphen) and is also
+  the path-safety boundary, since a name becomes a filename — `../escape` and
+  `nested/name` are rejected before any file is touched. `SkillWriter::remove`
+  and `exists` complete the lifecycle. `SkillInjector::reloaded` rescans the root
+  and returns a refreshed injector, and `SkillInjector::root` reports what it
+  rescans; `reloaded` returns a new value rather than mutating because
+  `build_plugin` captures the index by handle, so a plugin already handed to a
+  runner must be rebuilt to see new skills.
+
+- **`AgentInvoker` and the ambient runner bridge** (`adk-core`, `adk-runner`,
+  `adk-agent` feature `ambient`): `AmbientAgent::start` refuses to run without a
+  trigger handler, and writing one meant building `Content`, inventing a session
+  id, and calling `Runner::run` by hand. `Runner::run` also resolves an *existing*
+  session and yields `session.not_found` through the stream when there is none,
+  which an external trigger has no opportunity to pre-register — so the obvious
+  wiring failed at the first tick, inside the stream rather than at the call site.
+  `adk-core` now defines `AgentInvoker`, a single `invoke(user_id, session_id,
+  content)` operation whose implementations create a missing session;
+  `adk-runner` implements it for `Runner`; and
+  `AmbientAgent::with_invoker(invoker, RunnerTriggerConfig)` supplies the handler.
+  `TriggerSessionPolicy` chooses between `PerTrigger` (default — a fresh session
+  per event, so a frequent schedule cannot grow one session's history and per-run
+  cost without bound) and `Shared(id)`; shared invocations are serialized through
+  the returned stream. The wrapper adopts the runner's executable root for accurate
+  diagnostics. `RunnerTriggerConfig::with_prompt` shapes the event into prompt text.
+  The OpenAI-backed `ambient_cron_agent` example failed at `start()`
+  and documented that it did not invoke the agent; it now runs all seven lifecycle
+  steps and prints what each run produced.
+
+- **Cron missed-tick handling** (`adk-agent`, feature `ambient`):
+  `CronTrigger::subscribe` computes the next tick from the moment it is called, so
+  a trigger that restarted after downtime — or ran on a host that suspended —
+  resumed at the next future tick and discarded every tick that came due in
+  between, with no record that anything was skipped. `MissedTickPolicy` now
+  decides that span's fate: `Skip` (default, prior behaviour), `CoalesceOne` (one
+  event for the whole gap), or `All` (one event per elapsed tick, oldest first,
+  bounded by `CronTrigger::with_max_catch_up`, default 64). Detecting a gap across
+  a process restart needs a `TickWatermark`; `FileTickWatermark` stores one
+  RFC 3339 cursor using portable atomic replacement. A capped replay persists its
+  skipped-through cursor, and a persistence failure stops the stream before
+  emission. Replayed events carry
+  `scheduled_for`, `catch_up`, and — for `CoalesceOne` — `missed_count` in their
+  payload. The watermark advances on emission rather than on consumer completion,
+  making delivery at-most-once so a consumer that stops polling cannot replay the
+  same gap on every restart.
+
+- **cargo-adk `docker` addon** (`cargo adk new my-agent --addon docker`): emits a
+  multi-stage `Dockerfile` (`rust:1.95-slim` build stage kept in lockstep with
+  `rust-toolchain.toml`, `gcr.io/distroless/cc-debian12` runtime, `ENV PORT=8080`,
+  `ENTRYPOINT ["/app/agent"]`), a fully static `Dockerfile.static`
+  (`x86_64-unknown-linux-musl` + `FROM scratch`, CA bundle copied in for
+  `rustls-tls-native-roots`, with a compatibility guard naming the feature sets
+  that cannot link statically), and a `.dockerignore`. Fixes the README drift
+  that advertised a `docker` addon the registry did not provide.
+- **Example Store client** (`adk-tool`, feature `example-store`; umbrella
+  feature `example-store`, included in `gemini-agent-platform`):
+  `ExampleStoreClient` is an ADC-authenticated REST client for the Vertex AI
+  Example Store v1beta1 data plane (Preview, `us-central1` only) —
+  `upsert_examples`, `search_examples`, and `fetch_examples` against a
+  pre-provisioned `projects/*/locations/*/exampleStores/*` resource (no store
+  create/delete). `ExampleStoreProvider` packages top-k retrieval as a
+  `BeforeModelCallback` that injects the most similar stored examples into the
+  request preamble as dynamic few-shot instructions. New standalone example:
+  `examples/example_store/`.
+- **Vertex AI Memory Bank backend** (`adk-memory`, feature `vertex-memory`;
+  umbrella feature `vertex-memory`, included in `gemini-agent-platform`):
+  `VertexAiMemoryBankService` implements `MemoryService` over the platform's
+  `memories:generate` (LRO-polled) and `memories:retrieve` (similarity
+  search) endpoints with the same `{app_name, user_id}` scope adk-python
+  writes, so both runtimes share one Memory Bank. `VertexAiMemoryConfig`
+  mirrors the session config (`from_env()` reads the platform's container
+  variables). `add_events_to_memory` persists a subset of events;
+  `delete_user` enumerates and deletes a scope's memories. This completes the
+  Agent Engine dispatch surface's `async_add_session_to_memory` /
+  `async_search_memory` class methods, which returned `Unsupported` until
+  now.
+
+- **Agent Engine turnkey entrypoint** (`adk-server`, feature `agent-engine`;
+  umbrella feature `agent-engine`, included in `gemini-agent-platform`):
+  `serve_agent_engine(agent, options)` is the whole `main` of a deployable
+  Gemini Enterprise Agent Platform engine — binds `0.0.0.0:$PORT` (fallback
+  `8080`), installs the crypto provider, and serves the dispatch endpoints
+  plus `GET /health`. `AgentEngineOptions` configures session, memory, and
+  artifact services, app name, and port; `build_agent_engine_app` returns the
+  same app as a plain `Router`. `ServerBuilder::with_agent_engine(true)`
+  mounts the dispatch surface alongside the built-in REST/UI/A2A routes.
+  New docs page: `docs/official_docs/deployment/agent-engine.md`.
+
+- **Agent Engine dispatch surface** (`adk-server`, feature `agent-engine`): the
+  container-side runtime contract that makes an adk-rust agent drivable by the
+  Gemini Enterprise Agent Platform (`reasoningEngines.query` /
+  `streamQuery`, console Playground, platform SDKs). `agent_engine_router`
+  mounts `POST /api/reasoning_engine` (unary, `{"output": ...}`) and
+  `POST /api/stream_reasoning_engine` (newline-delimited JSON events), dispatching
+  the exact `AdkApp` operation set — session CRUD in sync/async pairs,
+  `stream_query` / `async_stream_query`, `streaming_agent_run_with_events`,
+  `async_add_session_to_memory` / `async_search_memory` (Unsupported until a
+  memory service is configured), and `register_operations`. A shared wire
+  fixture (`adk-server/tests/fixtures/agent_engine_wire.json`) pins the
+  envelope and streamed-event framing for the future remote-engine client.
+
+- **adk-rag: shared `VectorStore` contract test suite.** A new
+  `adk-rag/tests/common/vector_store_contract.rs` holds the behavioral contract
+  every vector store backend must satisfy — idempotent collection creation,
+  upsert-then-search round trips, descending-score ordering bounded by `top_k`,
+  deletion by ID, empty-input no-ops, metadata preservation, collection
+  isolation, and teardown — plus proptest search invariants. The suite runs
+  against InMemory, SurrealDB (embedded), and LanceDB (embedded, behind the
+  `lancedb` feature). LanceDB scopes out the upsert-replaces-by-ID assertion:
+  its `upsert` appends instead of replacing, a divergence the suite documents
+  rather than fixes.
+- **GCS artifact backend** (`adk-artifact`, feature `gcs`): `GcsArtifactService`
+  stores artifacts in a Google Cloud Storage bucket over the GCS JSON API with
+  ADC authentication, keeping byte-for-byte blob-name parity with adk-python's
+  `GcsArtifactService` (session-scoped and `user:`-namespaced layouts, `adkDisplayName`/
+  `adkIsText`/`adkFileUri`/`adkFileMimeType` object metadata, versions starting at 0).
+  Umbrella feature `gcs-artifacts`, included in the `gemini-agent-platform` meta-feature.
+- **adk-gemini: cached content on Vertex AI.** `VertexBackend` implements the five
+  cached-content operations (create, get, update, list, delete) against the Vertex
+  REST endpoint `…/v1/projects/{project}/locations/{location}/cachedContents`,
+  including TTL refresh via `updateCachedContent` so the runner's cache-refresh
+  path works on Vertex. Studio-style model names (`models/{model}`) in create
+  payloads are normalized to full Vertex resource names. The Files API, batch
+  operations, and the Interactions API remain Studio-only on the Vertex backend.
+- **Telemetry to Google Cloud** (`adk-telemetry` feature `gcp`, umbrella
+  `gcp-telemetry`, included in `gemini-agent-platform`). `init_with_gcp`
+  exports traces to `https://telemetry.googleapis.com` with per-request
+  `Authorization: Bearer` headers minted from Application Default Credentials
+  (refreshed in the background) plus `x-goog-user-project`. Resource
+  attributes (`service.name`, `gcp.project_id`,
+  `cloud.platform = gcp.agent_engine`) are detected from `K_SERVICE`,
+  `GOOGLE_CLOUD_PROJECT`, and `GOOGLE_CLOUD_AGENT_ENGINE_ID`.
+  `init_json_logging` emits Cloud Logging structured JSON (severity mapping,
+  `logging.googleapis.com/trace` correlation). A collector-sidecar fallback is
+  documented in `docs/official_docs/observability/gcp.md`.
 ### Fixed
 
+- **Model pricing corrected across every provider table.** All rates are now the
+  vendors' published standard-tier list prices, verified 2026-08-23, and each
+  module records the source URL and verification date.
+  - `adk-model` (OpenAI): every GPT-5.x rate was wrong, in both directions.
+    `gpt-5` was overstated 2× on input, `gpt-5-mini` 2.4×, `gpt-5-nano` 3×;
+    `gpt-5.5-pro` was understated 5× and `gpt-5.4-pro` 7.5×. `gpt-5`,
+    `gpt-5-mini`, `gpt-5-nano`, `gpt-5.1`, `gpt-5.2`, `gpt-5.4`, `gpt-5.4-mini`,
+    `gpt-5.4-nano`, `gpt-5.4-pro`, `gpt-5.5`, `gpt-5.5-pro`, `gpt-5-pro` and
+    `gpt-5.3-codex` are corrected. `gpt-image-2` image output was $32, now $30.
+  - `adk-gemini`: Gemini 2.5 Flash-Lite was documented as having no cache
+    support and priced cache reads at $0, when Google charges $0.01/MTok.
+    `cache_input_long` on 2.5 Flash and 3 Flash Preview held audio cache rates
+    ($0.10) rather than long-context rates, inflating cached cost on long
+    prompts by 2–3.3×; those models have no long-context tier and now report the
+    base rate.
+  - `adk-eval`: `default_pricing()` contained no current model and understated
+    Gemini 2.5 Flash output 4× and 2.5 Pro output 2×. Replaced with the current
+    Gemini, OpenAI, Anthropic and DeepSeek line-ups.
+- **Gemini 2.0 shutdown date** corrected in `AGENTS.md` from March 31 2026 to
+  June 1 2026, the date Google published.
+- **Current provider request contracts are validated before dispatch.** Direct
+  `adk-gemini` calls reject sampling, `candidate_count`, and token-based thinking
+  settings removed by Gemini 3.7. Anthropic rejects restricted sampling and
+  budget-based thinking on the current Claude families, and limits fast mode to
+  Claude Opus 5 and Opus 4.8.
+- **Gemini Live catalog lifecycle metadata is endpoint-aware.** The Vertex GA
+  `gemini-live-2.5-flash-native-audio` remains active through December 2026,
+  while the retired AI Studio `gemini-live-2.5-flash-preview` is rejected. The
+  catalog also covers additional retired Gemini aliases and Groq's Qwen 3 32B
+  deprecation.
+- **Runnable examples and crate README quickstarts no longer target superseded
+  provider defaults.** Gemini examples now use Gemini 3.7 Flash (or 3.5 Flash
+  Lite for deterministic benchmarks), image examples use the GA Gemini 3.1
+  Flash Image model, and provider-specific READMEs align with the shared model
+  catalog.
+
+### Changed
+
+- **`adk_gemini::Model::default()` is now Gemini 3.7 Flash**, not Gemini 2.5
+  Flash. This changes per-token cost for anyone relying on `Default`: 3.7 Flash
+  is $0.75/$3.75 per MTok against 2.5 Flash's $0.30/$2.50, so input is 2.5× and
+  output 1.5× the previous rate per token. Pin `Model::Gemini25Flash` explicitly
+  to keep the old behaviour.
+- The umbrella `provider_from_env()` and `run()` helpers now use the same shared
+  Gemini and OpenAI catalog defaults as CLI-generated projects.
+- **`lookup_pricing` and the new resolvers return `None` for models the vendor
+  publishes no rate for**, rather than a fabricated rate. Five OpenAI constants
+  (`GPT_55_INSTANT`, `GPT_52_CODEX`, `GPT_51_CODEX`, `GPT_51_CODEX_MAX`,
+  `GPT_51_CODEX_MINI`), `GPT_53_CHAT_LATEST` and both deep-research constants are
+  deprecated and no longer answer lookups. Treat `None` as unpriced, never free.
+- Introductory Gemini rates are marked with their expiry: Gemini 3.7 and 3.6
+  Flash double on 2027-01-01, and GPT-5.6 Sol's promotional rate runs at least
+  to 2026-11-21.
+
+### Added
+
+- **`ModelPricing::for_model` / `for_model_id`** (`adk-anthropic`) and
+  **`GeminiPricing::for_model_id`** (`adk-gemini`) resolve pricing from a wire
+  model ID, including the `Custom(..)` identifiers returned by the model
+  factories and Anthropic's dated aliases. Previously `adk-anthropic` had no
+  model-to-pricing mapping at all and `adk-gemini` special-cased one ID.
+- Anthropic Claude Mythos 5 and fast-mode rates (`ModelPricing::MYTHOS_5`,
+  `OPUS_5_FAST`), Haiku 3.5, and a `Model::claude_mythos_5()` factory.
+- Gemini 3.6 Flash and 3.5 Flash-Lite pricing plus a
+  `Model::gemini_3_5_flash_lite()` factory. Gemini 3.6 Flash previously had a
+  factory but no pricing entry, so it resolved as unpriced.
+- OpenAI GPT-5.6 Cyber, GPT-5.5 Cyber, GPT-5.2 Pro, `chat-latest`,
+  `gpt-5-search-api`, `gpt-5.3-codex` fast mode, and long-context constants for
+  the GPT-5.4, GPT-5.5 and GPT-5.6 families.
+- `OpenAIReasoningEffort` and additive Chat Completions / Responses constructors
+  expose `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max` without
+  adding variants to the existing exhaustive `ReasoningEffort` enum.
+- `scripts/check-model-pricing.sh` checks the encoded rates against the vendor
+  pricing pages and runs in the monthly advisory model-freshness workflow.
+
+### Changed
+
+- **`provider_from_env()` now consults the Vertex opt-in flags before any API
+  key.** A truthy `GOOGLE_GENAI_USE_ENTERPRISE` or `GOOGLE_GENAI_USE_VERTEXAI`
+  (`1` or a case-insensitive `true`) selects Gemini on Vertex AI — via
+  Application Default Credentials with `GOOGLE_CLOUD_PROJECT` and
+  `GOOGLE_CLOUD_LOCATION` — even when `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or
+  `GOOGLE_API_KEY` is set. Previously these flags were ignored and API-key
+  sniffing alone decided the provider. If you already set a `GOOGLE_GENAI_USE_*`
+  variable for another SDK (e.g. adk-python) and rely on `provider_from_env()`
+  picking Anthropic or OpenAI from an API key, unset the flag or set it to a
+  falsy value. `GOOGLE_GENAI_USE_ENTERPRISE` takes precedence when both flags
+  are set. When a flag is truthy but the `gemini-vertex` feature is not
+  compiled, `provider_from_env()` emits a `tracing` warning and falls through
+  to API-key detection; a truthy flag with `GOOGLE_CLOUD_PROJECT` /
+  `GOOGLE_CLOUD_LOCATION` missing is an error, not a Studio fallback.
+
+### Added
+
+- **`GeminiModel::from_env(model)`** — environment-driven construction: Vertex
+  AI via ADC when `GOOGLE_GENAI_USE_ENTERPRISE` / `GOOGLE_GENAI_USE_VERTEXAI`
+  is truthy (requires the `gemini-vertex` feature; errors when the feature is
+  missing or the Vertex target is incomplete), otherwise the Gemini API via
+  `GOOGLE_API_KEY` or `GEMINI_API_KEY`.
+- **`adk_model::gemini::vertex_env_requested()`** — reports whether the
+  environment opts in to the Vertex AI backend.
+- New docs page
+  [Vertex-Only Deployments](docs/official_docs/compliance/vertex-only-deployments.md)
+  — guaranteeing no `generativelanguage.googleapis.com` traffic for HIPAA and
+  data-residency workloads.
+### Added
+
+- **`VertexAiSessionConfig::from_env()`** builds the config from
+  `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`, and
+  `GOOGLE_CLOUD_AGENT_ENGINE_ID` (the bare numeric engine ID) — the variables
+  the Vertex AI Agent Engine platform sets inside deployed containers. Missing
+  or blank variables produce an actionable invalid-input error naming each one.
+- **Vertex session expiration**: `VertexAiSessionConfig::with_ttl()` and
+  `with_expire_time()` send the `Session.expiration` oneof (`ttl` /
+  `expireTime` from `google/cloud/aiplatform/v1beta1/session.proto`) on
+  session create. Setting both members, or a TTL below the 24-hour minimum,
+  fails at service construction.
+- **adk-server**: `agent_skills_from_index` bridges an `adk_skill::SkillIndex` to A2A
+  agent-card `skills[]` entries (skill name → `id` and `name`, description →
+  `description`, tags → `tags`, version folded into `tags` as `version:{v}`).
+  `ServerBuilder::with_skill_index` and `A2aServerBuilder::skill_index` attach an
+  index so the card served at `/.well-known/agent.json` includes those entries —
+  the surface Agent Registry keyword/prefix search indexes.
+  `A2aController::with_skill_index` is the underlying constructor.
+- **`POST /api/run` plain-JSON endpoint in `adk-server`.** Accepts the same body as
+  `/api/run_sse`, runs the agent to completion, and returns the collected events as a
+  JSON array — parity with Google ADK's `api_server` non-streaming `/run` route.
+
+### Fixed
+
+- **adk-rag: SurrealDB `create_collection` parse error.** The `metadata` field
+  definition used the pre-3.2 modifier order `FLEXIBLE TYPE object`, which
+  surrealdb 3.2 rejects with `FLEXIBLE must be specified after TYPE`. Reordered
+  to `TYPE object FLEXIBLE`, and the `surrealdb` feature now has a PR-tier
+  `feature-coverage` matrix entry so the backend cannot silently break again
+  (#568).
+
+### Changed
+
+- **Wave 3 ADC/LRO consolidation** — the Vertex plumbing duplicated across
+  five backends now lives in `adk-gcp`, with no public API change and each
+  backend's error codes, categories, and mock contract tests preserved:
+  `adk-session` (`vertex-session`), `adk-memory` (`vertex-memory`),
+  `adk-tool` (`example-store`), `adk-deploy` (`gcp`), and `adk-artifact`
+  (`gcs`, credential handling only).
+- **adk-gcp**: `GcpErrorContext` gains `with_response_too_large_code` (a
+  dedicated size-limit code override; the default remains the consumer's
+  `invalid_response` literal); `GcpHttpClient` gains `send_value_counted`
+  (parsed JSON plus decoded body size, for aggregate pagination bounds) and
+  a post-construction `with_max_response_bytes` override.
+
+### Contributors
+
+Thank you to [@joseph-wortmann](https://github.com/joseph-wortmann),
+[@1111mp](https://github.com/1111mp), and
+[@jkmaina](https://github.com/jkmaina) for their contributions to v2.1.0.
+
+## [2.0.0] - 2026-08-09
+
+### Breaking
+
+- **`DeferredNodeConfig` gained a public `min_predecessors` field.** Every struct
+  literal needs `min_predecessors: None` to keep the previous behaviour, which is
+  to release the join when all direct predecessors have arrived. `Some(n)` releases
+  after *n* of them, for a quorum instead of a full join.
+- **`CompiledGraph::get_next_nodes` returns `Result<Vec<String>>`.** A router
+  answering with a key that is not among the declared targets previously stopped
+  that branch and the run reported success with the target never executed. It now
+  gives `GraphError::UnknownRouteTarget`, naming the key and listing the declared
+  ones. A route to `END` stays legal, because `END` is declared.
+- **`CompiledGraph::time_travel` returns `Result<TimeTravelHandle>`.** It used to
+  panic when the graph had no checkpointer. Add `?` at the call site.
+
+- **`ConnectionRefresher::call_tool` and `SimpleClient::call_tool` return
+  `CallToolResponse`** instead of `CallToolResult`. SEP-2663 lets a server answer
+  `tools/call` with a task, and SEP-2322 with a request for more input, so the
+  response now says which of the three happened. Both wrappers moved to rmcp's
+  `call_tool_once`: the `call_tool` helper fulfils input rounds through the local
+  handler on its own and rejects a task response outright, which would break every
+  server that materializes one. `McpToolset::execute` handles all three cases
+  internally, so agents built on `McpToolset` need no change.
+- **Task execution now needs the extension declared at handshake time.** SEP-2663
+  moved the declaration from the request to the client's capabilities: a server
+  must not answer with a task unless the client declared
+  `io.modelcontextprotocol/tasks`. Call
+  `AdkClientHandler::with_tasks()` when building the client;
+  `McpToolset::with_task_support` continues to set how the client polls. Under
+  rmcp 2.2 each call carried its own task metadata, so no handshake declaration
+  was needed. `examples/mcp_protocol_revisions` demonstrates both.
+- **A tool no longer declares its own task contract.** SEP-2663 removed the
+  per-tool signal, so `Tool::is_long_running` on an MCP tool now answers per
+  connection: true when tasks are enabled and the server negotiated them. A
+  `CodeActAgent` that suspends on long-running tools suspends for any tool on a
+  task-capable server rather than only those that declared support.
+- **`rmcp::model::SamplingMessageContent` is now `SamplingMessageContentBlock`**
+  under the `mcp-sampling` feature. `adk-tool --features mcp-sampling` joins the
+  PR-tier feature-coverage matrix; nothing in the workspace enabled it, so its
+  only cover was an example crate.
+
+### Changed
+
+- **A graph's default `recursion_limit` is 100, up from 50.** `LlmAgent`'s tool loop
+  already allowed 100, so a graph stopped at half the budget an agent got, for no
+  stated reason. A cycle now runs twice as far before
+  `GraphError::RecursionLimitExceeded`.
+- **`RetryPolicy::default()` allows ten attempts, up from one.** One attempt made
+  the default a no-op. Ten attempts sleep about 243 seconds in total, so a node that
+  keeps failing takes roughly four minutes to give up; lower `max_attempts` where a
+  caller is waiting. Retry is still opt-in: a node with **no** policy runs once.
+
+### Added
+
+- **`adk-graph` parity and reliability work.** Each item is off by default, so an
+  existing graph behaves as it did:
+  - **Routing from inside a node.** `NodeOutput::with_goto` names the successors,
+    replacing that node's declared edges, so a node reaches a node it has no edge
+    to. `AgentNode::with_goto_mapper` derives the route from the updates its output
+    mapper produced, so an agent routes on its own answer. Naming `END` stops the
+    branch; an unknown name fails the run.
+  - **Per-node retry.** `RetryPolicy` with capped exponential backoff and jitter,
+    attached by `with_node_retry`. An interrupt is never retried. The attempt count
+    is checkpointed, so a resumed run continues the budget.
+  - **A concurrency bound.** `with_max_concurrency` caps how many nodes run at
+    once, admitting the frontier in sorted order.
+  - **Invoking a node directly.** `ctx.run_node_with(name, input, options)` runs a
+    node the graph has no edge to, sized from state. Completed children are
+    recorded under `<parent>/<child>@<run_id>`, so a resume returns the recorded
+    answer instead of paying for the child again.
+  - **A graph or a node as a tool.** `NodeTool::for_graph` and `for_node` expose
+    either through the `Tool` trait, reporting long-running so a graph pause travels
+    the existing tool-confirmation path.
+  - **An *n*-of-*m* join.** `DeferredNodeConfig::min_predecessors` releases a join
+    on a quorum.
+  - **Channel enforcement.** `with_strict_channels` fails the run when a node writes
+    a channel the schema does not declare, which otherwise took the overwrite
+    reducer silently.
+  - **`StreamEvent::NodeInterrupt`.** A node reporting a pause on the streamed
+    path. The executor converts it into the pause and does not forward it, so a
+    caller still sees only `Interrupted`.
+  - **Subgraphs.** `SubgraphNode` runs a compiled graph as a node, exchanging
+    named channels. A pause inside pauses the parent. A channel mapping naming a
+    channel neither side declares fails when the parent compiles, through a new
+    `Node::validate_against(&parent_schema)` that `compile()` calls for every node.
+  - **`NodeOutput::with_goto_parent`.** A node inside a subgraph ends its own graph
+    and names a node of the graph that holds it, read from the new
+    `CompiledGraph::invoke_detailed`. The counterpart to LangGraph's
+    `Command(graph=Command.PARENT)`.
+  - **`CompiledGraph::with_node_defaults`.** One retry, timeout or failure handler
+    for every node that sets none; a per-node value wins. A graph-wide
+    `default_timeout` already existed on `GraphAgentBuilder`.
+  - **`CompiledGraph::with_node_error_handler`.** Once a node's retry budget is
+    spent, a handler may record the failure and name a recovery node instead of
+    ending the run. An interrupt never reaches it.
+  - **Checkpoint retention.** `CompiledGraph::with_checkpoint_retention` bounds how
+    many checkpoints a thread keeps, by count, by age, or both, pruned after each
+    save. The newest is never discarded, because it is the one a resume loads.
+    `Checkpointer::prune` has a default that keeps everything, so a custom backend
+    is unaffected. A long-running thread previously grew without bound; LangGraph
+    documents the same growth and advises an external cron job.
+  - **Background runs survive a restart.** `adk-server`'s `RunStore` held runs in
+    an in-memory map, so graph state survived a restart through a checkpointer but
+    the list of runs did not, and a restarted server could not report what had been
+    in flight. `RunPersistence` records them, `FileRunPersistence` writes one JSON
+    file through a temporary and a rename, and `RunStore::restore` loads them at
+    startup — reporting any run that was `Running` or `Queued` as `Failed`, because
+    it cannot still be running. A restored run gets a live cancellation token. A
+    networked backend is a follow-up; the trait is the seam for one. Finished runs
+    are bounded by default — `RunRetention` keeps the newest 1000 and discards the
+    rest from both the map and the records, because a store that persists every
+    finished run forever is a leak that only appears after weeks. A run still in
+    flight is never discarded.
+  - **`FileManagedStateStore`.** The first `ManagedStateStore` reporting
+    `Durability::CrashDurable`, so a managed session can be reconstructed after
+    process loss. One JSON file per session, synced and renamed, so an acknowledged
+    write is persisted and a reader never sees a partial snapshot. Session ids are
+    escaped, so an id containing a path separator cannot write outside the root.
+    `InMemoryManagedStateStore` remains, and still reports `ProcessLocal`.
+  - **Umbrella features.** `graph-functional`, `graph-node-cache`, `graph-delta`,
+    `graph-time-travel`, `graph-sqlite`, and `graph-redis-cache` on `adk-rust`
+    forward to `adk-graph`, which has no default features. The first four are in
+    `full`.
+- **`gemini-agent-platform` / `gemini-agent-platform-full` umbrella meta-features.** One
+  switch that pulls in every Gemini Enterprise Agent Platform (Vertex/EAP)
+  integration, composable with any tier preset:
+  `features = ["standard", "gemini-agent-platform"]`. The base variant covers
+  `gemini-vertex`, `vertex-session`, and `gcp-secrets` (growing as later
+  platform integrations land) and excludes realtime transports — the right
+  default for ReasoningEngine BYOC deployments. `gemini-agent-platform-full` adds
+  `vertex-live` (Vertex AI Live API, which pulls in the adk-realtime stack).
+  Deploy-time tooling is host-side and excluded from both.
+
+### Changed
+
+- **MCP moves to the official `rmcp 3.1` SDK.** The client still advertises MCP
+  `2025-11-25`, so every existing server is unaffected: `rmcp 3.1` keeps
+  `ProtocolVersion::LATEST` at `2025-11-25`, and a `2026-07-28` server answers
+  the same handshake. `2026-07-28` adds a stateless `server/discover` handshake,
+  now selectable per connection through `adk_tool::mcp::ClientLifecycleMode`. It
+  stays opt-in because the SDK falls back to the legacy handshake only when a
+  server refuses the probe with `METHOD_NOT_FOUND`, and applies no timeout to it.
+  A new `adk-tool/tests/mcp_protocol_compatibility_tests.rs` holds the contract
+  across every revision the SDK knows: the default path must send `initialize`
+  first and advertise `2025-11-25`; a server pinned to `2024-11-05` stays
+  reachable; and `Discover` and `Auto` settle on `2026-07-28` against a server
+  that supports it. Two further tests run against external servers and are
+  `#[ignore]`d by default.
+  Closes #552.
+
+
+### Fixed
+
+- **`StreamMode::Messages` ignored every interrupt and wrote no checkpoint.** That
+  mode runs nodes in its own loop to forward tokens as they arrive, and both
+  interrupt checks lived in `execute_super_step`, which the loop never calls. So
+  `interrupt_before`, `interrupt_after`, and a node's own
+  `NodeOutput::interrupt` were all silently skipped — an approval gate did not
+  hold — and a completed run left nothing to resume from. The checks now live in
+  `gate_before`/`gate_after`, which both paths call, a node's pause travels as
+  `StreamEvent::NodeInterrupt` because that path yields events and no
+  `NodeOutput`, and the loop checkpoints each super-step. `GraphAgent`'s
+  `Agent::run` uses `invoke` and was never affected.
+- **A static interrupt could not be resumed past.** `interrupt_before` re-armed on
+  every resume, so the gated node never ran. `interrupt_after` had the same defect
+  and needed the opposite fix, because that node has already applied its updates.
+  A `cleared_interrupt` marker is now checkpointed, with a SQLite column, so the
+  durable backend keeps it too.
+- **A fan-in node ran once per arriving branch.** Branches of unequal length made
+  the join fire more than once. A node with more than one incoming direct edge is
+  now deferred automatically at compile time. Conditional predecessors are excluded
+  from the count, because a branch that never fires would stall the join.
+- **Parallel state updates depended on completion order.** Two nodes appending to
+  the same channel produced a different array depending on which finished first.
+  Updates now apply in sorted node order, and by sorted key within a node.
+- **An interrupt's data did not reach a caller through `GraphAgent`.** The pause is
+  now carried as a JSON payload under one reserved `provider_metadata` key, with
+  `GraphInterruptPayload::from_event` to read it back.
+- **`StreamEvent::RouteDispatched` was never emitted.** The debug stream now reports
+  one per conditional edge.
+
+
+- **`adk-memory --features database-memory` compiles again.** `pgvector` accepts
+  `sqlx >= 0.8, < 0.10` and resolved to 0.9 while the workspace pinned 0.8, so
+  two semver-incompatible `sqlx` majors sat in one graph and `pgvector::Vector`
+  implemented the other `sqlx::Type`. The lockfile now holds a single `sqlx`
+  0.8.6. `adk-rag --features pgvector` and the three sqlx-backed backends join
+  the PR-tier feature-coverage matrix, which no job had built.
 - **Inline and file content metadata survives session persistence.**
   `Part::InlineData`, `Part::FileData`, `Part::FunctionResponse`, and multimodal
   function-response parts retain optional annotations; inline data also retains
@@ -65,7 +686,73 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v3.0.0
   quote the offending instance values; `validate` delegates to it under
   `ValidationOptions::default()`. `SchemaError::InvalidInstance` gains
   `truncated`, so a capped issue list is distinguishable from a complete one.
-
+- **adk-code: in-process Python execution via Pydantic Monty** (`embedded-python`
+  feature). One `MontyExecutorBuilder` produces two `CodeExecutor` products:
+  `MontyOneShotExecutor` (fresh interpreter per call) and `MontyReplExecutor`
+  (variables, functions, and imports persist across calls, with
+  `start`/`stop`/`restart` lifecycle). OS access is host-granted at
+  construction — filesystem mounts (read-only/read-write), an explicit
+  environment map, and the clock — and serviced in place; ungranted access
+  raises a catchable in-script `OSError`. Monty has no network or subprocess
+  surface at all. Registered `HostFunction`s (sync or async) become callable
+  Python functions; the drive loop segments across `spawn_blocking` so async
+  host functions are awaited without holding interpreter state across `await`.
+  The per-request `SandboxPolicy` may only narrow within the grants — a grant
+  covers its entire directory subtree (a granted mount or any subdirectory of
+  one may be requested), and requests exceeding the grants are rejected
+  fail-closed with `UnsupportedPolicy`. Mount virtual paths are validated at
+  build time (normalized absolute, unique). Host-side buffers are bounded:
+  `print()` output is capped at `max_stdout_bytes` *during* the drive, and
+  JSON↔Monty conversion is depth-capped so iteratively built deep nesting
+  degrades to a placeholder instead of overflowing the host stack.
+  `SandboxPolicy::strict_python()` added.
+- **adk-code: `CodeExecutor::prompt_snippet()`** — a new defaulted trait method
+  (default `None`, backward compatible) letting backends describe their built
+  execution environment for LLM-facing tool descriptions. Both Monty executors
+  implement it: mode semantics, granted mounts, environment variable names
+  (never values), clock availability, and Python stubs for registered host
+  functions.
+- **adk-tool: `MontyPythonCodeTool`** (`monty_python_code`, feature
+  `code-embedded-python`) — the agent-facing tool over the Monty executors,
+  complementing the container-backed `PythonCodeTool` (which remains unchanged
+  for full-CPython workloads: pip packages, C extensions, the complete
+  standard library). One-shot mode shares a stateless executor; REPL mode keys
+  interpreter sessions by the full ADK session identity (app, user, session
+  id) with an LRU cap (default 100). The
+  tool description is composed from the executor's `prompt_snippet()`, the
+  schema is mode-aware (`reset` exists only in REPL mode), and
+  `MontyPythonCodeTool::builder()` forwards grants, host functions, and
+  limits. The umbrella crate forwards the feature as `code-embedded-python`.
+  New standalone example: `examples/monty_python_code_tool`.
+- **adk-codeact-monty is now publishable** (Experimental tier). The Python
+  `CodeRuntime` for the `CodeActAgent` joins the crates.io release train at the
+  workspace version, so `CodeActAgent` + Python is reachable from a published
+  dependency instead of a git checkout. Its duplicated Monty plumbing is gone:
+  the crate now consumes `adk-code`'s `embedded-python` integration kernel —
+  shared JSON↔Monty conversion (`json_to_monty`/`monty_to_json`), shared
+  OS-call servicing (`resolve_os_call`), a shared `PathAccess`, the shared
+  `pathlib` capability listing, and re-exports of the `monty`/`monty-types`/
+  `monty-fs` crates — so the Monty release is pinned exactly once, by
+  `adk-code`. Behavior change: an ungranted clock now raises a catchable
+  `OSError` (previously `RuntimeError`), matching the executors.
+- **adk-rust: `codeact` and `codeact-monty` umbrella features.** `codeact`
+  forwards `adk-agent/codeact` (the `CodeActAgent` was previously unreachable
+  through the umbrella); `codeact-monty` adds the `adk-codeact-monty` runtime
+  and re-exports it as `adk_rust::codeact_monty`. Both are opt-in specialist
+  features, composable with any tier — like `code-embedded-python`, they are
+  not part of `full`. The docs.rs build now enables the Monty opt-ins so their
+  modules appear in the umbrella documentation.
+- **adk-rust: `code-tools`, `code-embedded-js`, and `code-docker` umbrella
+  features — and `full` now includes `code-tools`.** Previously no tier enabled
+  `adk-tool/code`, so the code-execution tools (`CodeTool`, `PythonCodeTool`,
+  `JavaScriptCodeTool`, `FrontendCodeTool`, `MontyPythonCodeTool`) were
+  unreachable through the umbrella even on `full`, which compiled both
+  `adk-code` and `adk-tool` but not the integration layer between them.
+  `code-tools` forwards `adk-tool/code` (with `code` and `sandbox`, since
+  constructing `CodeTool` takes an adk-sandbox backend); `code-embedded-js`
+  and `code-docker` forward the embedded-JS and persistent-Docker live paths,
+  completing the family alongside `code-embedded-python` (which now implies
+  `code-tools`).
 - **adk-realtime: `DisconnectReason`, so a closed stream can say why.**
   `RealtimeSession::disconnect_reason()` reports the close code and reason the
   provider sent, and `RealtimeRunner::disconnect_reason()` forwards it. The
@@ -99,11 +786,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v3.0.0
 
 ### Security
 
-- **Wasmtime is updated to 46.0.2.** This resolves RUSTSEC-2026-0222 and
-  RUSTSEC-2026-0223. The PyO3 0.28 advisories are documented as unreachable:
-  PyO3 exists only in the lockfile through jiter's disabled `python` feature,
-  and no workspace feature compiles it. The supply-chain license policy now
+- **Wasmtime is updated to 46.0.3 and Monty to 0.0.21.** Wasmtime resolves
+  RUSTSEC-2026-0222 and RUSTSEC-2026-0223. Monty moves to `jiter 0.16` and
+  PyO3 0.29, resolving GHSA-36hh-v3qg-5jq4 and GHSA-chgr-c6px-7xpp even though
+  PyO3 remains behind jiter's disabled `python` feature. The Monty update also
+  brings descriptor-based mount confinement and fixes for Windows mount escape
+  and cached-overlay path revalidation. The supply-chain license policy
   recognizes Monty's OSI-approved Unicode-DFS-2016 data license.
+- **Example web interfaces no longer build DOM from untrusted HTML.** The
+  realtime voice example renders provider, memory, and pipeline data with DOM
+  text nodes, while the streaming bash example uses a cryptographic session ID
+  and a `Map` for untrusted tool-call keys. This resolves the five open CodeQL
+  XSS, prototype-pollution, and insecure-randomness findings.
+- **The audio `fx` feature drops unused `rubato` and `dasp` dependencies.** Its
+  processors already use ADK-Rust's internal bounded implementations and never
+  called either crate, so the public feature and behavior are unchanged while
+  the unnecessary dependency surface is removed.
+- **HTTP and cloud SDK dependencies are refreshed for RUSTSEC-2026-0258.** The
+  active HTTP/2 stack now uses `h2 0.4.19`; Azure Identity is aligned with the
+  0.22 Azure Core generation already used by Key Vault, and AWS Secrets Manager
+  no longer enables its legacy Hyper 0.14 TLS transport. The lockfile-only
+  `rkyv 0.7` advisory is documented as unreachable because no workspace feature
+  enables `rust_decimal`'s optional archive integration.
 
 ### Changed
 
@@ -123,25 +827,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v3.0.0
   variant or field is no longer a breaking change for downstream matches.
   `ValidationOptions` is deliberately exhaustive so `..Default::default()`
   construction keeps working.
-
+- **PostgreSQL vector memory remains aligned with SQLx 0.8.** `pgvector` is
+  pinned to `0.4.1`, the latest release whose SQLx integration uses the
+  workspace's SQLx 0.8 line. `pgvector 0.4.2` moved that integration to SQLx
+  0.9 and is intentionally excluded until the workspace upgrades SQLx.
 - **adk-codeact-monty joined the root workspace.** Monty is on crates.io since
   `0.0.19`, so the crate's git dependency (and the empty `[workspace]` table it
   forced) is gone: it now depends on `monty`, `monty-types`, and `monty-fs`
-  `0.0.19` from crates.io and is covered by the standard workspace gates
+  `0.0.21` from crates.io and is covered by the standard workspace gates
   (`clippy`, `nextest`, docs) on every PR. The dedicated out-of-workspace CI
   (`codeact-monty.yml`, the `out-of-workspace-monty` merge-tier job) is retired,
   and `examples/codeact_monty_agent` compiles in the PR-tier examples gate. The
-  workspace `Cargo.lock` pins `get-size2` to `0.10.1` — `monty 0.0.19` pulls
+  workspace `Cargo.lock` pins `get-size2` to `0.10.1` — `monty 0.0.21` pulls
   `ruff_python_ast 0.0.3`, which derives `GetSize` on `compact_str 0.9` fields
   while `get-size2 0.10.2+` moved to `compact_str 0.10`; the pin keeps the two
   aligned until monty upgrades past `ruff_python_ast 0.0.3`. Porting to the
-  0.0.19 API: `MontyRuntimeBuilder::max_allocations` is removed (Monty's
+  0.0.21 API: `MontyRuntimeBuilder::max_allocations` is removed (Monty's
   `ResourceLimits` no longer counts allocations — the time/memory caps remain),
   and per-step `print()` capture is capped at Monty's 10 MiB collector default
-  (exceeding it raises `MemoryError` in the script). The crate stays
-  `publish = false`.
-
-## [3.0.0] - 2026-07-25
+  (exceeding it raises `MemoryError` in the script). The crate is published on
+  the workspace release train.
 
 ### Breaking
 
@@ -3553,7 +4258,9 @@ Initial release - Published to crates.io.
 - Tokio async runtime
 - Google API key for Gemini
 
-[Unreleased]: https://github.com/zavora-ai/adk-rust/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/zavora-ai/adk-rust/compare/v2.1.0...HEAD
+[2.1.0]: https://github.com/zavora-ai/adk-rust/compare/v2.0.0...v2.1.0
+[2.0.0]: https://github.com/zavora-ai/adk-rust/compare/v1.0.0...v2.0.0
 [0.3.0]: https://github.com/zavora-ai/adk-rust/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/zavora-ai/adk-rust/compare/v0.1.9...v0.2.0
 [0.1.9]: https://github.com/zavora-ai/adk-rust/compare/v0.1.7...v0.1.9

@@ -29,10 +29,10 @@ This means your agent can answer questions about product docs, company policies,
 ```toml
 [dependencies]
 # Core only (in-memory store, all chunkers, no external deps)
-adk-rag = "3.0.0"
+adk-rag = "2.1.0"
 
 # With Gemini embeddings (recommended for getting started)
-adk-rag = { version = "3.0.0", features = ["gemini"] }
+adk-rag = { version = "2.1.0", features = ["gemini"] }
 ```
 
 ---
@@ -148,7 +148,7 @@ async fn main() -> anyhow::Result<()> {
     // Wrap pipeline as a tool and attach to an agent
     let agent = LlmAgentBuilder::new("support")
         .instruction("Answer questions using the rag_search tool. Cite your sources.")
-        .model(Arc::new(GeminiModel::new(&api_key, "gemini-2.5-flash")?))
+        .model(Arc::new(GeminiModel::new(&api_key, "gemini-3.7-flash")?))
         .tool(Arc::new(RagTool::new(pipeline, "kb")))
         .build()?;
 
@@ -221,7 +221,7 @@ let config = RagConfig::builder()
 
 | Provider | Feature flag | Model | Requires |
 |----------|-------------|-------|----------|
-| `GeminiEmbeddingProvider` | `gemini` | gemini-embedding-001 | `GOOGLE_API_KEY` |
+| `GeminiEmbeddingProvider` | `gemini` | gemini-embedding-2 | `GOOGLE_API_KEY` |
 | `OpenAIEmbeddingProvider` | `openai` | text-embedding-3-small | `OPENAI_API_KEY` |
 
 ```rust
@@ -353,13 +353,13 @@ Only pull the dependencies you need:
 
 ```toml
 # Just core
-adk-rag = "3.0.0"
+adk-rag = "2.1.0"
 
 # With Gemini embeddings
-adk-rag = { version = "3.0.0", features = ["gemini"] }
+adk-rag = { version = "2.1.0", features = ["gemini"] }
 
 # Everything
-adk-rag = { version = "3.0.0", features = ["full"] }
+adk-rag = { version = "2.1.0", features = ["full"] }
 ```
 
 > **Note:** The `lancedb` feature requires `protoc` installed. Install with `brew install protobuf` (macOS) or `apt install protobuf-compiler` (Ubuntu).

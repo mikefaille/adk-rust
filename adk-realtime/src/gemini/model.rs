@@ -20,7 +20,7 @@ use adk_gemini::schema_adapter::GeminiSchemaDialect;
 /// use adk_realtime::RealtimeModel;
 ///
 /// let backend = GeminiLiveBackend::studio("your-key");
-/// let model = GeminiRealtimeModel::new(backend, "models/gemini-live-2.5-flash-native-audio");
+/// let model = GeminiRealtimeModel::new(backend, "models/gemini-3.1-flash-live-preview");
 /// let session = model.connect(config).await?;
 /// ```
 #[derive(Debug, Clone)]
@@ -44,14 +44,6 @@ impl GeminiRealtimeModel {
     }
 
     /// Choose the dialect tool schemas are written in.
-    ///
-    /// [`GeminiSchemaDialect::JsonSchema`] keeps `additionalProperties`,
-    /// `allOf`/`anyOf`, `if`/`then` and the string/numeric bounds that the
-    /// default OpenAPI subset must strip, so the model is shown the same
-    /// contract the caller validates against. It is an opt-in because the field
-    /// it uses is undocumented and verified only by probe — read
-    /// [`GeminiSchemaDialect`] before selecting it, and re-probe before
-    /// assuming it on another model, surface, or endpoint version.
     pub fn with_schema_dialect(mut self, dialect: GeminiSchemaDialect) -> Self {
         self.schema_dialect = dialect;
         self

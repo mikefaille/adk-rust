@@ -24,14 +24,14 @@ Session management and state persistence for Rust Agent Development Kit (ADK-Rus
 
 ```toml
 [dependencies]
-adk-session = "3.0.0"
+adk-session = "2.1.0"
 ```
 
 Or use the meta-crate:
 
 ```toml
 [dependencies]
-adk-rust = { version = "3.0.0", features = ["sessions"] }
+adk-rust = { version = "2.1.0", features = ["sessions"] }
 ```
 
 ## Quick Start
@@ -80,19 +80,19 @@ let name = session.state().get("user:name");
 
 ```toml
 # SQLite
-adk-session = { version = "3.0.0", features = ["sqlite"] }
+adk-session = { version = "2.1.0", features = ["sqlite"] }
 
 # PostgreSQL
-adk-session = { version = "3.0.0", features = ["postgres"] }
+adk-session = { version = "2.1.0", features = ["postgres"] }
 
 # Redis
-adk-session = { version = "3.0.0", features = ["redis"] }
+adk-session = { version = "2.1.0", features = ["redis"] }
 
 # Encrypted sessions
-adk-session = { version = "3.0.0", features = ["encrypted-session"] }
+adk-session = { version = "2.1.0", features = ["encrypted-session"] }
 
 # Vertex AI sessions through the umbrella crate
-adk-rust = { version = "3.0.0", features = ["vertex-session"] }
+adk-rust = { version = "2.1.0", features = ["vertex-session"] }
 ```
 
 ## Vertex AI Sessions
@@ -107,6 +107,14 @@ let config = VertexAiSessionConfig::new("my-project", "us-central1")
     .with_reasoning_engine("1234567890");
 let service = VertexAiSessionService::new_with_adc(config)?;
 ```
+
+Inside a deployed Vertex AI Agent Engine container,
+`VertexAiSessionConfig::from_env()` reads `GOOGLE_CLOUD_PROJECT`,
+`GOOGLE_CLOUD_LOCATION`, and `GOOGLE_CLOUD_AGENT_ENGINE_ID` (the bare numeric
+engine ID) directly from the platform-provided environment.
+`with_ttl()`/`with_expire_time()` set the `Session.expiration` oneof sent on
+session create; `ttl` has a 24-hour minimum and both members are mutually
+exclusive.
 
 Caller-facing session IDs remain unchanged. The backend derives a deterministic
 remote ID from the complete `(app_name, user_id, session_id)` identity and stores

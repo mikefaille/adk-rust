@@ -16,6 +16,7 @@ Semantic memory and search for Rust Agent Development Kit (ADK-Rust) agents.
 - **MongoMemoryService** - MongoDB-backed persistence (`mongodb-memory` feature)
 - **Neo4jMemoryService** - Neo4j-backed persistence (`neo4j-memory` feature)
 - **RedisMemoryService** - Redis-backed persistence (`redis-memory` feature)
+- **VertexAiMemoryBankService** - Vertex AI Agent Engine Memory Bank (`vertex-memory` feature)
 - **MemoryService** - Trait for custom storage backends
 - **Semantic Search** - Query memories by content similarity
 - **Project-Scoped Isolation** - Isolate memories by project within a user
@@ -25,14 +26,14 @@ Semantic memory and search for Rust Agent Development Kit (ADK-Rust) agents.
 
 ```toml
 [dependencies]
-adk-memory = "3.0.0"
+adk-memory = "2.1.0"
 ```
 
 Or use the meta-crate:
 
 ```toml
 [dependencies]
-adk-rust = { version = "3.0.0", features = ["memory"] }
+adk-rust = { version = "2.1.0", features = ["memory"] }
 ```
 
 ## Quick Start
@@ -178,13 +179,14 @@ validate_project_id(&"x".repeat(257))?; // Err: exceeds 256 chars
 | `redis-memory` | Redis | Low-latency in-memory persistence via fred |
 | `mongodb-memory` | MongoDB | Document-oriented persistence |
 | `neo4j-memory` | Neo4j | Graph database persistence |
+| `vertex-memory` | Vertex AI Memory Bank | Managed memory generation and retrieval on the Gemini Enterprise Agent Platform |
 
 ```toml
 # SQLite
-adk-memory = { version = "3.0.0", features = ["sqlite-memory"] }
+adk-memory = { version = "2.1.0", features = ["sqlite-memory"] }
 
 # PostgreSQL + pgvector
-adk-memory = { version = "3.0.0", features = ["database-memory"] }
+adk-memory = { version = "2.1.0", features = ["database-memory"] }
 ```
 
 ## Schema Migrations

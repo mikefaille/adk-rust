@@ -40,7 +40,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! adk-rust = "3.0.0"
+//! adk-rust = "2.1.0"
 //! tokio = { version = "1.40", features = ["full"] }
 //! dotenvy = "0.15"  # For loading .env files
 //! ```
@@ -49,20 +49,20 @@
 //!
 //! ```toml
 //! # Minimal (default) — agents, Gemini, runner, sessions (fastest build)
-//! adk-rust = "3.0.0"
+//! adk-rust = "2.1.0"
 //!
 //! # Standard — minimal + tools, memory, OpenAI, Anthropic, server, auth,
 //! # graph, eval, guardrails, skills, plugins, artifacts, telemetry
-//! adk-rust = { version = "3.0.0", features = ["standard"] }
+//! adk-rust = { version = "2.1.0", features = ["standard"] }
 //!
 //! # Enterprise — standard + realtime, browser, rag, payments, awp
-//! adk-rust = { version = "3.0.0", features = ["enterprise"] }
+//! adk-rust = { version = "2.1.0", features = ["enterprise"] }
 //!
 //! # Full — enterprise + experimental crates (audio, code, sandbox)
-//! adk-rust = { version = "3.0.0", features = ["full"] }
+//! adk-rust = { version = "2.1.0", features = ["full"] }
 //!
 //! # Custom — pick exactly what you need
-//! adk-rust = { version = "3.0.0", default-features = false, features = [
+//! adk-rust = { version = "2.1.0", default-features = false, features = [
 //!     "agents", "gemini", "tools", "sessions", "openai", "openrouter"
 //! ] }
 //! ```
@@ -439,6 +439,14 @@
 //! | `sandbox` | Sandboxed execution | full (experimental) |
 //! | `audio` | Audio processing | full (experimental) |
 //! | `cli` | CLI launcher | (opt-in, any preset) |
+//! | `agent-engine` | Agent Engine runtime contract: dispatch endpoints + `serve_agent_engine` entrypoint | (opt-in, any preset) |
+//! | `example-store` | Vertex AI Example Store client + few-shot retrieval provider | (opt-in, any preset) |
+//! | `vertex-sandbox` | Vertex AI Agent Engine managed code-execution sandbox (adk-code) | (opt-in, any preset) |
+//! | `gemini-agent-platform` | Gemini Enterprise Agent Platform integrations (Vertex model backend, managed Sessions, GCP Secret Manager, GCS artifacts, Cloud telemetry, Agent Engine runtime contract, Example Store, code-execution Sandbox); excludes realtime transports and host-side deploy tooling | (opt-in, any preset) |
+//! | `vertex-memory` | Vertex AI Memory Bank backend for adk-memory | (opt-in, any preset) |
+//! | `gcp-deploy` | Agent Engine deployment client (host-side; not part of `gemini-agent-platform`) | (opt-in, any preset) |
+//! | `gemini-agent-platform` | Gemini Enterprise Agent Platform integrations (Vertex model backend, managed Sessions, GCP Secret Manager, GCS artifacts, Cloud telemetry, Agent Engine runtime contract, Memory Bank); excludes realtime transports and host-side deploy tooling | (opt-in, any preset) |
+//! | `gemini-agent-platform-full` | `gemini-agent-platform` + Vertex AI Live API (realtime stack) | (opt-in, any preset) |
 //!
 //! ## Examples
 //!
@@ -531,6 +539,9 @@ pub mod model {
 /// - `GoogleSearchTool` - Web search
 /// - `ExitLoopTool` - Control loop agents
 /// - `McpToolset` - MCP server integration with the `mcp` feature
+/// - `CodeTool` / `PythonCodeTool` / `JavaScriptCodeTool` / `MontyPythonCodeTool` -
+///   Code execution with the `code-tools` feature (included in `full`); the
+///   embedded live paths need `code-embedded-js` / `code-embedded-python`
 ///
 /// Available with feature: `tools`
 #[cfg(feature = "tools")]
@@ -638,6 +649,18 @@ pub mod telemetry {
     pub use adk_telemetry::*;
 }
 
+/// Deployment tooling (Agent Engine BYOC deployment client).
+///
+/// Host-side utilities for deploying agents:
+/// - `deploy::gcp` — create, poll, get, and delete ReasoningEngines
+///
+/// Available with feature: `gcp-deploy`
+#[cfg(feature = "gcp-deploy")]
+#[cfg_attr(docsrs, doc(cfg(feature = "gcp-deploy")))]
+pub mod deploy {
+    pub use adk_deploy::*;
+}
+
 /// Graph-based workflow engine (LangGraph-inspired).
 ///
 /// Build complex agent workflows with:
@@ -678,6 +701,21 @@ pub mod computer_use {
 #[cfg_attr(docsrs, doc(cfg(feature = "code")))]
 pub mod code {
     pub use adk_code::*;
+}
+
+/// Python `CodeRuntime` for the CodeActAgent, backed by the Monty interpreter
+/// (experimental).
+///
+/// Lets a [`CodeActAgent`](agent::codeact::CodeActAgent) act by writing Python:
+/// - [`MontyRuntime`](codeact_monty::MontyRuntime) - The `CodeRuntime` implementation
+/// - [`OsAccess`](codeact_monty::OsAccess) - Host-granted filesystem/environment/clock policy
+/// - [`PathAccess`](codeact_monty::PathAccess) - Read-only / read-write mount modes
+///
+/// Available with feature: `codeact-monty` (implies `codeact`)
+#[cfg(feature = "codeact-monty")]
+#[cfg_attr(docsrs, doc(cfg(feature = "codeact-monty")))]
+pub mod codeact_monty {
+    pub use adk_codeact_monty::*;
 }
 
 /// Isolated code execution runtime (experimental — `full` preset).
@@ -1051,13 +1089,25 @@ pub use adk_enterprise;
 /// `minimal` tier detects Gemini via `GOOGLE_API_KEY`; add `openai` or
 /// `anthropic` to widen detection.
 ///
-/// 1. `ANTHROPIC_API_KEY` → Anthropic (Claude)
-/// 2. `OPENAI_API_KEY` → OpenAI
-/// 3. `GOOGLE_API_KEY` → Gemini
+/// 1. `GOOGLE_GENAI_USE_ENTERPRISE` / `GOOGLE_GENAI_USE_VERTEXAI` truthy
+///    (`1` or case-insensitive `true`) → Gemini on Vertex AI via Application
+///    Default Credentials, using `GOOGLE_CLOUD_PROJECT` and
+///    `GOOGLE_CLOUD_LOCATION` (requires the `gemini-vertex` feature;
+///    `GOOGLE_GENAI_USE_ENTERPRISE` takes precedence when both are set)
+/// 2. `ANTHROPIC_API_KEY` → Anthropic (Claude)
+/// 3. `OPENAI_API_KEY` → OpenAI
+/// 4. `GOOGLE_API_KEY` → Gemini
+///
+/// When a Vertex flag is truthy but the `gemini-vertex` feature is not
+/// compiled, a `tracing` warning is emitted and detection falls through to
+/// the API-key steps, which may select the Gemini Studio endpoint
+/// (`generativelanguage.googleapis.com`).
 ///
 /// # Errors
 ///
-/// Returns [`AdkError`] when no supported environment variable is set.
+/// Returns [`AdkError`] when no supported environment variable is set, or
+/// when a Vertex flag is truthy but `GOOGLE_CLOUD_PROJECT` /
+/// `GOOGLE_CLOUD_LOCATION` is missing.
 ///
 /// # Example
 ///
@@ -1068,6 +1118,26 @@ pub use adk_enterprise;
 /// let model: Arc<dyn adk_rust::Llm> = provider_from_env()?;
 /// ```
 pub fn provider_from_env() -> Result<std::sync::Arc<dyn Llm>> {
+    // The Vertex opt-in flags come before any API-key sniffing so a
+    // deployment pinned to Vertex AI can never be diverted to the Studio
+    // endpoint by a stray API key.
+    #[cfg(feature = "gemini")]
+    {
+        if model::gemini::vertex_env_requested() {
+            #[cfg(feature = "gemini-vertex")]
+            {
+                return Ok(std::sync::Arc::new(model::GeminiModel::from_env(
+                    model::catalog::GEMINI_DEFAULT,
+                )?));
+            }
+            #[cfg(not(feature = "gemini-vertex"))]
+            tracing::warn!(
+                env.flags = "GOOGLE_GENAI_USE_ENTERPRISE/GOOGLE_GENAI_USE_VERTEXAI",
+                "vertex backend requested via environment but the gemini-vertex feature is not compiled; api-key detection may select the gemini studio endpoint (generativelanguage.googleapis.com)"
+            );
+        }
+    }
+
     #[cfg(feature = "anthropic")]
     {
         if let Ok(key) = std::env::var("ANTHROPIC_API_KEY") {
@@ -1078,7 +1148,7 @@ pub fn provider_from_env() -> Result<std::sync::Arc<dyn Llm>> {
     #[cfg(feature = "openai")]
     {
         if let Ok(key) = std::env::var("OPENAI_API_KEY") {
-            let config = model::openai::OpenAIConfig::new(key, "gpt-5-mini");
+            let config = model::openai::OpenAIConfig::new(key, model::catalog::OPENAI_DEFAULT);
             return Ok(std::sync::Arc::new(model::openai::OpenAIClient::new(config)?));
         }
     }
@@ -1086,7 +1156,10 @@ pub fn provider_from_env() -> Result<std::sync::Arc<dyn Llm>> {
     #[cfg(feature = "gemini")]
     {
         if let Ok(key) = std::env::var("GOOGLE_API_KEY") {
-            return Ok(std::sync::Arc::new(model::GeminiModel::new(key, "gemini-2.5-flash")?));
+            return Ok(std::sync::Arc::new(model::GeminiModel::new(
+                key,
+                model::catalog::GEMINI_DEFAULT,
+            )?));
         }
     }
 
@@ -1153,7 +1226,7 @@ pub async fn run(instructions: &str, input: &str) -> Result<String> {
             if result.is_none()
                 && let Ok(key) = std::env::var("OPENAI_API_KEY")
             {
-                let config = model::openai::OpenAIConfig::new(key, "gpt-4o-mini");
+                let config = model::openai::OpenAIConfig::new(key, model::catalog::OPENAI_DEFAULT);
                 let m = model::openai::OpenAIClient::new(config)?;
                 result = Some((Arc::new(m), None));
             }
@@ -1164,7 +1237,7 @@ pub async fn run(instructions: &str, input: &str) -> Result<String> {
             if result.is_none()
                 && let Ok(key) = std::env::var("GOOGLE_API_KEY")
             {
-                let m = Arc::new(model::GeminiModel::new(key, "gemini-2.5-flash")?);
+                let m = Arc::new(model::GeminiModel::new(key, model::catalog::GEMINI_DEFAULT)?);
                 let cc: Arc<dyn CacheCapable> = m.clone();
                 result = Some((m, Some(cc)));
             }

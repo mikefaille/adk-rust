@@ -8,14 +8,14 @@ Provides unified traits for Text-to-Speech (TTS), Speech-to-Text (STT), music ge
 
 ```toml
 [dependencies]
-adk-audio = "3.0.0"
+adk-audio = "2.1.0"
 ```
 
 Or via the umbrella crate (experimental):
 
 ```toml
 [dependencies]
-adk-rust = { version = "3.0.0", features = ["audio"] }
+adk-rust = { version = "2.1.0", features = ["audio"] }
 ```
 
 ## Feature Flags
@@ -25,8 +25,8 @@ adk-rust = { version = "3.0.0", features = ["audio"] }
 | `tts` (default) | Cloud TTS providers (ElevenLabs, OpenAI, Gemini, Cartesia) | `reqwest`, `base64` |
 | `stt` (default) | Cloud STT providers (Whisper API, Deepgram, AssemblyAI) | `reqwest`, `tokio-tungstenite` |
 | `music` | Music generation providers | `reqwest` |
-| `fx` | DSP processors (normalizer, resampler, noise, compressor, trimmer, pitch) | `rubato`, `dasp` |
-| `vad` | No-op, kept for compatibility. This crate ships **no** VAD backend — see [VAD](#vad-voice-activity-detection) | — |
+| `fx` | DSP processors (normalizer, resampler, noise, compressor, trimmer, pitch) | None |
+| `vad` | Voice Activity Detection | `webrtc-vad` |
 | `mlx` | Local inference model loading (tokenizers + HF Hub, cross-platform) | `tokenizers`, `hf-hub` |
 | `onnx` | ONNX Runtime local inference (cross-platform) | `ort`, `tokenizers`, `hf-hub` |
 | `kokoro` | Kokoro-82M ONNX TTS with espeak-ng phonemizer | `espeak-rs`, `ndarray` (implies `onnx`) |
@@ -379,30 +379,11 @@ let agent = LlmAgentBuilder::new("voice_assistant")
 
 ## VAD (Voice Activity Detection)
 
-**This crate ships no VAD backend.** It defines the `VadProcessor` trait so that
-callers can plug one in; it does not implement one, and nothing in this crate
-calls one. The only implementations in the repository are test doubles and a
-peak-amplitude threshold in `examples/desktop_audio`.
+The `VadProcessor` trait (behind `vad` feature) provides:
+- `is_speech(&AudioFrame) -> bool` — binary speech detection
+- `segment(&AudioFrame) -> Vec<SpeechSegment>` — identify speech segments with start/end timestamps
 
-```rust
-pub trait VadProcessor: Send + Sync {
-    fn is_speech(&self, frame: &AudioFrame) -> bool;
-    fn segment(&self, frame: &AudioFrame) -> Vec<SpeechSegment>;
-}
-```
-
-The trait is always available — it is **not** behind the `vad` feature, which
-gates no code at all and exists only so that dependents naming it keep building.
-
-Note the shape before adopting it: `is_speech` takes `&self` on a `Send + Sync`
-trait, so a stateful or recurrent detector has to put a mutex in the per-frame
-path. For streaming detection prefer one mutable detector per stream with an
-explicit `reset()`.
-
-There is deliberately no `webrtc-vad` dependency. It builds libfvad, which
-exports the upstream WebRTC signal-processing C symbols unmangled and therefore
-fails to link into any binary that also links LiveKit's `webrtc-sys`. Pick a
-pure-Rust backend instead.
+Used by the voice agent pipeline to gate STT inference to speech-only segments.
 
 ## Realtime Bridge
 

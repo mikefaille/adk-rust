@@ -5,7 +5,7 @@ Welcome to the official documentation for ADK-Rust (Agent Development Kit for Ru
 ## Getting Started
 
 - [Introduction](introduction.md) - Overview of ADK-Rust, its architecture, and key concepts
-- [Quickstart](quickstart.md) - Build your first agent in under 10 minutes
+- [Quickstart](quickstart.md) - Scaffold, run, and test your first agent in the embedded UI in under 5 minutes
 - [A2UI Quickstart](quickstart-a2ui.md) - Emit A2UI JSONL and render it in React
 - [Migrating 1.0 → 2.0](migration/1.0-to-2.0.md) - Complete breaking-change list with before/after code
 
@@ -117,6 +117,7 @@ Long-term memory that outlives a session — the persistent counterpart to sessi
 - [Server](deployment/server.md) - REST API and web UI integration
 - [A2A Protocol](deployment/a2a.md) - Agent-to-Agent communication
 - [Agentic Web Protocol](deployment/awp.md) - AWP protocol for agent-native web services
+- [Agent Engine](deployment/agent-engine.md) - Deploying on the Gemini Enterprise Agent Platform
 
 ## Evaluation
 
@@ -133,6 +134,10 @@ Long-term memory that outlives a session — the persistent counterpart to sessi
 - [Guardrails](security/guardrails.md) - PII redaction, content filtering, schema validation
 - [Memory](security/memory.md) - Long-term semantic memory for agents
 - [Payments and Commerce](security/payments.md) - Agentic commerce journeys, protocol support, and validation paths
+
+## Compliance
+
+- [Vertex-Only Deployments](compliance/vertex-only-deployments.md) - Guarantee no Gemini Studio (`generativelanguage.googleapis.com`) traffic for HIPAA and data-residency workloads
 
 ## Studio
 

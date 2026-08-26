@@ -38,7 +38,7 @@ documentation and automation.
 
 ## Built-in templates
 
-The built-in registry currently contains 12 templates.
+The built-in registry currently contains 13 templates.
 
 | Template | What it creates | Choose it when |
 |---|---|---|
@@ -54,6 +54,7 @@ The built-in registry currently contains 12 templates.
 | `graph` | A branching workflow with checkpoints | Work must resume, branch, join, or survive process failure |
 | `realtime` | Bidirectional audio and video handling | The product needs a live voice or multimodal conversation |
 | `custom` | A manual implementation of the `Agent` trait | The execution contract cannot be expressed by a built-in agent |
+| `agent-engine` | A Gemini Enterprise Agent Engine BYOC container with `Dockerfile` and `deploy/terraform/` | The agent deploys to Agent Runtime as a prebuilt container |
 
 Choose the execution shape first. Add sessions, MCP, telemetry, or other
 product capabilities afterward instead of using them to decide the workflow.
@@ -75,6 +76,7 @@ files in a stable priority order.
 | `eval` | Evaluation harness scaffolding | Measure behavior against repeatable cases before release |
 | `browser` | Browser automation integration | Let an approved agent operate a web interface |
 | `server` | Axum HTTP and A2A server setup | Publish the agent for remote callers |
+| `docker` | Multi-stage container build files (`Dockerfile`, `Dockerfile.static`, `.dockerignore`) | Package the agent as a minimal container image |
 
 Example:
 

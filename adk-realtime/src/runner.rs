@@ -360,6 +360,36 @@ impl RealtimeRunnerBuilder {
 /// model and an application. It provides single-authority session generation fencing,
 /// managed write boundaries with explicit delivery certainty (`NotAttempted` vs `Indeterminate`),
 /// atomic configuration revision snapshotting, and automatic background connection recovery.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use adk_realtime::{RealtimeRunner, RealtimeConfig, ToolDefinition};
+/// use adk_realtime::openai::OpenAIRealtimeModel;
+///
+/// #[tokio::main]
+/// async fn main() -> Result<()> {
+///     let model = OpenAIRealtimeModel::new(api_key, "gpt-realtime-2.1");
+///
+///     let runner = RealtimeRunner::builder()
+///         .model(Box::new(model))
+///         .instruction("You are a helpful voice assistant.")
+///         .voice("alloy")
+///         .tool_fn(
+///             ToolDefinition::new("get_weather")
+///                 .with_description("Get weather for a location"),
+///             |call| {
+///                 Ok(serde_json::json!({"temperature": 72, "condition": "sunny"}))
+///             }
+///         )
+///         .build()?;
+///
+///     runner.connect().await?;
+///     runner.run().await?;
+///
+///     Ok(())
+/// }
+/// ```
 pub struct RealtimeRunner {
     model: BoxedModel,
     runner_config: RunnerConfig,

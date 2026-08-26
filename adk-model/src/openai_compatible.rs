@@ -1,13 +1,14 @@
 //! Shared OpenAI-compatible provider implementation.
 
-use crate::openai::convert;
+use crate::openai::{OpenAIReasoningEffort, convert};
 use crate::retry::{RetryConfig, execute_with_retry, is_retryable_model_error};
 use adk_core::{
     AdkError, Content, ErrorCategory, ErrorComponent, FinishReason, GenericSchemaAdapter, Llm,
     LlmRequest, LlmResponse, LlmResponseStream, Part, SchemaAdapter, SchemaCache, UsageMetadata,
 };
 use async_openai::types::chat::{
-    CreateChatCompletionRequestArgs, ReasoningEffort, ResponseFormat, ResponseFormatJsonSchema,
+    CreateChatCompletionRequestArgs, ReasoningEffort as OaiReasoningEffort, ResponseFormat,
+    ResponseFormatJsonSchema,
 };
 use async_stream::try_stream;
 use async_trait::async_trait;
@@ -35,7 +36,7 @@ pub struct OpenAICompatibleConfig {
     pub project_id: Option<String>,
     /// Optional reasoning effort for OpenAI reasoning models.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub reasoning_effort: Option<ReasoningEffort>,
+    pub reasoning_effort: Option<OaiReasoningEffort>,
     /// Whether to allow the model to call multiple tools in a single turn.
     pub parallel_tool_calls: bool,
 }
@@ -80,7 +81,7 @@ impl OpenAICompatibleConfig {
     }
 
     /// Set reasoning effort for reasoning models.
-    pub fn with_reasoning_effort(mut self, effort: ReasoningEffort) -> Self {
+    pub fn with_reasoning_effort(mut self, effort: OaiReasoningEffort) -> Self {
         self.reasoning_effort = Some(effort);
         self
     }
@@ -95,7 +96,7 @@ impl OpenAICompatibleConfig {
 
     /// Fireworks AI preset.
     ///
-    /// Default model: `accounts/fireworks/models/llama-v3p1-8b-instruct`
+    /// Default model: `accounts/fireworks/models/kimi-k2p6`
     pub fn fireworks(api_key: impl Into<String>, model: impl Into<String>) -> Self {
         Self::new(api_key, model)
             .with_provider_name("fireworks")
@@ -104,7 +105,7 @@ impl OpenAICompatibleConfig {
 
     /// Together AI preset.
     ///
-    /// Default model: `meta-llama/Llama-3.3-70B-Instruct-Turbo`
+    /// Default model: `MiniMaxAI/MiniMax-M2.7`
     pub fn together(api_key: impl Into<String>, model: impl Into<String>) -> Self {
         Self::new(api_key, model)
             .with_provider_name("together")
@@ -113,7 +114,7 @@ impl OpenAICompatibleConfig {
 
     /// Mistral AI preset.
     ///
-    /// Default model: `mistral-small-latest`
+    /// Default model: `mistral-medium-latest`
     pub fn mistral(api_key: impl Into<String>, model: impl Into<String>) -> Self {
         Self::new(api_key, model)
             .with_provider_name("mistral")
@@ -122,7 +123,7 @@ impl OpenAICompatibleConfig {
 
     /// Perplexity preset.
     ///
-    /// Default model: `sonar`
+    /// Default model: `sonar-pro`
     pub fn perplexity(api_key: impl Into<String>, model: impl Into<String>) -> Self {
         Self::new(api_key, model)
             .with_provider_name("perplexity")
@@ -131,7 +132,7 @@ impl OpenAICompatibleConfig {
 
     /// Cerebras preset.
     ///
-    /// Default model: `llama-3.3-70b`
+    /// Default model: `gpt-oss-120b`
     pub fn cerebras(api_key: impl Into<String>, model: impl Into<String>) -> Self {
         Self::new(api_key, model)
             .with_provider_name("cerebras")
@@ -140,7 +141,7 @@ impl OpenAICompatibleConfig {
 
     /// SambaNova preset.
     ///
-    /// Default model: `Meta-Llama-3.3-70B-Instruct`
+    /// Default model: `gpt-oss-120b`
     pub fn sambanova(api_key: impl Into<String>, model: impl Into<String>) -> Self {
         Self::new(api_key, model)
             .with_provider_name("sambanova")
@@ -149,7 +150,7 @@ impl OpenAICompatibleConfig {
 
     /// xAI (Grok) preset.
     ///
-    /// Default model: `grok-3-mini`
+    /// Default model: `grok-4.6`
     pub fn xai(api_key: impl Into<String>, model: impl Into<String>) -> Self {
         Self::new(api_key, model).with_provider_name("xai").with_base_url("https://api.x.ai/v1")
     }
@@ -157,7 +158,7 @@ impl OpenAICompatibleConfig {
     /// Google Gemini (OpenAI-compatible) preset.
     ///
     /// Targets Gemini's OpenAI-compatibility endpoint, letting you use a Gemini
-    /// API key and a Gemini model (e.g. `gemini-3.5-flash`) through the OpenAI
+    /// API key and a Gemini model (e.g. `gemini-3.7-flash`) through the OpenAI
     /// Chat Completions wire format. Use a `GEMINI_API_KEY` for the `api_key`.
     ///
     /// For native Gemini features (thinking levels, server-side tools, the
@@ -165,7 +166,7 @@ impl OpenAICompatibleConfig {
     /// This preset is for callers who want a single OpenAI-compatible code path
     /// across providers.
     ///
-    /// Default model suggestion: `gemini-3.5-flash`.
+    /// Default model suggestion: `gemini-3.7-flash`.
     pub fn gemini(api_key: impl Into<String>, model: impl Into<String>) -> Self {
         Self::new(api_key, model)
             .with_provider_name("gemini")
@@ -174,7 +175,7 @@ impl OpenAICompatibleConfig {
 
     /// MiniMax preset.
     ///
-    /// Default model: `minimax-m2.7`
+    /// Default model: `MiniMax-M2.7` (case-sensitive)
     pub fn minimax(api_key: impl Into<String>, model: impl Into<String>) -> Self {
         Self::new(api_key, model)
             .with_provider_name("minimax")
@@ -192,7 +193,7 @@ impl OpenAICompatibleConfig {
 
     /// Zhipu AI (GLM) preset.
     ///
-    /// Default model: `glm-5.1`
+    /// Default model: `glm-5.2`
     pub fn zhipu(api_key: impl Into<String>, model: impl Into<String>) -> Self {
         Self::new(api_key, model)
             .with_provider_name("zhipu")
@@ -201,7 +202,7 @@ impl OpenAICompatibleConfig {
 
     /// Baidu ERNIE (Qianfan) preset via OpenAI-compatible endpoint.
     ///
-    /// Default model: `ernie-5`
+    /// Default model: `ernie-5.1`
     ///
     /// Note: Uses the Qianfan OpenAI-compatible endpoint. For the native
     /// Qianfan API with OAuth2 token exchange, use a dedicated client.
@@ -241,7 +242,7 @@ pub struct OpenAICompatible {
     model: String,
     provider_name: String,
     retry_config: RetryConfig,
-    reasoning_effort: Option<ReasoningEffort>,
+    reasoning_effort: Option<OpenAIReasoningEffort>,
     organization_id: Option<String>,
     parallel_tool_calls: bool,
     adapter: std::sync::Arc<dyn SchemaAdapter>,
@@ -251,6 +252,26 @@ pub struct OpenAICompatible {
 impl OpenAICompatible {
     /// Create a new OpenAI-compatible client.
     pub fn new(config: OpenAICompatibleConfig) -> Result<Self, AdkError> {
+        let reasoning_effort = config.reasoning_effort.clone().map(|effort| match effort {
+            OaiReasoningEffort::None => OpenAIReasoningEffort::None,
+            OaiReasoningEffort::Minimal => OpenAIReasoningEffort::Minimal,
+            OaiReasoningEffort::Low => OpenAIReasoningEffort::Low,
+            OaiReasoningEffort::Medium => OpenAIReasoningEffort::Medium,
+            OaiReasoningEffort::High => OpenAIReasoningEffort::High,
+            OaiReasoningEffort::Xhigh => OpenAIReasoningEffort::XHigh,
+        });
+        Self::new_with_reasoning_effort(config, reasoning_effort)
+    }
+
+    /// Create an OpenAI-compatible client with the complete OpenAI reasoning vocabulary.
+    ///
+    /// This supports newer values such as `none`, `xhigh`, and `max` without changing
+    /// the backward-compatible [`OpenAICompatibleConfig::reasoning_effort`] field type.
+    pub fn new_with_reasoning_effort(
+        config: OpenAICompatibleConfig,
+        reasoning_effort: Option<OpenAIReasoningEffort>,
+    ) -> Result<Self, AdkError> {
+        crate::catalog::warn_if_obsolete(&config.provider_name, &config.model);
         let base_url = config.base_url.unwrap_or_else(|| "https://api.openai.com/v1".to_string());
         let adapter: std::sync::Arc<dyn SchemaAdapter> = if config.provider_name == "kimi" {
             std::sync::Arc::new(adk_core::KimiSchemaAdapter)
@@ -266,7 +287,7 @@ impl OpenAICompatible {
             model: config.model,
             provider_name: config.provider_name,
             retry_config: RetryConfig::default(),
-            reasoning_effort: config.reasoning_effort,
+            reasoning_effort,
             organization_id: config.organization_id,
             parallel_tool_calls: config.parallel_tool_calls,
             adapter,
@@ -305,11 +326,27 @@ impl OpenAICompatible {
 pub(crate) fn build_request_json(
     model: &str,
     request: &LlmRequest,
-    reasoning_effort: &Option<ReasoningEffort>,
+    reasoning_effort: &Option<OpenAIReasoningEffort>,
     parallel_tool_calls: bool,
     adapter: &dyn SchemaAdapter,
     cache: &SchemaCache,
 ) -> Result<serde_json::Value, AdkError> {
+    let bare_model = model.strip_prefix("models/").unwrap_or(model);
+    if matches!(bare_model, "gemini-3.6-flash" | "gemini-3.7-flash")
+        && request.config.as_ref().is_some_and(|config| {
+            config.temperature.is_some() || config.top_p.is_some() || config.top_k.is_some()
+        })
+    {
+        return Err(AdkError::new(
+            ErrorComponent::Model,
+            ErrorCategory::InvalidInput,
+            "model.gemini.sampling_unsupported",
+            format!(
+                "{bare_model} does not accept temperature, top_p, or top_k; remove explicit sampling parameters"
+            ),
+        )
+        .with_provider("gemini"));
+    }
     let messages: Vec<_> = request.contents.iter().map(convert::content_to_message).collect();
 
     let mut request_builder = CreateChatCompletionRequestArgs::default();
@@ -322,8 +359,8 @@ pub(crate) fn build_request_json(
         request_builder.parallel_tool_calls(parallel_tool_calls);
     }
 
-    if let Some(effort) = reasoning_effort {
-        request_builder.reasoning_effort(effort.clone());
+    if let Some(effort) = reasoning_effort.and_then(to_oai_reasoning_effort) {
+        request_builder.reasoning_effort(effort);
     }
 
     if let Some(config) = &request.config {
@@ -359,6 +396,18 @@ pub(crate) fn build_request_json(
     let mut body = serde_json::to_value(&openai_request)
         .map_err(|e| AdkError::model(format!("failed to serialize request: {e}")))?;
 
+    if matches!(reasoning_effort, Some(OpenAIReasoningEffort::Max)) {
+        body["reasoning_effort"] = serde_json::Value::String("max".to_string());
+    }
+
+    // GPT-5.6 defaults to medium reasoning, while Chat Completions function
+    // tools require effective reasoning `none`. ADK's public reasoning enum
+    // predates that value, so preserve source compatibility and make the safe
+    // effective setting explicit only for this otherwise-invalid combination.
+    if model.starts_with("gpt-5.6") && !request.tools.is_empty() && reasoning_effort.is_none() {
+        body["reasoning_effort"] = serde_json::Value::String("none".to_string());
+    }
+
     // Merge provider-specific extensions from config.extensions["openai"] into
     // the request body.  This allows users to pass provider-specific fields
     // that the typed builder doesn't cover (e.g. provider-specific parameters
@@ -373,6 +422,18 @@ pub(crate) fn build_request_json(
     }
 
     Ok(body)
+}
+
+fn to_oai_reasoning_effort(effort: OpenAIReasoningEffort) -> Option<OaiReasoningEffort> {
+    match effort {
+        OpenAIReasoningEffort::None => Some(OaiReasoningEffort::None),
+        OpenAIReasoningEffort::Minimal => Some(OaiReasoningEffort::Minimal),
+        OpenAIReasoningEffort::Low => Some(OaiReasoningEffort::Low),
+        OpenAIReasoningEffort::Medium => Some(OaiReasoningEffort::Medium),
+        OpenAIReasoningEffort::High => Some(OaiReasoningEffort::High),
+        OpenAIReasoningEffort::XHigh => Some(OaiReasoningEffort::Xhigh),
+        OpenAIReasoningEffort::Max => None,
+    }
 }
 
 /// Send an HTTP POST and handle error status codes.
@@ -508,7 +569,7 @@ impl Llm for OpenAICompatible {
         let api_key = self.api_key.clone();
         let base_url = self.base_url.clone();
         let retry_config = self.retry_config.clone();
-        let reasoning_effort = self.reasoning_effort.clone();
+        let reasoning_effort = self.reasoning_effort;
         let organization_id = self.organization_id.clone();
 
         // Normalize tool schemas at request time using the instance schema adapter and cache.
@@ -785,7 +846,7 @@ impl Llm for OpenAICompatible {
                         finish_reason: if is_tool { Some(adk_core::FinishReason::Stop) } else { None },
                         citation_metadata: None,
                         partial: !is_tool,
-                        turn_complete: is_tool,
+                        turn_complete: false,
                         interrupted: false,
                         error_code: None,
                         error_message: None,
@@ -849,6 +910,8 @@ impl Llm for OpenAICompatible {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use adk_core::{GenericSchemaAdapter, LlmRequest, SchemaCache};
+    use std::sync::Arc;
 
     #[test]
     fn test_parallel_tool_calls_config() {
@@ -872,6 +935,108 @@ mod tests {
     }
 
     #[test]
+    fn gpt_56_chat_tools_default_to_no_reasoning() {
+        let adapter = GenericSchemaAdapter;
+        let cache = SchemaCache::for_adapter(Arc::new(GenericSchemaAdapter));
+        let mut request = LlmRequest {
+            model: crate::catalog::OPENAI_DEFAULT.to_string(),
+            contents: Vec::new(),
+            config: None,
+            tools: HashMap::new(),
+            previous_response_id: None,
+        };
+        request.tools.insert(
+            "lookup".to_string(),
+            serde_json::json!({
+                "description": "Look up a record",
+                "parameters": {"type": "object", "properties": {}}
+            }),
+        );
+
+        let body = build_request_json(
+            crate::catalog::OPENAI_DEFAULT,
+            &request,
+            &None,
+            true,
+            &adapter,
+            &cache,
+        )
+        .expect("request should build");
+
+        assert_eq!(body["reasoning_effort"], "none");
+    }
+
+    #[test]
+    fn gpt_56_without_tools_keeps_server_reasoning_default() {
+        let adapter = GenericSchemaAdapter;
+        let cache = SchemaCache::for_adapter(Arc::new(GenericSchemaAdapter));
+        let request = LlmRequest {
+            model: crate::catalog::OPENAI_DEFAULT.to_string(),
+            contents: Vec::new(),
+            config: None,
+            tools: HashMap::new(),
+            previous_response_id: None,
+        };
+
+        let body = build_request_json(
+            crate::catalog::OPENAI_DEFAULT,
+            &request,
+            &None,
+            true,
+            &adapter,
+            &cache,
+        )
+        .expect("request should build");
+
+        assert!(body.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn gpt_56_chat_serializes_max_reasoning() {
+        let adapter = GenericSchemaAdapter;
+        let cache = SchemaCache::for_adapter(Arc::new(GenericSchemaAdapter));
+        let request = LlmRequest {
+            model: crate::catalog::OPENAI_DEFAULT.to_string(),
+            contents: Vec::new(),
+            config: None,
+            tools: HashMap::new(),
+            previous_response_id: None,
+        };
+
+        let body = build_request_json(
+            crate::catalog::OPENAI_DEFAULT,
+            &request,
+            &Some(OpenAIReasoningEffort::Max),
+            true,
+            &adapter,
+            &cache,
+        )
+        .expect("request should build");
+
+        assert_eq!(body["reasoning_effort"], "max");
+    }
+
+    #[test]
+    fn gemini_37_compatible_path_rejects_sampling_locally() {
+        let mut request = LlmRequest::new("gemini-3.7-flash", Vec::new());
+        request.config =
+            Some(adk_core::GenerateContentConfig { top_p: Some(0.9), ..Default::default() });
+        let cache = SchemaCache::for_adapter(Arc::new(GenericSchemaAdapter));
+
+        let error = build_request_json(
+            "gemini-3.7-flash",
+            &request,
+            &None,
+            true,
+            &GenericSchemaAdapter,
+            &cache,
+        )
+        .expect_err("sampling should be rejected before network I/O");
+
+        assert_eq!(error.code, "model.gemini.sampling_unsupported");
+    }
+
+    #[test]
     fn gemini_preset_sets_endpoint_and_provider() {
         let config = OpenAICompatibleConfig::gemini("test-key", "gemini-3.5-flash");
         assert_eq!(config.provider_name, "gemini");
@@ -887,8 +1052,8 @@ mod tests {
     fn gemini_preset_supports_reasoning_effort() {
         // Gemini's OpenAI-compat layer maps reasoning_effort onto thinking levels.
         let config = OpenAICompatibleConfig::gemini("k", "gemini-3.5-flash")
-            .with_reasoning_effort(ReasoningEffort::Low);
-        assert_eq!(config.reasoning_effort, Some(ReasoningEffort::Low));
+            .with_reasoning_effort(OaiReasoningEffort::Low);
+        assert_eq!(config.reasoning_effort, Some(OaiReasoningEffort::Low));
     }
 
     #[test]

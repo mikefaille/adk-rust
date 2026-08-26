@@ -22,6 +22,8 @@ This project is an **unofficial** community-maintained library. It is not affili
 - **PDF processing** — URL, base64, and Files API PDF analysis with citations
 - **Token counting** — `/v1/messages/count_tokens` endpoint
 - **Fast mode** — `speed: "fast"` for Opus 4.6 (beta, waitlist)
+- **Request customization** — caller-selected beta headers, bearer auth, API-version overrides, and exact per-request headers
+- **Server-side fallback** — typed default or explicit safety-refusal routing with fallback-aware responses and SSE events
 - **Batches API** — async batch processing
 - **Files API** — upload, get, delete, list
 - **Models API** — list and get model metadata with capabilities
@@ -32,21 +34,19 @@ This project is an **unofficial** community-maintained library. It is not affili
 
 | Model | API ID | Generation |
 |-------|--------|------------|
-| Claude Opus 4.8 | `claude-opus-4-8` | Latest |
-| Claude Opus 4.7 | `claude-opus-4-7` | Current |
-| Claude Opus 4.6 | `claude-opus-4-6` | Current |
-| Claude Sonnet 4.6 | `claude-sonnet-4-6` | Current |
-| Claude Haiku 4.5 | `claude-haiku-4-5` | Current (fastest) |
-| Claude Opus 4.5 | `claude-opus-4-5` | Previous |
-| Claude Sonnet 4.5 | `claude-sonnet-4-5` | Previous |
-| Claude Sonnet 4 | `claude-sonnet-4-0` | Legacy (retiring June 2026) |
-| Claude Opus 4 | `claude-opus-4-0` | Legacy (retiring June 2026) |
+| Claude Opus 5 | `claude-opus-5` | Current flagship |
+| Claude Sonnet 5 | `claude-sonnet-5` | Recommended default |
+| Claude Fable 5 | `claude-fable-5` | Creative and long-form |
+| Claude Opus 4.8 | `claude-opus-4-8` | Previous flagship; fast mode supported |
+| Claude Opus 4.7 | `claude-opus-4-7` | Previous generation |
+| Claude Sonnet 4.6 | `claude-sonnet-4-6` | Previous generation |
+| Claude Haiku 4.5 | `claude-haiku-4-5` | Economy |
 
 Any model string not matching a known variant deserializes as `Model::Custom(String)`.
 
-### Opus 4.8 / Opus 4.7 Breaking Changes
+### Current Model Request Contracts
 
-Opus 4.8 and Opus 4.7 introduce API breaking changes versus Opus 4.6:
+Claude 5, Opus 4.8, and Opus 4.7 use stricter request contracts than older models:
 
 - **Adaptive thinking only** — `thinking: {type: "enabled", budget_tokens: N}` returns 400. Use `ThinkingConfig::adaptive()`.
 - **No custom sampling** — `temperature` and `top_p` parameters are rejected.
@@ -74,6 +74,52 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## Examples
 
+### Request headers and server-side fallback
+
+`MessageCreateParams` remains source-compatible with 2.0. Use client methods
+for request-scoped beta selection or full header replacement:
+
+```rust
+use adk_anthropic::{Anthropic, KnownModel, MessageCreateParams};
+
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
+let client = Anthropic::new(None)?;
+let params = MessageCreateParams::simple("Hello", KnownModel::ClaudeSonnet46);
+let response = client
+    .send_with_betas(params, &["fine-grained-tool-streaming-2025-05-14"])
+    .await?;
+# let _ = response;
+# Ok(())
+# }
+```
+
+For OAuth or an Anthropic-compatible gateway, use
+`Anthropic::new_with_auth_token`; it sends `Authorization: Bearer ...` and
+omits `x-api-key`. `default_headers_for_request` plus `send_with_headers` or
+`stream_with_headers` provides exact replacement semantics when every header
+must be controlled by the caller.
+
+Server fallback is limited to safety-classifier refusals. It does not retry
+rate limits, overloaded responses, or server errors. It is currently intended
+for classifier-enabled models such as Claude Fable 5 and Claude Opus 5:
+
+```rust
+use adk_anthropic::{Anthropic, MessageCreateParams, Model, ServerFallbackRequest};
+
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
+let client = Anthropic::new(None)?;
+let params = MessageCreateParams::simple(
+    "Hello",
+    Model::Custom("claude-fable-5".to_string()),
+);
+let response = client
+    .send_with_server_fallbacks(ServerFallbackRequest::default_routing(params)?)
+    .await?;
+println!("fallback ran: {}", response.served_by_fallback());
+# Ok(())
+# }
+```
+
 Run any example with `cargo run -p adk-anthropic --example <name>`:
 
 | Example | Description |
@@ -93,6 +139,8 @@ Run any example with `cargo run -p adk-anthropic --example <name>`:
 | `pdf_processing` | PDF analysis via URL, base64, and with citations |
 | `vision` | Image understanding via URL |
 | `anthropic_custom_base_url` | Custom endpoints (Ollama, Vercel, MiniMax, proxies) |
+| `request_customization` | Caller-selected beta headers and optional bearer authentication |
+| `server_fallback` | Typed server-side safety-refusal fallback |
 
 ### Managed Agents Examples
 
@@ -206,7 +254,7 @@ When integrated with `AnthropicConfig` in `adk-model`, only tools matching the p
 use adk_model::anthropic::AnthropicConfig;
 use adk_anthropic::ToolSearchConfig;
 
-let config = AnthropicConfig::new("sk-ant-xxx", "claude-sonnet-4-6")
+let config = AnthropicConfig::new("sk-ant-xxx", "claude-sonnet-5")
     .with_tool_search(ToolSearchConfig::new("^safe_.*"));
 ```
 

@@ -26,25 +26,26 @@ Tool system for Rust Agent Development Kit (ADK-Rust) agents (FunctionTool, MCP,
 - **LoadArtifactsTool** - Inject binary artifacts into context
 - **LoadMemoryTool** - Agent-callable tool for on-demand memory search (feature: `memory-tools`)
 - **PreloadMemoryTool** - Auto-loads relevant memories at turn start (feature: `memory-tools`)
+- **ExampleStoreClient / ExampleStoreProvider** - Vertex AI Example Store few-shot retrieval (feature: `example-store`)
 
 ## Installation
 
 ```toml
 [dependencies]
-adk-tool = "3.0.0"
+adk-tool = "2.1.0"
 
 # For local MCP servers via stdio:
-adk-tool = { version = "3.0.0", features = ["mcp"] }
+adk-tool = { version = "2.1.0", features = ["mcp"] }
 
 # For remote MCP servers via HTTP:
-adk-tool = { version = "3.0.0", features = ["mcp", "http-transport"] }
+adk-tool = { version = "2.1.0", features = ["mcp", "http-transport"] }
 ```
 
 Or use the meta-crate:
 
 ```toml
 [dependencies]
-adk-rust = { version = "3.0.0", features = ["tools"] }
+adk-rust = { version = "2.1.0", features = ["tools"] }
 ```
 
 ## Quick Start
@@ -266,7 +267,8 @@ let toolset = McpHttpClientBuilder::new("https://mcp.example.com/v1")
 
 ### MCP Task Support (Long-Running Operations)
 
-Enable the negotiated MCP `2025-11-25` task lifecycle for long-running tool operations:
+Enable the negotiated MCP 2026-07-28 SEP-2663 Tasks extension for long-running
+tool operations:
 
 ```rust
 use adk_tool::{McpToolset, McpTaskConfig};
@@ -281,10 +283,39 @@ let toolset = McpToolset::new(client)
     );
 ```
 
-Task mode is used only when the server advertises task support and the selected
-tool declares it. ADK-Rust sends task metadata with `tools/call`, polls
-`tasks/get`, reads `tasks/result`, and requests `tasks/cancel` when the local
-timeout or poll bound is reached.
+Task mode is used only when the client config enables it and the server
+advertises the extension. The server decides per call whether to return a task.
+ADK-Rust polls `tasks/get`, fulfils paused `input_required` requests through the
+configured elicitation handler and `tasks/update`, and requests `tasks/cancel`
+when the local timeout or poll bound is reached.
+
+Managed servers select lifecycle and task policy in `mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "controlled-server": {
+      "command": "controlled-server",
+      "lifecycle": "discover",
+      "taskConfig": {
+        "enableTasks": true,
+        "pollIntervalMs": 500,
+        "timeoutMs": 300000,
+        "maxInputRounds": 10
+      }
+    },
+    "third-party-server": {
+      "command": "third-party-server",
+      "lifecycle": "auto"
+    }
+  }
+}
+```
+
+`discover` requires the stateless 2026 lifecycle. `auto` probes discovery and
+falls back only on `METHOD_NOT_FOUND`. The default remains `initialize` for
+backward compatibility. Stateless MRTR elicitation is driven automatically and
+bounded by `maxInputRounds`; opaque `requestState` is echoed without inspection.
 
 ### MCP Auto-Reconnect (Connection Resilience)
 
@@ -330,6 +361,23 @@ let search = GoogleSearchTool::new();
 // Add to agent - enables grounded web search
 ```
 
+## Code Execution Tools (`code` feature)
+
+Language-preset tool wrappers over the `adk-code` execution substrate: `CodeTool` (Rust), `JavaScriptCodeTool` (embedded JS via `code-embedded-js`), `PythonCodeTool` (container-backed CPython), and `MontyPythonCodeTool` (in-process Python via `code-embedded-python`).
+
+`MontyPythonCodeTool` runs model-written Python in the Monty interpreter — no container, no subprocess. It supports one-shot mode (fresh interpreter per call) and REPL mode (state persists across calls, scoped per ADK session), with host-granted filesystem/environment/clock access and registered host functions. Its LLM-facing description is composed from the executor's own capability report, so it always matches the built environment. For the full Python ecosystem (pip packages, C extensions, the complete standard library), use the container-backed `PythonCodeTool` instead.
+
+```rust
+use adk_code::PathAccess;
+use adk_tool::MontyPythonCodeTool;
+
+let tool = MontyPythonCodeTool::builder()
+    .allow_path("/data", "/srv/agent/data", PathAccess::ReadOnly)
+    .environ_var("PROJECT", "acme")
+    .system_clock()
+    .build_repl()?;
+```
+
 ## Features
 
 | Feature | Description |
@@ -337,6 +385,10 @@ let search = GoogleSearchTool::new();
 | `mcp` | Local MCP clients via stdio, `McpToolset`, and `McpServerManager` |
 | `http-transport` | Remote MCP servers via streamable HTTP |
 | `mcp-sampling` | Deprecated upstream sampling compatibility |
+| `code` | Code execution tools over the `adk-code` substrate |
+| `code-embedded-js` | `JavaScriptCodeTool` live path (boa_engine) |
+| `code-embedded-python` | `MontyPythonCodeTool` live path (Monty interpreter) |
+| `example-store` | Vertex AI Example Store client (v1beta1 data plane) and `ExampleStoreProvider` few-shot retrieval |
 
 ## MCP examples and guides
 
@@ -395,19 +447,58 @@ All composition utilities implement `Toolset` and work with any `Toolset` implem
 
 ## rmcp compatibility
 
-ADK-Rust 2 uses `rmcp 2.2`, the official Rust SDK aligned with MCP
-`2025-11-25`. `McpToolset::new(client)` remains the primary adapter. Advanced
-server authoring, transports, protocol extensions, and SDK types are available
-through `adk_tool::mcp::rmcp`, keeping them on the same version used internally.
+ADK-Rust 2 uses `rmcp 3.1`, the official Rust SDK. `McpToolset::new(client)`
+remains the primary adapter. Advanced server authoring, transports, protocol
+extensions, and SDK types are available through `adk_tool::mcp::rmcp`, keeping
+them on the same version used internally.
+
+### Protocol revisions
+
+The client advertises MCP `2025-11-25`, the same revision ADK-Rust 2 has always
+sent. A `2026-07-28` server still answers that handshake, so one client reaches
+both generations of server and no existing configuration changes behaviour.
+
+`2026-07-28` also adds a stateless `server/discover` handshake. It is opt-in,
+because a server that predates it is free to refuse an unknown method with
+something other than `METHOD_NOT_FOUND`, and the SDK treats only that one code
+as proof of a legacy peer. Select it per connection:
+
+| Mode | Sends first | Against an older server |
+|------|-------------|-------------------------|
+| `Initialize` (default) | `initialize` | Works |
+| `Auto` | `server/discover` | Falls back only on `METHOD_NOT_FOUND` |
+| `Discover` | `server/discover` | Fails; no fallback |
+
+```rust,ignore
+use adk_tool::mcp::{AdkClientHandler, ClientLifecycleMode, ClientServiceExt, McpToolset};
+use rmcp::model::ProtocolVersion;
+
+let client = AdkClientHandler::new(handler)
+    .serve_with_lifecycle(
+        transport,
+        ClientLifecycleMode::Auto {
+            preferred_versions: vec![ProtocolVersion::V_2026_07_28],
+            legacy_version: Some(ProtocolVersion::V_2025_11_25),
+        },
+    )
+    .await?;
+let toolset = McpToolset::new(client);
+```
+
+### Tasks
+
+SEP-2663 replaced the experimental task design. A tool no longer declares
+whether it supports task execution; the server decides per call, and the client
+reads the response to find out. `Tool::is_long_running` therefore reports per
+connection rather than per tool: it is true when tasks are enabled and the server
+negotiated them.
 
 Sampling, roots, and logging are deprecated upstream by SEP-2577. The
 `mcp-sampling` feature exists for compatible deployments and should not be the
 default design for a new system.
 
-When migrating code that imports `rmcp` types directly, align it to `rmcp 2.2`
-or import the SDK through `adk_tool::mcp::rmcp`. MCP 2.2 renamed several public
-content and elicitation types, so downstream type annotations may require
-updates even when `McpToolset::new(client)` itself is unchanged.
+When migrating code that imports `rmcp` types directly, align it to `rmcp 3.1`
+or import the SDK through `adk_tool::mcp::rmcp`.
 
 ## Related Crates
 

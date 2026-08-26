@@ -161,7 +161,7 @@ ADK-Rust provides multiple session service implementations:
 
 ```toml
 [dependencies]
-adk-rust = { version = "3.0.0", features = ["vertex-session"] }
+adk-rust = { version = "2.1.0", features = ["vertex-session"] }
 ```
 
 ### VertexAiSessionService
@@ -176,6 +176,43 @@ use adk_session::{VertexAiSessionConfig, VertexAiSessionService};
 let config = VertexAiSessionConfig::new("my-project", "us-central1")
     .with_reasoning_engine("1234567890");
 let service = VertexAiSessionService::new_with_adc(config)?;
+```
+
+Inside a deployed Vertex AI Agent Engine container the platform provides the
+configuration as environment variables, and `VertexAiSessionConfig::from_env()`
+reads them:
+
+| Variable | Meaning |
+|----------|---------|
+| `GOOGLE_CLOUD_PROJECT` | Google Cloud project ID |
+| `GOOGLE_CLOUD_LOCATION` | GCP region |
+| `GOOGLE_CLOUD_AGENT_ENGINE_ID` | Bare numeric agent engine ID (not a full resource name) |
+
+```rust
+use adk_session::{VertexAiSessionConfig, VertexAiSessionService};
+
+let config = VertexAiSessionConfig::from_env()?;
+let service = VertexAiSessionService::new_with_adc(config)?;
+```
+
+Missing or blank variables produce an invalid-input error naming each one.
+
+#### Session expiration
+
+`ttl` and `expireTime` are the `Session.expiration` oneof members
+(`google/cloud/aiplatform/v1beta1/session.proto`). The config sends at most
+one on session create: `ttl` is input-only, serialized as a JSON duration
+string (e.g. `"86400s"`), with a 24-hour minimum; `expireTime` is an RFC 3339
+timestamp. Setting both members, or a TTL below 24 hours, fails at service
+construction.
+
+```rust
+use adk_session::VertexAiSessionConfig;
+use std::time::Duration;
+
+let config = VertexAiSessionConfig::new("my-project", "us-central1")
+    .with_reasoning_engine("1234567890")
+    .with_ttl(Duration::from_secs(86_400)); // sent as "86400s"
 ```
 
 #### Identity isolation
@@ -388,7 +425,7 @@ async fn main() -> anyhow::Result<()> {
 
 > **Note**: The `SqliteSessionService` requires the `sqlite` feature flag:
 > ```toml
-> adk-session = { version = "3.0.0", features = ["sqlite"] }
+> adk-session = { version = "2.1.0", features = ["sqlite"] }
 > ```
 
 ### PostgresSessionService
@@ -421,7 +458,7 @@ async fn main() -> anyhow::Result<()> {
 
 > **Note**: Requires the `postgres` feature flag:
 > ```toml
-> adk-session = { version = "3.0.0", features = ["postgres"] }
+> adk-session = { version = "2.1.0", features = ["postgres"] }
 > ```
 
 ### MongoSessionService
@@ -466,7 +503,7 @@ async fn main() -> anyhow::Result<()> {
 
 > **Note**: Requires the `mongodb` feature flag:
 > ```toml
-> adk-session = { version = "3.0.0", features = ["mongodb"] }
+> adk-session = { version = "2.1.0", features = ["mongodb"] }
 > ```
 
 #### MongoDB deployment modes
@@ -520,7 +557,7 @@ async fn main() -> anyhow::Result<()> {
 
 > **Note**: Requires the `neo4j` feature flag:
 > ```toml
-> adk-session = { version = "3.0.0", features = ["neo4j"] }
+> adk-session = { version = "2.1.0", features = ["neo4j"] }
 > ```
 
 ### RedisSessionService
@@ -536,7 +573,7 @@ let session_service = RedisSessionService::new(config).await?;
 
 > **Note**: Requires the `redis` feature flag:
 > ```toml
-> adk-session = { version = "3.0.0", features = ["redis"] }
+> adk-session = { version = "2.1.0", features = ["redis"] }
 > ```
 
 ## Schema Migrations
@@ -548,7 +585,7 @@ All database-backed session services (SQLite, PostgreSQL, MongoDB, Neo4j) includ
 Wrap any `SessionService` with `EncryptedSession` to encrypt session state at rest using AES-256-GCM. Requires the `encrypted-session` feature flag.
 
 ```toml
-adk-session = { version = "3.0.0", features = ["encrypted-session"] }
+adk-session = { version = "2.1.0", features = ["encrypted-session"] }
 ```
 
 #### Basic Usage
@@ -743,7 +780,7 @@ use std::sync::Arc;
 async fn main() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
     let api_key = std::env::var("GOOGLE_API_KEY")?;
-    let model = Arc::new(GeminiModel::new(&api_key, "gemini-2.5-flash")?);
+    let model = Arc::new(GeminiModel::new(&api_key, "gemini-3.7-flash")?);
 
     let agent = LlmAgentBuilder::new("assistant")
         .model(model)

@@ -15,7 +15,7 @@ Add dependencies to `Cargo.toml`:
 
 ```toml
 [dependencies]
-adk-rust = "3.0.0"
+adk-rust = "2.1.0"
 tokio = { version = "1.40", features = ["full"] }
 dotenvy = "0.15"
 serde_json = "1.0"
@@ -40,7 +40,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     dotenvy::dotenv().ok();
     
     let api_key = std::env::var("GOOGLE_API_KEY")?;
-    let model = GeminiModel::new(&api_key, "gemini-2.5-flash")?;
+    let model = GeminiModel::new(&api_key, "gemini-3.7-flash")?;
 
     let agent = LlmAgentBuilder::new("my_agent")
         .instruction("You are a helpful assistant.")
@@ -181,7 +181,7 @@ use std::sync::Arc;
 async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     dotenvy::dotenv().ok();
     let api_key = std::env::var("GOOGLE_API_KEY")?;
-    let model = GeminiModel::new(&api_key, "gemini-2.5-flash")?;
+    let model = GeminiModel::new(&api_key, "gemini-3.7-flash")?;
 
     // 1. Agent with templated instruction
     let agent = LlmAgentBuilder::new("personalized")
@@ -297,7 +297,7 @@ Add dependencies to `Cargo.toml`:
 
 ```toml
 [dependencies]
-adk-rust = { version = "3.0.0", features = ["tools"] }
+adk-rust = { version = "2.1.0", features = ["tools"] }
 tokio = { version = "1.40", features = ["full"] }
 dotenvy = "0.15"
 serde_json = "1.0"
@@ -321,7 +321,7 @@ use std::sync::Arc;
 async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     dotenvy::dotenv().ok();
     let api_key = std::env::var("GOOGLE_API_KEY")?;
-    let model = GeminiModel::new(&api_key, "gemini-2.5-flash")?;
+    let model = GeminiModel::new(&api_key, "gemini-3.7-flash")?;
 
     // Tool 1: Weather lookup
     let weather_tool = FunctionTool::new(
@@ -407,7 +407,7 @@ use std::sync::Arc;
 async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     dotenvy::dotenv().ok();
     let api_key = std::env::var("GOOGLE_API_KEY")?;
-    let model = GeminiModel::new(&api_key, "gemini-2.5-flash")?;
+    let model = GeminiModel::new(&api_key, "gemini-3.7-flash")?;
 
     let extractor = LlmAgentBuilder::new("entity_extractor")
         .instruction("Extract entities from the given text.")
@@ -713,7 +713,7 @@ use std::sync::Arc;
 async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     dotenvy::dotenv().ok();
     let api_key = std::env::var("GOOGLE_API_KEY")?;
-    let model = GeminiModel::new(&api_key, "gemini-2.5-flash")?;
+    let model = GeminiModel::new(&api_key, "gemini-3.7-flash")?;
 
     // Weather tool
     let weather = FunctionTool::new(

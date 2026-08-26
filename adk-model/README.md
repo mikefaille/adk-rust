@@ -35,21 +35,21 @@ The crate implements the `Llm` trait from `adk-core`, allowing models to be used
 
 ```toml
 [dependencies]
-adk-model = "3.0.0"
+adk-model = "2.1.0"
 ```
 
 Enable provider-specific features as needed:
 
 ```toml
 [dependencies]
-adk-model = { version = "3.0.0", features = ["openrouter"] }
+adk-model = { version = "2.1.0", features = ["openrouter"] }
 ```
 
 Or use the meta-crate:
 
 ```toml
 [dependencies]
-adk-rust = { version = "3.0.0", features = ["models"] }
+adk-rust = { version = "2.1.0", features = ["models"] }
 ```
 
 ## Quick Start
@@ -74,6 +74,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+`GeminiModel::from_env(model)` builds the client from the environment: a truthy
+`GOOGLE_GENAI_USE_ENTERPRISE` or `GOOGLE_GENAI_USE_VERTEXAI` (`1` or a
+case-insensitive `true`) selects Vertex AI via Application Default Credentials
+using `GOOGLE_CLOUD_PROJECT` and `GOOGLE_CLOUD_LOCATION` (requires the
+`gemini-vertex` feature); otherwise the Gemini API via `GOOGLE_API_KEY` or
+`GEMINI_API_KEY`.
+
 ### OpenAI
 
 ```rust
@@ -84,7 +91,7 @@ use std::sync::Arc;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let api_key = std::env::var("OPENAI_API_KEY")?;
-    let model = OpenAIClient::new(OpenAIConfig::new(api_key, "gpt-5-mini"))?;
+    let model = OpenAIClient::new(OpenAIConfig::new(api_key, "gpt-5.6-terra"))?;
 
     let agent = LlmAgentBuilder::new("assistant")
         .model(Arc::new(model))
@@ -105,13 +112,13 @@ use futures::StreamExt;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let api_key = std::env::var("OPENROUTER_API_KEY")?;
     let client = OpenRouterClient::new(
-        OpenRouterConfig::new(api_key, "openai/gpt-4.1-mini")
+        OpenRouterConfig::new(api_key, "qwen/qwen3.7-max")
             .with_http_referer("https://github.com/zavora-ai/adk-rust")
             .with_title("ADK-Rust"),
     )?;
 
     let request = LlmRequest::new(
-        "openai/gpt-4.1-mini",
+        "qwen/qwen3.7-max",
         vec![Content::new("user").with_text("Reply in one short sentence.")],
     );
     let mut stream = client.generate_content(request, true).await?;
@@ -133,7 +140,7 @@ use adk_model::openrouter::{OpenRouterClient, OpenRouterConfig};
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let api_key = std::env::var("OPENROUTER_API_KEY")?;
     let client = OpenRouterClient::new(
-        OpenRouterConfig::new(api_key, "openai/gpt-4.1-mini")
+        OpenRouterConfig::new(api_key, "qwen/qwen3.7-max")
             .with_http_referer("https://github.com/zavora-ai/adk-rust")
             .with_title("ADK-Rust"),
     )?;
@@ -182,7 +189,7 @@ use std::sync::Arc;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let api_key = std::env::var("OPENAI_API_KEY")?;
-    let config = OpenAIResponsesConfig::new(api_key, "gpt-4.1-mini");
+    let config = OpenAIResponsesConfig::new(api_key, "gpt-5.6-terra");
     let model = OpenAIResponsesClient::new(config)?;
 
     let agent = LlmAgentBuilder::new("assistant")
@@ -240,17 +247,26 @@ Six standalone example crates demonstrate specific features:
 
 #### OpenAI Reasoning Effort
 
-For reasoning models (o1, o3, etc.), control how much reasoning effort the model applies:
+For current reasoning models, use the complete OpenAI reasoning vocabulary:
 
 ```rust
-use adk_model::openai::{OpenAIClient, OpenAIConfig, ReasoningEffort};
+use adk_model::openai::{
+    OpenAIReasoningEffort, OpenAIResponsesClient, OpenAIResponsesConfig,
+};
 
-let config = OpenAIConfig::new(api_key, "o3-mini")
-    .with_reasoning_effort(ReasoningEffort::High);
-let model = OpenAIClient::new(config)?;
+let config = OpenAIResponsesConfig::new(api_key, "gpt-5.6-terra");
+let model = OpenAIResponsesClient::new_with_reasoning_effort(
+    config,
+    OpenAIReasoningEffort::Max,
+)?;
 ```
 
-Available levels: `Low`, `Medium`, `High`.
+Available values are `None`, `Minimal`, `Low`, `Medium`, `High`, `XHigh`, and
+`Max`. Model and API support varies: GPT-5.6 supports every value except
+`Minimal` through the Responses API, while Chat Completions supports up to
+`XHigh`.
+The original `ReasoningEffort::{Low, Medium, High}` configuration remains
+available for backward compatibility.
 
 ### Anthropic (Claude)
 
@@ -262,7 +278,7 @@ use std::sync::Arc;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let api_key = std::env::var("ANTHROPIC_API_KEY")?;
-    let model = AnthropicClient::new(AnthropicConfig::new(api_key, "claude-sonnet-4-6"))?;
+    let model = AnthropicClient::new(AnthropicConfig::new(api_key, "claude-sonnet-5"))?;
 
     let agent = LlmAgentBuilder::new("assistant")
         .model(Arc::new(model))
@@ -275,11 +291,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 #### Anthropic Advanced Features
 
 ```rust
-use adk_model::anthropic::{AnthropicClient, AnthropicConfig};
+use adk_model::anthropic::{AnthropicClient, AnthropicConfig, ThinkingMode};
 
-// Extended thinking with token budget
-let config = AnthropicConfig::new(api_key, "claude-sonnet-4-6")
-    .with_thinking(8192)
+// Current Claude models use adaptive thinking rather than token budgets.
+let config = AnthropicConfig::new(api_key, "claude-sonnet-5")
+    .with_thinking_mode(ThinkingMode::Adaptive)
     .with_prompt_caching(true)
     .with_beta_feature("prompt-caching-2024-07-31");
 let client = AnthropicClient::new(config)?;
@@ -289,7 +305,7 @@ let count = client.count_tokens(&request).await?;
 
 // Model discovery
 let models = client.list_models().await?;
-let info = client.get_model("claude-sonnet-4-6").await?;
+let info = client.get_model("claude-sonnet-5").await?;
 
 // Rate limit inspection
 let rate_info = client.latest_rate_limit_info().await;
@@ -330,7 +346,7 @@ use std::sync::Arc;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let api_key = std::env::var("GROQ_API_KEY")?;
-    let model = GroqClient::new(GroqConfig::llama70b(api_key))?;
+    let model = GroqClient::new(GroqConfig::gpt_oss_120b(api_key))?;
 
     let agent = LlmAgentBuilder::new("assistant")
         .model(Arc::new(model))
@@ -434,7 +450,7 @@ use std::sync::Arc;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let api_key = std::env::var("PERPLEXITY_API_KEY")?;
-    let model = PerplexityClient::new(PerplexityConfig::new(api_key, "sonar"))?;
+    let model = PerplexityClient::new(PerplexityConfig::new(api_key, "sonar-pro"))?;
 
     let agent = LlmAgentBuilder::new("assistant")
         .model(Arc::new(model))
@@ -454,7 +470,7 @@ use std::sync::Arc;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let api_key = std::env::var("CEREBRAS_API_KEY")?;
-    let model = CerebrasClient::new(CerebrasConfig::new(api_key, "llama-3.3-70b"))?;
+    let model = CerebrasClient::new(CerebrasConfig::new(api_key, "gpt-oss-120b"))?;
 
     let agent = LlmAgentBuilder::new("assistant")
         .model(Arc::new(model))
@@ -474,7 +490,7 @@ use std::sync::Arc;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let api_key = std::env::var("SAMBANOVA_API_KEY")?;
-    let model = SambaNovaClient::new(SambaNovaConfig::new(api_key, "Meta-Llama-3.3-70B-Instruct"))?;
+    let model = SambaNovaClient::new(SambaNovaConfig::new(api_key, "gpt-oss-120b"))?;
 
     let agent = LlmAgentBuilder::new("assistant")
         .model(Arc::new(model))
@@ -493,8 +509,9 @@ use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Uses AWS IAM credentials from the environment (no API key needed)
-    let config = BedrockConfig::new("us-east-1", "us.anthropic.claude-sonnet-4-6");
+    // Uses AWS IAM credentials. Model IDs are account- and region-specific.
+    let model_id = std::env::var("BEDROCK_MODEL")?;
+    let config = BedrockConfig::new("us-east-1", model_id);
     let model = BedrockClient::new(config).await?;
 
     let agent = LlmAgentBuilder::new("assistant")
@@ -536,13 +553,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 | Model | Description |
 |-------|-------------|
-| `gemini-3.1-pro` | Most intelligent AI model, enhancing reasoning and multimodal capabilities. (1M context) |
-| `gemini-3-pro` | Intelligent model for complex agentic workflows (1M context) |
-| `gemini-3-flash` | Fast and efficient for most tasks (1M context) |
-| `gemini-2.5-pro` | Advanced reasoning and multimodal understanding |
-| `gemini-2.5-flash` | Balanced speed and capability (recommended) |
-| `gemini-2.5-flash-lite` | Ultra-fast for high-volume tasks |
-| `gemini-2.0-flash` | Previous generation (retiring March 2026) |
+| `gemini-3.7-flash` | Current balanced default (1M context) |
+| `gemini-3.6-flash` | Previous balanced generation (1M context) |
+| `gemini-3.5-flash-lite` | Cost-efficient high-volume model (1M context) |
+| `gemini-3.1-pro-preview` | Preview reasoning model (2M context) |
 
 See [Gemini models documentation](https://ai.google.dev/gemini-api/docs/models/gemini) for the full list.
 
@@ -550,11 +564,9 @@ See [Gemini models documentation](https://ai.google.dev/gemini-api/docs/models/g
 
 | Model | Description |
 |-------|-------------|
-| `gpt-5.1` | Latest iteration with improved performance (256K context) |
-| `gpt-5` | State-of-the-art unified model with adaptive thinking |
-| `gpt-5-mini` | Efficient version for most tasks (128K context) |
-| `gpt-4o` | Multimodal model (deprecated August 2025) |
-| `gpt-4o-mini` | Fast and affordable (deprecated August 2025) |
+| `gpt-5.6-terra` | Balanced default for agents |
+| `gpt-5.6-sol` | Flagship reasoning and coding |
+| `gpt-5.6-luna` | Cost-efficient high-volume model |
 
 See [OpenAI models documentation](https://platform.openai.com/docs/models) for the full list.
 
@@ -562,13 +574,10 @@ See [OpenAI models documentation](https://platform.openai.com/docs/models) for t
 
 | Model | Description |
 |-------|-------------|
-| `claude-opus-4-8` | Latest and most capable model for complex autonomous tasks (200K context) |
-| `claude-opus-4-7` | Previous flagship for complex autonomous tasks (200K context) |
-| `claude-opus-4-6` | Capable model for autonomous tasks (200K context) |
-| `claude-sonnet-4-6` | Balanced intelligence and cost for production (1M context) |
-| `claude-haiku-4-5-20251001` | Ultra-efficient for high-volume workloads |
-| `claude-opus-4-5-20251101` | Previous generation hybrid model with extended thinking |
-| `claude-sonnet-4-5-20250929` | Previous generation balanced model |
+| `claude-sonnet-5` | Balanced production default (1M context) |
+| `claude-opus-5` | Flagship autonomous-agent capability (1M context) |
+| `claude-fable-5` | Premium creative and long-form work (1M context) |
+| `claude-haiku-4-5` | Cost-efficient previous generation |
 
 See [Anthropic models documentation](https://docs.anthropic.com/claude/docs/models-overview) for the full list.
 
@@ -576,11 +585,8 @@ See [Anthropic models documentation](https://docs.anthropic.com/claude/docs/mode
 
 | Model | Description |
 |-------|-------------|
-| `deepseek-r1-0528` | Latest reasoning model with enhanced thinking depth (128K context) |
-| `deepseek-r1` | Advanced reasoning comparable to o1 |
-| `deepseek-v3.1` | Latest 671B MoE model for general tasks |
-| `deepseek-chat` | 671B MoE model, excellent for code (V3) |
-| `deepseek-vl2` | Vision-language model (32K context) |
+| `deepseek-v4-flash` | Fast balanced default |
+| `deepseek-v4-pro` | Advanced reasoning |
 
 **Features:**
 - **Thinking Mode** - Chain-of-thought reasoning with `<thinking>` tags
@@ -593,12 +599,8 @@ See [DeepSeek API documentation](https://api-docs.deepseek.com/) for the full li
 
 | Model | Description |
 |-------|-------------|
-| `llama-4-scout` | Llama 4 Scout (17Bx16E) - Fast via Groq LPU (128K context) |
-| `llama-3.2-90b-text-preview` | Large text model |
-| `llama-3.2-11b-text-preview` | Balanced text model |
-| `llama-3.1-70b-versatile` | Versatile large model |
-| `llama-3.1-8b-instant` | Ultra-fast instruction model |
-| `mixtral-8x7b-32768` | MoE model with 32K context |
+| `openai/gpt-oss-120b` | Production default via Groq LPU |
+| `openai/gpt-oss-20b` | Lower-latency economy model |
 
 **Features:**
 - **Ultra-Fast** - LPU-based inference (fastest in the industry)
@@ -636,13 +638,13 @@ See [Ollama library](https://ollama.com/library) for all available models.
 
 | Provider | Feature Flag | Default Model | API Key Env Var |
 |----------|-------------|---------------|-----------------|
-| Fireworks AI | `fireworks` | `accounts/fireworks/models/llama-v3p1-8b-instruct` | `FIREWORKS_API_KEY` |
-| Together AI | `together` | `meta-llama/Llama-3.3-70B-Instruct-Turbo` | `TOGETHER_API_KEY` |
-| Mistral AI | `mistral` | `mistral-small-latest` | `MISTRAL_API_KEY` |
-| Perplexity | `perplexity` | `sonar` | `PERPLEXITY_API_KEY` |
-| Cerebras | `cerebras` | `llama-3.3-70b` | `CEREBRAS_API_KEY` |
-| SambaNova | `sambanova` | `Meta-Llama-3.3-70B-Instruct` | `SAMBANOVA_API_KEY` |
-| Amazon Bedrock | `bedrock` | `us.anthropic.claude-sonnet-4-6` | AWS IAM credentials |
+| Fireworks AI | `openai` preset | `accounts/fireworks/models/kimi-k2p6` | `FIREWORKS_API_KEY` |
+| Together AI | `openai` preset | `MiniMaxAI/MiniMax-M2.7` | `TOGETHER_API_KEY` |
+| Mistral AI | `openai` preset | `mistral-medium-latest` | `MISTRAL_API_KEY` |
+| Perplexity | `openai` preset | `sonar-pro` | `PERPLEXITY_API_KEY` |
+| Cerebras | `openai` preset | `gpt-oss-120b` | `CEREBRAS_API_KEY` |
+| SambaNova | `openai` preset | `gpt-oss-120b` | `SAMBANOVA_API_KEY` |
+| Amazon Bedrock | `bedrock` | account/region-specific | AWS IAM credentials |
 | Azure AI Inference | `azure-ai` | (endpoint-specific) | `AZURE_AI_API_KEY` |
 
 ## Features
@@ -712,24 +714,24 @@ Enable specific providers with feature flags:
 ```toml
 [dependencies]
 # All providers (default)
-adk-model = { version = "3.0.0", features = ["all-providers"] }
+adk-model = { version = "2.1.0", features = ["all-providers"] }
 
 # Individual providers
-adk-model = { version = "3.0.0", features = ["gemini"] }
-adk-model = { version = "3.0.0", features = ["openai"] }
-adk-model = { version = "3.0.0", features = ["xai"] }
-adk-model = { version = "3.0.0", features = ["anthropic"] }
-adk-model = { version = "3.0.0", features = ["deepseek"] }
-adk-model = { version = "3.0.0", features = ["groq"] }
-adk-model = { version = "3.0.0", features = ["ollama"] }
-adk-model = { version = "3.0.0", features = ["fireworks"] }
-adk-model = { version = "3.0.0", features = ["together"] }
-adk-model = { version = "3.0.0", features = ["mistral"] }
-adk-model = { version = "3.0.0", features = ["perplexity"] }
-adk-model = { version = "3.0.0", features = ["cerebras"] }
-adk-model = { version = "3.0.0", features = ["sambanova"] }
-adk-model = { version = "3.0.0", features = ["bedrock"] }
-adk-model = { version = "3.0.0", features = ["azure-ai"] }
+adk-model = { version = "2.1.0", features = ["gemini"] }
+adk-model = { version = "2.1.0", features = ["openai"] }
+adk-model = { version = "2.1.0", features = ["xai"] }
+adk-model = { version = "2.1.0", features = ["anthropic"] }
+adk-model = { version = "2.1.0", features = ["deepseek"] }
+adk-model = { version = "2.1.0", features = ["groq"] }
+adk-model = { version = "2.1.0", features = ["ollama"] }
+adk-model = { version = "2.1.0", features = ["fireworks"] }
+adk-model = { version = "2.1.0", features = ["together"] }
+adk-model = { version = "2.1.0", features = ["mistral"] }
+adk-model = { version = "2.1.0", features = ["perplexity"] }
+adk-model = { version = "2.1.0", features = ["cerebras"] }
+adk-model = { version = "2.1.0", features = ["sambanova"] }
+adk-model = { version = "2.1.0", features = ["bedrock"] }
+adk-model = { version = "2.1.0", features = ["azure-ai"] }
 ```
 
 ## Related Crates

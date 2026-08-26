@@ -60,6 +60,7 @@ The table below assigns one stability tier to every public `adk-*` crate in the 
 | `adk-schema` | **Beta** | Canonical JSON Schema documents, bounded ingestion, and role-typed identity |
 | `adk-enterprise` | **Experimental** | Enterprise client SDK for ADK-Rust Managed Agent Service |
 | `adk-managed` | **Experimental** | Managed agent runtime engine |
+| `adk-codeact-monty` | **Experimental** | Python CodeRuntime for the CodeActAgent via the Monty interpreter |
 
 ### Beta Crate Rationale
 
@@ -152,7 +153,7 @@ spends the major version on the breakage that had accumulated since 1.0.0.
 
 | Area | Change |
 |---|---|
-| MCP | Official `rmcp 2.2` SDK, protocol `2025-11-25` |
+| MCP | Official `rmcp 3.1` SDK, advertises protocol `2025-11-25` |
 | ACP | Official `agent-client-protocol` 1.2; `PermissionDecision::Allow` split into `AllowOnce`/`AllowAlways`/`Select` |
 | Tool authorization | `RunConfig` gained an async `ToolConfirmationHandler`; decisions key on function-call ID |
 | Realtime | `ClientEvent`/`ServerEvent` became `#[non_exhaustive]` so future protocol events are additive |

@@ -193,7 +193,10 @@ every `ci.yml` dependency and matrix entry succeeds. See CONTRIBUTING.md
   PSScriptAnalyzer on staged `*.ps1` via `scripts/lint-powershell.ps1` (skips
   itself when the module is not installed).
 - **pre-push** — `cargo check --workspace` (a fast compilation check, not the full
-  test suite). CI is the full-suite safety net, so the local gate stays quick.
+  test suite), plus `scripts/check-examples-compile.sh` over all four shards when
+  an example or a workspace crate it depends on has changed. The standalone
+  examples are outside the workspace, so nothing else compiles them. CI is the
+  full-suite safety net, so the local gate stays quick.
 
 ### AI Agent Workflow (`devenv`)
 
@@ -233,6 +236,10 @@ adk-gemini/      Dedicated Gemini client with GeminiBackend trait (Studio + Vert
                  streaming step events, and lifecycle (get/delete/cancel). The runtime
                  transport lives in adk-model (`gemini-interactions`): a `GeminiModel`
                  toggle that drives the standard LlmAgent/Runner through this endpoint.
+adk-gcp/         Shared Google Cloud REST plumbing for Vertex AI backends: ADC credential
+                 caching (GcpHttpClient), bounded HTTP transport, LRO polling (LroPoller),
+                 resource-name parsing (VertexResourceName), consumer-branded errors
+                 (GcpErrorContext). Wave 3 consolidation target for the ADC/LRO pattern.
 adk-anthropic/   Dedicated Anthropic API client: streaming, adaptive thinking, prompt caching,
                  citations, context management, fast mode, vision, PDF processing, pricing.
                  Supports Claude Opus 4.8, Opus 4.7, Sonnet 4.6, Haiku 4.5.
@@ -241,7 +248,7 @@ adk-anthropic/   Dedicated Anthropic API client: streaming, adaptive thinking, p
                  multiagent orchestration, file mounting, self-hosted environments.
                  Files API (`files` feature): upload, download, list, get, delete.
 adk-tool/        Tool system: FunctionTool, StatefulTool, SimpleToolContext, MCP integration
-                 (rmcp 2.2), McpServerManager (lifecycle, health, auto-restart), MCP Resource
+                 (rmcp 3.1), McpServerManager (lifecycle, health, auto-restart), MCP Resource
                  API, MCP Elicitation, Google Search, built-in tool wrappers (Gemini/OpenAI/
                  Anthropic), Slack/BigQuery/Spanner toolsets
 adk-runner/      Agent execution runtime with event streaming, RunnerConfigBuilder (typestate),
@@ -289,11 +296,14 @@ adk-skill/       Skill discovery, parsing, and convention-based agent capabiliti
 adk-cli/         Command-line launcher for agents, `cargo adk deploy` for ADK Platform
 adk-rust-macros/ Procedural macros (#[tool] attribute with read_only, concurrency_safe,
                  long_running metadata)
-adk-code/        Code execution (experimental)
+adk-code/        Code execution (experimental). Vertex AI Agent Engine sandbox client
+                 (`vertex-sandbox` feature): sandboxEnvironments lifecycle, synchronous
+                 :execute chunk protocol, per-session SandboxCodeExecutor (adk-python
+                 parity), VertexSandboxTool
 adk-codeact-monty/ Python CodeRuntime for the CodeActAgent, backed by the Pydantic Monty
-                 interpreter (monty, monty-types, monty-fs from crates.io). Sandboxed
-                 OS access (mounts, environ, clock), suspend/resume snapshots.
-                 Workspace member; publish = false.
+                 interpreter (via adk-code's embedded-python kernel, which pins the
+                 monty crates once). Sandboxed OS access (mounts, environ, clock),
+                 suspend/resume snapshots. EXPERIMENTAL.
 adk-devtools/    Developer tools for coding agents — inner-loop file/search/edit tools
                  (read_file, write_file, edit_file, glob, grep, ...) scoped to a sandboxed workspace
 adk-bench/       Benchmarking framework: framework-level runtime performance with real LLM APIs
@@ -374,17 +384,18 @@ docs/official_docs/    Comprehensive documentation site content
 
 ### Gemini model selection
 
-Use current-generation models. Gemini 2.0 models are deprecated (shut down March 31, 2026).
+Use current-generation models. Gemini 2.0 models were shut down on June 1, 2026.
 
 | Use case | Model ID | Notes |
 |----------|----------|-------|
-| Default / general | `gemini-2.5-flash` | Default in `adk-gemini` |
-| Cost-efficient / high-volume | `gemini-3.1-flash-lite-preview` | Cheapest, fastest, best for agentic routing |
-| Advanced reasoning | `gemini-3.1-pro-preview` | Strongest reasoning |
-| Image generation | `gemini-2.5-flash-image` | Multimodal output |
-| Code + agents | `gemini-3-flash-preview` | Good balance of speed and capability |
+| Default / general | `gemini-3.7-flash` | Default in `adk-gemini` and `adk-model` |
+| Cost-efficient / high-volume | `gemini-3.5-flash-lite` | Fast routing and high-volume work |
+| Advanced reasoning | `gemini-3.1-pro-preview` | Preview reasoning model |
+| Image generation | `gemini-3.1-flash-image` | Native image output |
+| Live voice | `gemini-3.1-flash-live-preview` | Realtime audio and video |
 
-**Avoid deprecated models:** `gemini-2.0-flash`, `gemini-2.0-flash-lite` — these are shut down.
+**Avoid retired models:** `gemini-2.0-flash`, `gemini-2.0-flash-lite`,
+`gemini-3.1-flash-lite-preview`, and `gemini-3-pro-preview`.
 
 ### adk-realtime
 
@@ -406,21 +417,45 @@ Four tiered presets control which crates are compiled:
 - `minimal` **(default)** — agents, models, gemini, runner, sessions. Fastest possible build for a single Gemini-powered agent.
 - `standard` — minimal + openai, anthropic, tools, memory, telemetry, skills, graph, auth, server, eval, guardrail, plugin, artifacts. Production deployment with server and auth.
 - `enterprise` — standard + realtime, browser, rag, payments, awp. Full-featured production.
-- `full` — enterprise + audio, code, sandbox. Everything.
+- `full` — enterprise + audio, code, sandbox, code-tools. Everything.
 
 Domain add-ons are composable with any tier: `features = ["minimal", "audio"]`.
+
+Platform meta-features (composable with any tier):
+- `gemini-agent-platform` — every Gemini Enterprise Agent Platform (Vertex/EAP) integration except realtime transports: `gemini-vertex`, `vertex-session`, `gcp-secrets`, `gcs-artifacts`, `gcp-telemetry`, `agent-engine`, `example-store` (grows as later integrations land). The right default for ReasoningEngine BYOC deployments. Deploy-time tooling is host-side and excluded.
+- `gemini-agent-platform` — every Gemini Enterprise Agent Platform (Vertex/EAP) integration except realtime transports: `gemini-vertex`, `vertex-session`, `gcp-secrets`, `gcs-artifacts`, `gcp-telemetry`, `agent-engine`, `vertex-memory` (grows as later integrations land). The right default for ReasoningEngine BYOC deployments. Deploy-time tooling is host-side and excluded.
+- `gemini-agent-platform-full` — `gemini-agent-platform` + `vertex-live` (Vertex AI Live API, pulls in the adk-realtime stack)
+
+Graph capability features (forwarded to `adk-graph`, which has no default features):
+- `graph-functional` — the functional API (`#[entrypoint]`/`#[task]`), in `full`
+- `graph-node-cache` — node result caching with content keys, in `full`
+- `graph-delta` — delta checkpoints, in `full`
+- `graph-time-travel` — step, fork and state history, in `full`
+- `graph-sqlite` — the SQLite checkpointer; needs a database, so not in `full`
+- `graph-redis-cache` — Redis-backed node cache; needs a server, so not in `full`
 
 Production backend features (require external infrastructure, NOT included in `full`):
 - `postgres-session`, `redis-session`, `mongodb-session`, `firestore-session`, `neo4j-session`,
   `vertex-session`
-- `sqlite-memory`, `database-memory`, `redis-memory`, `mongodb-memory`, `neo4j-memory`
+- `sqlite-memory`, `database-memory`, `redis-memory`, `mongodb-memory`, `neo4j-memory`,
+  `vertex-memory`
 - `auth-bridge`
 - `managed-runtime` — Managed agent runtime (adk-managed): durable sessions, event streaming, provider parity
 
 Specialist opt-in features:
 - `yaml-agent`, `agent-registry` — YAML agent config and registry REST API
+- `gcp-deploy` — Agent Engine (ReasoningEngine) BYOC deployment client (adk-deploy): create/poll/get/delete; host-side tooling, deliberately excluded from `gemini-agent-platform`. The same name on adk-cli enables `adk-rust deploy agent-engine`
+- `agent-engine` — Agent Engine runtime contract (adk-server): class-method dispatch endpoints and the turnkey `serve_agent_engine` entrypoint for Gemini Enterprise Agent Platform BYOC containers
+- `example-store` — Vertex AI Example Store client (adk-tool): v1beta1 data-plane upsert/search/fetch against a pre-provisioned store, plus `ExampleStoreProvider` for dynamic few-shot retrieval via a `BeforeModelCallback`
+- `vertex-sandbox` — Vertex AI Agent Engine managed code-execution sandbox (adk-code): v1beta1 sandboxEnvironments lifecycle (create/get/list/delete with LRO polling), synchronous `:execute` chunk protocol, `SandboxCodeExecutor` with per-session lazy create/recreate (adk-python parity), and `VertexSandboxTool` for LLM agents; part of `gemini-agent-platform`
 - `gemini-interactions` — Gemini Interactions API (Beta): wire client surface (server-side history, step timeline) plus the runtime transport on `GeminiModel` (`use_interactions_api`) driving the standard `LlmAgent`/`Runner`
 - `mcp`, `mcp-http`, `mcp-sampling` — MCP transport and sampling support
+- `code-tools` — Code execution tools over the adk-code substrate (`CodeTool`, `PythonCodeTool`, `JavaScriptCodeTool`, `MontyPythonCodeTool`; forwarded to adk-tool; included in `full`)
+- `code-embedded-js` — Embedded JavaScript execution via boa_engine — the `JavaScriptCodeTool` live path (forwarded to adk-tool and adk-code)
+- `code-embedded-python` — In-process Python execution via the Monty interpreter (`MontyPythonCodeTool`, forwarded to adk-tool and adk-code)
+- `code-docker` — Docker SDK-based persistent container execution (forwarded to adk-tool and adk-code)
+- `codeact` — CodeAct agents: the model acts by writing code (forwarded to adk-agent)
+- `codeact-monty` — Python `CodeRuntime` for the CodeActAgent via the Monty interpreter (adk-codeact-monty; implies `codeact`)
 - `slack`, `bigquery`, `spanner` — Native toolsets
 - `action`, `action-http`, `action-trigger`, `action-db`, `action-code`, `action-email`, `action-rss`, `action-full` — Action node executors
 - `video-avatar` — HeyGen/D-ID avatar providers
@@ -782,18 +817,18 @@ Always verify builds during publish — never use `--no-verify`. Verification en
 Crates must be published in dependency order. `cargo xtask publish` (via
 `./publish.sh`) computes the order from the workspace graph, so this list is
 documentation rather than configuration — `scripts/check-publish-order.sh` is the
-gate that keeps it satisfiable. The current 8 tiers over 41 publishable crates:
+gate that keeps it satisfiable. The current 8 tiers over 43 publishable crates:
 
 ```
 Tier 1: adk-core, adk-anthropic, adk-deploy, adk-enterprise, adk-rust-macros,
         adk-telemetry, awp-types
-Tier 2: adk-action, adk-artifact, adk-awp, adk-browser, adk-devtools, adk-gemini,
-        adk-guardrail, adk-memory, adk-mistralrs, adk-plugin, adk-sandbox,
-        adk-session
+Tier 2: adk-action, adk-artifact, adk-awp, adk-browser, adk-devtools, adk-gcp,
+        adk-gemini, adk-guardrail, adk-memory, adk-mistralrs, adk-plugin,
+        adk-sandbox, adk-session
 Tier 3: adk-code, adk-graph, adk-model, adk-rag, adk-realtime, adk-retry-reflect,
         adk-skill
 Tier 4: adk-agent, adk-audio, adk-runner, adk-tool
-Tier 5: adk-acp, adk-eval, adk-managed, adk-server
+Tier 5: adk-acp, adk-codeact-monty, adk-eval, adk-managed, adk-server
 Tier 6: adk-auth, adk-bench, adk-cli
 Tier 7: adk-computer-use, adk-payments, cargo-adk
 Tier 8: adk-rust (umbrella — always last)

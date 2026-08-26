@@ -17,14 +17,10 @@ The `adk-anthropic` crate is a dedicated Anthropic API client for ADK-Rust. It p
 
 | Model | API ID | Notes |
 |-------|--------|-------|
-| Claude Opus 4.7 | `claude-opus-4-7` | Most capable GA model, 1M context, 128K output, adaptive thinking only |
-| Claude Opus 4.6 | `claude-opus-4-6` | Previous flagship, 1M context, 128K output |
-| Claude Sonnet 4.6 | `claude-sonnet-4-6` | Best speed/intelligence balance, 1M context |
-| Claude Haiku 4.5 | `claude-haiku-4-5` | Fastest, 200K context |
-| Claude Opus 4.5 | `claude-opus-4-5` | Previous generation |
-| Claude Sonnet 4.5 | `claude-sonnet-4-5` | Previous generation |
-| Claude Sonnet 4 | `claude-sonnet-4-0` | Legacy (retiring June 2026) |
-| Claude Opus 4 | `claude-opus-4-0` | Legacy (retiring June 2026) |
+| Claude Sonnet 5 | `claude-sonnet-5` | Default speed/intelligence balance, 1M context |
+| Claude Opus 5 | `claude-opus-5` | Flagship capability, 1M context |
+| Claude Fable 5 | `claude-fable-5` | Premium creative and long-form work, 1M context |
+| Claude Haiku 4.5 | `claude-haiku-4-5` | Cost-efficient previous generation, 200K context |
 
 ## Setup
 
@@ -37,10 +33,10 @@ export ANTHROPIC_API_KEY=sk-ant-...
 ## Direct Client Usage
 
 ```rust
-use adk_anthropic::{Anthropic, KnownModel, MessageCreateParams};
+use adk_anthropic::{Anthropic, MessageCreateParams, Model};
 
 let client = Anthropic::new(None)?; // reads ANTHROPIC_API_KEY
-let params = MessageCreateParams::simple("Hello!", KnownModel::ClaudeSonnet46);
+let params = MessageCreateParams::simple("Hello!", Model::claude_sonnet_5());
 let response = client.send(params).await?;
 ```
 
@@ -50,7 +46,7 @@ let response = client.send(params).await?;
 use adk_model::anthropic::{AnthropicClient, AnthropicConfig};
 
 let api_key = std::env::var("ANTHROPIC_API_KEY")?;
-let model = AnthropicClient::new(AnthropicConfig::new(api_key, "claude-sonnet-4-6"))?;
+let model = AnthropicClient::new(AnthropicConfig::new(api_key, "claude-sonnet-5"))?;
 ```
 
 ## Custom base URL (gateways, proxies, compatible endpoints)
@@ -64,7 +60,7 @@ through `adk-model` to the underlying client:
 use adk_model::anthropic::{AnthropicClient, AnthropicConfig};
 
 let model = AnthropicClient::new(
-    AnthropicConfig::new(api_key, "claude-sonnet-4-6")
+    AnthropicConfig::new(api_key, "claude-sonnet-5")
         .with_base_url("https://gateway.internal/anthropic"),
 )?;
 ```
@@ -91,20 +87,22 @@ validated when `AnthropicClient::new` builds the underlying client.
 
 ## Key Features
 
-### Adaptive Thinking (4.6+ models)
+### Adaptive Thinking
 
 Opus 4.7 **only** supports adaptive thinking — `budget_tokens` is rejected.
 
 ```rust
-use adk_anthropic::{ThinkingConfig, OutputConfig, EffortLevel};
+use adk_anthropic::{
+    EffortLevel, KnownModel, MessageCreateParams, Model, OutputConfig, ThinkingConfig,
+};
 
 // Opus 4.7: use xhigh effort (recommended for coding/agentic)
 let mut params = MessageCreateParams::simple("Solve this...", KnownModel::ClaudeOpus47)
     .with_thinking(ThinkingConfig::adaptive());
 params.output_config = Some(OutputConfig::with_effort(EffortLevel::XHigh));
 
-// Sonnet 4.6: any effort level works
-let mut params = MessageCreateParams::simple("Solve this...", KnownModel::ClaudeSonnet46)
+// Sonnet 5: balanced default for agentic workloads
+let mut params = MessageCreateParams::simple("Solve this...", Model::claude_sonnet_5())
     .with_thinking(ThinkingConfig::adaptive());
 params.output_config = Some(OutputConfig::with_effort(EffortLevel::High));
 ```
@@ -112,9 +110,9 @@ params.output_config = Some(OutputConfig::with_effort(EffortLevel::High));
 ### Prompt Caching
 
 ```rust
-use adk_anthropic::CacheControlEphemeral;
+use adk_anthropic::{CacheControlEphemeral, MessageCreateParams, Model};
 
-let mut params = MessageCreateParams::simple("Question", KnownModel::ClaudeSonnet46)
+let mut params = MessageCreateParams::simple("Question", Model::claude_sonnet_5())
     .with_system("Large system prompt...");
 params.cache_control = Some(CacheControlEphemeral::new());
 ```
@@ -122,9 +120,9 @@ params.cache_control = Some(CacheControlEphemeral::new());
 ### Structured Output
 
 ```rust
-use adk_anthropic::{OutputConfig, OutputFormat};
+use adk_anthropic::{MessageCreateParams, Model, OutputConfig, OutputFormat};
 
-let mut params = MessageCreateParams::simple("Extract data", KnownModel::ClaudeSonnet46);
+let mut params = MessageCreateParams::simple("Extract data", Model::claude_sonnet_5());
 params.output_config = Some(OutputConfig::new(OutputFormat::json_schema(schema)));
 ```
 
@@ -133,7 +131,7 @@ params.output_config = Some(OutputConfig::new(OutputFormat::json_schema(schema))
 ```rust
 use adk_anthropic::pricing::{ModelPricing, estimate_cost};
 
-let cost = estimate_cost(ModelPricing::SONNET_46, &response.usage);
+let cost = estimate_cost(ModelPricing::SONNET_5, &response.usage);
 println!("${:.6}", cost.total());
 ```
 

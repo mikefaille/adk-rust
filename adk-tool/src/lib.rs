@@ -99,12 +99,21 @@ pub mod spanner;
 #[cfg(feature = "mcp-sampling")]
 pub mod sampling;
 
+#[cfg(feature = "example-store")]
+pub mod example_store;
+
+#[cfg(feature = "vertex-agent-registry")]
+pub mod vertex;
+
 pub use adk_core::{AdkError, Result, Tool, ToolContext, Toolset};
 pub use adk_rust_macros::tool;
 
 // Re-export async_trait so the #[tool] macro's generated code can reference it
 // without requiring users to add async-trait as a direct dependency.
-pub use agent_tool::{AgentTool, AgentToolConfig};
+pub use agent_tool::{
+    AgentTool, AgentToolConfig, AgentToolFailureMode, AgentToolSessionSnapshot,
+    AgentToolStateMergePolicy,
+};
 pub use async_trait::async_trait;
 pub use builtin::{
     AnthropicBashTool20241022, AnthropicBashTool20250124, AnthropicTextEditorTool20250124,
@@ -116,6 +125,8 @@ pub use builtin::{
     OpenAIFileSearchTool, OpenAIImageGenerationTool, OpenAILocalShellTool, OpenAIMcpTool,
     OpenAIShellTool, OpenAIWebSearchTool, UrlContextTool, WebSearchTool, WebSearchUserLocation,
 };
+#[cfg(feature = "example-store")]
+pub use example_store::{ExampleStoreClient, ExampleStoreConfig, ExampleStoreProvider};
 pub use function_tool::{FunctionTool, schema_for};
 #[cfg(feature = "mcp")]
 pub use mcp::{
@@ -128,6 +139,8 @@ pub use stateful_tool::StatefulTool;
 pub use toolset::{
     BasicToolset, FilteredToolset, MergedToolset, PrefixedToolset, string_predicate,
 };
+#[cfg(feature = "vertex-agent-registry")]
+pub use vertex::agent_registry::{AgentRegistryClient, AgentRegistryConfig, AgentSearchTool};
 
 #[cfg(feature = "code")]
 pub use code_execution::CodeTool;
@@ -140,3 +153,9 @@ pub use code_execution::JavaScriptCodeTool;
 
 #[cfg(feature = "code")]
 pub use code_execution::PythonCodeTool;
+
+#[cfg(feature = "code")]
+pub use code_execution::MontyPythonCodeTool;
+
+#[cfg(feature = "code-embedded-python")]
+pub use code_execution::MontyPythonCodeToolBuilder;

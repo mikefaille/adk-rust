@@ -43,24 +43,6 @@ pub trait SchemaAdapter: Send + Sync + std::fmt::Debug {
         None
     }
 
-    /// Name of the function-declaration field that carries the parameter schema.
-    ///
-    /// A provider that offers more than one schema dialect usually offers them
-    /// under *different field names*, and the fields are mutually exclusive —
-    /// Gemini's `parameters` (an OpenAPI subset) and `parametersJsonSchema`
-    /// (JSON Schema) are the worked example. Sending a dialect under the wrong
-    /// name is not a degraded request: the Live socket closes with WS 1007
-    /// before any turn happens.
-    ///
-    /// Returning the field name from the adapter keeps the pair — "what did I
-    /// reduce to?" and "what do I call it on the wire?" — in one place, so a
-    /// caller cannot select a dialect and then post it under the other name.
-    /// The default is the long-standing `parameters`, so existing adapters are
-    /// unaffected.
-    fn parameters_field(&self) -> &'static str {
-        "parameters"
-    }
-
     /// Normalize a raw JSON Schema for this provider (infallible).
     fn normalize_schema(&self, schema: Value) -> Value;
 
@@ -94,6 +76,39 @@ pub trait SchemaAdapter: Send + Sync + std::fmt::Debug {
     /// Fallback schema when a tool provides no parameters.
     fn empty_schema(&self) -> Value {
         serde_json::json!({"type": "object", "properties": {}})
+    }
+
+    /// The function-declaration field this adapter's output must be posted under.
+    ///
+    /// A provider may accept more than one schema dialect on different fields —
+    /// Gemini takes an OpenAPI subset on `parameters` and standard JSON Schema
+    /// on `parametersJsonSchema`, and the two are mutually exclusive. The
+    /// reduction and the field name are therefore **one decision**: a schema
+    /// reduced for one dialect but posted under the other's field is either
+    /// rejected outright, or silently accepted carrying constraints the model
+    /// was never shown.
+    ///
+    /// Returning the field from the adapter keeps that decision in the one place
+    /// that already knows which dialect it produced, so a caller cannot pick the
+    /// wrong one. Defaults to `"parameters"`, which is correct for every
+    /// provider having only one such field.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use adk_core::SchemaAdapter;
+    /// use serde_json::Value;
+    ///
+    /// #[derive(Debug)]
+    /// struct TestAdapter;
+    /// impl SchemaAdapter for TestAdapter {
+    ///     fn normalize_schema(&self, schema: Value) -> Value { schema }
+    /// }
+    ///
+    /// assert_eq!(TestAdapter.parameters_field(), "parameters");
+    /// ```
+    fn parameters_field(&self) -> &'static str {
+        "parameters"
     }
 }
 
