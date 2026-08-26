@@ -784,8 +784,19 @@ impl RecoverySupervisor {
             }
 
             let max_attempts = policy.max_attempts().get();
+            // Phase-aware budget: planned attempts use 1..=max_attempts,
+            // but if promoted to Recovering the reactive phase gets its own
+            // fresh 1..=max_attempts budget.
+            let mut reactive_budget_started = false;
+            let mut attempt_idx: u32 = 0;
+            let mut current_max: u32 = max_attempts;
 
-            for attempt_idx in 1..=max_attempts {
+            loop {
+                attempt_idx += 1;
+                if attempt_idx > current_max {
+                    break;
+                }
+
                 if txn.cancel_token.is_cancelled() {
                     tracing::info!(
                         generation = originating_gen.id,
@@ -794,7 +805,7 @@ impl RecoverySupervisor {
                     let ctx = AttemptContext {
                         originating_gen_id: originating_gen.id,
                         attempt_idx,
-                        max_attempts,
+                        max_attempts: current_max,
                         expected_revision: None,
                         recovery_impl: Some(recovery_impl),
                     };
@@ -815,6 +826,18 @@ impl RecoverySupervisor {
                     ReplacementPhase::Recovering { cause, deadline } => (cause, deadline, true),
                 };
 
+                // When promoted to Recovering, give recovery its own fresh budget.
+                if is_recovering && !reactive_budget_started {
+                    reactive_budget_started = true;
+                    attempt_idx = 1;
+                    current_max = max_attempts;
+                    tracing::info!(
+                        generation = originating_gen.id,
+                        "promoted to reactive recovery; resetting attempt budget to {}",
+                        current_max
+                    );
+                }
+
                 if is_recovering
                     && recovery_impl.classify(&current_cause) == RecoveryDisposition::Fatal
                 {
@@ -830,7 +853,7 @@ impl RecoverySupervisor {
                     let ctx = AttemptContext {
                         originating_gen_id: originating_gen.id,
                         attempt_idx,
-                        max_attempts,
+                        max_attempts: current_max,
                         expected_revision: None,
                         recovery_impl: Some(recovery_impl),
                     };
@@ -859,6 +882,12 @@ impl RecoverySupervisor {
                             attempt = attempt_idx,
                             "planned deadline expired but promoted to recovery; continuing under fresh deadline"
                         );
+                        // Reset budget on promotion detected via deadline takeover.
+                        if !reactive_budget_started {
+                            reactive_budget_started = true;
+                            attempt_idx = 0; // Will be incremented to 1 at loop top
+                            current_max = max_attempts;
+                        }
                         continue;
                     }
 
@@ -867,7 +896,7 @@ impl RecoverySupervisor {
                     let ctx = AttemptContext {
                         originating_gen_id: originating_gen.id,
                         attempt_idx,
-                        max_attempts,
+                        max_attempts: current_max,
                         expected_revision: None,
                         recovery_impl: Some(recovery_impl),
                     };
@@ -913,7 +942,7 @@ impl RecoverySupervisor {
                         let ctx = AttemptContext {
                             originating_gen_id: originating_gen.id,
                             attempt_idx,
-                            max_attempts,
+                            max_attempts: current_max,
                             expected_revision: None,
                             recovery_impl: Some(recovery_impl),
                         };
@@ -937,6 +966,12 @@ impl RecoverySupervisor {
                                 attempt = attempt_idx,
                                 "in-flight attempt timed out under planned deadline after promotion; continuing under fresh deadline"
                             );
+                            // Reset budget on promotion detected via in-flight timeout.
+                            if !reactive_budget_started {
+                                reactive_budget_started = true;
+                                attempt_idx = 0; // Will be incremented to 1 at loop top
+                                current_max = max_attempts;
+                            }
                             continue;
                         }
                         let msg = "replacement deadline expired during connection attempt".to_string();
@@ -949,7 +984,7 @@ impl RecoverySupervisor {
                         let ctx = AttemptContext {
                             originating_gen_id: originating_gen.id,
                             attempt_idx,
-                            max_attempts,
+                            max_attempts: current_max,
                             expected_revision: None,
                             recovery_impl: Some(recovery_impl),
                         };
@@ -968,7 +1003,7 @@ impl RecoverySupervisor {
                 let ctx = AttemptContext {
                     originating_gen_id: originating_gen.id,
                     attempt_idx,
-                    max_attempts,
+                    max_attempts: current_max,
                     expected_revision: Some(snapshot.revision),
                     recovery_impl: Some(recovery_impl),
                 };
@@ -983,7 +1018,7 @@ impl RecoverySupervisor {
                         return;
                     }
                     AttemptTransition::RetryRecovering => {
-                        if attempt_idx < max_attempts {
+                        if attempt_idx < current_max {
                             let base_delay = policy.initial_delay();
                             let factor = 2u32.checked_pow(attempt_idx - 1).unwrap_or(u32::MAX);
                             let mut backoff =
@@ -999,7 +1034,7 @@ impl RecoverySupervisor {
                                 let ctx = AttemptContext {
                                     originating_gen_id: originating_gen.id,
                                     attempt_idx,
-                                    max_attempts,
+                                    max_attempts: current_max,
                                     expected_revision: None,
                                     recovery_impl: Some(recovery_impl),
                                 };
@@ -1021,7 +1056,7 @@ impl RecoverySupervisor {
                                         let ctx = AttemptContext {
                                             originating_gen_id: originating_gen.id,
                                             attempt_idx,
-                                            max_attempts,
+                                            max_attempts: current_max,
                                             expected_revision: None,
                                             recovery_impl: Some(recovery_impl),
                                         };
@@ -1039,7 +1074,7 @@ impl RecoverySupervisor {
                                         let ctx = AttemptContext {
                                             originating_gen_id: originating_gen.id,
                                             attempt_idx,
-                                            max_attempts,
+                                            max_attempts: current_max,
                                             expected_revision: None,
                                             recovery_impl: Some(recovery_impl),
                                         };
@@ -1056,7 +1091,34 @@ impl RecoverySupervisor {
                                 }
                             }
                         }
+                        // If attempt_idx >= current_max, fall through to loop exit
+                        // where the defensive terminalization will catch it.
                     }
+                }
+            }
+
+            // Defensive post-loop terminalization: if we exit the loop while
+            // ManagedState::Recovering is still authoritative for this txn,
+            // atomically transition to Terminal::Exhausted. This catches any
+            // code path that reaches the loop boundary without terminalizing.
+            {
+                let mut core_guard = core_lock.write().await;
+                if let ManagedState::Recovering { ref failed, txn: ref cur_txn } = core_guard.state
+                    && cur_txn.id == txn.id
+                {
+                    tracing::warn!(
+                        generation = originating_gen.id,
+                        txn_id = txn.id,
+                        "worker exiting loop with authoritative Recovering; defensive terminalization"
+                    );
+                    let last_gen = Arc::clone(failed);
+                    core_guard.state = ManagedState::Terminal {
+                        reason: TerminalReason::Exhausted,
+                        _last_generation: Some(last_gen),
+                    };
+                    let _ = txn.outcome_tx.send(Some(Err(RealtimeError::provider(
+                        "recovery exhausted: worker loop completed without terminalization",
+                    ))));
                 }
             }
         });
@@ -1172,9 +1234,23 @@ impl RecoverySupervisor {
                                     tracing::warn!(
                                         expected = expected_rev,
                                         current = config.revision,
+                                        attempt = ctx.attempt_idx,
+                                        max_attempts = ctx.max_attempts,
                                         "candidate publication rejected: stale config revision"
                                     );
-                                    transition = AttemptTransition::RetryRecovering;
+                                    if ctx.attempt_idx >= ctx.max_attempts {
+                                        *state = ManagedState::Terminal {
+                                            reason: TerminalReason::Exhausted,
+                                            _last_generation: Some(Arc::clone(failed)),
+                                        };
+                                        let err = RealtimeError::config(
+                                            "recovery exhausted: stale config revision on final attempt",
+                                        );
+                                        final_outcome_to_send = Some(Err(err));
+                                        transition = AttemptTransition::Terminal;
+                                    } else {
+                                        transition = AttemptTransition::RetryRecovering;
+                                    }
                                 } else {
                                     let next_gen = *next_generation_id;
                                     *next_generation_id += 1;
@@ -2507,5 +2583,242 @@ mod tests {
             "Expected ~60ms delay (clamped by max_delay), got {:?}",
             delay_2_3
         );
+    }
+
+    /// Proves that when max_attempts=1 and a planned attempt is in-flight
+    /// when promoted to Recovering, the in-flight timeout under the planned
+    /// deadline does NOT exit the worker. Instead, the reactive phase gets
+    /// its own fresh attempt budget and the worker continues.
+    #[tokio::test]
+    async fn test_promoted_in_flight_timeout_with_max_attempts_one_gets_reactive_attempt() {
+        tokio::time::pause();
+
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let entered_notify = Arc::new(tokio::sync::Notify::new());
+
+        struct SlowThenSucceedRecovery {
+            attempts: Arc<AtomicUsize>,
+            entered_notify: Arc<tokio::sync::Notify>,
+        }
+
+        #[async_trait]
+        impl RealtimeRecovery for SlowThenSucceedRecovery {
+            fn classify(&self, _cause: &RecoveryCause) -> RecoveryDisposition {
+                RecoveryDisposition::Recoverable
+            }
+
+            fn classify_attempt_error(
+                &self,
+                _error: &crate::error::RealtimeError,
+            ) -> RecoveryDisposition {
+                RecoveryDisposition::Recoverable
+            }
+
+            async fn recover(&self, _context: RecoveryContext<'_>) -> Result<RecoveredSession> {
+                let attempt = self.attempts.fetch_add(1, Ordering::SeqCst) + 1;
+                self.entered_notify.notify_one();
+                if attempt == 1 {
+                    // First attempt (planned): takes very long — will be timed out
+                    // by the short planned deadline
+                    tokio::time::sleep(Duration::from_secs(60)).await;
+                    Err(RealtimeError::provider("should not reach here"))
+                } else {
+                    // Reactive attempt: succeed immediately
+                    let session = Arc::new(MockSession {
+                        id: format!("reactive-gen-1-attempt-{}", attempt),
+                        recovery: None,
+                    });
+                    Ok(RecoveredSession::new(session, RecoveryContinuity::Reconnected))
+                }
+            }
+        }
+
+        let mock_rec = Arc::new(SlowThenSucceedRecovery {
+            attempts: Arc::clone(&attempts),
+            entered_notify: Arc::clone(&entered_notify),
+        });
+
+        let initial_session = Arc::new(MockSession {
+            id: "gen-0".to_string(),
+            recovery: Some(Arc::clone(&mock_rec) as Arc<dyn RealtimeRecovery>),
+        });
+
+        // max_attempts = 1: only one planned attempt allowed
+        let policy = RecoveryPolicy::default()
+            .with_max_attempts(NonZeroU32::new(1).unwrap())
+            .with_deadline(Duration::from_secs(10));
+
+        let config = Arc::new(tokio::sync::RwLock::new(crate::config::RealtimeConfig::default()));
+        let supervisor =
+            Arc::new(RecoverySupervisor::with_initial_session(policy, config, initial_session));
+
+        // Start planned replacement with a short deadline: "2100ms" - 2s margin = 100ms
+        let sup_planned = Arc::clone(&supervisor);
+        let planned_handle = tokio::spawn(async move {
+            sup_planned
+                .execute_planned_replacement(
+                    0,
+                    RecoveryCause::PlannedRotation { time_left: Some("2100ms".into()) },
+                )
+                .await
+        });
+
+        // Wait for attempt 1 to start
+        entered_notify.notified().await;
+
+        // Advance past the short planned deadline but before the recovery deadline
+        // Then promote to Recovering via a real failure
+        tokio::time::advance(Duration::from_millis(50)).await;
+
+        let sup_fail = Arc::clone(&supervisor);
+        let fail_handle = tokio::spawn(async move {
+            let report = FailureReport { generation: 0, cause: RecoveryCause::UnexpectedEof };
+            sup_fail.report_failure(report).await
+        });
+
+        while supervisor.status().await != TransportStatus::Recovering {
+            tokio::task::yield_now().await;
+        }
+
+        // Advance past the planned deadline (100ms total) to trigger the in-flight timeout
+        tokio::time::advance(Duration::from_millis(60)).await;
+
+        // CRITICAL INVARIANT: Supervisor must NOT be Exhausted!
+        // Despite max_attempts=1, the promotion gives a fresh reactive budget.
+        // The worker should detect the promoted deadline and continue with
+        // a reactive attempt 1.
+        assert_ne!(
+            supervisor.status().await,
+            TransportStatus::Exhausted,
+            "max_attempts=1 promoted to Recovering must get fresh reactive attempt, not exhaust"
+        );
+
+        // The reactive attempt succeeds immediately
+        let fail_res = fail_handle.await.unwrap().unwrap();
+        match fail_res {
+            RecoveryOutcome::Recovered { session, .. } => {
+                assert!(
+                    session.session_id().starts_with("reactive-gen-1-attempt-"),
+                    "Expected reactive recovery session, got {}",
+                    session.session_id()
+                );
+            }
+            _ => panic!("Expected Recovered under reactive budget, got {:?}", fail_res),
+        }
+
+        // At least 2 attempts: the original planned (timed out) + reactive
+        assert!(
+            attempts.load(Ordering::SeqCst) >= 2,
+            "Expected at least 2 attempts (planned + reactive), got {}",
+            attempts.load(Ordering::SeqCst)
+        );
+
+        let _ = planned_handle.await;
+    }
+
+    /// Proves that when the final attempt in Recovering mode succeeds at
+    /// building a candidate but config revision changed (stale), the supervisor
+    /// atomically transitions to Terminal::Exhausted instead of leaving an
+    /// ownerless Recovering state.
+    #[tokio::test]
+    async fn test_stale_config_on_final_attempt_atomically_exhausts() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let entered_notify = Arc::new(tokio::sync::Notify::new());
+        let unblock_notify = Arc::new(tokio::sync::Notify::new());
+
+        struct BarrierSucceedRecovery {
+            attempts: Arc<AtomicUsize>,
+            entered_notify: Arc<tokio::sync::Notify>,
+            unblock_notify: Arc<tokio::sync::Notify>,
+        }
+
+        #[async_trait]
+        impl RealtimeRecovery for BarrierSucceedRecovery {
+            fn classify(&self, _cause: &RecoveryCause) -> RecoveryDisposition {
+                RecoveryDisposition::Recoverable
+            }
+
+            fn classify_attempt_error(
+                &self,
+                _error: &crate::error::RealtimeError,
+            ) -> RecoveryDisposition {
+                RecoveryDisposition::Recoverable
+            }
+
+            async fn recover(&self, _context: RecoveryContext<'_>) -> Result<RecoveredSession> {
+                let attempt = self.attempts.fetch_add(1, Ordering::SeqCst) + 1;
+                // Signal that recovery is in-flight, then wait for test to change config
+                self.entered_notify.notify_one();
+                self.unblock_notify.notified().await;
+                let session = Arc::new(MockSession {
+                    id: format!("candidate-attempt-{}", attempt),
+                    recovery: None,
+                });
+                Ok(RecoveredSession::new(session, RecoveryContinuity::Reconnected))
+            }
+        }
+
+        let mock_rec = Arc::new(BarrierSucceedRecovery {
+            attempts: Arc::clone(&attempts),
+            entered_notify: Arc::clone(&entered_notify),
+            unblock_notify: Arc::clone(&unblock_notify),
+        });
+
+        let initial_session = Arc::new(MockSession {
+            id: "gen-0".to_string(),
+            recovery: Some(Arc::clone(&mock_rec) as Arc<dyn RealtimeRecovery>),
+        });
+
+        // max_attempts = 1: only one recovery attempt
+        let policy = RecoveryPolicy::default()
+            .with_max_attempts(NonZeroU32::new(1).unwrap())
+            .with_deadline(Duration::from_secs(5));
+
+        let config = Arc::new(tokio::sync::RwLock::new(crate::config::RealtimeConfig::default()));
+        let supervisor =
+            Arc::new(RecoverySupervisor::with_initial_session(policy, config, initial_session));
+
+        // Trigger a failure to enter Recovering
+        let sup_clone = Arc::clone(&supervisor);
+        let fail_handle = tokio::spawn(async move {
+            let report = FailureReport { generation: 0, cause: RecoveryCause::UnexpectedEof };
+            sup_clone.report_failure(report).await
+        });
+
+        // Wait for the recovery attempt to be in-flight (barrier-controlled)
+        entered_notify.notified().await;
+
+        // Now the recovery attempt has snapshotted config revision 0
+        // and is waiting for us to unblock. Bump the config revision.
+        {
+            let mut core = supervisor.core.write().await;
+            core.config.revision += 1;
+        }
+
+        // Unblock the recovery attempt. It returns Ok(candidate) built under rev 0,
+        // but apply_attempt_result will see config.revision == 1 != expected_rev 0.
+        // With max_attempts=1 and attempt_idx=1, this is the final attempt.
+        unblock_notify.notify_one();
+
+        // Wait for the failure handle to resolve
+        let fail_res = fail_handle.await.unwrap();
+
+        // CRITICAL INVARIANT: The supervisor must be in Terminal::Exhausted,
+        // NOT stuck in ownerless Recovering.
+        assert_eq!(
+            supervisor.status().await,
+            TransportStatus::Exhausted,
+            "stale config on final recovery attempt must terminalize to Exhausted"
+        );
+
+        // The result should be an error (stale config exhaustion)
+        assert!(
+            fail_res.is_err(),
+            "Expected error from stale config exhaustion, got {:?}",
+            fail_res
+        );
+
+        // Only 1 attempt was made (max_attempts = 1)
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
     }
 }
