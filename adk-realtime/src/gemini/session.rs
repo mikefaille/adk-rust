@@ -868,21 +868,21 @@ impl GeminiRealtimeSession {
             }
 
             if let Some(go_away) = value.get("goAway") {
-                let deadline =
-                    if let Some(time_left_str) = go_away.get("timeLeft").and_then(|t| t.as_str()) {
-                        parse_duration_string(time_left_str)
-                            .map(|d| std::time::Instant::now() + d)
-                            .unwrap_or_else(|| {
-                                std::time::Instant::now() + std::time::Duration::from_secs(30)
-                            })
+                if let Some(time_left_str) = go_away.get("timeLeft").and_then(|t| t.as_str()) {
+                    if let Some(duration) = parse_duration_string(time_left_str) {
+                        let deadline = std::time::Instant::now() + duration;
+                        let _ = self.replacement_deadline_tx.send(Some(deadline));
+                        tracing::info!(
+                            deadline = ?deadline,
+                            "Broadcasted planned replacement deadline from Gemini goAway frame"
+                        );
                     } else {
-                        std::time::Instant::now()
-                    };
-                let _ = self.replacement_deadline_tx.send(Some(deadline));
-                tracing::info!(
-                    deadline = ?deadline,
-                    "Broadcasted planned replacement deadline from Gemini goAway frame"
-                );
+                        tracing::warn!(
+                            raw_time_left = time_left_str,
+                            "Ignored unparseable timeLeft in Gemini goAway frame"
+                        );
+                    }
+                }
             }
         }
 
@@ -1725,21 +1725,27 @@ fn describe_unparseable_frame(raw: &str, error: &serde_json::Error) -> String {
     )
 }
 
-/// Parse a human-readable or protobuf duration string (e.g. "10s", "120s", "500ms", "1m").
+/// Parse a human-readable or protobuf duration string (e.g. "10s", "120s", "500ms", "1m", "15.5s").
+///
+/// Safely returns `None` for negative, non-finite (NaN/infinity), overflowing, or malformed inputs without panicking.
 fn parse_duration_string(s: &str) -> Option<std::time::Duration> {
     let s = s.trim();
-    if let Some(stripped) = s.strip_suffix("ms") {
-        stripped
-            .trim()
-            .parse::<f64>()
-            .ok()
-            .map(|ms| std::time::Duration::from_secs_f64(ms / 1000.0))
+    let secs = if let Some(stripped) = s.strip_suffix("ms") {
+        let ms = stripped.trim().parse::<f64>().ok()?;
+        ms / 1000.0
     } else if let Some(stripped) = s.strip_suffix('s') {
-        stripped.trim().parse::<f64>().ok().map(std::time::Duration::from_secs_f64)
+        stripped.trim().parse::<f64>().ok()?
     } else if let Some(stripped) = s.strip_suffix('m') {
-        stripped.trim().parse::<f64>().ok().map(|m| std::time::Duration::from_secs_f64(m * 60.0))
+        let m = stripped.trim().parse::<f64>().ok()?;
+        m * 60.0
     } else {
-        s.parse::<f64>().ok().map(std::time::Duration::from_secs_f64)
+        s.parse::<f64>().ok()?
+    };
+
+    if secs.is_finite() && secs >= 0.0 && secs <= 86400.0 * 365.0 {
+        Some(std::time::Duration::from_secs_f64(secs))
+    } else {
+        None
     }
 }
 
@@ -2679,6 +2685,27 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_duration_string() {
+        use std::time::Duration;
+        assert_eq!(parse_duration_string("15s"), Some(Duration::from_secs(15)));
+        assert_eq!(parse_duration_string(" 15s "), Some(Duration::from_secs(15)));
+        assert_eq!(parse_duration_string("500ms"), Some(Duration::from_millis(500)));
+        assert_eq!(parse_duration_string("2m"), Some(Duration::from_secs(120)));
+        assert_eq!(parse_duration_string("1.5s"), Some(Duration::from_millis(1500)));
+        assert_eq!(parse_duration_string("0.5s"), Some(Duration::from_millis(500)));
+        assert_eq!(parse_duration_string("100"), Some(Duration::from_secs(100)));
+        // Panic-safety checks for negative, NaN, infinity, overflow, and garbage
+        assert_eq!(parse_duration_string("-5s"), None);
+        assert_eq!(parse_duration_string("-100"), None);
+        assert_eq!(parse_duration_string("NaNs"), None);
+        assert_eq!(parse_duration_string("infs"), None);
+        assert_eq!(parse_duration_string("-infs"), None);
+        assert_eq!(parse_duration_string("1e999s"), None);
+        assert_eq!(parse_duration_string(""), None);
+        assert_eq!(parse_duration_string("invalid"), None);
+    }
+
+    #[test]
     fn go_away_without_time_left_translates_to_planned_rotation() {
         let raw = json!({ "goAway": {} }).to_string();
         let events = GeminiRealtimeSession::translate_event_static(&raw).unwrap();
@@ -2728,6 +2755,49 @@ mod tests {
         let remaining = deadline.unwrap().saturating_duration_since(std::time::Instant::now());
         assert!(remaining <= std::time::Duration::from_secs(16));
         assert!(remaining >= std::time::Duration::from_secs(10));
+    }
+
+    #[tokio::test]
+    async fn go_away_without_valid_time_left_does_not_fabricate_deadline() {
+        use crate::session::RealtimeLifecycle;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let _server = tokio::spawn(async move {
+            if let Ok((stream, _)) = listener.accept().await {
+                let _ = tokio_tungstenite::accept_async(stream).await;
+            }
+        });
+        let (ws_stream, _) =
+            tokio_tungstenite::connect_async(format!("ws://{}", addr)).await.unwrap();
+        let (_sink, source) = ws_stream.split();
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let writer_task = tokio::spawn(async {});
+
+        let session = GeminiRealtimeSession::new_for_test(
+            "test-lifecycle-session".into(),
+            format!("ws://{}", addr),
+            "models/test".into(),
+            tx,
+            writer_task,
+            source,
+        );
+
+        let deadline_rx = session.subscribe_replacement_deadline();
+
+        // 1. Missing timeLeft
+        let raw = json!({ "goAway": {} }).to_string();
+        let _ = session.translate_gemini_event(&raw).unwrap();
+        assert_eq!(*deadline_rx.borrow(), None);
+
+        // 2. Unparseable timeLeft
+        let raw = json!({ "goAway": { "timeLeft": "garbage" } }).to_string();
+        let _ = session.translate_gemini_event(&raw).unwrap();
+        assert_eq!(*deadline_rx.borrow(), None);
+
+        // 3. Negative timeLeft
+        let raw = json!({ "goAway": { "timeLeft": "-10s" } }).to_string();
+        let _ = session.translate_gemini_event(&raw).unwrap();
+        assert_eq!(*deadline_rx.borrow(), None);
     }
 
     #[test]
