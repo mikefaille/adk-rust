@@ -38,7 +38,7 @@ const AUDIO_FLUSH_TARGET_MS: usize = 40;
 /// Backend configuration for Gemini Live connections.
 ///
 /// Determines how to authenticate and which endpoint to connect to.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum GeminiLiveBackend {
     /// AI Studio with API key authentication.
     Studio { api_key: String, endpoint_url: Option<String> },
@@ -55,6 +55,45 @@ pub enum GeminiLiveBackend {
         /// Custom WebSocket URL endpoint override.
         endpoint_url: Option<String>,
     },
+}
+
+/// Hand-written so the credential never reaches a log line.
+///
+/// A derived `Debug` prints `api_key` verbatim, and this type is held by
+/// `GeminiRealtimeSession`, so a single `tracing::debug!(?backend, ..)` -- or a
+/// `#[derive(Debug)]` added to any struct that owns one -- is enough to put a
+/// live Google API key into a log aggregator. The endpoint and region stay
+/// visible because they are what anyone reading the log actually needs.
+impl std::fmt::Debug for GeminiLiveBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            GeminiLiveBackend::Studio { api_key, endpoint_url } => f
+                .debug_struct("Studio")
+                .field("api_key", &Redacted(api_key.len()))
+                .field("endpoint_url", endpoint_url)
+                .finish(),
+            #[cfg(feature = "vertex-live")]
+            GeminiLiveBackend::Vertex { credentials: _, region, project_id, endpoint_url } => f
+                .debug_struct("Vertex")
+                .field("credentials", &"<redacted>")
+                .field("region", region)
+                .field("project_id", project_id)
+                .field("endpoint_url", endpoint_url)
+                .finish(),
+        }
+    }
+}
+
+/// Renders as `<redacted N bytes>`.
+///
+/// The length is kept because "the key is empty" and "the key is present but
+/// wrong" are different bugs, and a bare `<redacted>` cannot tell them apart.
+struct Redacted(usize);
+
+impl std::fmt::Debug for Redacted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "<redacted {} bytes>", self.0)
+    }
 }
 
 impl GeminiLiveBackend {
@@ -3392,6 +3431,43 @@ mod tests {
 
         let received = setup_received_handle.lock().clone();
         assert_eq!(received, Some("fresh_provider_h2".to_string()));
+    }
+
+    /// The whole point of the hand-written `Debug`: a derived one printed this
+    /// key verbatim, and the backend is held by the session for the life of the
+    /// call.
+    #[test]
+    fn debug_never_prints_the_studio_api_key() {
+        let backend = GeminiLiveBackend::studio("AIzaSy-super-secret-key-value");
+
+        let rendered = format!("{backend:?}");
+
+        assert!(
+            !rendered.contains("AIzaSy-super-secret-key-value"),
+            "Debug leaked the API key: {rendered}"
+        );
+        assert!(rendered.contains("<redacted"), "expected a redaction marker: {rendered}");
+    }
+
+    /// An empty key and a wrong key are different bugs, so the length survives
+    /// redaction.
+    #[test]
+    fn debug_keeps_the_key_length_so_an_empty_key_is_still_diagnosable() {
+        assert!(format!("{:?}", GeminiLiveBackend::studio("")).contains("<redacted 0 bytes>"));
+        assert!(format!("{:?}", GeminiLiveBackend::studio("abcd")).contains("<redacted 4 bytes>"));
+    }
+
+    /// Redaction must not cost the fields that make a log line useful.
+    #[test]
+    fn debug_still_shows_the_endpoint_and_variant() {
+        let backend =
+            GeminiLiveBackend::studio("secret").with_endpoint_url("ws://127.0.0.1:9999/mock");
+
+        let rendered = format!("{backend:?}");
+
+        assert!(rendered.contains("Studio"), "variant should be visible: {rendered}");
+        assert!(rendered.contains("ws://127.0.0.1:9999/mock"), "endpoint lost: {rendered}");
+        assert!(!rendered.contains("secret"), "Debug leaked the API key: {rendered}");
     }
 }
 
