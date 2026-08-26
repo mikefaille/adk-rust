@@ -933,7 +933,7 @@ impl GeminiRealtimeSession {
         // Check for goAway planned rotation signal
         if let Some(go_away) = value.get("goAway") {
             let time_left = go_away.get("timeLeft").and_then(Value::as_str).map(str::to_owned);
-            tracing::info!(time_left = ?time_left, "Gemini Live goAway frame received");
+            tracing::info!(time_left = ?time_left, "gemini live goAway frame received");
             return Ok(vec![ServerEvent::PlannedRotation { time_left }]);
         }
 

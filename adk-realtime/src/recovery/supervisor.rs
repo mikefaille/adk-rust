@@ -980,10 +980,14 @@ impl RecoverySupervisor {
                 }
 
                 #[cfg(any(test, feature = "recovery-test-utils"))]
-                if phase.is_recovering() {
+                {
                     let maybe_barrier = test_recovery_barrier.lock().take();
                     if let Some(barrier) = maybe_barrier {
-                        barrier.on_recovering().await;
+                        if phase.is_recovering() {
+                            barrier.on_recovering().await;
+                        } else {
+                            barrier.on_planned().await;
+                        }
                     }
                 }
 

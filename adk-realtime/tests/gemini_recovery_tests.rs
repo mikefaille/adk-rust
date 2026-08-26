@@ -48,6 +48,8 @@ where
 pub struct GeminiLiveWsProxy {
     addr: SocketAddr,
     disconnect_notify: Arc<tokio::sync::Notify>,
+    goaway_notify: Arc<tokio::sync::Notify>,
+    goaway_time_left: Arc<parking_lot::Mutex<String>>,
     armed_for_checkpoint: Arc<std::sync::atomic::AtomicBool>,
     resume_checkpoint_observed: Arc<std::sync::atomic::AtomicBool>,
     candidate_resume_handle_match: Arc<std::sync::atomic::AtomicBool>,
@@ -61,6 +63,8 @@ impl GeminiLiveWsProxy {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("proxy TcpListener bind");
         let addr = listener.local_addr().expect("proxy local_addr");
         let disconnect_notify = Arc::new(tokio::sync::Notify::new());
+        let goaway_notify = Arc::new(tokio::sync::Notify::new());
+        let goaway_time_left = Arc::new(parking_lot::Mutex::new("30s".to_string()));
         let armed_for_checkpoint = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let resume_checkpoint_observed = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let candidate_resume_handle_match = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -68,6 +72,8 @@ impl GeminiLiveWsProxy {
         let target_url = format!("{}?key={}", adk_realtime::gemini::GEMINI_LIVE_URL, api_key);
 
         let disconnect_notify_clone = Arc::clone(&disconnect_notify);
+        let goaway_notify_clone = Arc::clone(&goaway_notify);
+        let goaway_time_left_clone = Arc::clone(&goaway_time_left);
         let armed_clone = Arc::clone(&armed_for_checkpoint);
         let resume_obs_clone = Arc::clone(&resume_checkpoint_observed);
         let candidate_match_clone = Arc::clone(&candidate_resume_handle_match);
@@ -80,6 +86,8 @@ impl GeminiLiveWsProxy {
                 let conn_id = conn_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
                 let target_url = target_url.clone();
                 let disconnect_notify = Arc::clone(&disconnect_notify_clone);
+                let goaway_notify = Arc::clone(&goaway_notify_clone);
+                let goaway_time_left = Arc::clone(&goaway_time_left_clone);
                 let armed = Arc::clone(&armed_clone);
                 let resume_obs = Arc::clone(&resume_obs_clone);
                 let candidate_match = Arc::clone(&candidate_match_clone);
@@ -115,6 +123,16 @@ impl GeminiLiveWsProxy {
                                 _ = disconnect_notify.notified() => {
                                     tracing::info!("GeminiLiveWsProxy: Inducing abrupt transport drop on connection 1");
                                     break;
+                                }
+                                _ = goaway_notify.notified() => {
+                                    let dur = goaway_time_left.lock().clone();
+                                    let frame = json!({
+                                        "goAway": {
+                                            "timeLeft": dur
+                                        }
+                                    });
+                                    tracing::info!(time_left = %dur, "GeminiLiveWsProxy: Injecting goAway frame into Connection 1");
+                                    let _ = client_sink.send(Message::Text(frame.to_string().into())).await;
                                 }
                                 client_msg = client_stream.next() => {
                                     match client_msg {
@@ -212,6 +230,8 @@ impl GeminiLiveWsProxy {
         Self {
             addr,
             disconnect_notify,
+            goaway_notify,
+            goaway_time_left,
             armed_for_checkpoint,
             resume_checkpoint_observed,
             candidate_resume_handle_match,
@@ -229,6 +249,11 @@ impl GeminiLiveWsProxy {
 
     pub fn trigger_abrupt_disconnect(&self) {
         self.disconnect_notify.notify_one();
+    }
+
+    pub fn trigger_goaway(&self, time_left: &str) {
+        *self.goaway_time_left.lock() = time_left.to_string();
+        self.goaway_notify.notify_one();
     }
 
     pub fn resume_checkpoint_observed(&self) -> bool {
@@ -1144,6 +1169,257 @@ async fn test_live_gemini_managed_recovery_interruption() {
             },
             Some(Err(err)) => panic!("Error during post-recovery interaction on N+1: {err:?}"),
             None => panic!("Unexpected EOF during post-recovery interaction on N+1"),
+        }
+    }
+
+    assert!(received_function_call, "Must receive real function call on generation N+1");
+    assert!(
+        received_post_tool_content,
+        "Must receive non-empty post-tool content delta on generation N+1"
+    );
+    assert!(
+        received_final_response,
+        "Must receive ResponseDone after post-tool content delta on N+1"
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_live_gemini_goaway_make_before_break_rotation() {
+    use adk_realtime::config::ToolDefinition;
+    use adk_realtime::events::ToolResponse;
+    use adk_realtime::gemini::GeminiRealtimeModel;
+    use adk_realtime::runner::RealtimeRunner;
+
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    let _ = tracing_subscriber::fmt().with_env_filter("info").try_init();
+    adk_core::ensure_crypto_provider();
+
+    let api_key = std::env::var("GEMINI_API_KEY")
+        .or_else(|_| std::env::var("GOOGLE_API_KEY"))
+        .ok()
+        .filter(|k| !k.trim().is_empty())
+        .expect("GEMINI_API_KEY or GOOGLE_API_KEY environment variable required for live Gemini GoAway rotation proof test");
+
+    let proxy = GeminiLiveWsProxy::start(api_key.clone()).await;
+
+    let probe_tool = ToolDefinition::new("recovery_probe")
+        .with_description(
+            "A test tool to probe recovery readiness after GoAway make-before-break rotation.",
+        )
+        .with_parameters(json!({
+            "type": "object",
+            "properties": {
+                "value": { "type": "string", "description": "Echo value" }
+            },
+            "required": ["value"]
+        }));
+
+    let model = Arc::new(GeminiRealtimeModel::new(
+        GeminiLiveBackend::studio(api_key).with_endpoint_url(proxy.url()),
+        "models/gemini-3.1-flash-live-preview",
+    ));
+
+    let runner = RealtimeRunner::builder()
+        .model(model as adk_realtime::model::BoxedModel)
+        .tool_fn(probe_tool, |call| {
+            let val = call.arguments.get("value").and_then(|v| v.as_str()).unwrap_or("ok");
+            Ok(json!({ "status": "probed", "value": val }))
+        })
+        .instruction("You are a helpful assistant. Reply concisely.")
+        .build()
+        .expect("Runner build should succeed");
+
+    let mut gen_watcher = runner.subscribe_generation();
+
+    // 1. Connect initial generation N (0): prove initial generation receives real setupComplete
+    runner.connect().await.expect("Initial connect should succeed");
+    assert!(runner.is_connected().await);
+    let gen_n_id = *gen_watcher.borrow_and_update();
+    assert_eq!(gen_n_id, 0);
+
+    let setup_ev = runner.next_event().await;
+    match setup_ev {
+        Some(Ok(ServerEvent::SessionCreated { .. })) => {
+            tracing::info!("Generation N connected and received setupComplete");
+        }
+        Some(Ok(other)) => panic!("Expected SessionCreated setupComplete frame, got: {other:?}"),
+        Some(Err(err)) => panic!("Initial connect produced error: {err:?}"),
+        None => panic!("Initial connect returned EOF"),
+    }
+
+    // Generate random secret recovery marker
+    let random_marker = format!("marker-{}", uuid::Uuid::new_v4());
+
+    // Tell Gemini the secret recovery marker on Generation N
+    runner
+        .send_text(&format!(
+            "Remember this secret recovery marker: {random_marker}. Say 'understood' in one word."
+        ))
+        .await
+        .expect("Send text on Generation N must succeed");
+
+    let mut marker_turn_done = false;
+    let n_usable_deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    while tokio::time::Instant::now() < n_usable_deadline {
+        let ev = match tokio::time::timeout(Duration::from_secs(4), runner.next_event()).await {
+            Ok(Some(Ok(e))) => e,
+            Ok(Some(Err(err))) => panic!("Error on Generation N marker prompt: {err:?}"),
+            Ok(None) => panic!("Unexpected EOF on Generation N marker prompt"),
+            Err(_) => continue,
+        };
+        if matches!(ev, ServerEvent::ResponseDone { .. }) {
+            marker_turn_done = true;
+            break;
+        }
+    }
+    assert!(marker_turn_done, "Generation N marker turn must reach ResponseDone before GoAway");
+
+    // Arm proxy to capture sessionResumptionUpdate AFTER marker turn completes
+    proxy.arm_checkpoint_capture();
+
+    // Wait until proxy observes a valid sessionResumptionUpdate checkpoint frame after marker turn
+    let checkpoint_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while tokio::time::Instant::now() < checkpoint_deadline && !proxy.resume_checkpoint_observed() {
+        let _ = tokio::time::timeout(Duration::from_millis(500), runner.next_event()).await;
+    }
+    assert!(
+        proxy.resume_checkpoint_observed(),
+        "Proxy must observe a valid sessionResumptionUpdate checkpoint frame on Generation N"
+    );
+    tracing::info!(
+        resume_checkpoint_observed = true,
+        "Confirmed checkpoint observed prior to GoAway frame"
+    );
+
+    // 2. Set test recovery barrier on recovery supervisor to hold planned candidate connection in-flight
+    let barrier = Arc::new(adk_realtime::recovery::TestRecoveryBarrier::new());
+    runner.set_recovery_barrier_for_testing(barrier.clone());
+
+    // 3. Inject GoAway frame into Generation N transport via proxy
+    proxy.trigger_goaway("30s");
+
+    // Spawn background reader task on Generation N to ingest the GoAway frame and trigger supervisor
+    let runner_arc = Arc::new(runner);
+    let runner_read_clone = Arc::clone(&runner_arc);
+    let _read_task = tokio::spawn(async move { runner_read_clone.next_event().await });
+
+    // Wait on barrier to confirm supervisor has entered ReplacementPhase::Planned
+    tokio::time::timeout(Duration::from_secs(5), barrier.wait_until_planned_entered())
+        .await
+        .expect("Recovery supervisor must enter replacement worker in Planned phase within 5s");
+
+    // 4. MAKE-BEFORE-BREAK PROOF: Generation N remains fully writable while candidate is connecting!
+    let write_res = runner_arc
+        .send_text("Continuing conversation on Generation N while candidate builds")
+        .await;
+    assert!(
+        write_res.is_ok(),
+        "Managed write must succeed on Generation N during planned make-before-break rotation"
+    );
+    tracing::info!("Make-before-break invariant verified: Generation N remains writable");
+
+    // 5. Release recovery barrier, allowing candidate session (N+1) to connect, verify handle, and publish
+    barrier.release();
+
+    // 6. Verify generation advances monotonically N -> N+1 without requiring new traffic
+    tokio::time::timeout(Duration::from_secs(10), gen_watcher.changed())
+        .await
+        .expect("Watcher must wake on N+1 publication within 10s")
+        .expect("Watcher channel valid");
+    let gen_n1_id = *gen_watcher.borrow_and_update();
+    assert_eq!(
+        gen_n1_id,
+        gen_n_id + 1,
+        "Generation must advance monotonically from N ({gen_n_id}) to N+1 ({})",
+        gen_n_id + 1
+    );
+
+    assert!(
+        proxy.candidate_resume_handle_match(),
+        "Candidate session N+1 setup frame must present the exact resume handle captured from Generation N checkpoint"
+    );
+    tracing::info!(
+        candidate_resume_handle_match = true,
+        "Confirmed candidate handle match on N+1 setup under GoAway rotation"
+    );
+
+    let runner = runner_arc;
+
+    // 7. Post-rotation conversation continuity proof: prompt Gemini on N+1 WITHOUT repeating the secret marker
+    runner
+        .send_text("Please call recovery_probe with the secret recovery marker I gave you earlier, then confirm concisely.")
+        .await
+        .expect("Send text on N+1 must succeed");
+
+    // 8. Await event from background read_task or poll on N+1
+    let mut received_function_call = false;
+    let mut received_post_tool_content = false;
+    let mut received_final_response = false;
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    while tokio::time::Instant::now() < deadline && !received_final_response {
+        let event_opt =
+            match tokio::time::timeout(Duration::from_secs(4), runner.next_event()).await {
+                Ok(opt) => opt,
+                Err(_) => continue,
+            };
+
+        match event_opt {
+            Some(Ok(event)) => match event {
+                ServerEvent::FunctionCallDone { call_id, name, arguments, .. }
+                    if !received_function_call =>
+                {
+                    assert_eq!(name, "recovery_probe");
+                    let probed_val = arguments.get("value").and_then(|v| v.as_str());
+                    assert_eq!(
+                        probed_val,
+                        Some(random_marker.as_str()),
+                        "Gemini N+1 must recall the exact secret recovery marker from Generation N history after GoAway rotation!"
+                    );
+                    tracing::info!(
+                        marker_continuity_success = true,
+                        "Secret recovery marker recalled successfully on N+1 under GoAway rotation"
+                    );
+                    received_function_call = true;
+                    let response = ToolResponse {
+                        call_id,
+                        output: json!({ "status": "probed", "value": probed_val }),
+                    };
+                    runner
+                        .send_tool_response(response)
+                        .await
+                        .expect("send_tool_response on N+1 must succeed");
+                }
+                ServerEvent::TextDelta { delta, .. }
+                    if !delta.is_empty() && received_function_call =>
+                {
+                    received_post_tool_content = true;
+                }
+                ServerEvent::AudioDelta { delta, .. }
+                    if !delta.is_empty() && received_function_call =>
+                {
+                    received_post_tool_content = true;
+                }
+                ServerEvent::TranscriptDelta { delta, .. }
+                    if !delta.is_empty() && received_function_call =>
+                {
+                    received_post_tool_content = true;
+                }
+                ServerEvent::ResponseDone { .. }
+                    if received_function_call && received_post_tool_content =>
+                {
+                    received_final_response = true;
+                    tracing::info!(
+                        post_tool_continuation_success = true,
+                        "Model continuation turn completed post-tool on N+1 under GoAway rotation"
+                    );
+                    break;
+                }
+                _ => {}
+            },
+            Some(Err(err)) => panic!("Error during post-rotation interaction on N+1: {err:?}"),
+            None => panic!("Unexpected EOF during post-rotation interaction on N+1"),
         }
     }
 
