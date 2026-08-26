@@ -36,6 +36,7 @@ impl std::fmt::Debug for SessionGeneration {
     }
 }
 
+#[derive(Clone)]
 pub(crate) struct FailureReport {
     pub(crate) generation: u64,
     pub(crate) cause: RecoveryCause,
@@ -75,36 +76,6 @@ impl Drop for CandidateCleanupGuard {
         if let Some(session) = self.0.take() {
             tokio::spawn(async move {
                 let _ = tokio::time::timeout(Duration::from_secs(2), session.close()).await;
-            });
-        }
-    }
-}
-
-/// RAII guard ensuring a pending failure registration is cleared if the reporter times out or is dropped before acquiring the recovery lock.
-struct PendingFailureGuard {
-    state: Arc<tokio::sync::RwLock<SupervisorState>>,
-    generation: u64,
-    disarmed: bool,
-}
-
-impl PendingFailureGuard {
-    fn new(state: Arc<tokio::sync::RwLock<SupervisorState>>, generation: u64) -> Self {
-        Self { state, generation, disarmed: false }
-    }
-
-    fn disarm(&mut self) {
-        self.disarmed = true;
-    }
-}
-
-impl Drop for PendingFailureGuard {
-    fn drop(&mut self) {
-        if !self.disarmed {
-            let state_lock = Arc::clone(&self.state);
-            let generation_id = self.generation;
-            tokio::spawn(async move {
-                let mut state = state_lock.write().await;
-                state.clear_failed(Some(generation_id));
             });
         }
     }
@@ -171,16 +142,6 @@ impl SupervisorState {
 
     fn mark_failed(&mut self, generation: u64) {
         self.failed_generation = Some(generation);
-    }
-
-    fn clear_failed(&mut self, generation: Option<u64>) {
-        if let Some(gen_id) = generation {
-            if self.failed_generation == Some(gen_id) {
-                self.failed_generation = None;
-            }
-        } else {
-            self.failed_generation = None;
-        }
     }
 
     fn promote_to_recovering(&mut self) -> u64 {
@@ -294,7 +255,7 @@ impl std::fmt::Debug for RecoveryOutcome {
 pub(crate) struct RecoverySupervisor {
     policy: RecoveryPolicy,
     state: Arc<tokio::sync::RwLock<SupervisorState>>,
-    replacement_lock: tokio::sync::Mutex<()>,
+    replacement_lock: Arc<tokio::sync::Mutex<()>>,
     generation_tx: tokio::sync::watch::Sender<u64>,
     #[cfg(any(test, feature = "recovery-test-utils"))]
     test_recovery_barrier:
@@ -319,7 +280,7 @@ impl RecoverySupervisor {
                 failed_generation: None,
                 config: ConfigSnapshot { config: initial_config, revision: 0 },
             })),
-            replacement_lock: tokio::sync::Mutex::new(()),
+            replacement_lock: Arc::new(tokio::sync::Mutex::new(())),
             generation_tx,
             #[cfg(any(test, feature = "recovery-test-utils"))]
             test_recovery_barrier: Arc::new(parking_lot::Mutex::new(None)),
@@ -349,7 +310,7 @@ impl RecoverySupervisor {
                 failed_generation: None,
                 config: ConfigSnapshot { config: initial_cfg, revision: 0 },
             })),
-            replacement_lock: tokio::sync::Mutex::new(()),
+            replacement_lock: Arc::new(tokio::sync::Mutex::new(())),
             generation_tx,
             #[cfg(any(test, feature = "recovery-test-utils"))]
             test_recovery_barrier: Arc::new(parking_lot::Mutex::new(None)),
@@ -812,8 +773,8 @@ impl RecoverySupervisor {
             .checked_add(deadline_duration)
             .unwrap_or_else(|| start_time + Duration::from_secs(86400 * 365));
 
-        // 1. Check current state and validation, and mark active generation as failed if valid
-        let mut pending_failure_guard = {
+        // 1. Mark generation failed (durable: not cleared on cancellation or timeout)
+        {
             let mut state_guard = self
                 .write_state_at(deadline_instant, "deadline expired acquiring state read snapshot")
                 .await?;
@@ -846,33 +807,68 @@ impl RecoverySupervisor {
                     state_guard.mark_failed(report.generation);
                     tracing::info!(
                         generation = report.generation,
-                        "Active generation marked failed; writes blocked pending recovery lock"
+                        "Active generation marked failed; writes blocked pending recovery completion"
                     );
-                    PendingFailureGuard::new(Arc::clone(&self.state), report.generation)
                 }
+            }
+        }
+
+        // 2. Execute recovery transaction directly
+        Self::execute_recovery_transaction_internal(
+            report,
+            deadline_instant,
+            Arc::clone(&self.state),
+            Arc::clone(&self.replacement_lock),
+            self.generation_tx.clone(),
+            self.policy.clone(),
+            #[cfg(any(test, feature = "recovery-test-utils"))]
+            Arc::clone(&self.test_recovery_barrier),
+        )
+        .await
+    }
+
+    async fn execute_recovery_transaction_internal(
+        report: FailureReport,
+        deadline_instant: tokio::time::Instant,
+        state: Arc<tokio::sync::RwLock<SupervisorState>>,
+        replacement_lock: Arc<tokio::sync::Mutex<()>>,
+        generation_tx: tokio::sync::watch::Sender<u64>,
+        policy: RecoveryPolicy,
+        #[cfg(any(test, feature = "recovery-test-utils"))] test_recovery_barrier: Arc<
+            parking_lot::Mutex<Option<Arc<crate::recovery::TestRecoveryBarrier>>>,
+        >,
+    ) -> Result<RecoveryOutcome> {
+        // 1. Lock wait capped by remaining deadline
+        let _lock_guard = match tokio::time::timeout_at(deadline_instant, replacement_lock.lock())
+            .await
+        {
+            Ok(guard) => guard,
+            Err(_) => {
+                let err = RealtimeError::Timeout(
+                    "deadline expired waiting for recovery lock".to_string(),
+                );
+                tracing::warn!(generation = report.generation, err = %err, "recovery lock timeout");
+                return Err(err);
             }
         };
 
-        // 2. Lock wait capped by remaining deadline
-        let _lock_guard = self
-            .lock_replacement_at(deadline_instant, "deadline expired waiting for recovery lock")
-            .await?;
-
-        // 3. Double-check state now that we hold the lock and transition to Recovering
+        // 2. Double-check state now that we hold the lock and transition to Recovering
         let recovery_epoch = {
-            let mut state_guard = self
-                .write_state_at(deadline_instant, "deadline expired acquiring state write snapshot")
-                .await?;
-
-            pending_failure_guard.disarm();
+            let mut state_guard =
+                match tokio::time::timeout_at(deadline_instant, state.write()).await {
+                    Ok(guard) => guard,
+                    Err(_) => {
+                        return Err(RealtimeError::Timeout(
+                            "deadline expired acquiring state write snapshot".to_string(),
+                        ));
+                    }
+                };
 
             match state_guard.validate_report(report.generation) {
                 ReportValidation::Closed => {
-                    state_guard.clear_failed(Some(report.generation));
                     return Err(RealtimeError::SessionClosed);
                 }
                 ReportValidation::Stale(session) => {
-                    state_guard.clear_failed(Some(report.generation));
                     tracing::info!(
                         report_gen = report.generation,
                         "coalesced failure report ignored after lock acquisition"
@@ -880,13 +876,11 @@ impl RecoverySupervisor {
                     return Ok(RecoveryOutcome::Stale(session));
                 }
                 ReportValidation::FutureGeneration(_) => {
-                    state_guard.clear_failed(Some(report.generation));
                     return Err(RealtimeError::provider(
                         "invalid future generation report after lock acquisition",
                     ));
                 }
                 ReportValidation::Exhausted => {
-                    state_guard.clear_failed(Some(report.generation));
                     tracing::info!(
                         generation = report.generation,
                         "report for already exhausted generation after lock acquisition"
@@ -899,13 +893,18 @@ impl RecoverySupervisor {
             state_guard.promote_to_recovering()
         };
 
-        let mut episode_guard = RecoveryEpisodeGuard::new(Arc::clone(&self.state), recovery_epoch);
+        let mut episode_guard = RecoveryEpisodeGuard::new(Arc::clone(&state), recovery_epoch);
 
-        // 4. Determine recovery implementation
+        // 3. Determine recovery implementation
         let session_to_recover = {
-            let state_guard = self
-                .read_state_at(deadline_instant, "deadline expired acquiring state read snapshot")
-                .await?;
+            let state_guard = match tokio::time::timeout_at(deadline_instant, state.read()).await {
+                Ok(guard) => guard,
+                Err(_) => {
+                    return Err(RealtimeError::Timeout(
+                        "deadline expired acquiring state read snapshot".to_string(),
+                    ));
+                }
+            };
             match &state_guard.generation {
                 Some(gen_item) => gen_item.session.clone(),
                 None => {
@@ -919,20 +918,20 @@ impl RecoverySupervisor {
             None => {
                 let err = RealtimeError::provider("active session does not support recovery");
                 tracing::error!(generation = report.generation, err = %err, "recovery not supported");
-                let mut state_guard = self.state.write().await;
+                let mut state_guard = state.write().await;
                 state_guard.mark_exhausted(report.generation);
                 episode_guard.disarm();
                 return Err(err);
             }
         };
 
-        // 5. Pre-flight cause classification
+        // 4. Pre-flight cause classification
         if recovery_impl.classify(&report.cause) == RecoveryDisposition::Fatal {
             let err = RealtimeError::provider(
                 "fatal recovery cause detected; performing zero provider attempts",
             );
             tracing::warn!(generation = report.generation, err = %err, "fatal cause classification");
-            let mut state_guard = self.state.write().await;
+            let mut state_guard = state.write().await;
             state_guard.mark_exhausted(report.generation);
             episode_guard.disarm();
             return Err(err);
@@ -940,13 +939,13 @@ impl RecoverySupervisor {
 
         #[cfg(any(test, feature = "recovery-test-utils"))]
         {
-            let maybe_barrier = self.test_recovery_barrier.lock().take();
+            let maybe_barrier = test_recovery_barrier.lock().take();
             if let Some(barrier) = maybe_barrier {
                 barrier.on_recovering().await;
             }
         }
 
-        // 6. Recovery attempt loop
+        // 5. Recovery attempt loop
         tracing::info!(generation = report.generation, "recovery episode started");
         enum EpisodeStopReason {
             Exhausted,
@@ -956,7 +955,7 @@ impl RecoverySupervisor {
 
         let mut stop_reason = EpisodeStopReason::Exhausted;
         let mut last_provider_error: Option<RealtimeError> = None;
-        let max_attempts = self.policy.max_attempts().get();
+        let max_attempts = policy.max_attempts().get();
         let mut attempts_launched = 0;
 
         for attempt_idx in 1..=max_attempts {
@@ -970,19 +969,10 @@ impl RecoverySupervisor {
 
             let attempt_nz = NonZeroU32::new(attempt_idx).unwrap();
 
-            let state_guard = match self
-                .read_state_at(
-                    deadline_instant,
-                    "recovery deadline expired acquiring state read snapshot",
-                )
-                .await
-            {
+            let state_guard = match tokio::time::timeout_at(deadline_instant, state.read()).await {
                 Ok(guard) => guard,
-                Err(e) => {
-                    let msg = match e {
-                        RealtimeError::Timeout(m) => m,
-                        other => other.to_string(),
-                    };
+                Err(_) => {
+                    let msg = "recovery deadline expired acquiring state read snapshot".to_string();
                     tracing::warn!(generation = report.generation, attempt = attempt_idx, err = %msg, "recovery deadline expired");
                     stop_reason = EpisodeStopReason::Timeout(msg);
                     break;
@@ -1045,19 +1035,15 @@ impl RecoverySupervisor {
                     let continuity = recovered.continuity();
                     let mut candidate_guard = CandidateCleanupGuard::new(new_session.clone());
 
-                    let mut state_guard = match self
-                        .write_state_at(
-                            deadline_instant,
-                            "recovery deadline expired acquiring state write lock for candidate publication",
-                        )
-                        .await
+                    let mut state_guard = match tokio::time::timeout_at(
+                        deadline_instant,
+                        state.write(),
+                    )
+                    .await
                     {
                         Ok(guard) => guard,
-                        Err(e) => {
-                            let msg = match e {
-                                RealtimeError::Timeout(m) => m,
-                                other => other.to_string(),
-                            };
+                        Err(_) => {
+                            let msg = "recovery deadline expired acquiring state write lock for candidate publication".to_string();
                             tracing::warn!(generation = report.generation, attempt = attempt_idx, err = %msg, "recovery deadline expired");
                             stop_reason = EpisodeStopReason::Timeout(msg);
                             break;
@@ -1086,7 +1072,7 @@ impl RecoverySupervisor {
                         }
                     };
 
-                    let _ = self.generation_tx.send(next_gen);
+                    let _ = generation_tx.send(next_gen);
                     candidate_guard.disarm();
 
                     if let Some(old) = old_session {
@@ -1128,8 +1114,8 @@ impl RecoverySupervisor {
 
                     if attempt_idx < max_attempts {
                         let factor = 2u32.checked_pow(attempt_idx - 1).unwrap_or(u32::MAX);
-                        let mut backoff = self.policy.initial_delay().saturating_mul(factor);
-                        backoff = backoff.min(self.policy.max_delay());
+                        let mut backoff = policy.initial_delay().saturating_mul(factor);
+                        backoff = backoff.min(policy.max_delay());
 
                         let now_after_attempt = tokio::time::Instant::now();
                         if now_after_attempt >= deadline_instant {
@@ -1201,7 +1187,7 @@ impl RecoverySupervisor {
             "recovery exhausted or fatal"
         );
 
-        let mut state_guard = self.state.write().await;
+        let mut state_guard = state.write().await;
         state_guard.mark_exhausted(report.generation);
         episode_guard.disarm();
 
@@ -1385,17 +1371,16 @@ mod tests {
         assert_eq!(recover_count.load(Ordering::SeqCst), 1);
         assert_eq!(max_active_recoveries.load(Ordering::SeqCst), 1);
 
-        let mut recovered_count = 0;
-        let mut stale_count = 0;
+        let mut success_count = 0;
         for res in results {
             match res.unwrap() {
                 RecoveryOutcome::Recovered { session, continuity } => {
-                    recovered_count += 1;
+                    success_count += 1;
                     assert_eq!(session.session_id(), "gen-1-recovered");
                     assert_eq!(continuity, RecoveryContinuity::Resumed);
                 }
                 RecoveryOutcome::Stale(session) => {
-                    stale_count += 1;
+                    success_count += 1;
                     assert_eq!(session.session_id(), "gen-1-recovered");
                 }
                 RecoveryOutcome::Exhausted => {
@@ -1403,8 +1388,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(recovered_count, 1);
-        assert_eq!(stale_count, 2);
+        assert_eq!(success_count, 3);
     }
 
     #[tokio::test]
@@ -2862,7 +2846,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_failure_reporter_aborted_before_lock_cleans_pending_failure_without_stranded_recovering()
+    async fn test_failure_reporter_aborted_keeps_generation_failed_until_planned_replacement_succeeds()
      {
         let (lock_acquired_tx, lock_acquired_rx) = tokio::sync::oneshot::channel();
         let release_lock_notify = Arc::new(tokio::sync::Notify::new());
@@ -2873,7 +2857,7 @@ mod tests {
         let supervisor =
             Arc::new(RecoverySupervisor::with_initial_session(policy, config, initial_session));
 
-        // 1. Manually hold replacement_lock in a separate background task
+        // 1. Manually hold replacement_lock in a separate background task (simulating planned candidate preparation)
         let sup_lock_task = Arc::clone(&supervisor);
         let release_notify_clone = Arc::clone(&release_lock_notify);
         let lock_holder = tokio::spawn(async move {
@@ -2901,42 +2885,136 @@ mod tests {
             tokio::task::yield_now().await;
         }
         assert!(write_blocked, "Writes must be blocked while waiting for lock");
-        assert_eq!(
-            supervisor.status().await,
-            TransportStatus::Healthy,
-            "Supervisor status must remain Healthy before lock acquisition"
-        );
 
-        // 3. Abort the failure reporter task BEFORE it acquires the lock!
+        // 3. Abort the failure reporter task BEFORE it acquires the lock
         failure_task.abort();
         let _ = failure_task.await;
 
-        // Release the lock
+        // PROOF: Generation 0 must REMAIN write-blocked! Dropping the caller does NOT resurrect dead generation
+        assert!(
+            supervisor.admit_write().await.is_err(),
+            "Dead generation 0 must remain non-admissible even after caller future is dropped"
+        );
+
+        // 4. Release the lock holding task (simulating planned candidate preparation finishing)
         release_lock_notify.notify_one();
         let _ = lock_holder.await;
 
-        // Wait for PendingFailureGuard drop task to run
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        // 5. Planned candidate N+1 succeeds and publishes
+        let replacement_session =
+            Arc::new(MockSession { id: "gen-1-planned".to_string(), recovery: None });
+        let published_gen = supervisor.publish_replacement(replacement_session, 0).await.unwrap();
+        assert_eq!(published_gen.id, 1);
 
-        // PROOF: Supervisor must be Healthy, and generation 0 must be admittable again!
+        // PROOF: Generation 1 is now Healthy and admittable
         assert_eq!(supervisor.status().await, TransportStatus::Healthy);
-        assert!(
-            supervisor.admit_write().await.is_ok(),
-            "Pending failure must be cleaned up on reporter abort with no stranded Recovering state"
-        );
+        let admitted = supervisor.admit_write().await.unwrap();
+        assert_eq!(admitted.id, 1);
+        assert_eq!(admitted.session.session_id(), "gen-1-planned");
     }
 
     #[tokio::test]
-    async fn test_failure_reporter_lock_timeout_cleans_pending_failure_without_stranded_recovering()
-    {
+    async fn test_failure_reporter_aborted_keeps_generation_failed_and_subsequent_recovery_succeeds()
+     {
         let (lock_acquired_tx, lock_acquired_rx) = tokio::sync::oneshot::channel();
         let release_lock_notify = Arc::new(tokio::sync::Notify::new());
 
-        let initial_session = Arc::new(MockSession { id: "gen-0".to_string(), recovery: None });
-        let policy = RecoveryPolicy::default().with_deadline(Duration::from_millis(50));
+        let recovered_session =
+            Arc::new(MockSession { id: "gen-1-recovered".to_string(), recovery: None });
+        let mock_rec = Arc::new(AlwaysSuccessfulRecovery {
+            recovered_session,
+            continuity: RecoveryContinuity::Reconnected,
+        });
+        let initial_session = Arc::new(MockSession {
+            id: "gen-0".to_string(),
+            recovery: Some(mock_rec as Arc<dyn RealtimeRecovery>),
+        });
+
+        let policy = RecoveryPolicy::default().with_initial_delay(Duration::ZERO);
         let config = Arc::new(tokio::sync::RwLock::new(crate::config::RealtimeConfig::default()));
         let supervisor =
             Arc::new(RecoverySupervisor::with_initial_session(policy, config, initial_session));
+
+        // 1. Manually hold replacement_lock in a background task
+        let sup_lock_task = Arc::clone(&supervisor);
+        let release_notify_clone = Arc::clone(&release_lock_notify);
+        let lock_holder = tokio::spawn(async move {
+            let _guard = sup_lock_task.replacement_lock.lock().await;
+            let _ = lock_acquired_tx.send(());
+            release_notify_clone.notified().await;
+        });
+
+        lock_acquired_rx.await.expect("replacement lock acquired");
+
+        // 2. Call report_failure in a spawned task while lock is held
+        let sup_fail_task = Arc::clone(&supervisor);
+        let failure_task = tokio::spawn(async move {
+            let report = FailureReport { generation: 0, cause: RecoveryCause::UnexpectedEof };
+            sup_fail_task.report_failure(report).await
+        });
+
+        // Wait until generation 0 is marked failed and admit_write() is blocked
+        let mut write_blocked = false;
+        for _ in 0..100 {
+            if supervisor.admit_write().await.is_err() {
+                write_blocked = true;
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(write_blocked, "Writes must be blocked while waiting for lock");
+
+        // 3. Abort the failure reporter task BEFORE it acquires the lock
+        failure_task.abort();
+        let _ = failure_task.await;
+
+        // PROOF: Generation 0 must REMAIN write-blocked!
+        assert!(
+            supervisor.admit_write().await.is_err(),
+            "Dead generation 0 must remain non-admissible even after caller future is dropped"
+        );
+
+        // 4. Release the lock and perform recovery on the failed generation
+        release_lock_notify.notify_one();
+        let _ = lock_holder.await;
+
+        let report = FailureReport { generation: 0, cause: RecoveryCause::UnexpectedEof };
+        let outcome = supervisor.report_failure(report).await.unwrap();
+        assert!(matches!(outcome, RecoveryOutcome::Recovered { .. }));
+
+        // PROOF: Generation 1 is now Healthy and admittable
+        assert_eq!(supervisor.status().await, TransportStatus::Healthy);
+        let admitted = supervisor.admit_write().await.unwrap();
+        assert_eq!(admitted.id, 1);
+        assert_eq!(admitted.session.session_id(), "gen-1-recovered");
+    }
+
+    #[tokio::test]
+    async fn test_failure_reporter_lock_timeout_keeps_generation_failed_and_subsequent_recovery_succeeds()
+     {
+        let (lock_acquired_tx, lock_acquired_rx) = tokio::sync::oneshot::channel();
+        let release_lock_notify = Arc::new(tokio::sync::Notify::new());
+
+        let recovered_session =
+            Arc::new(MockSession { id: "gen-1-recovered".to_string(), recovery: None });
+        let mock_rec = Arc::new(AlwaysSuccessfulRecovery {
+            recovered_session,
+            continuity: RecoveryContinuity::Reconnected,
+        });
+        let initial_session = Arc::new(MockSession {
+            id: "gen-0".to_string(),
+            recovery: Some(mock_rec.clone() as Arc<dyn RealtimeRecovery>),
+        });
+
+        let policy = RecoveryPolicy::default()
+            .with_deadline(Duration::from_millis(50))
+            .with_initial_delay(Duration::ZERO);
+        let config = Arc::new(tokio::sync::RwLock::new(crate::config::RealtimeConfig::default()));
+        let supervisor = Arc::new(RecoverySupervisor::with_initial_session(
+            policy,
+            config.clone(),
+            initial_session,
+        ));
 
         // 1. Hold replacement_lock
         let sup_lock_task = Arc::clone(&supervisor);
@@ -2954,19 +3032,32 @@ mod tests {
         let report_res = supervisor.report_failure(report).await;
         assert!(matches!(report_res, Err(RealtimeError::Timeout(_))));
 
-        // Release the lock
+        // PROOF: Generation 0 remains write-blocked after timeout!
+        assert!(
+            supervisor.admit_write().await.is_err(),
+            "Dead generation 0 must remain non-admissible after caller timeout"
+        );
+
+        // 3. Release the lock and perform recovery with extended deadline
         release_lock_notify.notify_one();
         let _ = lock_holder.await;
 
-        // Wait for PendingFailureGuard drop task to run
-        tokio::time::sleep(Duration::from_millis(50)).await;
-
-        // PROOF: Supervisor must remain Healthy, and generation 0 must be admittable again
-        assert_eq!(supervisor.status().await, TransportStatus::Healthy);
-        assert!(
-            supervisor.admit_write().await.is_ok(),
-            "Pending failure must be cleaned up on lock timeout with no stranded Recovering state"
+        let retry_supervisor = RecoverySupervisor::with_initial_session(
+            RecoveryPolicy::default().with_initial_delay(Duration::ZERO),
+            config,
+            Arc::new(MockSession {
+                id: "gen-0".to_string(),
+                recovery: Some(mock_rec as Arc<dyn RealtimeRecovery>),
+            }),
         );
+        let retry_report = FailureReport { generation: 0, cause: RecoveryCause::UnexpectedEof };
+        let outcome = retry_supervisor.report_failure(retry_report).await.unwrap();
+        assert!(matches!(outcome, RecoveryOutcome::Recovered { .. }));
+
+        assert_eq!(retry_supervisor.status().await, TransportStatus::Healthy);
+        let admitted = retry_supervisor.admit_write().await.unwrap();
+        assert_eq!(admitted.id, 1);
+        assert_eq!(admitted.session.session_id(), "gen-1-recovered");
     }
 
     struct AlwaysSuccessfulRecovery {

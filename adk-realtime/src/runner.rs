@@ -2824,7 +2824,22 @@ mod runner_tests {
             .await;
         assert!(res.is_ok());
 
-        tokio::task::yield_now().await;
+        // Explicitly assert execute_planned_replacement directly rejects stale originating generation 0
+        let rotation_res = runner
+            .supervisor
+            .execute_planned_replacement(
+                0,
+                crate::recovery::RecoveryCause::PlannedRotation { time_left: Some("30s".into()) },
+            )
+            .await;
+        assert!(
+            rotation_res.is_err()
+                || matches!(
+                    rotation_res,
+                    Ok(crate::recovery::supervisor::RecoveryOutcome::Stale(_))
+                ),
+            "stale generation 0 rotation report must not rotate generation 1"
+        );
 
         let active = runner.supervisor.get_active_generation().await.unwrap();
         assert_eq!(active.id, 1, "stale generation 0 rotation report must not rotate generation 1");
