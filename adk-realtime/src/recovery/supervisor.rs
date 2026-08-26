@@ -2,7 +2,8 @@
 
 use crate::error::{RealtimeError, Result};
 use crate::recovery::{
-    RecoveryCause, RecoveryContext, RecoveryContinuity, RecoveryDisposition, RecoveryPolicy,
+    RealtimeRecovery, RecoveredSession, RecoveryCause, RecoveryContext, RecoveryContinuity,
+    RecoveryDisposition, RecoveryPolicy,
 };
 use crate::session::RealtimeSession;
 use std::num::NonZeroU32;
@@ -160,6 +161,22 @@ impl ReplacementTxn {
 pub(crate) enum TerminalReason {
     ExplicitClose,
     Exhausted,
+}
+
+#[derive(Debug)]
+pub(crate) enum AttemptTransition {
+    Published,
+    KeepServing,
+    RetryRecovering,
+    Terminal,
+}
+
+pub(crate) struct AttemptContext<'a> {
+    pub(crate) originating_gen_id: u64,
+    pub(crate) attempt_idx: u32,
+    pub(crate) max_attempts: u32,
+    pub(crate) expected_revision: Option<u64>,
+    pub(crate) recovery_impl: Option<&'a dyn RealtimeRecovery>,
 }
 
 /// Closed algebraic state machine for supervisor transport lifecycle.
@@ -729,15 +746,16 @@ impl RecoverySupervisor {
                 None => {
                     let err = RealtimeError::provider("active session does not support recovery");
                     tracing::error!(generation = originating_gen.id, err = %err, "recovery not supported");
-                    Self::finish_txn_internal(
-                        &core_lock,
-                        &generation_tx,
-                        &txn,
-                        Err(err),
-                        None,
-                        Some(originating_gen.id),
-                    )
-                    .await;
+                    let ctx = AttemptContext {
+                        originating_gen_id: originating_gen.id,
+                        attempt_idx: 1,
+                        max_attempts: 1,
+                        expected_revision: None,
+                        recovery_impl: None,
+                    };
+                    let _ =
+                        Self::apply_attempt_result(&core_lock, &generation_tx, &txn, ctx, Err(err))
+                            .await;
                     return;
                 }
             };
@@ -753,22 +771,19 @@ impl RecoverySupervisor {
                     "fatal recovery cause detected; performing zero provider attempts",
                 );
                 tracing::warn!(generation = originating_gen.id, err = %err, "fatal cause classification");
-                Self::finish_txn_internal(
-                    &core_lock,
-                    &generation_tx,
-                    &txn,
-                    Err(err),
-                    None,
-                    Some(originating_gen.id),
-                )
-                .await;
+                let ctx = AttemptContext {
+                    originating_gen_id: originating_gen.id,
+                    attempt_idx: 1,
+                    max_attempts: 1,
+                    expected_revision: None,
+                    recovery_impl: Some(recovery_impl),
+                };
+                let _ = Self::apply_attempt_result(&core_lock, &generation_tx, &txn, ctx, Err(err))
+                    .await;
                 return;
             }
 
             let max_attempts = policy.max_attempts().get();
-            let mut attempts_launched = 0;
-            let mut last_provider_error: Option<RealtimeError> = None;
-            let mut stop_reason: Option<RealtimeError> = None;
 
             for attempt_idx in 1..=max_attempts {
                 if txn.cancel_token.is_cancelled() {
@@ -776,13 +791,19 @@ impl RecoverySupervisor {
                         generation = originating_gen.id,
                         "replacement transaction cancelled"
                     );
-                    Self::finish_txn_internal(
+                    let ctx = AttemptContext {
+                        originating_gen_id: originating_gen.id,
+                        attempt_idx,
+                        max_attempts,
+                        expected_revision: None,
+                        recovery_impl: Some(recovery_impl),
+                    };
+                    let _ = Self::apply_attempt_result(
                         &core_lock,
                         &generation_tx,
                         &txn,
+                        ctx,
                         Err(RealtimeError::SessionClosed),
-                        None,
-                        Some(originating_gen.id),
                     )
                     .await;
                     return;
@@ -806,8 +827,17 @@ impl RecoverySupervisor {
                         err = %err,
                         "fatal cause classification during recovery"
                     );
-                    stop_reason = Some(err);
-                    break;
+                    let ctx = AttemptContext {
+                        originating_gen_id: originating_gen.id,
+                        attempt_idx,
+                        max_attempts,
+                        expected_revision: None,
+                        recovery_impl: Some(recovery_impl),
+                    };
+                    let _ =
+                        Self::apply_attempt_result(&core_lock, &generation_tx, &txn, ctx, Err(err))
+                            .await;
+                    return;
                 }
 
                 #[cfg(any(test, feature = "recovery-test-utils"))]
@@ -820,16 +850,41 @@ impl RecoverySupervisor {
 
                 let now = tokio::time::Instant::now();
                 if now >= current_deadline {
+                    let phase_now = txn.snapshot_phase();
+                    if let ReplacementPhase::Recovering { deadline: new_deadline, .. } = phase_now
+                        && now < new_deadline
+                    {
+                        tracing::info!(
+                            generation = originating_gen.id,
+                            attempt = attempt_idx,
+                            "planned deadline expired but promoted to recovery; continuing under fresh deadline"
+                        );
+                        continue;
+                    }
+
                     let msg = "replacement deadline expired before attempt".to_string();
                     tracing::warn!(generation = originating_gen.id, attempt = attempt_idx, err = %msg, "deadline expired");
-                    stop_reason = Some(RealtimeError::Timeout(msg));
-                    break;
+                    let ctx = AttemptContext {
+                        originating_gen_id: originating_gen.id,
+                        attempt_idx,
+                        max_attempts,
+                        expected_revision: None,
+                        recovery_impl: Some(recovery_impl),
+                    };
+                    let _ = Self::apply_attempt_result(
+                        &core_lock,
+                        &generation_tx,
+                        &txn,
+                        ctx,
+                        Err(RealtimeError::Timeout(msg)),
+                    )
+                    .await;
+                    return;
                 }
 
                 let attempt_nz = NonZeroU32::new(attempt_idx).unwrap_or(NonZeroU32::MIN);
                 let snapshot = core_lock.read().await.config.clone();
 
-                attempts_launched += 1;
                 let remaining_dur = current_deadline.saturating_duration_since(now);
                 let context_deadline = std::time::Instant::now()
                     .checked_add(remaining_dur)
@@ -855,17 +910,35 @@ impl RecoverySupervisor {
                             attempt = attempt_idx,
                             "replacement candidate cancelled during connection"
                         );
-                        Self::finish_txn_internal(
+                        let ctx = AttemptContext {
+                            originating_gen_id: originating_gen.id,
+                            attempt_idx,
+                            max_attempts,
+                            expected_revision: None,
+                            recovery_impl: Some(recovery_impl),
+                        };
+                        let _ = Self::apply_attempt_result(
                             &core_lock,
                             &generation_tx,
                             &txn,
+                            ctx,
                             Err(RealtimeError::SessionClosed),
-                            None,
-                            Some(originating_gen.id),
                         ).await;
                         return;
                     }
                     _ = tokio::time::sleep_until(current_deadline) => {
+                        let now_timeout = tokio::time::Instant::now();
+                        let phase_timeout = txn.snapshot_phase();
+                        if let ReplacementPhase::Recovering { deadline: new_deadline, .. } = phase_timeout
+                            && now_timeout < new_deadline
+                        {
+                            tracing::info!(
+                                generation = originating_gen.id,
+                                attempt = attempt_idx,
+                                "in-flight attempt timed out under planned deadline after promotion; continuing under fresh deadline"
+                            );
+                            continue;
+                        }
                         let msg = "replacement deadline expired during connection attempt".to_string();
                         tracing::warn!(
                             generation = originating_gen.id,
@@ -873,91 +946,43 @@ impl RecoverySupervisor {
                             err = %msg,
                             "deadline expired during connection"
                         );
-                        stop_reason = Some(RealtimeError::Timeout(msg));
-                        break;
+                        let ctx = AttemptContext {
+                            originating_gen_id: originating_gen.id,
+                            attempt_idx,
+                            max_attempts,
+                            expected_revision: None,
+                            recovery_impl: Some(recovery_impl),
+                        };
+                        let _ = Self::apply_attempt_result(
+                            &core_lock,
+                            &generation_tx,
+                            &txn,
+                            ctx,
+                            Err(RealtimeError::Timeout(msg)),
+                        ).await;
+                        return;
                     }
                     res = recovery_impl.recover(context) => res,
                 };
 
-                match attempt_res {
-                    Ok(recovered) => {
-                        tracing::info!(
-                            generation = originating_gen.id,
-                            attempt = attempt_idx,
-                            "replacement candidate ready; validating publication"
-                        );
-
-                        let continuity = recovered.continuity;
-                        let session = recovered.session;
-                        let outcome = Ok(RecoveryOutcome::Recovered { session, continuity });
-
-                        let published = Self::finish_txn_internal(
-                            &core_lock,
-                            &generation_tx,
-                            &txn,
-                            outcome,
-                            Some(snapshot.revision),
-                            Some(originating_gen.id),
-                        )
+                let ctx = AttemptContext {
+                    originating_gen_id: originating_gen.id,
+                    attempt_idx,
+                    max_attempts,
+                    expected_revision: Some(snapshot.revision),
+                    recovery_impl: Some(recovery_impl),
+                };
+                let transition =
+                    Self::apply_attempt_result(&core_lock, &generation_tx, &txn, ctx, attempt_res)
                         .await;
 
-                        if published {
-                            return;
-                        } else {
-                            let is_recovering_now =
-                                matches!(txn.snapshot_phase(), ReplacementPhase::Recovering { .. });
-                            if !is_recovering_now {
-                                tracing::warn!(
-                                    generation = originating_gen.id,
-                                    attempt = attempt_idx,
-                                    "planned publication rejected; exiting worker"
-                                );
-                                return;
-                            }
-                            tracing::warn!(
-                                generation = originating_gen.id,
-                                attempt = attempt_idx,
-                                "recovery candidate stale config rejected; retrying with fresh snapshot"
-                            );
-                            last_provider_error = Some(RealtimeError::config(
-                                "stale config revision during candidate publication",
-                            ));
-                            continue;
-                        }
+                match transition {
+                    AttemptTransition::Published
+                    | AttemptTransition::KeepServing
+                    | AttemptTransition::Terminal => {
+                        return;
                     }
-                    Err(err) => {
-                        let disposition = recovery_impl.classify_attempt_error(&err);
-
-                        let is_recovering_now =
-                            matches!(txn.snapshot_phase(), ReplacementPhase::Recovering { .. });
-
-                        if !is_recovering_now {
-                            // Still in Serving planned mode:
-                            // Clean up planned candidate, keep healthy generation N!
-                            Self::finish_txn_internal(
-                                &core_lock,
-                                &generation_tx,
-                                &txn,
-                                Err(err),
-                                None,
-                                Some(originating_gen.id),
-                            )
-                            .await;
-                            return;
-                        }
-
-                        last_provider_error = Some(err);
-
-                        // In Recovering mode!
-                        if disposition == RecoveryDisposition::Fatal {
-                            stop_reason = Some(RealtimeError::ProviderError(format!(
-                                "recovery aborted after {} attempt(s) due to fatal error",
-                                attempts_launched
-                            )));
-                            break;
-                        }
-
-                        // Retryable error: backoff and retry if attempts remain
+                    AttemptTransition::RetryRecovering => {
                         if attempt_idx < max_attempts {
                             let base_delay = policy.initial_delay();
                             let factor = 2u32.checked_pow(attempt_idx - 1).unwrap_or(u32::MAX);
@@ -969,32 +994,63 @@ impl RecoverySupervisor {
                             };
                             let now_after = tokio::time::Instant::now();
                             if now_after >= current_deadline {
-                                stop_reason = Some(RealtimeError::Timeout(
-                                    "recovery deadline expired during backoff calculation"
-                                        .to_string(),
-                                ));
-                                break;
+                                let msg = "recovery deadline expired during backoff calculation"
+                                    .to_string();
+                                let ctx = AttemptContext {
+                                    originating_gen_id: originating_gen.id,
+                                    attempt_idx,
+                                    max_attempts,
+                                    expected_revision: None,
+                                    recovery_impl: Some(recovery_impl),
+                                };
+                                let _ = Self::apply_attempt_result(
+                                    &core_lock,
+                                    &generation_tx,
+                                    &txn,
+                                    ctx,
+                                    Err(RealtimeError::Timeout(msg)),
+                                )
+                                .await;
+                                return;
                             }
                             backoff =
                                 backoff.min(current_deadline.saturating_duration_since(now_after));
                             if !backoff.is_zero() {
                                 tokio::select! {
                                     _ = txn.cancel_token.cancelled() => {
-                                        Self::finish_txn_internal(
+                                        let ctx = AttemptContext {
+                                            originating_gen_id: originating_gen.id,
+                                            attempt_idx,
+                                            max_attempts,
+                                            expected_revision: None,
+                                            recovery_impl: Some(recovery_impl),
+                                        };
+                                        let _ = Self::apply_attempt_result(
                                             &core_lock,
                                             &generation_tx,
                                             &txn,
+                                            ctx,
                                             Err(RealtimeError::SessionClosed),
-                                            None,
-                                            Some(originating_gen.id),
                                         ).await;
                                         return;
                                     }
                                     _ = tokio::time::sleep_until(current_deadline) => {
-                                        stop_reason = Some(RealtimeError::Timeout(
-                                            "recovery deadline expired during backoff sleep".to_string(),
-                                        ));
-                                        break;
+                                        let msg = "recovery deadline expired during backoff sleep".to_string();
+                                        let ctx = AttemptContext {
+                                            originating_gen_id: originating_gen.id,
+                                            attempt_idx,
+                                            max_attempts,
+                                            expected_revision: None,
+                                            recovery_impl: Some(recovery_impl),
+                                        };
+                                        let _ = Self::apply_attempt_result(
+                                            &core_lock,
+                                            &generation_tx,
+                                            &txn,
+                                            ctx,
+                                            Err(RealtimeError::Timeout(msg)),
+                                        ).await;
+                                        return;
                                     }
                                     _ = tokio::time::sleep(backoff) => {}
                                 }
@@ -1003,26 +1059,6 @@ impl RecoverySupervisor {
                     }
                 }
             }
-
-            // Exited loop without publishing
-            let final_err = stop_reason.unwrap_or_else(|| {
-                last_provider_error.unwrap_or_else(|| {
-                    RealtimeError::ProviderError(format!(
-                        "recovery failed after {} attempt(s)",
-                        attempts_launched
-                    ))
-                })
-            });
-
-            Self::finish_txn_internal(
-                &core_lock,
-                &generation_tx,
-                &txn,
-                Err(final_err),
-                None,
-                Some(originating_gen.id),
-            )
-            .await;
         });
     }
 
@@ -1030,132 +1066,169 @@ impl RecoverySupervisor {
     ///
     /// Validates supervisor state, verifies config revision, updates state atomically,
     /// cleans up old sessions / candidates, and publishes outcome.
-    async fn finish_txn_internal(
+    async fn apply_attempt_result(
         core_lock: &Arc<tokio::sync::RwLock<SupervisorCore>>,
         generation_tx: &tokio::sync::watch::Sender<u64>,
         txn: &Arc<ReplacementTxn>,
-        outcome: Result<RecoveryOutcome>,
-        expected_revision: Option<u64>,
-        originating_gen_id: Option<u64>,
-    ) -> bool {
-        let mut candidate_guard = match &outcome {
-            Ok(RecoveryOutcome::Recovered { session, .. }) => {
-                Some(CandidateCleanupGuard::new(session.clone()))
-            }
-            _ => None,
+        ctx: AttemptContext<'_>,
+        result: Result<RecoveredSession>,
+    ) -> AttemptTransition {
+        let mut candidate_guard = match &result {
+            Ok(recovered) => Some(CandidateCleanupGuard::new(recovered.session.clone())),
+            Err(_) => None,
         };
 
         let mut old_session_to_close = None;
         let mut final_outcome_to_send = None;
         let mut published_next_gen = None;
+        let transition;
 
         {
             let mut core_guard = core_lock.write().await;
             let SupervisorCore { state, config, next_generation_id, .. } = &mut *core_guard;
-            if let Some(expected_rev) = expected_revision
-                && config.revision != expected_rev
-            {
-                tracing::warn!(
-                    expected = expected_rev,
-                    current = config.revision,
-                    "candidate publication rejected: stale config revision"
-                );
-                // If in Serving mode, clear planned transaction and notify waiter
-                if let ManagedState::Serving { planned, .. } = state
-                    && let Some(p) = planned
-                    && p.id == txn.id
-                {
-                    *planned = None;
-                    let _ = txn.outcome_tx.send(Some(Err(RealtimeError::config(
-                        "candidate publication rejected: stale config revision",
-                    ))));
-                }
-                return false;
-            }
 
             match state {
                 ManagedState::Terminal { .. } => {
-                    final_outcome_to_send = Some(Err(RealtimeError::SessionClosed));
+                    let err = RealtimeError::SessionClosed;
+                    final_outcome_to_send = Some(Err(err));
+                    transition = AttemptTransition::Terminal;
                 }
                 ManagedState::Uninitialized => {
-                    final_outcome_to_send = Some(Err(RealtimeError::NotConnected));
+                    let err = RealtimeError::NotConnected;
+                    final_outcome_to_send = Some(Err(err));
+                    transition = AttemptTransition::Terminal;
                 }
                 ManagedState::Serving { active, planned } => {
-                    if let Some(p) = planned {
-                        if p.id != txn.id {
-                            let _ = txn.outcome_tx.send(Some(Err(RealtimeError::config(
-                                "planned transaction superseded",
-                            ))));
-                            return false;
+                    if active.id != ctx.originating_gen_id {
+                        let err = RealtimeError::config(
+                            "originating generation changed during replacement",
+                        );
+                        final_outcome_to_send = Some(Err(err));
+                        transition = AttemptTransition::Terminal;
+                    } else if let Some(p) = planned
+                        && p.id == txn.id
+                    {
+                        match result {
+                            Ok(recovered) => {
+                                if let Some(expected_rev) = ctx.expected_revision
+                                    && config.revision != expected_rev
+                                {
+                                    tracing::warn!(
+                                        expected = expected_rev,
+                                        current = config.revision,
+                                        "candidate publication rejected: stale config revision"
+                                    );
+                                    *planned = None;
+                                    let err = RealtimeError::config(
+                                        "candidate publication rejected: stale config revision",
+                                    );
+                                    final_outcome_to_send = Some(Err(err));
+                                    transition = AttemptTransition::KeepServing;
+                                } else {
+                                    let next_gen = *next_generation_id;
+                                    *next_generation_id += 1;
+                                    let session = recovered.session.clone();
+                                    let continuity = recovered.continuity;
+                                    let new_gen =
+                                        Arc::new(SessionGeneration::new(next_gen, session.clone()));
+                                    old_session_to_close = Some(active.session.clone());
+                                    *state =
+                                        ManagedState::Serving { active: new_gen, planned: None };
+                                    published_next_gen = Some(next_gen);
+                                    if let Some(ref mut cg) = candidate_guard {
+                                        cg.disarm();
+                                    }
+                                    final_outcome_to_send = Some(Ok(RecoveryOutcome::Recovered {
+                                        session,
+                                        continuity,
+                                    }));
+                                    transition = AttemptTransition::Published;
+                                }
+                            }
+                            Err(err) => {
+                                *planned = None;
+                                final_outcome_to_send = Some(Err(err));
+                                transition = AttemptTransition::KeepServing;
+                            }
                         }
                     } else {
-                        let _ = txn.outcome_tx.send(Some(Err(RealtimeError::config(
-                            "planned transaction missing or cleared",
-                        ))));
-                        return false;
-                    }
-
-                    match outcome {
-                        Ok(RecoveryOutcome::Recovered { session, continuity }) => {
-                            if let Some(orig_id) = originating_gen_id
-                                && orig_id != active.id
-                            {
-                                let _ = txn.outcome_tx.send(Some(Err(RealtimeError::config(
-                                    "originating generation changed during replacement",
-                                ))));
-                                return false;
-                            }
-                            let next_gen = *next_generation_id;
-                            *next_generation_id += 1;
-                            let new_gen =
-                                Arc::new(SessionGeneration::new(next_gen, session.clone()));
-                            old_session_to_close = Some(active.session.clone());
-                            *state = ManagedState::Serving { active: new_gen, planned: None };
-                            published_next_gen = Some(next_gen);
-                            if let Some(ref mut cg) = candidate_guard {
-                                cg.disarm();
-                            }
-                            final_outcome_to_send =
-                                Some(Ok(RecoveryOutcome::Recovered { session, continuity }));
-                        }
-                        Err(err) => {
-                            *planned = None;
-                            final_outcome_to_send = Some(Err(err));
-                        }
-                        _ => {}
+                        let err =
+                            RealtimeError::config("planned transaction missing or superseded");
+                        final_outcome_to_send = Some(Err(err));
+                        transition = AttemptTransition::Terminal;
                     }
                 }
                 ManagedState::Recovering { failed, txn: cur_txn } => {
                     if cur_txn.id != txn.id {
-                        let _ = txn.outcome_tx.send(Some(Err(RealtimeError::config(
-                            "recovery transaction superseded",
-                        ))));
-                        return false;
-                    }
-
-                    match outcome {
-                        Ok(RecoveryOutcome::Recovered { session, continuity }) => {
-                            let next_gen = *next_generation_id;
-                            *next_generation_id += 1;
-                            let new_gen =
-                                Arc::new(SessionGeneration::new(next_gen, session.clone()));
-                            old_session_to_close = Some(failed.session.clone());
-                            *state = ManagedState::Serving { active: new_gen, planned: None };
-                            published_next_gen = Some(next_gen);
-                            if let Some(ref mut cg) = candidate_guard {
-                                cg.disarm();
+                        let err = RealtimeError::config("recovery transaction superseded");
+                        final_outcome_to_send = Some(Err(err));
+                        transition = AttemptTransition::Terminal;
+                    } else {
+                        match result {
+                            Ok(recovered) => {
+                                if let Some(expected_rev) = ctx.expected_revision
+                                    && config.revision != expected_rev
+                                {
+                                    tracing::warn!(
+                                        expected = expected_rev,
+                                        current = config.revision,
+                                        "candidate publication rejected: stale config revision"
+                                    );
+                                    transition = AttemptTransition::RetryRecovering;
+                                } else {
+                                    let next_gen = *next_generation_id;
+                                    *next_generation_id += 1;
+                                    let session = recovered.session.clone();
+                                    let continuity = recovered.continuity;
+                                    let new_gen =
+                                        Arc::new(SessionGeneration::new(next_gen, session.clone()));
+                                    old_session_to_close = Some(failed.session.clone());
+                                    *state =
+                                        ManagedState::Serving { active: new_gen, planned: None };
+                                    published_next_gen = Some(next_gen);
+                                    if let Some(ref mut cg) = candidate_guard {
+                                        cg.disarm();
+                                    }
+                                    final_outcome_to_send = Some(Ok(RecoveryOutcome::Recovered {
+                                        session,
+                                        continuity,
+                                    }));
+                                    transition = AttemptTransition::Published;
+                                }
                             }
-                            final_outcome_to_send =
-                                Some(Ok(RecoveryOutcome::Recovered { session, continuity }));
+                            Err(err) => {
+                                let (cause_disposition, error_disposition) = match ctx.recovery_impl
+                                {
+                                    Some(impl_) => {
+                                        let current_cause = match txn.snapshot_phase() {
+                                            ReplacementPhase::Planned { cause, .. } => cause,
+                                            ReplacementPhase::Recovering { cause, .. } => cause,
+                                        };
+                                        (
+                                            impl_.classify(&current_cause),
+                                            impl_.classify_attempt_error(&err),
+                                        )
+                                    }
+                                    None => {
+                                        (RecoveryDisposition::Fatal, RecoveryDisposition::Fatal)
+                                    }
+                                };
+
+                                if cause_disposition == RecoveryDisposition::Fatal
+                                    || error_disposition == RecoveryDisposition::Fatal
+                                    || ctx.attempt_idx >= ctx.max_attempts
+                                {
+                                    *state = ManagedState::Terminal {
+                                        reason: TerminalReason::Exhausted,
+                                        _last_generation: Some(Arc::clone(failed)),
+                                    };
+                                    final_outcome_to_send = Some(Err(err));
+                                    transition = AttemptTransition::Terminal;
+                                } else {
+                                    transition = AttemptTransition::RetryRecovering;
+                                }
+                            }
                         }
-                        Err(err) => {
-                            *state = ManagedState::Terminal {
-                                reason: TerminalReason::Exhausted,
-                                _last_generation: Some(Arc::clone(failed)),
-                            };
-                            final_outcome_to_send = Some(Err(err));
-                        }
-                        _ => {}
                     }
                 }
             }
@@ -1175,7 +1248,7 @@ impl RecoverySupervisor {
             let _ = txn.outcome_tx.send(Some(out));
         }
 
-        true
+        transition
     }
 
     /// Close the session gracefully and mark supervisor as closed.
@@ -2169,5 +2242,270 @@ mod tests {
             let backoff = base_delay.saturating_mul(factor).min(policy.max_delay());
             assert!(backoff <= Duration::from_millis(200), "Backoff must not exceed max_delay");
         }
+    }
+
+    #[tokio::test]
+    async fn test_fresh_deadline_takeover_on_promoted_in_flight_attempt() {
+        tokio::time::pause();
+
+        let entered_notify = Arc::new(tokio::sync::Notify::new());
+        let unblock_notify = Arc::new(tokio::sync::Notify::new());
+
+        let mock_rec = Arc::new(BarrierRecovery {
+            entered_notify: Arc::clone(&entered_notify),
+            unblock_notify: Arc::clone(&unblock_notify),
+        });
+
+        let initial_session = Arc::new(MockSession {
+            id: "gen-0".to_string(),
+            recovery: Some(Arc::clone(&mock_rec) as Arc<dyn RealtimeRecovery>),
+        });
+
+        // Planned deadline will be very short: 2.1s - 2s safety margin = 100ms
+        let policy = RecoveryPolicy::default()
+            .with_max_attempts(NonZeroU32::new(3).unwrap())
+            .with_deadline(Duration::from_secs(5));
+
+        let config = Arc::new(tokio::sync::RwLock::new(crate::config::RealtimeConfig::default()));
+        let supervisor =
+            Arc::new(RecoverySupervisor::with_initial_session(policy, config, initial_session));
+
+        // Start planned replacement with short provider timeLeft: "2100ms" -> capped to 100ms
+        let sup_planned = Arc::clone(&supervisor);
+        let planned_handle = tokio::spawn(async move {
+            sup_planned
+                .execute_planned_replacement(
+                    0,
+                    RecoveryCause::PlannedRotation { time_left: Some("2100ms".into()) },
+                )
+                .await
+        });
+
+        // Wait until candidate construction is in-flight (attempt 1)
+        entered_notify.notified().await;
+
+        // At +50ms: Generation 0 suffers real failure and is promoted to Recovering (fresh 5s deadline)
+        tokio::time::advance(Duration::from_millis(50)).await;
+        let sup_fail = Arc::clone(&supervisor);
+        let fail_handle = tokio::spawn(async move {
+            let report = FailureReport { generation: 0, cause: RecoveryCause::UnexpectedEof };
+            sup_fail.report_failure(report).await
+        });
+
+        while supervisor.status().await != TransportStatus::Recovering {
+            tokio::task::yield_now().await;
+        }
+
+        // At +150ms: Old planned deadline (+100ms) has expired, but we are well before fresh 5s deadline!
+        tokio::time::advance(Duration::from_millis(100)).await;
+
+        // Invariant: Supervisor MUST NOT be exhausted! It stays Recovering!
+        assert_eq!(supervisor.status().await, TransportStatus::Recovering);
+
+        // Candidate 2 is building or attempt 1 is unblocked: unblock and complete recovery
+        unblock_notify.notify_one();
+
+        let fail_res = fail_handle.await.unwrap().unwrap();
+        match fail_res {
+            RecoveryOutcome::Recovered { session, .. } => {
+                assert_eq!(session.session_id(), "gen-1-recovered");
+            }
+            _ => panic!("Expected Recovered session under fresh deadline"),
+        }
+
+        let _ = planned_handle.await;
+    }
+
+    #[tokio::test]
+    async fn test_error_promotion_atomic_transition_retries() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let entered_notify = Arc::new(tokio::sync::Notify::new());
+        let unblock_notify = Arc::new(tokio::sync::Notify::new());
+
+        struct AttemptControlledRecovery {
+            attempts: Arc<AtomicUsize>,
+            entered_notify: Arc<tokio::sync::Notify>,
+            unblock_notify: Arc<tokio::sync::Notify>,
+        }
+
+        #[async_trait]
+        impl RealtimeRecovery for AttemptControlledRecovery {
+            fn classify(&self, _cause: &RecoveryCause) -> RecoveryDisposition {
+                RecoveryDisposition::Recoverable
+            }
+
+            fn classify_attempt_error(
+                &self,
+                _error: &crate::error::RealtimeError,
+            ) -> RecoveryDisposition {
+                RecoveryDisposition::Recoverable
+            }
+
+            async fn recover(&self, _context: RecoveryContext<'_>) -> Result<RecoveredSession> {
+                let attempt = self.attempts.fetch_add(1, Ordering::SeqCst) + 1;
+                self.entered_notify.notify_one();
+                if attempt == 1 {
+                    self.unblock_notify.notified().await;
+                    // Attempt 1 fails while planned
+                    Err(RealtimeError::provider("transient planned failure"))
+                } else {
+                    let session = Arc::new(MockSession {
+                        id: format!("gen-1-attempt-{}", attempt),
+                        recovery: None,
+                    });
+                    Ok(RecoveredSession::new(session, RecoveryContinuity::Reconnected))
+                }
+            }
+        }
+
+        let mock_rec = Arc::new(AttemptControlledRecovery {
+            attempts: Arc::clone(&attempts),
+            entered_notify: Arc::clone(&entered_notify),
+            unblock_notify: Arc::clone(&unblock_notify),
+        });
+
+        let initial_session = Arc::new(MockSession {
+            id: "gen-0".to_string(),
+            recovery: Some(Arc::clone(&mock_rec) as Arc<dyn RealtimeRecovery>),
+        });
+
+        let policy = RecoveryPolicy::default()
+            .with_max_attempts(NonZeroU32::new(3).unwrap())
+            .with_initial_delay(Duration::from_millis(10))
+            .with_deadline(Duration::from_secs(5));
+
+        let config = Arc::new(tokio::sync::RwLock::new(crate::config::RealtimeConfig::default()));
+        let supervisor =
+            Arc::new(RecoverySupervisor::with_initial_session(policy, config, initial_session));
+
+        // Start planned replacement
+        let sup_clone = Arc::clone(&supervisor);
+        let planned_handle = tokio::spawn(async move {
+            sup_clone
+                .execute_planned_replacement(
+                    0,
+                    RecoveryCause::PlannedRotation { time_left: Some("30s".into()) },
+                )
+                .await
+        });
+
+        // Attempt 1 in-flight
+        entered_notify.notified().await;
+
+        // Concurrently fail generation 0 and promote to Recovering right as attempt 1 finishes with error
+        let sup_fail = Arc::clone(&supervisor);
+        let fail_handle = tokio::spawn(async move {
+            let report = FailureReport { generation: 0, cause: RecoveryCause::UnexpectedEof };
+            sup_fail.report_failure(report).await
+        });
+
+        while supervisor.status().await != TransportStatus::Recovering {
+            tokio::task::yield_now().await;
+        }
+
+        // Unblock attempt 1 failure: atomic transition evaluates as RetryRecovering, not Terminal!
+        unblock_notify.notify_one();
+
+        let fail_res = fail_handle.await.unwrap().unwrap();
+        match fail_res {
+            RecoveryOutcome::Recovered { session, .. } => {
+                assert_eq!(session.session_id(), "gen-1-attempt-2");
+            }
+            _ => panic!(
+                "Expected Recovered session on retry after atomic error promotion transition"
+            ),
+        }
+
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        let _ = planned_handle.await;
+    }
+
+    #[tokio::test]
+    async fn test_backoff_respects_max_delay_with_paused_time() {
+        tokio::time::pause();
+
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let timestamps = Arc::new(parking_lot::Mutex::new(Vec::new()));
+
+        struct TimingRecovery {
+            attempts: Arc<AtomicUsize>,
+            timestamps: Arc<parking_lot::Mutex<Vec<tokio::time::Instant>>>,
+        }
+
+        #[async_trait]
+        impl RealtimeRecovery for TimingRecovery {
+            fn classify(&self, _cause: &RecoveryCause) -> RecoveryDisposition {
+                RecoveryDisposition::Recoverable
+            }
+
+            fn classify_attempt_error(
+                &self,
+                _error: &crate::error::RealtimeError,
+            ) -> RecoveryDisposition {
+                RecoveryDisposition::Recoverable
+            }
+
+            async fn recover(&self, _context: RecoveryContext<'_>) -> Result<RecoveredSession> {
+                let attempt = self.attempts.fetch_add(1, Ordering::SeqCst) + 1;
+                self.timestamps.lock().push(tokio::time::Instant::now());
+                if attempt < 3 {
+                    Err(RealtimeError::provider("transient failure"))
+                } else {
+                    let session = Arc::new(MockSession {
+                        id: format!("gen-1-attempt-{}", attempt),
+                        recovery: None,
+                    });
+                    Ok(RecoveredSession::new(session, RecoveryContinuity::Reconnected))
+                }
+            }
+        }
+
+        let mock_rec = Arc::new(TimingRecovery {
+            attempts: Arc::clone(&attempts),
+            timestamps: Arc::clone(&timestamps),
+        });
+
+        let initial_session = Arc::new(MockSession {
+            id: "gen-0".to_string(),
+            recovery: Some(Arc::clone(&mock_rec) as Arc<dyn RealtimeRecovery>),
+        });
+
+        let policy = RecoveryPolicy::default()
+            .with_max_attempts(NonZeroU32::new(3).unwrap())
+            .with_initial_delay(Duration::from_millis(50))
+            .with_max_delay(Duration::from_millis(60))
+            .with_deadline(Duration::from_secs(5));
+
+        let config = Arc::new(tokio::sync::RwLock::new(crate::config::RealtimeConfig::default()));
+        let supervisor =
+            Arc::new(RecoverySupervisor::with_initial_session(policy, config, initial_session));
+
+        let sup_clone = Arc::clone(&supervisor);
+        let fail_handle = tokio::spawn(async move {
+            let report = FailureReport { generation: 0, cause: RecoveryCause::UnexpectedEof };
+            sup_clone.report_failure(report).await
+        });
+
+        let fail_res = fail_handle.await.unwrap().unwrap();
+        assert!(matches!(fail_res, RecoveryOutcome::Recovered { .. }));
+
+        let recorded = timestamps.lock().clone();
+        assert_eq!(recorded.len(), 3);
+
+        // Backoff attempt 1 -> 2: 50ms * 2^0 = 50ms
+        let delay_1_2 = recorded[1].duration_since(recorded[0]);
+        assert!(
+            delay_1_2 >= Duration::from_millis(50) && delay_1_2 <= Duration::from_millis(55),
+            "Expected ~50ms delay, got {:?}",
+            delay_1_2
+        );
+
+        // Backoff attempt 2 -> 3: 50ms * 2^1 = 100ms, clamped to max_delay 60ms!
+        let delay_2_3 = recorded[2].duration_since(recorded[1]);
+        assert!(
+            delay_2_3 >= Duration::from_millis(60) && delay_2_3 <= Duration::from_millis(65),
+            "Expected ~60ms delay (clamped by max_delay), got {:?}",
+            delay_2_3
+        );
     }
 }
