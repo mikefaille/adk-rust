@@ -3,11 +3,9 @@ use std::hint::black_box;
 use std::time::{Duration, Instant};
 
 fn main() {
-    // 192,000 bytes = 1 second of 48kHz stereo 16-bit PCM (96,000 samples, or 50 standard 20ms WebRTC frames)
-    let buffer_size = 192_000;
-    let bytes: Vec<u8> = vec![0; buffer_size];
-    let iterations = 100;
-    let warmup = 10;
+    let bytes: Vec<u8> = vec![0; 10_000_000];
+    let iterations = 1000;
+    let warmup = 100;
 
     let mut manual_durations = Vec::with_capacity(iterations);
     let mut iter_durations = Vec::new();
@@ -58,12 +56,12 @@ fn main() {
 
     assert_eq!(samples1, samples2, "Fatal: pcm16 outputs differ!");
 
-    print_stats("Manual Loop", &mut manual_durations, buffer_size);
-    print_stats("Iterator / Collect", &mut iter_durations, buffer_size);
-    print_stats("Absolute Zero-Copy (bytemuck simulated)", &mut bytemuck_durations, buffer_size);
+    print_stats("Manual Loop", &mut manual_durations);
+    print_stats("Iterator / Collect", &mut iter_durations);
+    print_stats("Absolute Zero-Copy (bytemuck simulated)", &mut bytemuck_durations);
 }
 
-fn print_stats(name: &str, durations: &mut [Duration], buffer_bytes: usize) {
+fn print_stats(name: &str, durations: &mut [Duration]) {
     durations.sort_unstable();
     let count = durations.len();
     let sum: Duration = durations.iter().sum();
@@ -86,18 +84,11 @@ fn print_stats(name: &str, durations: &mut [Duration], buffer_bytes: usize) {
         / count as f64;
     let stddev = Duration::from_secs_f64(variance.sqrt());
 
-    let throughput_mb_s = if mean_f64 > 0.0 {
-        (buffer_bytes as f64 / (1024.0 * 1024.0)) / mean_f64
-    } else {
-        f64::INFINITY
-    };
-
     println!("=== {} ===", name);
-    println!("Throughput: {:.2} MB/s", throughput_mb_s);
-    println!("Mean:       {:?}", mean);
-    println!("Median:     {:?}", median);
-    println!("StdDev:     {:?}", stddev);
-    println!("Min:        {:?}", durations[0]);
-    println!("Max:        {:?}", durations[count - 1]);
+    println!("Mean:   {:?}", mean);
+    println!("Median: {:?}", median);
+    println!("StdDev: {:?}", stddev);
+    println!("Min:    {:?}", durations[0]);
+    println!("Max:    {:?}", durations[count - 1]);
     println!();
 }

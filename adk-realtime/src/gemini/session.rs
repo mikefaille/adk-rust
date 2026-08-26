@@ -1742,7 +1742,7 @@ fn parse_duration_string(s: &str) -> Option<std::time::Duration> {
         s.parse::<f64>().ok()?
     };
 
-    if secs.is_finite() && secs >= 0.0 && secs <= 86400.0 * 365.0 {
+    if secs.is_finite() && (0.0..=86400.0 * 365.0).contains(&secs) {
         Some(std::time::Duration::from_secs_f64(secs))
     } else {
         None
