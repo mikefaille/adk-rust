@@ -104,9 +104,37 @@ impl Drop for PendingFailureGuard {
             let generation_id = self.generation;
             tokio::spawn(async move {
                 let mut state = state_lock.write().await;
-                if state.failed_generation == Some(generation_id) {
-                    state.failed_generation = None;
-                }
+                state.clear_failed(Some(generation_id));
+            });
+        }
+    }
+}
+
+/// RAII guard ensuring an unowned recovery episode restores supervisor status to Healthy if aborted or cancelled.
+struct RecoveryEpisodeGuard {
+    state: Arc<tokio::sync::RwLock<SupervisorState>>,
+    epoch: u64,
+    disarmed: bool,
+}
+
+impl RecoveryEpisodeGuard {
+    fn new(state: Arc<tokio::sync::RwLock<SupervisorState>>, epoch: u64) -> Self {
+        Self { state, epoch, disarmed: false }
+    }
+
+    fn disarm(&mut self) {
+        self.disarmed = true;
+    }
+}
+
+impl Drop for RecoveryEpisodeGuard {
+    fn drop(&mut self) {
+        if !self.disarmed {
+            let state_lock = Arc::clone(&self.state);
+            let epoch = self.epoch;
+            tokio::spawn(async move {
+                let mut state = state_lock.write().await;
+                state.recover_to_healthy_if_unowned(epoch);
             });
         }
     }
@@ -121,6 +149,62 @@ enum ReportValidation {
 }
 
 impl SupervisorState {
+    /// Return the currently active session generation if supervisor is healthy and generation is not write-blocked.
+    fn admittable_generation(&self) -> Result<SessionGeneration> {
+        match self.status {
+            TransportStatus::Closed => Err(RealtimeError::SessionClosed),
+            TransportStatus::Exhausted => Err(RealtimeError::provider("session exhausted")),
+            TransportStatus::Uninitialized | TransportStatus::Recovering => {
+                Err(RealtimeError::NotConnected)
+            }
+            TransportStatus::Healthy => {
+                if let Some(ref current) = self.generation
+                    && self.failed_generation != Some(current.id)
+                {
+                    Ok(current.clone())
+                } else {
+                    Err(RealtimeError::NotConnected)
+                }
+            }
+        }
+    }
+
+    fn mark_failed(&mut self, generation: u64) {
+        self.failed_generation = Some(generation);
+    }
+
+    fn clear_failed(&mut self, generation: Option<u64>) {
+        if let Some(gen_id) = generation {
+            if self.failed_generation == Some(gen_id) {
+                self.failed_generation = None;
+            }
+        } else {
+            self.failed_generation = None;
+        }
+    }
+
+    fn promote_to_recovering(&mut self) -> u64 {
+        self.failed_generation = None;
+        self.status = TransportStatus::Recovering;
+        self.recovery_epoch = self.recovery_epoch.wrapping_add(1);
+        self.recovery_epoch
+    }
+
+    fn mark_exhausted(&mut self, generation: u64) {
+        self.failed_generation = None;
+        self.exhausted_generation = Some(generation);
+        self.status = TransportStatus::Exhausted;
+    }
+
+    fn recover_to_healthy_if_unowned(&mut self, epoch: u64) {
+        if self.status == TransportStatus::Recovering
+            && self.recovery_epoch == epoch
+            && self.generation.is_some()
+        {
+            self.status = TransportStatus::Healthy;
+        }
+    }
+
     fn validate_report(&self, report_gen: u64) -> ReportValidation {
         if self.status == TransportStatus::Closed {
             return ReportValidation::Closed;
@@ -345,62 +429,22 @@ impl RecoverySupervisor {
 
     /// Check if currently connected and healthy.
     pub(crate) async fn is_connected(&self) -> bool {
-        let state = self.state.read().await;
-        if state.status != TransportStatus::Healthy {
-            return false;
-        }
-        if let Some(ref current) = state.generation {
-            if state.failed_generation == Some(current.id) {
-                return false;
-            }
-            current.session.is_connected()
-        } else {
-            false
-        }
+        self.state
+            .read()
+            .await
+            .admittable_generation()
+            .map(|g| g.session.is_connected())
+            .unwrap_or(false)
     }
 
     /// Retrieve current active session snapshot if healthy.
     pub(crate) async fn get_active_generation(&self) -> Result<SessionGeneration> {
-        let state = self.state.read().await;
-        match state.status {
-            TransportStatus::Closed => Err(RealtimeError::SessionClosed),
-            TransportStatus::Exhausted => Err(RealtimeError::provider("session exhausted")),
-            TransportStatus::Uninitialized | TransportStatus::Recovering => {
-                Err(RealtimeError::NotConnected)
-            }
-            TransportStatus::Healthy => {
-                if let Some(ref current) = state.generation {
-                    if state.failed_generation == Some(current.id) {
-                        return Err(RealtimeError::NotConnected);
-                    }
-                    Ok(current.clone())
-                } else {
-                    Err(RealtimeError::NotConnected)
-                }
-            }
-        }
+        self.state.read().await.admittable_generation()
     }
 
     /// Admit a write operation before invoking the raw session.
     pub(crate) async fn admit_write(&self) -> Result<SessionGeneration> {
-        let state = self.state.read().await;
-        match state.status {
-            TransportStatus::Closed => Err(RealtimeError::SessionClosed),
-            TransportStatus::Exhausted => Err(RealtimeError::provider("session exhausted")),
-            TransportStatus::Uninitialized | TransportStatus::Recovering => {
-                Err(RealtimeError::NotConnected)
-            }
-            TransportStatus::Healthy => {
-                if let Some(ref current) = state.generation {
-                    if state.failed_generation == Some(current.id) {
-                        return Err(RealtimeError::NotConnected);
-                    }
-                    Ok(current.clone())
-                } else {
-                    Err(RealtimeError::NotConnected)
-                }
-            }
-        }
+        self.state.read().await.admittable_generation()
     }
 
     /// Mutate the canonical configuration atomically and return the new snapshot.
@@ -799,8 +843,7 @@ impl RecoverySupervisor {
                     return Ok(RecoveryOutcome::Exhausted);
                 }
                 ReportValidation::Valid => {
-                    // Mark generation as failed immediately so admit_write() fails closed (NotAttempted)
-                    state_guard.failed_generation = Some(report.generation);
+                    state_guard.mark_failed(report.generation);
                     tracing::info!(
                         generation = report.generation,
                         "Active generation marked failed; writes blocked pending recovery lock"
@@ -821,19 +864,15 @@ impl RecoverySupervisor {
                 .write_state_at(deadline_instant, "deadline expired acquiring state write snapshot")
                 .await?;
 
+            pending_failure_guard.disarm();
+
             match state_guard.validate_report(report.generation) {
                 ReportValidation::Closed => {
-                    pending_failure_guard.disarm();
-                    if state_guard.failed_generation == Some(report.generation) {
-                        state_guard.failed_generation = None;
-                    }
+                    state_guard.clear_failed(Some(report.generation));
                     return Err(RealtimeError::SessionClosed);
                 }
                 ReportValidation::Stale(session) => {
-                    pending_failure_guard.disarm();
-                    if state_guard.failed_generation == Some(report.generation) {
-                        state_guard.failed_generation = None;
-                    }
+                    state_guard.clear_failed(Some(report.generation));
                     tracing::info!(
                         report_gen = report.generation,
                         "coalesced failure report ignored after lock acquisition"
@@ -841,19 +880,13 @@ impl RecoverySupervisor {
                     return Ok(RecoveryOutcome::Stale(session));
                 }
                 ReportValidation::FutureGeneration(_) => {
-                    pending_failure_guard.disarm();
-                    if state_guard.failed_generation == Some(report.generation) {
-                        state_guard.failed_generation = None;
-                    }
+                    state_guard.clear_failed(Some(report.generation));
                     return Err(RealtimeError::provider(
                         "invalid future generation report after lock acquisition",
                     ));
                 }
                 ReportValidation::Exhausted => {
-                    pending_failure_guard.disarm();
-                    if state_guard.failed_generation == Some(report.generation) {
-                        state_guard.failed_generation = None;
-                    }
+                    state_guard.clear_failed(Some(report.generation));
                     tracing::info!(
                         generation = report.generation,
                         "report for already exhausted generation after lock acquisition"
@@ -863,41 +896,10 @@ impl RecoverySupervisor {
                 ReportValidation::Valid => {}
             }
 
-            pending_failure_guard.disarm();
-            state_guard.failed_generation = None;
-            state_guard.status = TransportStatus::Recovering;
-            state_guard.recovery_epoch = state_guard.recovery_epoch.wrapping_add(1);
-            state_guard.recovery_epoch
+            state_guard.promote_to_recovering()
         };
 
-        struct RecoveryEpisodeGuard {
-            state: Arc<tokio::sync::RwLock<SupervisorState>>,
-            epoch: u64,
-            disarmed: bool,
-        }
-        impl Drop for RecoveryEpisodeGuard {
-            fn drop(&mut self) {
-                if !self.disarmed {
-                    let state_lock = Arc::clone(&self.state);
-                    let epoch = self.epoch;
-                    tokio::spawn(async move {
-                        let mut state = state_lock.write().await;
-                        if state.status == TransportStatus::Recovering
-                            && state.recovery_epoch == epoch
-                            && state.generation.is_some()
-                        {
-                            state.status = TransportStatus::Healthy;
-                        }
-                    });
-                }
-            }
-        }
-
-        let mut episode_guard = RecoveryEpisodeGuard {
-            state: Arc::clone(&self.state),
-            epoch: recovery_epoch,
-            disarmed: false,
-        };
+        let mut episode_guard = RecoveryEpisodeGuard::new(Arc::clone(&self.state), recovery_epoch);
 
         // 4. Determine recovery implementation
         let session_to_recover = {
@@ -918,9 +920,8 @@ impl RecoverySupervisor {
                 let err = RealtimeError::provider("active session does not support recovery");
                 tracing::error!(generation = report.generation, err = %err, "recovery not supported");
                 let mut state_guard = self.state.write().await;
-                state_guard.exhausted_generation = Some(report.generation);
-                state_guard.status = TransportStatus::Exhausted;
-                episode_guard.disarmed = true;
+                state_guard.mark_exhausted(report.generation);
+                episode_guard.disarm();
                 return Err(err);
             }
         };
@@ -932,9 +933,8 @@ impl RecoverySupervisor {
             );
             tracing::warn!(generation = report.generation, err = %err, "fatal cause classification");
             let mut state_guard = self.state.write().await;
-            state_guard.exhausted_generation = Some(report.generation);
-            state_guard.status = TransportStatus::Exhausted;
-            episode_guard.disarmed = true;
+            state_guard.mark_exhausted(report.generation);
+            episode_guard.disarm();
             return Err(err);
         }
 
@@ -1102,7 +1102,7 @@ impl RecoverySupervisor {
                         "recovered session published"
                     );
 
-                    episode_guard.disarmed = true;
+                    episode_guard.disarm();
                     return Ok(RecoveryOutcome::Recovered { session: new_session, continuity });
                 }
                 Err(err) => {
@@ -1202,9 +1202,8 @@ impl RecoverySupervisor {
         );
 
         let mut state_guard = self.state.write().await;
-        state_guard.exhausted_generation = Some(report.generation);
-        state_guard.status = TransportStatus::Exhausted;
-        episode_guard.disarmed = true;
+        state_guard.mark_exhausted(report.generation);
+        episode_guard.disarm();
 
         Err(final_err)
     }
