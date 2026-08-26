@@ -202,15 +202,6 @@ struct GeminiSetup {
     realtime_input_config: Option<Value>,
 }
 
-/// `setup.realtimeInputConfig`.
-///
-/// Only the automatic-detection switch is modelled. `activityHandling` is
-/// deliberately left off the wire: its default,
-/// `START_OF_ACTIVITY_INTERRUPTS`, is the behaviour
-/// [`ActivitySignaller::start`] depends on, and sending the field would mean
-/// offering callers a way to turn barge-in off without any of the plumbing
-/// that would make that coherent.
-
 /// `activityStart` / `activityEnd`.
 ///
 /// Both are documented as having no fields, so they serialize as `{}`. The
@@ -496,8 +487,6 @@ pub struct GeminiRealtimeSession {
     receiver: Arc<Mutex<WsSource>>,
     audio_buffer: Arc<ParkingMutex<BytesMut>>,
     event_queue: Arc<ParkingMutex<std::collections::VecDeque<ServerEvent>>>,
-    schema_cache: Arc<adk_core::SchemaCache>,
-    adapter: Arc<dyn adk_core::SchemaAdapter>,
     frame_log: FrameLog,
     /// The close frame the server sent, if it sent one.
     ///
@@ -635,8 +624,6 @@ impl GeminiRealtimeSession {
             receiver: Arc::new(Mutex::new(receiver)),
             audio_buffer: Arc::new(ParkingMutex::new(BytesMut::new())),
             event_queue: Arc::new(ParkingMutex::new(std::collections::VecDeque::new())),
-            schema_cache: Arc::new(adk_core::SchemaCache::new()),
-            adapter: Arc::new(adk_core::GenericSchemaAdapter),
             frame_log: FrameLog::new(session_id, "studio", reconnect_model.clone()),
             last_disconnect: Arc::new(ParkingMutex::new(None)),
             backend,
@@ -850,8 +837,6 @@ impl GeminiRealtimeSession {
             audio_buffer: Arc::new(ParkingMutex::new(BytesMut::new())),
             last_disconnect: Arc::new(ParkingMutex::new(None)),
             event_queue: Arc::new(ParkingMutex::new(std::collections::VecDeque::new())),
-            schema_cache,
-            adapter,
             frame_log,
             backend: backend.clone(),
             dialect,
@@ -2193,6 +2178,12 @@ fn log_frame_shape(value: &Value, log: Option<&FrameLog>) {
 ///   `START_SENSITIVITY_*` / `END_SENSITIVITY_*` enums, and inventing a
 ///   cutoff would be this adapter making up policy.
 /// - `eagerness` is documented OpenAI-specific.
+///
+/// Only the automatic-detection switch is modelled. `activityHandling` is
+/// deliberately left off the wire: its default, `START_OF_ACTIVITY_INTERRUPTS`,
+/// is the behaviour [`ActivitySignaller::start`] depends on, and sending the
+/// field would mean offering callers a way to turn barge-in off without any of
+/// the plumbing that would make that coherent.
 fn gemini_realtime_input_config(config: &RealtimeConfig) -> Option<Value> {
     let vad = config.turn_detection.as_ref()?;
     let mut detection = serde_json::Map::new();
@@ -3752,8 +3743,6 @@ mod teardown_tests {
             receiver: Arc::new(Mutex::new(source)),
             audio_buffer: Arc::new(ParkingMutex::new(BytesMut::new())),
             event_queue: Arc::new(ParkingMutex::new(std::collections::VecDeque::new())),
-            schema_cache: Arc::new(adk_core::SchemaCache::new()),
-            adapter: Arc::new(adk_core::GenericSchemaAdapter),
             frame_log: FrameLog::new(
                 "test-gemini-session".into(),
                 "studio",
@@ -3932,9 +3921,6 @@ mod teardown_tests {
         });
 
         let (replacement_deadline_tx, replacement_deadline_rx) = tokio::sync::watch::channel(None);
-        let schema_cache = Arc::new(adk_core::SchemaCache::new());
-        let adapter: Arc<dyn adk_core::SchemaAdapter> =
-            Arc::new(adk_gemini::schema_adapter::GeminiSchemaAdapter::with_dialect(schema_dialect));
         let cancel_token = tokio_util::sync::CancellationToken::new();
 
         let session = GeminiRealtimeSession {
@@ -3946,8 +3932,6 @@ mod teardown_tests {
             receiver: Arc::new(Mutex::new(source)),
             audio_buffer: Arc::new(ParkingMutex::new(BytesMut::new())),
             event_queue: Arc::new(ParkingMutex::new(std::collections::VecDeque::new())),
-            schema_cache,
-            adapter,
             frame_log: FrameLog::new("test-session".into(), "studio", "models/test".into()),
             last_disconnect: Arc::new(ParkingMutex::new(None)),
             backend: GeminiLiveBackend::studio("mock-key"),
@@ -4158,9 +4142,14 @@ mod teardown_tests {
 
         let config =
             RealtimeConfig { tools: Some(tool_with_constrained_schema()), ..Default::default() };
+        // Built from the session's own `dialect`, which is the thing under test:
+        // rebuilding here proves `send_setup` used the session's dialect just as
+        // reading a cached adapter off the session did, without the session
+        // having to carry schema state its production paths never read.
+        let adapter =
+            adk_gemini::schema_adapter::GeminiSchemaAdapter::with_dialect(session.dialect);
         let tools =
-            convert_tools(config.tools.clone(), &session.schema_cache, session.adapter.as_ref())
-                .unwrap();
+            convert_tools(config.tools.clone(), &adk_core::SchemaCache::new(), &adapter).unwrap();
         session.send_setup_with_compiled_tools("models/test", config, tools, None).await.unwrap();
 
         let frame = next_frame(&mut server).await;
