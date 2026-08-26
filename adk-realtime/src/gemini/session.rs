@@ -867,21 +867,21 @@ impl GeminiRealtimeSession {
                 }
             }
 
-            if let Some(go_away) = value.get("goAway") {
-                if let Some(time_left_str) = go_away.get("timeLeft").and_then(|t| t.as_str()) {
-                    if let Some(duration) = parse_duration_string(time_left_str) {
-                        let deadline = std::time::Instant::now() + duration;
-                        let _ = self.replacement_deadline_tx.send(Some(deadline));
-                        tracing::info!(
-                            deadline = ?deadline,
-                            "Broadcasted planned replacement deadline from Gemini goAway frame"
-                        );
-                    } else {
-                        tracing::warn!(
-                            raw_time_left = time_left_str,
-                            "Ignored unparseable timeLeft in Gemini goAway frame"
-                        );
-                    }
+            if let Some(go_away) = value.get("goAway")
+                && let Some(time_left_str) = go_away.get("timeLeft").and_then(|t| t.as_str())
+            {
+                if let Some(duration) = parse_duration_string(time_left_str) {
+                    let deadline = std::time::Instant::now() + duration;
+                    let _ = self.replacement_deadline_tx.send(Some(deadline));
+                    tracing::info!(
+                        deadline = ?deadline,
+                        "Broadcasted planned replacement deadline from Gemini goAway frame"
+                    );
+                } else {
+                    tracing::warn!(
+                        raw_time_left = time_left_str,
+                        "Ignored unparseable timeLeft in Gemini goAway frame"
+                    );
                 }
             }
         }
@@ -3190,6 +3190,8 @@ mod teardown_tests {
             }
         });
 
+        let (replacement_deadline_tx, replacement_deadline_rx) = tokio::sync::watch::channel(None);
+
         let session = GeminiRealtimeSession {
             session_id: "test-gemini-session".into(),
             connected,
@@ -3212,14 +3214,8 @@ mod teardown_tests {
             reconnect_model: "models/gemini-3.1-flash-live-preview".into(),
             last_resume_handle: Arc::new(ParkingMutex::new(None)),
             call_names: Arc::new(ParkingMutex::new(CallNamesMap::new())),
-            replacement_deadline_tx: {
-                let (tx, _) = tokio::sync::watch::channel(None);
-                tx
-            },
-            replacement_deadline_rx: {
-                let (_, rx) = tokio::sync::watch::channel(None);
-                rx
-            },
+            replacement_deadline_tx,
+            replacement_deadline_rx,
         };
 
         // Execution of close() must complete quickly despite channel full & writer blocked
