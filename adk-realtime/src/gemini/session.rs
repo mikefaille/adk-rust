@@ -854,12 +854,11 @@ impl GeminiRealtimeSession {
         if let Ok(value) = serde_json::from_str::<Value>(raw) {
             if let Some(resumption_update) = value.get("sessionResumptionUpdate") {
                 let resumable =
-                    resumption_update.get("resumable").and_then(|r| r.as_bool()).unwrap_or(false);
+                    resumption_update.get("resumable").and_then(Value::as_bool).unwrap_or(false);
                 if resumable
-                    && let Some(handle) =
-                        resumption_update.get("newHandle").and_then(|h| h.as_str())
+                    && let Some(handle) = resumption_update.get("newHandle").and_then(Value::as_str)
                 {
-                    *self.last_resume_handle.lock() = Some(handle.to_string());
+                    *self.last_resume_handle.lock() = Some(handle.to_owned());
                     tracing::debug!(
                         resume_checkpoint_observed = true,
                         "Stored resumable Gemini session handle for reconnect"
@@ -868,7 +867,7 @@ impl GeminiRealtimeSession {
             }
 
             if let Some(go_away) = value.get("goAway")
-                && let Some(time_left_str) = go_away.get("timeLeft").and_then(|t| t.as_str())
+                && let Some(time_left_str) = go_away.get("timeLeft").and_then(Value::as_str)
             {
                 if let Some(duration) = parse_duration_string(time_left_str) {
                     let deadline = std::time::Instant::now() + duration;
@@ -933,7 +932,7 @@ impl GeminiRealtimeSession {
 
         // Check for goAway planned rotation signal
         if let Some(go_away) = value.get("goAway") {
-            let time_left = go_away.get("timeLeft").and_then(|t| t.as_str()).map(|s| s.to_string());
+            let time_left = go_away.get("timeLeft").and_then(Value::as_str).map(str::to_owned);
             tracing::info!(time_left = ?time_left, "Gemini Live goAway frame received");
             return Ok(vec![ServerEvent::PlannedRotation { time_left }]);
         }
@@ -944,7 +943,7 @@ impl GeminiRealtimeSession {
 
             // Barge-in: the caller spoke over the model, so this generation is
             // abandoned and the client must empty its playback queue.
-            let interrupted = content.get("interrupted").and_then(|i| i.as_bool()).unwrap_or(false);
+            let interrupted = content.get("interrupted").and_then(Value::as_bool).unwrap_or(false);
             if interrupted {
                 events.push(ServerEvent::ResponseCancelled {
                     event_id: uuid::Uuid::new_v4().to_string(),

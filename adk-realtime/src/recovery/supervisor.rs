@@ -125,6 +125,34 @@ pub(crate) enum ReplacementPhase {
     Recovering { cause: RecoveryCause, deadline: tokio::time::Instant },
 }
 
+impl ReplacementPhase {
+    pub fn is_recovering(&self) -> bool {
+        matches!(self, Self::Recovering { .. })
+    }
+
+    pub fn cause(&self) -> &RecoveryCause {
+        match self {
+            Self::Planned { cause, .. } | Self::Recovering { cause, .. } => cause,
+        }
+    }
+
+    pub fn deadline(&self) -> tokio::time::Instant {
+        match self {
+            Self::Planned { deadline, .. } | Self::Recovering { deadline, .. } => *deadline,
+        }
+    }
+
+    pub fn remaining_duration(&self) -> Duration {
+        self.deadline().saturating_duration_since(tokio::time::Instant::now())
+    }
+
+    pub fn context_deadline(&self) -> std::time::Instant {
+        std::time::Instant::now()
+            .checked_add(self.remaining_duration())
+            .unwrap_or_else(std::time::Instant::now)
+    }
+}
+
 /// A supervisor-owned replacement transaction (planned or reactive).
 pub(crate) struct ReplacementTxn {
     pub(crate) id: u64,
@@ -177,6 +205,58 @@ pub(crate) enum AttemptKind {
     Recovering,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct AttemptBudget {
+    kind: AttemptKind,
+    attempt_idx: u32,
+    max_attempts: u32,
+}
+
+impl AttemptBudget {
+    pub fn new(kind: AttemptKind, max_attempts: u32) -> Self {
+        Self { kind, attempt_idx: 0, max_attempts }
+    }
+
+    pub fn kind(&self) -> AttemptKind {
+        self.kind
+    }
+
+    pub fn max_attempts(&self) -> u32 {
+        self.max_attempts
+    }
+
+    pub fn is_at_limit(&self) -> bool {
+        self.attempt_idx >= self.max_attempts
+    }
+
+    pub fn next_attempt(&mut self) -> Option<NonZeroU32> {
+        if self.attempt_idx < self.max_attempts {
+            self.attempt_idx += 1;
+            NonZeroU32::new(self.attempt_idx)
+        } else {
+            None
+        }
+    }
+
+    pub fn promote_to_recovering(&mut self, max_attempts: u32) {
+        self.kind = AttemptKind::Recovering;
+        self.attempt_idx = 0;
+        self.max_attempts = max_attempts;
+    }
+
+    pub fn compute_backoff(
+        &self,
+        policy: &RecoveryPolicy,
+        deadline: tokio::time::Instant,
+    ) -> Duration {
+        let base_delay = policy.initial_delay();
+        let factor = 2u32.checked_pow(self.attempt_idx.saturating_sub(1)).unwrap_or(u32::MAX);
+        let uncapped = base_delay.saturating_mul(factor).min(policy.max_delay());
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        uncapped.min(remaining)
+    }
+}
+
 pub(crate) struct AttemptContext<'a> {
     pub(crate) originating_gen_id: u64,
     pub(crate) kind: AttemptKind,
@@ -184,6 +264,12 @@ pub(crate) struct AttemptContext<'a> {
     pub(crate) max_attempts: u32,
     pub(crate) expected_revision: Option<u64>,
     pub(crate) recovery_impl: Option<&'a dyn RealtimeRecovery>,
+}
+
+impl<'a> AttemptContext<'a> {
+    pub fn is_exhausted(&self) -> bool {
+        self.kind == AttemptKind::Recovering && self.attempt_idx >= self.max_attempts
+    }
 }
 
 /// Closed algebraic state machine for supervisor transport lifecycle.
@@ -203,6 +289,32 @@ pub(crate) struct SupervisorCore {
     pub(crate) config: ConfigSnapshot,
     pub(crate) next_generation_id: u64,
     pub(crate) next_txn_id: u64,
+}
+
+impl SupervisorCore {
+    pub fn publish_serving(
+        &mut self,
+        session: Arc<dyn RealtimeSession>,
+        failed_generation: Option<Arc<SessionGeneration>>,
+    ) -> (u64, Option<Arc<dyn RealtimeSession>>) {
+        let next_gen = self.next_generation_id;
+        self.next_generation_id += 1;
+        let new_gen = Arc::new(SessionGeneration::new(next_gen, session));
+        let old_session = match &self.state {
+            ManagedState::Serving { active, .. } => Some(active.session.clone()),
+            ManagedState::Recovering { failed, .. } => Some(failed.session.clone()),
+            _ => failed_generation.map(|g| g.session.clone()),
+        };
+        self.state = ManagedState::Serving { active: new_gen, planned: None };
+        (next_gen, old_session)
+    }
+
+    pub fn terminate_exhausted(&mut self, last_gen: Option<Arc<SessionGeneration>>) {
+        self.state = ManagedState::Terminal {
+            reason: TerminalReason::Exhausted,
+            _last_generation: last_gen,
+        };
+    }
 }
 
 /// RAII cleanup guard for un-published candidate sessions.
@@ -749,9 +861,10 @@ impl RecoverySupervisor {
 
         tokio::spawn(async move {
             let initial_phase = txn.snapshot_phase();
-            let initial_kind = match &initial_phase {
-                ReplacementPhase::Planned { .. } => AttemptKind::Planned,
-                ReplacementPhase::Recovering { .. } => AttemptKind::Recovering,
+            let initial_kind = if initial_phase.is_recovering() {
+                AttemptKind::Recovering
+            } else {
+                AttemptKind::Planned
             };
 
             let recovery_impl = match originating_gen.session.recovery() {
@@ -774,12 +887,7 @@ impl RecoverySupervisor {
                 }
             };
 
-            let initial_cause = match &initial_phase {
-                ReplacementPhase::Planned { cause, .. } => cause,
-                ReplacementPhase::Recovering { cause, .. } => cause,
-            };
-
-            if recovery_impl.classify(initial_cause) == RecoveryDisposition::Fatal {
+            if recovery_impl.classify(initial_phase.cause()) == RecoveryDisposition::Fatal {
                 let err = RealtimeError::provider(
                     "fatal recovery cause detected; performing zero provider attempts",
                 );
@@ -798,27 +906,28 @@ impl RecoverySupervisor {
             }
 
             let max_attempts = policy.max_attempts().get();
-            // Phase-aware budget: planned attempts use 1..=max_attempts,
-            // but if promoted to Recovering the reactive phase gets its own
-            // fresh 1..=max_attempts budget.
-            let mut reactive_budget_started = false;
-            let mut attempt_idx: u32 = 0;
-            let mut current_max: u32 = max_attempts;
+            let mut budget = AttemptBudget::new(initial_kind, max_attempts);
 
             loop {
-                attempt_idx += 1;
-                if attempt_idx > current_max {
-                    break;
+                let phase = txn.snapshot_phase();
+
+                // If promoted to Recovering while budget was Planned, promote budget to fresh reactive allocation.
+                if phase.is_recovering() && budget.kind() == AttemptKind::Planned {
+                    budget.promote_to_recovering(max_attempts);
+                    tracing::info!(
+                        generation = originating_gen.id,
+                        "promoted to reactive recovery; resetting attempt budget to {}",
+                        max_attempts
+                    );
                 }
 
-                let phase = txn.snapshot_phase();
-                let (current_cause, current_deadline, is_recovering) = match phase {
-                    ReplacementPhase::Planned { cause, deadline } => (cause, deadline, false),
-                    ReplacementPhase::Recovering { cause, deadline } => (cause, deadline, true),
+                let attempt_nz = match budget.next_attempt() {
+                    Some(nz) => nz,
+                    None => break,
                 };
-
-                let attempt_kind =
-                    if is_recovering { AttemptKind::Recovering } else { AttemptKind::Planned };
+                let attempt_idx = attempt_nz.get();
+                let attempt_kind = budget.kind();
+                let current_max = budget.max_attempts();
 
                 if txn.cancel_token.is_cancelled() {
                     tracing::info!(
@@ -844,20 +953,8 @@ impl RecoverySupervisor {
                     return;
                 }
 
-                // When promoted to Recovering, give recovery its own fresh budget.
-                if is_recovering && !reactive_budget_started {
-                    reactive_budget_started = true;
-                    attempt_idx = 1;
-                    current_max = max_attempts;
-                    tracing::info!(
-                        generation = originating_gen.id,
-                        "promoted to reactive recovery; resetting attempt budget to {}",
-                        current_max
-                    );
-                }
-
-                if is_recovering
-                    && recovery_impl.classify(&current_cause) == RecoveryDisposition::Fatal
+                if phase.is_recovering()
+                    && recovery_impl.classify(phase.cause()) == RecoveryDisposition::Fatal
                 {
                     let err = RealtimeError::provider(
                         "fatal failure cause classified during recovery; aborting attempts",
@@ -883,7 +980,7 @@ impl RecoverySupervisor {
                 }
 
                 #[cfg(any(test, feature = "recovery-test-utils"))]
-                if is_recovering {
+                if phase.is_recovering() {
                     let maybe_barrier = test_recovery_barrier.lock().take();
                     if let Some(barrier) = maybe_barrier {
                         barrier.on_recovering().await;
@@ -891,21 +988,17 @@ impl RecoverySupervisor {
                 }
 
                 let now = tokio::time::Instant::now();
+                let current_deadline = phase.deadline();
                 if now >= current_deadline {
                     let phase_now = txn.snapshot_phase();
-                    if let ReplacementPhase::Recovering { deadline: new_deadline, .. } = phase_now
-                        && now < new_deadline
-                    {
+                    if phase_now.is_recovering() && now < phase_now.deadline() {
                         tracing::info!(
                             generation = originating_gen.id,
                             attempt = attempt_idx,
                             "planned deadline expired but promoted to recovery; continuing under fresh deadline"
                         );
-                        // Reset budget on promotion detected via deadline takeover.
-                        if !reactive_budget_started {
-                            reactive_budget_started = true;
-                            attempt_idx = 0; // Will be incremented to 1 at loop top
-                            current_max = max_attempts;
+                        if budget.kind() == AttemptKind::Planned {
+                            budget.promote_to_recovering(max_attempts);
                         }
                         continue;
                     }
@@ -931,19 +1024,12 @@ impl RecoverySupervisor {
                     return;
                 }
 
-                let attempt_nz = NonZeroU32::new(attempt_idx).unwrap_or(NonZeroU32::MIN);
                 let snapshot = core_lock.read().await.config.clone();
-
-                let remaining_dur = current_deadline.saturating_duration_since(now);
-                let context_deadline = std::time::Instant::now()
-                    .checked_add(remaining_dur)
-                    .unwrap_or_else(std::time::Instant::now);
-
                 let context = RecoveryContext::new(
                     attempt_nz,
-                    &current_cause,
+                    phase.cause(),
                     &snapshot.config,
-                    context_deadline,
+                    phase.context_deadline(),
                 );
 
                 tracing::debug!(
@@ -979,19 +1065,14 @@ impl RecoverySupervisor {
                     _ = tokio::time::sleep_until(current_deadline) => {
                         let now_timeout = tokio::time::Instant::now();
                         let phase_timeout = txn.snapshot_phase();
-                        if let ReplacementPhase::Recovering { deadline: new_deadline, .. } = phase_timeout
-                            && now_timeout < new_deadline
-                        {
+                        if phase_timeout.is_recovering() && now_timeout < phase_timeout.deadline() {
                             tracing::info!(
                                 generation = originating_gen.id,
                                 attempt = attempt_idx,
                                 "in-flight attempt timed out under planned deadline after promotion; continuing under fresh deadline"
                             );
-                            // Reset budget on promotion detected via in-flight timeout.
-                            if !reactive_budget_started {
-                                reactive_budget_started = true;
-                                attempt_idx = 0; // Will be incremented to 1 at loop top
-                                current_max = max_attempts;
+                            if budget.kind() == AttemptKind::Planned {
+                                budget.promote_to_recovering(max_attempts);
                             }
                             continue;
                         }
@@ -1046,21 +1127,12 @@ impl RecoverySupervisor {
                                 generation = originating_gen.id,
                                 "planned-origin attempt completed after promotion to recovery; resetting to fresh reactive budget"
                             );
-                            reactive_budget_started = true;
-                            attempt_idx = 0; // Will be incremented to 1 at loop top
-                            current_max = max_attempts;
+                            budget.promote_to_recovering(max_attempts);
                             continue;
                         }
 
-                        if attempt_idx < current_max {
-                            let base_delay = policy.initial_delay();
-                            let factor = 2u32.checked_pow(attempt_idx - 1).unwrap_or(u32::MAX);
-                            let mut backoff =
-                                base_delay.saturating_mul(factor).min(policy.max_delay());
-                            let current_deadline = match txn.snapshot_phase() {
-                                ReplacementPhase::Planned { deadline, .. } => deadline,
-                                ReplacementPhase::Recovering { deadline, .. } => deadline,
-                            };
+                        if !budget.is_at_limit() {
+                            let current_deadline = txn.snapshot_phase().deadline();
                             let now_after = tokio::time::Instant::now();
                             if now_after >= current_deadline {
                                 let msg = "recovery deadline expired during backoff calculation"
@@ -1083,8 +1155,8 @@ impl RecoverySupervisor {
                                 .await;
                                 return;
                             }
-                            backoff =
-                                backoff.min(current_deadline.saturating_duration_since(now_after));
+
+                            let backoff = budget.compute_backoff(&policy, current_deadline);
                             if !backoff.is_zero() {
                                 tokio::select! {
                                     _ = txn.cancel_token.cancelled() => {
@@ -1128,8 +1200,6 @@ impl RecoverySupervisor {
                                 }
                             }
                         }
-                        // If attempt_idx >= current_max, fall through to loop exit
-                        // where the defensive terminalization will catch it.
                     }
                 }
             }
@@ -1184,7 +1254,7 @@ impl RecoverySupervisor {
 
         {
             let mut core_guard = core_lock.write().await;
-            let SupervisorCore { state, config, next_generation_id, .. } = &mut *core_guard;
+            let SupervisorCore { state, config, .. } = &mut *core_guard;
 
             match state {
                 ManagedState::Terminal { .. } => {
@@ -1224,15 +1294,11 @@ impl RecoverySupervisor {
                                     final_outcome_to_send = Some(Err(err));
                                     transition = AttemptTransition::KeepServing;
                                 } else {
-                                    let next_gen = *next_generation_id;
-                                    *next_generation_id += 1;
                                     let session = recovered.session.clone();
                                     let continuity = recovered.continuity;
-                                    let new_gen =
-                                        Arc::new(SessionGeneration::new(next_gen, session.clone()));
-                                    old_session_to_close = Some(active.session.clone());
-                                    *state =
-                                        ManagedState::Serving { active: new_gen, planned: None };
+                                    let (next_gen, old) =
+                                        core_guard.publish_serving(session.clone(), None);
+                                    old_session_to_close = old;
                                     published_next_gen = Some(next_gen);
                                     if let Some(ref mut cg) = candidate_guard {
                                         cg.disarm();
@@ -1275,13 +1341,9 @@ impl RecoverySupervisor {
                                         max_attempts = ctx.max_attempts,
                                         "candidate publication rejected: stale config revision"
                                     );
-                                    let is_exhausted = ctx.kind == AttemptKind::Recovering
-                                        && ctx.attempt_idx >= ctx.max_attempts;
-                                    if is_exhausted {
-                                        *state = ManagedState::Terminal {
-                                            reason: TerminalReason::Exhausted,
-                                            _last_generation: Some(Arc::clone(failed)),
-                                        };
+                                    if ctx.is_exhausted() {
+                                        let last_gen = Arc::clone(failed);
+                                        core_guard.terminate_exhausted(Some(last_gen));
                                         let err = RealtimeError::config(
                                             "recovery exhausted: stale config revision on final attempt",
                                         );
@@ -1291,15 +1353,11 @@ impl RecoverySupervisor {
                                         transition = AttemptTransition::RetryRecovering;
                                     }
                                 } else {
-                                    let next_gen = *next_generation_id;
-                                    *next_generation_id += 1;
                                     let session = recovered.session.clone();
                                     let continuity = recovered.continuity;
-                                    let new_gen =
-                                        Arc::new(SessionGeneration::new(next_gen, session.clone()));
-                                    old_session_to_close = Some(failed.session.clone());
-                                    *state =
-                                        ManagedState::Serving { active: new_gen, planned: None };
+                                    let (next_gen, old) =
+                                        core_guard.publish_serving(session.clone(), None);
+                                    old_session_to_close = old;
                                     published_next_gen = Some(next_gen);
                                     if let Some(ref mut cg) = candidate_guard {
                                         cg.disarm();
@@ -1315,10 +1373,7 @@ impl RecoverySupervisor {
                                 let (cause_disposition, error_disposition) = match ctx.recovery_impl
                                 {
                                     Some(impl_) => {
-                                        let current_cause = match txn.snapshot_phase() {
-                                            ReplacementPhase::Planned { cause, .. } => cause,
-                                            ReplacementPhase::Recovering { cause, .. } => cause,
-                                        };
+                                        let current_cause = txn.snapshot_phase().cause().clone();
                                         (
                                             impl_.classify(&current_cause),
                                             impl_.classify_attempt_error(&err),
@@ -1329,17 +1384,12 @@ impl RecoverySupervisor {
                                     }
                                 };
 
-                                let is_exhausted = ctx.kind == AttemptKind::Recovering
-                                    && ctx.attempt_idx >= ctx.max_attempts;
-
                                 if cause_disposition == RecoveryDisposition::Fatal
                                     || error_disposition == RecoveryDisposition::Fatal
-                                    || is_exhausted
+                                    || ctx.is_exhausted()
                                 {
-                                    *state = ManagedState::Terminal {
-                                        reason: TerminalReason::Exhausted,
-                                        _last_generation: Some(Arc::clone(failed)),
-                                    };
+                                    let last_gen = Arc::clone(failed);
+                                    core_guard.terminate_exhausted(Some(last_gen));
                                     final_outcome_to_send = Some(Err(err));
                                     transition = AttemptTransition::Terminal;
                                 } else {
@@ -3088,5 +3138,91 @@ mod tests {
         assert_eq!(supervisor.status().await, TransportStatus::Healthy);
         assert_eq!(attempts.load(Ordering::SeqCst), 2);
         let _ = planned_handle.await;
+    }
+
+    #[test]
+    fn test_attempt_budget_planned_advancement_and_limit() {
+        let mut budget = AttemptBudget::new(AttemptKind::Planned, 2);
+        assert_eq!(budget.kind(), AttemptKind::Planned);
+        assert_eq!(budget.max_attempts(), 2);
+        assert!(!budget.is_at_limit());
+
+        let att1 = budget.next_attempt();
+        assert_eq!(att1.map(|n| n.get()), Some(1));
+        assert!(!budget.is_at_limit());
+
+        let att2 = budget.next_attempt();
+        assert_eq!(att2.map(|n| n.get()), Some(2));
+        assert!(budget.is_at_limit());
+
+        let att3 = budget.next_attempt();
+        assert_eq!(att3, None);
+    }
+
+    #[test]
+    fn test_attempt_budget_promotion_to_recovering() {
+        let mut budget = AttemptBudget::new(AttemptKind::Planned, 1);
+        let att1 = budget.next_attempt();
+        assert_eq!(att1.map(|n| n.get()), Some(1));
+        assert!(budget.is_at_limit());
+
+        // Promote to recovering with fresh budget of 3
+        budget.promote_to_recovering(3);
+        assert_eq!(budget.kind(), AttemptKind::Recovering);
+        assert_eq!(budget.max_attempts(), 3);
+        assert!(!budget.is_at_limit());
+
+        assert_eq!(budget.next_attempt().map(|n| n.get()), Some(1));
+        assert_eq!(budget.next_attempt().map(|n| n.get()), Some(2));
+        assert_eq!(budget.next_attempt().map(|n| n.get()), Some(3));
+        assert!(budget.is_at_limit());
+        assert_eq!(budget.next_attempt(), None);
+    }
+
+    #[test]
+    fn test_attempt_budget_exponential_backoff_calculation() {
+        let policy = RecoveryPolicy::default()
+            .with_initial_delay(Duration::from_millis(100))
+            .with_max_delay(Duration::from_millis(1000));
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+
+        let mut budget = AttemptBudget::new(AttemptKind::Recovering, 5);
+
+        // Attempt 1: factor 2^0 = 1 => 100ms
+        let _ = budget.next_attempt();
+        let backoff1 = budget.compute_backoff(&policy, deadline);
+        assert_eq!(backoff1, Duration::from_millis(100));
+
+        // Attempt 2: factor 2^1 = 2 => 200ms
+        let _ = budget.next_attempt();
+        let backoff2 = budget.compute_backoff(&policy, deadline);
+        assert_eq!(backoff2, Duration::from_millis(200));
+
+        // Attempt 3: factor 2^2 = 4 => 400ms
+        let _ = budget.next_attempt();
+        let backoff3 = budget.compute_backoff(&policy, deadline);
+        assert_eq!(backoff3, Duration::from_millis(400));
+
+        // Attempt 4: factor 2^3 = 8 => 800ms
+        let _ = budget.next_attempt();
+        let backoff4 = budget.compute_backoff(&policy, deadline);
+        assert_eq!(backoff4, Duration::from_millis(800));
+
+        // Attempt 5: factor 2^4 = 16 => 1600ms capped to 1000ms
+        let _ = budget.next_attempt();
+        let backoff5 = budget.compute_backoff(&policy, deadline);
+        assert_eq!(backoff5, Duration::from_millis(1000));
+    }
+
+    #[test]
+    fn test_replacement_phase_methods() {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let cause = RecoveryCause::UnexpectedEof;
+        let phase = ReplacementPhase::Recovering { cause, deadline };
+
+        assert!(phase.is_recovering());
+        assert!(matches!(phase.cause(), RecoveryCause::UnexpectedEof));
+        assert_eq!(phase.deadline(), deadline);
+        assert!(phase.remaining_duration() <= Duration::from_secs(5));
     }
 }
