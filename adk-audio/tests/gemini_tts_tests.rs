@@ -452,9 +452,7 @@ async fn test_gemini_tts_http_boundary_contract() {
             "model": "gemini-3.1-flash-tts-preview",
             "input": "HTTP boundary contract test",
             "response_format": {
-                "type": "audio",
-                "mime_type": "audio/l16",
-                "sample_rate": 24000
+                "type": "audio"
             },
             "stream": true,
             "store": false,
