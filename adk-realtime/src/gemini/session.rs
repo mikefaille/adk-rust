@@ -1704,8 +1704,46 @@ impl RealtimeSession for GeminiRealtimeSession {
         self.send_raw(&msg).await
     }
 
+    async fn begin_activity(&self) -> Result<()> {
+        // Silent in automatic mode rather than an error. The server owns
+        // detection there, so a caller reporting caller-speech is telling us
+        // something we already have a better source for — redundant, not
+        // wrong, and failing it would punish a caller for using the neutral
+        // API on a backend that happens not to need it.
+        if self.activity_detection != ActivityDetection::Manual {
+            return Ok(());
+        }
+
+        // The same frame `interrupt` sends, deliberately. Gemini opens a turn
+        // and abandons the model's response with one signal, so both callers
+        // converge here; `send_activity`'s edge de-duplication means two
+        // reports of one turn-start still put one frame on the wire.
+        let outcome = self.send_activity(ActivitySignal::Start).await?;
+        tracing::debug!(
+            session_id = %self.session_id,
+            ?outcome,
+            "begin activity sent activityStart"
+        );
+        Ok(())
+    }
+
     async fn commit_audio(&self) -> Result<()> {
-        self.flush_audio().await
+        self.flush_audio().await?;
+
+        // `commit_audio` is the provider-neutral boundary for a manually
+        // delimited input turn. Gemini has no audio-buffer commit frame: once
+        // automatic activity detection is disabled, its equivalent is an
+        // `activityEnd` after every queued audio frame has been written.
+        if self.activity_detection == ActivityDetection::Manual {
+            let outcome = self.send_activity(ActivitySignal::End).await?;
+            tracing::debug!(
+                session_id = %self.session_id,
+                ?outcome,
+                "commit audio sent activityEnd"
+            );
+        }
+
+        Ok(())
     }
 
     async fn clear_audio(&self) -> Result<()> {
@@ -3722,6 +3760,141 @@ mod teardown_tests {
         assert_eq!(
             next_frame(&mut server).await,
             json!({ "realtimeInput": { "activityStart": {} } })
+        );
+    }
+
+    /// The opening edge of a locally detected turn, reachable without a
+    /// downcast to this concrete session.
+    #[tokio::test]
+    async fn begin_activity_emits_activity_start_in_manual_mode() {
+        let (session, mut server) = session_on_loopback(ActivityDetection::Manual).await;
+
+        session.begin_activity().await.unwrap();
+
+        assert_eq!(
+            next_frame(&mut server).await,
+            json!({ "realtimeInput": { "activityStart": {} } })
+        );
+    }
+
+    /// Reporting caller speech while the server owns detection is redundant,
+    /// not an error: the server already has a better source for it. Failing
+    /// here would punish a caller for using the neutral API on a backend that
+    /// happens not to need it — and would put a frame on the wire that the
+    /// protocol forbids in this mode.
+    #[tokio::test]
+    async fn begin_activity_writes_nothing_when_the_server_owns_detection() {
+        let (session, mut server) = session_on_loopback(ActivityDetection::Automatic).await;
+
+        session.begin_activity().await.expect("redundant, not an error");
+        session.send_text("sentinel").await.unwrap();
+
+        let frame = next_frame(&mut server).await;
+        assert_eq!(
+            frame["realtimeInput"]["text"], "sentinel",
+            "an activity frame preceded the sentinel: {frame}"
+        );
+    }
+
+    /// `begin_activity` and `interrupt` are different statements that Gemini
+    /// happens to spell with one frame. Two reports of one turn-start must
+    /// still be one frame, or the second is read as a new turn.
+    #[tokio::test]
+    async fn begin_activity_and_interrupt_are_one_turn_start() {
+        let (session, mut server) = session_on_loopback(ActivityDetection::Manual).await;
+
+        session.begin_activity().await.unwrap();
+        session.interrupt().await.unwrap();
+        session.commit_audio().await.unwrap();
+
+        assert_eq!(
+            next_frame(&mut server).await,
+            json!({ "realtimeInput": { "activityStart": {} } })
+        );
+        assert_eq!(
+            next_frame(&mut server).await,
+            json!({ "realtimeInput": { "activityEnd": {} } }),
+            "the second start was de-duplicated, so the next frame is the close"
+        );
+    }
+
+    /// The recovery constraint: `commit_audio` had a caller contract before it
+    /// meant anything about activity — flush the pending buffer as a real
+    /// `realtimeInput.audio` frame. Adding the manual-mode boundary must not
+    /// change what an automatic-mode caller gets.
+    #[tokio::test]
+    async fn commit_audio_still_flushes_buffered_audio_under_server_detection() {
+        let (session, mut server) = session_on_loopback(ActivityDetection::Automatic).await;
+
+        let chunk = AudioChunk::from_i16_samples(&[0i16; 160], AudioFormat::pcm16_16khz());
+        session.send_audio(&chunk).await.unwrap();
+        session.commit_audio().await.unwrap();
+
+        let frame = next_frame(&mut server).await;
+        assert!(
+            frame["realtimeInput"].get("audio").is_some(),
+            "the buffered audio was not flushed: {frame}"
+        );
+    }
+
+    /// The generic manual-turn boundary reaches Gemini as `activityEnd` after
+    /// the queued audio has been flushed. Callers using `RealtimeRunner` do not
+    /// need a downcast to the Gemini session to end a locally detected turn.
+    #[tokio::test]
+    async fn commit_audio_emits_activity_end_in_manual_mode() {
+        let (session, mut server) = session_on_loopback(ActivityDetection::Manual).await;
+
+        session.interrupt().await.unwrap();
+        session.commit_audio().await.unwrap();
+
+        assert_eq!(
+            next_frame(&mut server).await,
+            json!({ "realtimeInput": { "activityStart": {} } })
+        );
+        assert_eq!(
+            next_frame(&mut server).await,
+            json!({ "realtimeInput": { "activityEnd": {} } })
+        );
+    }
+
+    /// A second local endpoint report is not a second turn boundary, and the
+    /// end frame re-arms the next start through the same session state machine.
+    #[tokio::test]
+    async fn repeated_commit_audio_is_redundant_and_rearms_manual_turns() {
+        let (session, mut server) = session_on_loopback(ActivityDetection::Manual).await;
+
+        session.interrupt().await.unwrap();
+        session.commit_audio().await.unwrap();
+        session.commit_audio().await.unwrap();
+        session.interrupt().await.unwrap();
+
+        assert_eq!(
+            next_frame(&mut server).await,
+            json!({ "realtimeInput": { "activityStart": {} } })
+        );
+        assert_eq!(
+            next_frame(&mut server).await,
+            json!({ "realtimeInput": { "activityEnd": {} } })
+        );
+        assert_eq!(
+            next_frame(&mut server).await,
+            json!({ "realtimeInput": { "activityStart": {} } })
+        );
+    }
+
+    /// In the default server-owned mode a commit must remain an audio flush,
+    /// not emit a frame the protocol forbids.
+    #[tokio::test]
+    async fn commit_audio_writes_no_activity_end_when_server_detection_is_on() {
+        let (session, mut server) = session_on_loopback(ActivityDetection::Automatic).await;
+
+        session.commit_audio().await.unwrap();
+        session.send_text("sentinel").await.unwrap();
+
+        let frame = next_frame(&mut server).await;
+        assert_eq!(
+            frame["realtimeInput"]["text"], "sentinel",
+            "an activity frame preceded the sentinel: {frame}"
         );
     }
 

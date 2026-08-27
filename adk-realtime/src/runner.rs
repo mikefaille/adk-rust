@@ -728,6 +728,17 @@ impl RealtimeRunner {
         self.invoke_write(|s| async move { s.commit_audio().await }).await
     }
 
+    /// Report the start of a manually delimited input turn on the active
+    /// session generation.
+    ///
+    /// The opening edge that [`commit_audio`](Self::commit_audio) closes. This
+    /// exists so a caller running its own detection can report caller speech
+    /// through the neutral runner, rather than downcasting to a concrete
+    /// session to reach a backend-specific signaller.
+    pub async fn begin_activity(&self) -> Result<()> {
+        self.invoke_write(|s| async move { s.begin_activity().await }).await
+    }
+
     /// Trigger model response for the active session generation.
     pub async fn create_response(&self) -> Result<()> {
         self.invoke_write(|s| async move { s.create_response().await }).await
