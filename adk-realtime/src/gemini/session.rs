@@ -2840,6 +2840,47 @@ mod tests {
         );
     }
 
+    /// **Protocol for settling which of these shapes is safe** (not run here —
+    /// it needs a live key and real speech, and this crate has neither).
+    ///
+    /// The pilot line went silent for hours after a partial
+    /// `automaticActivityDetection` first reached the wire, and the mechanism
+    /// was never proven: the correlation is confounded (the same deploy moved
+    /// the contract revision, dropped two tools and grew the system
+    /// instruction by ~9 KB), and the vendor documents the partial form as
+    /// legal. Until someone runs this, "the partial payload silenced the
+    /// model" is a hypothesis, and restoring an end-of-turn budget rests on it.
+    ///
+    /// Three sessions, same speech audio, count `serverContent` in each:
+    ///
+    /// 1. no `realtimeInputConfig` at all — the known-good shape, and what
+    ///    production sends today;
+    /// 2. `{"silenceDurationMs": 1200, "disabled": false}` — what this
+    ///    projection now produces, and what a restored budget would send;
+    /// 3. `{"silenceDurationMs": 1200}` — the suspect, which this projection
+    ///    can no longer produce and which therefore has to be handcrafted.
+    ///
+    /// **All three must travel the same path.** Sending 1 and 2 through
+    /// `GeminiRealtimeSession` and handcrafting 3 over a raw socket would
+    /// confound the payload with the plumbing: a difference in outcome could
+    /// then be either the bytes or the client, and the experiment would prove
+    /// nothing it set out to prove. Send all three as raw setup frames.
+    ///
+    /// It also cannot live in this crate: it needs a real speech recording to
+    /// get any `serverContent` at all, a synthesised tone will not do, and the
+    /// fixtures are in `zenith/data_plane/testdata/voice`. Run it from there.
+    ///
+    /// What each outcome licenses:
+    ///
+    /// - 3 silent, 1 and 2 fine → the partial payload is the mechanism, the
+    ///   fix above is the fix, and the budget can be restored.
+    /// - all three fine → the mechanism is elsewhere; the silence had another
+    ///   cause and this projection change is merely hygiene. Restoring the
+    ///   budget is then safe but the outage is still unexplained, which is
+    ///   worth saying out loud rather than quietly closing.
+    /// - 2 silent → do **not** restore the budget in any form, and the
+    ///   complete-payload theory is wrong too.
+    ///
     /// The whole object, pinned.
     ///
     /// A partial `automaticActivityDetection` reached production once — one
