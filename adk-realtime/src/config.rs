@@ -58,6 +58,36 @@ pub enum VadMode {
     None,
 }
 
+/// How readily the provider decides that speech has **started**.
+///
+/// Coarse levels, because that is what Gemini Live exposes; `threshold` is a
+/// raw probability and is not representable there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StartOfSpeechSensitivity {
+    /// Detect the start of speech more often.
+    High,
+    /// Detect it less often.
+    Low,
+}
+
+/// How readily the provider decides that speech has **ended**.
+///
+/// This does not compete with [`VadConfig::silence_duration_ms`] — the two are
+/// sequential stages of one decision. Sensitivity governs whether silence is
+/// judged to be an ending at all; the duration governs how long that ending
+/// must persist before the turn closes. Setting both conservatively
+/// (`Low` with a long silence budget) is two conservative stages in series,
+/// which is a choice worth making deliberately rather than by accident.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EndOfSpeechSensitivity {
+    /// End the turn more eagerly.
+    High,
+    /// End it less eagerly.
+    Low,
+}
+
 /// VAD configuration options.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct VadConfig {
@@ -73,6 +103,12 @@ pub struct VadConfig {
     /// Prefix padding (ms) to include before detected speech.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prefix_padding_ms: Option<u32>,
+    /// How readily speech start is detected. `None` leaves it to the provider.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_of_speech_sensitivity: Option<StartOfSpeechSensitivity>,
+    /// How readily speech end is detected. `None` leaves it to the provider.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end_of_speech_sensitivity: Option<EndOfSpeechSensitivity>,
     /// Whether to interrupt the model when user starts speaking.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub interrupt_response: Option<bool>,
@@ -101,6 +137,8 @@ impl Default for VadConfig {
     /// there is no default left to mistake for a choice.
     fn default() -> Self {
         Self {
+            start_of_speech_sensitivity: None,
+            end_of_speech_sensitivity: None,
             mode: VadMode::ServerVad,
             silence_duration_ms: None,
             threshold: None,

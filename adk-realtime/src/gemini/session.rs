@@ -2152,11 +2152,6 @@ fn gemini_realtime_input_config(config: &RealtimeConfig) -> Option<Value> {
     let vad = config.turn_detection.as_ref()?;
     let mut detection = serde_json::Map::new();
 
-    if vad.mode == crate::config::VadMode::None {
-        // Automatic detection off means the caller drives turns explicitly.
-        detection.insert("disabled".to_string(), json!(true));
-    }
-
     // No rule needed about which values to trust: `VadConfig`'s defaults are
     // `None`, so a `Some` here is a caller's decision by construction.
     if let Some(ms) = vad.silence_duration_ms {
@@ -2164,6 +2159,45 @@ fn gemini_realtime_input_config(config: &RealtimeConfig) -> Option<Value> {
     }
     if let Some(ms) = vad.prefix_padding_ms {
         detection.insert("prefixPaddingMs".to_string(), json!(ms));
+    }
+    if let Some(sensitivity) = vad.start_of_speech_sensitivity {
+        detection.insert(
+            "startOfSpeechSensitivity".to_string(),
+            json!(match sensitivity {
+                crate::config::StartOfSpeechSensitivity::High => "START_SENSITIVITY_HIGH",
+                crate::config::StartOfSpeechSensitivity::Low => "START_SENSITIVITY_LOW",
+            }),
+        );
+    }
+    if let Some(sensitivity) = vad.end_of_speech_sensitivity {
+        detection.insert(
+            "endOfSpeechSensitivity".to_string(),
+            json!(match sensitivity {
+                crate::config::EndOfSpeechSensitivity::High => "END_SENSITIVITY_HIGH",
+                crate::config::EndOfSpeechSensitivity::Low => "END_SENSITIVITY_LOW",
+            }),
+        );
+    }
+
+    // `disabled` is never left implicit in an object we emit.
+    //
+    // It used to be inserted only for `VadMode::None`, so asking for one
+    // tuning value under server VAD produced `{"silenceDurationMs": 1200}` —
+    // an object whose central field, the one that decides who owns turn
+    // detection at all, was absent. That exact payload reached production and
+    // correlates with a pilot line that completed setup, held a healthy
+    // socket, and returned no content at all. The vendor documents the partial
+    // form as legal and the mechanism was never proven, so this is not a claim
+    // to have found the bug — it is a refusal to keep sending a message whose
+    // meaning depends on a field we chose not to write.
+    //
+    // The emptiness check stays, and it is load-bearing: a caller who
+    // configured nothing must still produce no `realtimeInputConfig` at all,
+    // which is the wire shape server-side detection has always had. Only a
+    // caller who said *something* gets an object, and then it is complete.
+    let manual = vad.mode == crate::config::VadMode::None;
+    if manual || !detection.is_empty() {
+        detection.insert("disabled".to_string(), json!(manual));
     }
 
     if vad.threshold.is_some() {
@@ -2806,6 +2840,64 @@ mod tests {
         );
     }
 
+    /// The whole object, pinned.
+    ///
+    /// A partial `automaticActivityDetection` reached production once — one
+    /// tuning value with no `disabled` beside it — and nothing in the
+    /// repository caught it: every test asserted the fields it cared about and
+    /// none asserted the shape. Field-by-field assertions cannot fail for an
+    /// *absent* field nobody thought to name, which is exactly the failure
+    /// mode. This compares the serialized object whole, so any future omission
+    /// or addition has to be looked at by a human before it ships.
+    #[test]
+    fn the_projected_detection_object_is_pinned_whole() {
+        use crate::config::{EndOfSpeechSensitivity, StartOfSpeechSensitivity, VadConfig, VadMode};
+
+        // One tuning value under server VAD: the shape that went to production.
+        let one_value = RealtimeConfig::default()
+            .with_vad(VadConfig { silence_duration_ms: Some(1200), ..VadConfig::server_vad() });
+        assert_eq!(
+            gemini_realtime_input_config(&one_value).expect("projection")["automaticActivityDetection"],
+            json!({ "silenceDurationMs": 1200, "disabled": false }),
+            "a tuning value must not travel without saying who owns detection"
+        );
+
+        // Everything set.
+        let full = RealtimeConfig::default().with_vad(VadConfig {
+            silence_duration_ms: Some(1200),
+            prefix_padding_ms: Some(300),
+            start_of_speech_sensitivity: Some(StartOfSpeechSensitivity::Low),
+            end_of_speech_sensitivity: Some(EndOfSpeechSensitivity::Low),
+            ..VadConfig::server_vad()
+        });
+        assert_eq!(
+            gemini_realtime_input_config(&full).expect("projection")["automaticActivityDetection"],
+            json!({
+                "silenceDurationMs": 1200,
+                "prefixPaddingMs": 300,
+                "startOfSpeechSensitivity": "START_SENSITIVITY_LOW",
+                "endOfSpeechSensitivity": "END_SENSITIVITY_LOW",
+                "disabled": false
+            })
+        );
+
+        // Manual mode with no tuning: `disabled` alone, and true.
+        let manual = RealtimeConfig::default()
+            .with_vad(VadConfig { mode: VadMode::None, ..VadConfig::server_vad() });
+        assert_eq!(
+            gemini_realtime_input_config(&manual).expect("projection")["automaticActivityDetection"],
+            json!({ "disabled": true })
+        );
+
+        // Nothing configured: no object at all, which is the wire shape
+        // server-side detection has always had. The emptiness check that
+        // preserves this is the reason `disabled` is not simply always set.
+        assert!(
+            gemini_realtime_input_config(&RealtimeConfig::default().with_server_vad()).is_none(),
+            "a caller who chose nothing must send no realtimeInputConfig"
+        );
+    }
+
     #[test]
     fn explicitly_chosen_timings_do_reach_the_wire() {
         use crate::config::{VadConfig, VadMode};
@@ -2817,6 +2909,8 @@ mod tests {
             threshold: None,
             interrupt_response: None,
             eagerness: None,
+            start_of_speech_sensitivity: None,
+            end_of_speech_sensitivity: None,
         });
         let projected = gemini_realtime_input_config(&config).expect("projection");
         let detection = projected.get("automaticActivityDetection").expect("detection");
@@ -2840,6 +2934,8 @@ mod tests {
             threshold: None,
             interrupt_response: Some(false),
             eagerness: None,
+            start_of_speech_sensitivity: None,
+            end_of_speech_sensitivity: None,
         });
         let projected = gemini_realtime_input_config(&config).expect("projection");
         let detection = projected.get("automaticActivityDetection").expect("detection block");
