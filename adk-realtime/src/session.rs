@@ -162,7 +162,32 @@ pub trait RealtimeSession: Send + Sync {
         self.send_tool_response(response).await
     }
 
+    /// Report that a manually delimited input turn has begun.
+    ///
+    /// The opening edge of the turn that [`commit_audio`](Self::commit_audio)
+    /// closes. A caller running its own voice-activity detection reports the
+    /// start of caller speech here.
+    ///
+    /// This is deliberately **not** [`interrupt`](Self::interrupt). On some
+    /// backends the two currently put the same bytes on the wire — on Gemini
+    /// both open an activity — but they are different statements: one says the
+    /// human began speaking, the other asks to abandon the model's current
+    /// response. A caller that means the first should not have to say the
+    /// second, and a backend that stops conflating them must not break callers
+    /// that chose the right name.
+    ///
+    /// Defaults to a no-op, because a backend with no manual-turn concept has
+    /// nothing to report and reporting it is not an error. Backends that do
+    /// have one override this.
+    async fn begin_activity(&self) -> Result<()> {
+        Ok(())
+    }
+
     /// Commit the audio buffer (for manual VAD mode).
+    ///
+    /// The closing edge of a manually delimited input turn, and on a backend
+    /// with explicit activity signalling it is that boundary — not merely a
+    /// buffer flush.
     async fn commit_audio(&self) -> Result<()>;
 
     /// Clear the audio input buffer.

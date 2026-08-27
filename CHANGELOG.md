@@ -7,6 +7,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v3.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`RealtimeSession::begin_activity()`** (`adk-realtime`): the opening edge of a
+  manually delimited input turn, defaulting to a no-op so a backend with no
+  manual-turn concept is not forced to invent one. On Gemini in manual mode it
+  emits `activityStart`; under server-side detection it is silent, because the
+  server owns detection there and the frame is not legal in that mode. Exposed
+  through `RealtimeRunner` alongside `commit_audio`, which means a caller running
+  its own voice-activity detection can drive both edges of a turn through the
+  neutral API instead of downcasting to a concrete session to reach
+  `ActivitySignaller`.
+
+  Deliberately distinct from `interrupt()`. On Gemini both currently put
+  `activityStart` on the wire, so this changes no bytes — but they are different
+  statements: one says the human began speaking, the other asks to abandon the
+  model's response. A caller that means the first should not have to say the
+  second.
+
+- **`VadConfig::start_of_speech_sensitivity` / `end_of_speech_sensitivity`**:
+  the two coarse levels Gemini Live exposes, as `Option`, defaulting to `None`
+  like every sibling field. No value is emitted for a field left unset, so this
+  adds expressiveness and changes no bytes for callers that do not use it.
+
+### Changed
+
+- **`commit_audio` now closes the turn on Gemini in manual mode**, sending
+  `activityEnd` after flushing the audio buffer. The trait has always documented
+  this method as "commit the audio buffer (for manual VAD mode)"; on Gemini it
+  did not do the thing it advertised, because Gemini has no buffer-commit frame
+  and `activityEnd` is that boundary once automatic detection is disabled.
+
+  This is a behaviour change for callers that selected `VadMode::None` on Gemini
+  via `RealtimeConfig::without_vad()`. Behaviour under server-side detection is
+  unchanged and pinned by a test.
+
+- **The Gemini `automaticActivityDetection` projection now always states
+  `disabled`** in any object it emits. It previously inserted that field only
+  for `VadMode::None`, so a caller asking for one tuning value under server VAD
+  produced `{"silenceDurationMs": 1200}` — an object whose central field, the
+  one deciding who owns turn detection at all, was absent.
+
+  A caller who configures nothing still sends no `realtimeInputConfig` at all;
+  only a caller who set something gets an object, and then it is complete. The
+  emitted object is pinned whole by a test rather than field by field, because a
+  field-by-field assertion cannot fail for an absent field nobody thought to
+  name.
+
 ## [2.1.0] - 2026-08-25
 
 ### Added

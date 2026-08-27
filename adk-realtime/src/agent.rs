@@ -270,6 +270,8 @@ impl RealtimeAgentBuilder {
             silence_duration_ms: Some(500),
             interrupt_response: Some(true),
             eagerness: None,
+            start_of_speech_sensitivity: None,
+            end_of_speech_sensitivity: None,
         });
         self
     }

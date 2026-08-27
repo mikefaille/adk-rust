@@ -27,6 +27,8 @@ fn test_vad_config_server_vad() {
         silence_duration_ms: Some(500),
         interrupt_response: Some(true),
         eagerness: None,
+        start_of_speech_sensitivity: None,
+        end_of_speech_sensitivity: None,
     };
 
     assert!(matches!(vad.mode, VadMode::ServerVad));
@@ -42,6 +44,8 @@ fn test_vad_config_semantic_vad() {
         silence_duration_ms: None,
         interrupt_response: None,
         eagerness: Some("high".to_string()),
+        start_of_speech_sensitivity: None,
+        end_of_speech_sensitivity: None,
     };
 
     assert!(matches!(vad.mode, VadMode::SemanticVad));

@@ -1796,8 +1796,46 @@ impl RealtimeSession for GeminiRealtimeSession {
         self.send_raw(&msg).await
     }
 
+    async fn begin_activity(&self) -> Result<()> {
+        // Silent in automatic mode rather than an error. The server owns
+        // detection there, so a caller reporting caller-speech is telling us
+        // something we already have a better source for — redundant, not
+        // wrong, and failing it would punish a caller for using the neutral
+        // API on a backend that happens not to need it.
+        if self.activity_detection != ActivityDetection::Manual {
+            return Ok(());
+        }
+
+        // The same frame `interrupt` sends, deliberately. Gemini opens a turn
+        // and abandons the model's response with one signal, so both callers
+        // converge here; `send_activity`'s edge de-duplication means two
+        // reports of one turn-start still put one frame on the wire.
+        let outcome = self.send_activity(ActivitySignal::Start).await?;
+        tracing::debug!(
+            session_id = %self.session_id,
+            ?outcome,
+            "begin activity sent activityStart"
+        );
+        Ok(())
+    }
+
     async fn commit_audio(&self) -> Result<()> {
-        self.flush_audio().await
+        self.flush_audio().await?;
+
+        // `commit_audio` is the provider-neutral boundary for a manually
+        // delimited input turn. Gemini has no audio-buffer commit frame: once
+        // automatic activity detection is disabled, its equivalent is an
+        // `activityEnd` after every queued audio frame has been written.
+        if self.activity_detection == ActivityDetection::Manual {
+            let outcome = self.send_activity(ActivitySignal::End).await?;
+            tracing::debug!(
+                session_id = %self.session_id,
+                ?outcome,
+                "commit audio sent activityEnd"
+            );
+        }
+
+        Ok(())
     }
 
     async fn clear_audio(&self) -> Result<()> {
@@ -2212,11 +2250,6 @@ fn gemini_realtime_input_config(config: &RealtimeConfig) -> Option<Value> {
     let vad = config.turn_detection.as_ref()?;
     let mut detection = serde_json::Map::new();
 
-    if vad.mode == crate::config::VadMode::None {
-        // Automatic detection off means the caller drives turns explicitly.
-        detection.insert("disabled".to_string(), json!(true));
-    }
-
     // No rule needed about which values to trust: `VadConfig`'s defaults are
     // `None`, so a `Some` here is a caller's decision by construction.
     if let Some(ms) = vad.silence_duration_ms {
@@ -2224,6 +2257,45 @@ fn gemini_realtime_input_config(config: &RealtimeConfig) -> Option<Value> {
     }
     if let Some(ms) = vad.prefix_padding_ms {
         detection.insert("prefixPaddingMs".to_string(), json!(ms));
+    }
+    if let Some(sensitivity) = vad.start_of_speech_sensitivity {
+        detection.insert(
+            "startOfSpeechSensitivity".to_string(),
+            json!(match sensitivity {
+                crate::config::StartOfSpeechSensitivity::High => "START_SENSITIVITY_HIGH",
+                crate::config::StartOfSpeechSensitivity::Low => "START_SENSITIVITY_LOW",
+            }),
+        );
+    }
+    if let Some(sensitivity) = vad.end_of_speech_sensitivity {
+        detection.insert(
+            "endOfSpeechSensitivity".to_string(),
+            json!(match sensitivity {
+                crate::config::EndOfSpeechSensitivity::High => "END_SENSITIVITY_HIGH",
+                crate::config::EndOfSpeechSensitivity::Low => "END_SENSITIVITY_LOW",
+            }),
+        );
+    }
+
+    // `disabled` is never left implicit in an object we emit.
+    //
+    // It used to be inserted only for `VadMode::None`, so asking for one
+    // tuning value under server VAD produced `{"silenceDurationMs": 1200}` —
+    // an object whose central field, the one that decides who owns turn
+    // detection at all, was absent. That exact payload reached production and
+    // correlates with a pilot line that completed setup, held a healthy
+    // socket, and returned no content at all. The vendor documents the partial
+    // form as legal and the mechanism was never proven, so this is not a claim
+    // to have found the bug — it is a refusal to keep sending a message whose
+    // meaning depends on a field we chose not to write.
+    //
+    // The emptiness check stays, and it is load-bearing: a caller who
+    // configured nothing must still produce no `realtimeInputConfig` at all,
+    // which is the wire shape server-side detection has always had. Only a
+    // caller who said *something* gets an object, and then it is complete.
+    let manual = vad.mode == crate::config::VadMode::None;
+    if manual || !detection.is_empty() {
+        detection.insert("disabled".to_string(), json!(manual));
     }
 
     if vad.threshold.is_some() {
@@ -2868,6 +2940,105 @@ mod tests {
         );
     }
 
+    /// **Protocol for settling which of these shapes is safe** (not run here —
+    /// it needs a live key and real speech, and this crate has neither).
+    ///
+    /// The pilot line went silent for hours after a partial
+    /// `automaticActivityDetection` first reached the wire, and the mechanism
+    /// was never proven: the correlation is confounded (the same deploy moved
+    /// the contract revision, dropped two tools and grew the system
+    /// instruction by ~9 KB), and the vendor documents the partial form as
+    /// legal. Until someone runs this, "the partial payload silenced the
+    /// model" is a hypothesis, and restoring an end-of-turn budget rests on it.
+    ///
+    /// Three sessions, same speech audio, count `serverContent` in each:
+    ///
+    /// 1. no `realtimeInputConfig` at all — the known-good shape, and what
+    ///    production sends today;
+    /// 2. `{"silenceDurationMs": 1200, "disabled": false}` — what this
+    ///    projection now produces, and what a restored budget would send;
+    /// 3. `{"silenceDurationMs": 1200}` — the suspect, which this projection
+    ///    can no longer produce and which therefore has to be handcrafted.
+    ///
+    /// **All three must travel the same path.** Sending 1 and 2 through
+    /// `GeminiRealtimeSession` and handcrafting 3 over a raw socket would
+    /// confound the payload with the plumbing: a difference in outcome could
+    /// then be either the bytes or the client, and the experiment would prove
+    /// nothing it set out to prove. Send all three as raw setup frames.
+    ///
+    /// It also cannot live in this crate: it needs a real speech recording to
+    /// get any `serverContent` at all, a synthesised tone will not do, and the
+    /// fixtures are in `zenith/data_plane/testdata/voice`. Run it from there.
+    ///
+    /// What each outcome licenses:
+    ///
+    /// - 3 silent, 1 and 2 fine → the partial payload is the mechanism, the
+    ///   fix above is the fix, and the budget can be restored.
+    /// - all three fine → the mechanism is elsewhere; the silence had another
+    ///   cause and this projection change is merely hygiene. Restoring the
+    ///   budget is then safe but the outage is still unexplained, which is
+    ///   worth saying out loud rather than quietly closing.
+    /// - 2 silent → do **not** restore the budget in any form, and the
+    ///   complete-payload theory is wrong too.
+    ///
+    /// The whole object, pinned.
+    ///
+    /// A partial `automaticActivityDetection` reached production once — one
+    /// tuning value with no `disabled` beside it — and nothing in the
+    /// repository caught it: every test asserted the fields it cared about and
+    /// none asserted the shape. Field-by-field assertions cannot fail for an
+    /// *absent* field nobody thought to name, which is exactly the failure
+    /// mode. This compares the serialized object whole, so any future omission
+    /// or addition has to be looked at by a human before it ships.
+    #[test]
+    fn the_projected_detection_object_is_pinned_whole() {
+        use crate::config::{EndOfSpeechSensitivity, StartOfSpeechSensitivity, VadConfig, VadMode};
+
+        // One tuning value under server VAD: the shape that went to production.
+        let one_value = RealtimeConfig::default()
+            .with_vad(VadConfig { silence_duration_ms: Some(1200), ..VadConfig::server_vad() });
+        assert_eq!(
+            gemini_realtime_input_config(&one_value).expect("projection")["automaticActivityDetection"],
+            json!({ "silenceDurationMs": 1200, "disabled": false }),
+            "a tuning value must not travel without saying who owns detection"
+        );
+
+        // Everything set.
+        let full = RealtimeConfig::default().with_vad(VadConfig {
+            silence_duration_ms: Some(1200),
+            prefix_padding_ms: Some(300),
+            start_of_speech_sensitivity: Some(StartOfSpeechSensitivity::Low),
+            end_of_speech_sensitivity: Some(EndOfSpeechSensitivity::Low),
+            ..VadConfig::server_vad()
+        });
+        assert_eq!(
+            gemini_realtime_input_config(&full).expect("projection")["automaticActivityDetection"],
+            json!({
+                "silenceDurationMs": 1200,
+                "prefixPaddingMs": 300,
+                "startOfSpeechSensitivity": "START_SENSITIVITY_LOW",
+                "endOfSpeechSensitivity": "END_SENSITIVITY_LOW",
+                "disabled": false
+            })
+        );
+
+        // Manual mode with no tuning: `disabled` alone, and true.
+        let manual = RealtimeConfig::default()
+            .with_vad(VadConfig { mode: VadMode::None, ..VadConfig::server_vad() });
+        assert_eq!(
+            gemini_realtime_input_config(&manual).expect("projection")["automaticActivityDetection"],
+            json!({ "disabled": true })
+        );
+
+        // Nothing configured: no object at all, which is the wire shape
+        // server-side detection has always had. The emptiness check that
+        // preserves this is the reason `disabled` is not simply always set.
+        assert!(
+            gemini_realtime_input_config(&RealtimeConfig::default().with_server_vad()).is_none(),
+            "a caller who chose nothing must send no realtimeInputConfig"
+        );
+    }
+
     #[test]
     fn explicitly_chosen_timings_do_reach_the_wire() {
         use crate::config::{VadConfig, VadMode};
@@ -2879,6 +3050,8 @@ mod tests {
             threshold: None,
             interrupt_response: None,
             eagerness: None,
+            start_of_speech_sensitivity: None,
+            end_of_speech_sensitivity: None,
         });
         let projected = gemini_realtime_input_config(&config).expect("projection");
         let detection = projected.get("automaticActivityDetection").expect("detection");
@@ -2902,6 +3075,8 @@ mod tests {
             threshold: None,
             interrupt_response: Some(false),
             eagerness: None,
+            start_of_speech_sensitivity: None,
+            end_of_speech_sensitivity: None,
         });
         let projected = gemini_realtime_input_config(&config).expect("projection");
         let detection = projected.get("automaticActivityDetection").expect("detection block");
@@ -4062,6 +4237,141 @@ mod teardown_tests {
         assert_eq!(
             next_frame(&mut server).await,
             json!({ "realtimeInput": { "activityStart": {} } })
+        );
+    }
+
+    /// The opening edge of a locally detected turn, reachable without a
+    /// downcast to this concrete session.
+    #[tokio::test]
+    async fn begin_activity_emits_activity_start_in_manual_mode() {
+        let (session, mut server) = session_on_loopback(ActivityDetection::Manual).await;
+
+        session.begin_activity().await.unwrap();
+
+        assert_eq!(
+            next_frame(&mut server).await,
+            json!({ "realtimeInput": { "activityStart": {} } })
+        );
+    }
+
+    /// Reporting caller speech while the server owns detection is redundant,
+    /// not an error: the server already has a better source for it. Failing
+    /// here would punish a caller for using the neutral API on a backend that
+    /// happens not to need it — and would put a frame on the wire that the
+    /// protocol forbids in this mode.
+    #[tokio::test]
+    async fn begin_activity_writes_nothing_when_the_server_owns_detection() {
+        let (session, mut server) = session_on_loopback(ActivityDetection::Automatic).await;
+
+        session.begin_activity().await.expect("redundant, not an error");
+        session.send_text("sentinel").await.unwrap();
+
+        let frame = next_frame(&mut server).await;
+        assert_eq!(
+            frame["realtimeInput"]["text"], "sentinel",
+            "an activity frame preceded the sentinel: {frame}"
+        );
+    }
+
+    /// `begin_activity` and `interrupt` are different statements that Gemini
+    /// happens to spell with one frame. Two reports of one turn-start must
+    /// still be one frame, or the second is read as a new turn.
+    #[tokio::test]
+    async fn begin_activity_and_interrupt_are_one_turn_start() {
+        let (session, mut server) = session_on_loopback(ActivityDetection::Manual).await;
+
+        session.begin_activity().await.unwrap();
+        session.interrupt().await.unwrap();
+        session.commit_audio().await.unwrap();
+
+        assert_eq!(
+            next_frame(&mut server).await,
+            json!({ "realtimeInput": { "activityStart": {} } })
+        );
+        assert_eq!(
+            next_frame(&mut server).await,
+            json!({ "realtimeInput": { "activityEnd": {} } }),
+            "the second start was de-duplicated, so the next frame is the close"
+        );
+    }
+
+    /// The recovery constraint: `commit_audio` had a caller contract before it
+    /// meant anything about activity — flush the pending buffer as a real
+    /// `realtimeInput.audio` frame. Adding the manual-mode boundary must not
+    /// change what an automatic-mode caller gets.
+    #[tokio::test]
+    async fn commit_audio_still_flushes_buffered_audio_under_server_detection() {
+        let (session, mut server) = session_on_loopback(ActivityDetection::Automatic).await;
+
+        let chunk = AudioChunk::from_i16_samples(&[0i16; 160], AudioFormat::pcm16_16khz());
+        session.send_audio(&chunk).await.unwrap();
+        session.commit_audio().await.unwrap();
+
+        let frame = next_frame(&mut server).await;
+        assert!(
+            frame["realtimeInput"].get("audio").is_some(),
+            "the buffered audio was not flushed: {frame}"
+        );
+    }
+
+    /// The generic manual-turn boundary reaches Gemini as `activityEnd` after
+    /// the queued audio has been flushed. Callers using `RealtimeRunner` do not
+    /// need a downcast to the Gemini session to end a locally detected turn.
+    #[tokio::test]
+    async fn commit_audio_emits_activity_end_in_manual_mode() {
+        let (session, mut server) = session_on_loopback(ActivityDetection::Manual).await;
+
+        session.interrupt().await.unwrap();
+        session.commit_audio().await.unwrap();
+
+        assert_eq!(
+            next_frame(&mut server).await,
+            json!({ "realtimeInput": { "activityStart": {} } })
+        );
+        assert_eq!(
+            next_frame(&mut server).await,
+            json!({ "realtimeInput": { "activityEnd": {} } })
+        );
+    }
+
+    /// A second local endpoint report is not a second turn boundary, and the
+    /// end frame re-arms the next start through the same session state machine.
+    #[tokio::test]
+    async fn repeated_commit_audio_is_redundant_and_rearms_manual_turns() {
+        let (session, mut server) = session_on_loopback(ActivityDetection::Manual).await;
+
+        session.interrupt().await.unwrap();
+        session.commit_audio().await.unwrap();
+        session.commit_audio().await.unwrap();
+        session.interrupt().await.unwrap();
+
+        assert_eq!(
+            next_frame(&mut server).await,
+            json!({ "realtimeInput": { "activityStart": {} } })
+        );
+        assert_eq!(
+            next_frame(&mut server).await,
+            json!({ "realtimeInput": { "activityEnd": {} } })
+        );
+        assert_eq!(
+            next_frame(&mut server).await,
+            json!({ "realtimeInput": { "activityStart": {} } })
+        );
+    }
+
+    /// In the default server-owned mode a commit must remain an audio flush,
+    /// not emit a frame the protocol forbids.
+    #[tokio::test]
+    async fn commit_audio_writes_no_activity_end_when_server_detection_is_on() {
+        let (session, mut server) = session_on_loopback(ActivityDetection::Automatic).await;
+
+        session.commit_audio().await.unwrap();
+        session.send_text("sentinel").await.unwrap();
+
+        let frame = next_frame(&mut server).await;
+        assert_eq!(
+            frame["realtimeInput"]["text"], "sentinel",
+            "an activity frame preceded the sentinel: {frame}"
         );
     }
 
