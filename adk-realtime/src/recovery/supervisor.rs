@@ -1532,6 +1532,18 @@ impl RecoverySupervisor {
                                     || error_disposition == RecoveryDisposition::Fatal
                                     || ctx.is_exhausted()
                                 {
+                                    // Abnormal teardown is decided here; record how, so the
+                                    // first real provider refusal is reviewable. Scalar
+                                    // fields only: never Debug-format cause, session,
+                                    // backend, or endpoint (endpoint queries are caller
+                                    // credentials).
+                                    tracing::warn!(
+                                        cause_disposition = ?cause_disposition,
+                                        error_disposition = ?error_disposition,
+                                        exhausted = ctx.is_exhausted(),
+                                        error = %err,
+                                        "managed recovery going terminal"
+                                    );
                                     let last_gen = Arc::clone(failed);
                                     core_guard.terminate_exhausted(Some(last_gen));
                                     final_outcome_to_send = Some(Err(err));
