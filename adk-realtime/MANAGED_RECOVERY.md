@@ -314,6 +314,11 @@ It is reasonable to describe `adk-realtime` as providing:
 - **managed read/write lifecycle with deterministic terminal states**
 - **provider-neutral recovery SPI for realtime backends**
 
+Integration evidence gathered against these claims by a downstream consumer —
+what was independently checked, with file and line, and what was not — is
+recorded separately in
+[`RECOVERY_INTEGRATION_EVIDENCE.md`](RECOVERY_INTEGRATION_EVIDENCE.md).
+
 ### Claims that require provider/runtime proof
 
 Do not claim any of the following solely because this managed layer exists:

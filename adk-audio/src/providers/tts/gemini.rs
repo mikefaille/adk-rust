@@ -169,10 +169,7 @@ impl GeminiTts {
         CreateInteractionRequest {
             model: Some(self.model.clone()),
             input: Input::Text(request.text.clone()),
-            response_format: Some(ResponseFormat::Audio {
-                mime_type: Some("audio/l16".to_string()),
-                sample_rate: Some(24000),
-            }),
+            response_format: Some(ResponseFormat::Audio { mime_type: None, sample_rate: None }),
             stream: Some(stream),
             store: Some(false),
             generation_config: Some(adk_gemini::interactions::GenerationConfig {

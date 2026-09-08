@@ -360,14 +360,14 @@ if projection.leaves_enforcement_gap() {
 
 ```toml
 [dependencies]
-adk-schema = "3.0.0"
+adk-schema = "2.1.0"
 ```
 
 Generate schemas from Rust types and validate instances:
 
 ```toml
 adk-schema = {
-    version = "3.0.0",
+    version = "2.1.0",
     features = ["schemars", "runtime-validation"]
 }
 ```
@@ -376,7 +376,7 @@ Enable integration with ADK-Rust `SchemaAdapter` implementations:
 
 ```toml
 adk-schema = {
-    version = "3.0.0",
+    version = "2.1.0",
     features = ["adapters"]
 }
 ```

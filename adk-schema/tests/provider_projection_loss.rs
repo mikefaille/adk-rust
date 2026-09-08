@@ -6,6 +6,22 @@
 //! without making `adk-schema` depend on a provider client.
 //!
 //! Re-capture it by running that call on [`source`] and pasting the result.
+//!
+//! `GeminiSchemaAdapter` and `KimiSchemaAdapter` are constructed here for real
+//! because neither creates a dependency `adk-schema` cannot afford: Gemini is
+//! reached via `adk-gemini` (already a dev-dependency of this crate, and not a
+//! cycle — `adk-gemini` does not depend on `adk-schema`), and Kimi lives in
+//! `adk-core` itself. `OpenAiSchemaAdapter`, `OpenAiStrictSchemaAdapter`, and
+//! `AnthropicSchemaAdapter` live in `adk-model`, which `adk-schema` cannot
+//! depend on without dragging a 51-dependency provider crate into this small
+//! Beta crate's dev graph — exactly the tight-coupling concern the upstream
+//! maintainer raised on issue #550. The real per-OpenAI/per-Anthropic loss
+//! matrix lives next to those adapters instead: see
+//! `adk-model/tests/openai_schema_projection_loss.rs` and
+//! `adk-model/tests/anthropic_schema_projection_loss.rs`. What stays here
+//! against `GenericSchemaAdapter` characterises the generic adapter itself —
+//! it does not stand in for, and must not be named after, any specific
+//! provider.
 
 use adk_core::{GenericSchemaAdapter, KimiSchemaAdapter, SchemaAdapter};
 use adk_gemini::GeminiSchemaAdapter;
@@ -40,13 +56,13 @@ fn gemini_projection() -> Value {
     GeminiSchemaAdapter::new().normalize_schema(source())
 }
 
-/// Verbatim invocation of `GenericSchemaAdapter.normalize_schema(source())` for OpenAI.
-fn openai_projection() -> Value {
-    GenericSchemaAdapter.normalize_schema(source())
-}
-
-/// Verbatim invocation of `GenericSchemaAdapter.normalize_schema(source())` for Anthropic.
-fn anthropic_projection() -> Value {
+/// Verbatim invocation of `GenericSchemaAdapter.normalize_schema(source())`.
+///
+/// Provider-neutral by construction — this is the fallback adapter, not a
+/// stand-in for any named provider. Do not rename this back to imply it
+/// characterises OpenAI or Anthropic; see the module doc for why that was
+/// wrong before.
+fn generic_projection() -> Value {
     GenericSchemaAdapter.normalize_schema(source())
 }
 
@@ -129,23 +145,17 @@ fn outstanding_recovers_the_obligation_the_projection_dropped() {
     );
 }
 
+/// Owned here because `GenericSchemaAdapter` lives in `adk-core`: the diff
+/// machinery drops the same `if`/`then` obligation for the fallback adapter
+/// as it does for Gemini. This does **not** characterise OpenAI or
+/// Anthropic — see the per-provider matrix in `adk-model/tests/` for that.
 #[test]
-fn reports_that_openai_projection_drops_conditional_constraints() {
-    let losses = ingest(source()).diff(&ingest(openai_projection()));
-    assert!(!losses.is_empty(), "openai projection reported no differences");
+fn reports_that_the_generic_projection_drops_conditional_constraints() {
+    let losses = ingest(source()).diff(&ingest(generic_projection()));
+    assert!(!losses.is_empty(), "generic projection reported no differences");
     assert!(
         losses.iter().any(|loss| loss.pointer.starts_with("/allOf") || loss.keyword == "allOf"),
-        "the dropped if/then obligation was not reported for openai: {losses:#?}"
-    );
-}
-
-#[test]
-fn reports_that_anthropic_projection_drops_conditional_constraints() {
-    let losses = ingest(source()).diff(&ingest(anthropic_projection()));
-    assert!(!losses.is_empty(), "anthropic projection reported no differences");
-    assert!(
-        losses.iter().any(|loss| loss.pointer.starts_with("/allOf") || loss.keyword == "allOf"),
-        "the dropped if/then obligation was not reported for anthropic: {losses:#?}"
+        "the dropped if/then obligation was not reported for the generic adapter: {losses:#?}"
     );
 }
 
