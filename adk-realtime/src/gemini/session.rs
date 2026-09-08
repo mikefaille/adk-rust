@@ -457,8 +457,6 @@ pub struct GeminiRealtimeSession {
     receiver: Arc<Mutex<WsSource>>,
     audio_buffer: Arc<ParkingMutex<BytesMut>>,
     event_queue: Arc<ParkingMutex<std::collections::VecDeque<ServerEvent>>>,
-    schema_cache: Arc<adk_core::SchemaCache>,
-    adapter: Arc<dyn adk_core::SchemaAdapter>,
     frame_log: FrameLog,
     /// The close frame the server sent, if it sent one.
     ///
@@ -588,8 +586,6 @@ impl GeminiRealtimeSession {
             receiver: Arc::new(Mutex::new(receiver)),
             audio_buffer: Arc::new(ParkingMutex::new(BytesMut::new())),
             event_queue: Arc::new(ParkingMutex::new(std::collections::VecDeque::new())),
-            schema_cache: Arc::new(adk_core::SchemaCache::new()),
-            adapter: Arc::new(adk_core::GenericSchemaAdapter),
             frame_log: FrameLog::new(session_id, "studio", reconnect_model.clone()),
             last_disconnect: Arc::new(ParkingMutex::new(None)),
             backend,
@@ -802,8 +798,6 @@ impl GeminiRealtimeSession {
             audio_buffer: Arc::new(ParkingMutex::new(BytesMut::new())),
             last_disconnect: Arc::new(ParkingMutex::new(None)),
             event_queue: Arc::new(ParkingMutex::new(std::collections::VecDeque::new())),
-            schema_cache,
-            adapter,
             frame_log,
             backend: backend.clone(),
             dialect,
@@ -3621,8 +3615,6 @@ mod teardown_tests {
             receiver: Arc::new(Mutex::new(source)),
             audio_buffer: Arc::new(ParkingMutex::new(BytesMut::new())),
             event_queue: Arc::new(ParkingMutex::new(std::collections::VecDeque::new())),
-            schema_cache: Arc::new(adk_core::SchemaCache::new()),
-            adapter: Arc::new(adk_core::GenericSchemaAdapter),
             frame_log: FrameLog::new(
                 "test-gemini-session".into(),
                 "studio",
@@ -3800,9 +3792,6 @@ mod teardown_tests {
         });
 
         let (replacement_deadline_tx, replacement_deadline_rx) = tokio::sync::watch::channel(None);
-        let schema_cache = Arc::new(adk_core::SchemaCache::new());
-        let adapter: Arc<dyn adk_core::SchemaAdapter> =
-            Arc::new(adk_gemini::schema_adapter::GeminiSchemaAdapter::with_dialect(schema_dialect));
         let cancel_token = tokio_util::sync::CancellationToken::new();
 
         let session = GeminiRealtimeSession {
@@ -3814,8 +3803,6 @@ mod teardown_tests {
             receiver: Arc::new(Mutex::new(source)),
             audio_buffer: Arc::new(ParkingMutex::new(BytesMut::new())),
             event_queue: Arc::new(ParkingMutex::new(std::collections::VecDeque::new())),
-            schema_cache,
-            adapter,
             frame_log: FrameLog::new("test-session".into(), "studio", "models/test".into()),
             last_disconnect: Arc::new(ParkingMutex::new(None)),
             backend: GeminiLiveBackend::studio("mock-key"),
@@ -4160,9 +4147,12 @@ mod teardown_tests {
 
         let config =
             RealtimeConfig { tools: Some(tool_with_constrained_schema()), ..Default::default() };
-        let tools =
-            convert_tools(config.tools.clone(), &session.schema_cache, session.adapter.as_ref())
-                .unwrap();
+        // The session no longer stores these; rebuild the expectation from the same dialect.
+        let schema_cache = adk_core::SchemaCache::new();
+        let adapter = adk_gemini::schema_adapter::GeminiSchemaAdapter::with_dialect(
+            adk_gemini::GeminiSchemaDialect::JsonSchema,
+        );
+        let tools = convert_tools(config.tools.clone(), &schema_cache, &adapter).unwrap();
         session.send_setup_with_compiled_tools("models/test", config, tools, None).await.unwrap();
 
         let frame = next_frame(&mut server).await;
