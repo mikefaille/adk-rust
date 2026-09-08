@@ -478,6 +478,45 @@ pub(crate) fn parse_duration_string(s: &str) -> Option<std::time::Duration> {
     }
 }
 
+/// Fixed log category for a terminal-teardown error.
+///
+/// Variant payloads carry server-controlled text, so teardown logs must
+/// never render the full error Display (CWE-532). The match is exhaustive
+/// on purpose: a new variant fails compilation until it is categorized.
+fn error_category(err: &RealtimeError) -> &'static str {
+    match err {
+        RealtimeError::ConnectionError(_) => "connection",
+        RealtimeError::MessageError(_) => "message",
+        RealtimeError::Protocol(_) => "protocol",
+        RealtimeError::AuthError(_) => "auth",
+        RealtimeError::NotConnected => "not-connected",
+        RealtimeError::SessionClosed => "session-closed",
+        RealtimeError::ConfigError(_) => "config",
+        RealtimeError::AudioFormatError(_) => "audio-format",
+        RealtimeError::ToolError(_) => "tool",
+        RealtimeError::ServerError { .. } => "server",
+        RealtimeError::Timeout(_) => "timeout",
+        RealtimeError::SerializationError(_) => "serialization",
+        RealtimeError::ProviderError(_) => "provider",
+        RealtimeError::IoError(_) => "io",
+        RealtimeError::OpusCodecError(_) => "opus-codec",
+        RealtimeError::WebRTCError(_) => "webrtc",
+        RealtimeError::LiveKitError(_) => "livekit",
+        #[cfg(feature = "livekit")]
+        RealtimeError::LiveKitNativeError(_) => "livekit-native",
+        RealtimeError::WriteFailed { .. } => "write-failed",
+    }
+}
+
+/// Short protocol code for a terminal-teardown error, when the variant
+/// carries one. Empty otherwise; the free-form message is never logged.
+fn error_server_code(err: &RealtimeError) -> &str {
+    match err {
+        RealtimeError::ServerError { code, .. } => code,
+        _ => "",
+    }
+}
+
 impl RecoverySupervisor {
     /// Create a new recovery supervisor.
     pub(crate) fn new(
@@ -1532,6 +1571,21 @@ impl RecoverySupervisor {
                                     || error_disposition == RecoveryDisposition::Fatal
                                     || ctx.is_exhausted()
                                 {
+                                    // Abnormal teardown is decided here; record how, so the
+                                    // first real provider refusal is reviewable. Fixed
+                                    // category plus server code only: variant payloads
+                                    // carry server-controlled text, so the full error
+                                    // Display must never reach logs (CWE-532). Never
+                                    // Debug-format cause, session, backend, or endpoint
+                                    // either (endpoint queries are caller credentials).
+                                    tracing::warn!(
+                                        cause_disposition = ?cause_disposition,
+                                        error_disposition = ?error_disposition,
+                                        exhausted = ctx.is_exhausted(),
+                                        error_category = error_category(&err),
+                                        server_code = error_server_code(&err),
+                                        "managed recovery going terminal"
+                                    );
                                     let last_gen = Arc::clone(failed);
                                     core_guard.terminate_exhausted(Some(last_gen));
                                     final_outcome_to_send = Some(Err(err));
