@@ -789,9 +789,11 @@ impl RealtimeRunner {
         tokio::spawn(async move {
             let cause = RecoveryCause::PlannedRotation { time_left: time_left_clone };
             if let Err(e) = supervisor.execute_planned_replacement(gen_id, cause).await {
+                // Fixed category, not the error Display: recovery errors
+                // carry provider text (CWE-532).
                 tracing::warn!(
                     gen_id,
-                    error = %e,
+                    error = crate::recovery::error_category(&e),
                     "proactive planned replacement attempt failed; keeping generation N authoritative"
                 );
             }
@@ -1170,13 +1172,23 @@ impl RealtimeRunner {
                         if let Err(e) =
                             self.invoke_write(|s| async move { s.send_event(event).await }).await
                         {
-                            tracing::warn!(error = %e, "failed to send bridge message after queued resumption");
+                            // Fixed category, not the error Display (CWE-532); `e`
+                            // still travels to the event handler below.
+                            tracing::warn!(
+                                error = crate::recovery::error_category(&e),
+                                "failed to send bridge message after queued resumption"
+                            );
                             let _ = self.event_handler.on_error(&e).await;
                         }
                     }
                 }
                 Err(e) => {
-                    tracing::error!("Resumption failed: {}.", e);
+                    // Fixed category, not the error Display (CWE-532); `e`
+                    // still travels to the event handler below.
+                    tracing::error!(
+                        error = crate::recovery::error_category(&e),
+                        "Resumption failed."
+                    );
 
                     let mut fallback_state = self.state.write().await;
 
