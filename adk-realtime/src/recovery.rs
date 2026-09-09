@@ -329,6 +329,10 @@ pub trait RealtimeRecovery: Send + Sync {
 
 pub(crate) mod supervisor;
 
+// Re-exported so downstream crates log the single canonical category
+// instead of inventing their own flat strings (or logging the Display).
+pub use supervisor::error_category;
+
 /// Integration test barrier for holding managed recovery in `TransportStatus::Recovering`
 /// or `ReplacementPhase::Planned` before candidate connection/publication completes.
 #[cfg(any(test, feature = "recovery-test-utils"))]
