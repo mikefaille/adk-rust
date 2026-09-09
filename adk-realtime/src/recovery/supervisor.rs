@@ -478,12 +478,14 @@ pub(crate) fn parse_duration_string(s: &str) -> Option<std::time::Duration> {
     }
 }
 
-/// Fixed log category for a terminal-teardown error.
+/// Fixed log category for a `RealtimeError`.
 ///
-/// Variant payloads carry server-controlled text, so teardown logs must
-/// never render the full error Display (CWE-532). The match is exhaustive
-/// on purpose: a new variant fails compilation until it is categorized.
-fn error_category(err: &RealtimeError) -> &'static str {
+/// Variant payloads carry server-controlled text, so logs must never render
+/// the full error Display (CWE-532). The match is exhaustive on purpose: a
+/// new variant fails compilation until it is categorized. Public so the
+/// single canonical mapping is shared across the submodule boundary instead
+/// of each caller inventing its own flat string.
+pub fn error_category(err: &RealtimeError) -> &'static str {
     match err {
         RealtimeError::ConnectionError(_) => "connection",
         RealtimeError::MessageError(_) => "message",

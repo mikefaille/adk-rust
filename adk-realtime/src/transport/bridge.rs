@@ -93,7 +93,14 @@ impl RealtimeTransportBridge {
                     // Could send marks or flush here
                 }
                 ServerEvent::Error { error, .. } => {
-                    tracing::error!("Model error received in pump: {:?}", error);
+                    // Log fixed fields, not the `ErrorInfo` Debug: `message`
+                    // and `param` carry raw provider text (CWE-532). Same
+                    // pattern as the supervisor terminal-disposition line.
+                    tracing::error!(
+                        error_type = %error.error_type,
+                        error_code = %error.code.as_deref().unwrap_or_default(),
+                        "Model error received in pump"
+                    );
                     // `ErrorInfo` has no blanket `Into<RealtimeError>` impl.
                     // Use the explicit two-argument constructor (same pattern as runner.rs).
                     return Err(crate::error::RealtimeError::server(
