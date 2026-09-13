@@ -819,7 +819,6 @@ dependencies = [
  "futures-util",
  "getrandom 0.3.4",
  "google-cloud-auth 1.16.0",
- "libwebrtc",
  "livekit",
  "livekit-api",
  "livekit-datatrack",
@@ -841,7 +840,6 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "uuid 1.26.1",
- "webrtc-sys",
 ]
 
 [[package]]

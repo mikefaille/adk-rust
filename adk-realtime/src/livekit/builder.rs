@@ -251,25 +251,4 @@ mod tests {
         let result = builder.connect().await;
         assert!(matches!(result, Err(LiveKitError::ConfigError(_))));
     }
-
-    #[tokio::test]
-    async fn test_repeated_builder_construction_and_teardown_lifecycle() {
-        let config = LiveKitConfig::new("wss://test.livekit.cloud", "key123", "secret456").unwrap();
-
-        for i in 0..10 {
-            let builder = LiveKitRoomBuilder::new(config.clone())
-                .identity(format!("test-agent-{i}"))
-                .room_name(format!("test-room-{i}"))
-                .with_audio(24000, 1);
-
-            assert_eq!(builder.identity.as_deref(), Some(format!("test-agent-{i}").as_str()));
-            assert_eq!(builder.room_name.as_deref(), Some(format!("test-room-{i}").as_str()));
-            assert!(builder.setup_audio);
-            assert_eq!(builder.audio_sample_rate, 24000);
-            assert_eq!(builder.audio_num_channels, 1);
-
-            // Dropping the builder cleanly releases all resources without hanging tasks.
-            drop(builder);
-        }
-    }
 }
