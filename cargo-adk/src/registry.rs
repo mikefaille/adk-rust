@@ -651,8 +651,7 @@ const DOCKERFILE_STATIC: &str = r##"# Fully static image: musl-linked binary on 
 #   works:  the `gemini-agent-platform` / `gemini-agent-platform-full` feature
 #           sets — the TLS stack is rustls with a statically built aws-lc, and
 #           no OpenSSL is involved.
-#   fails:  the `livekit` feature — pinned to native-tls, which requires a
-#           shared OpenSSL.
+#   note:   the `livekit` feature uses rustls-tls-native-roots by default.
 #   fails:  the adk-audio `onnx` / `kokoro` / `desktop-audio` features — ONNX
 #           Runtime is a shared library, and espeak-ng / ALSA are system
 #           libraries with no static musl builds.
