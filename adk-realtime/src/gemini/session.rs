@@ -35,6 +35,60 @@ type WsSource = futures::stream::SplitStream<WsStream>;
 const WRITER_CHANNEL_CAPACITY: usize = 64;
 const AUDIO_FLUSH_TARGET_MS: usize = 40;
 
+/// Feature flags and wire capabilities for Gemini Live models.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct GeminiLiveCapabilities {
+    pub configurable_thinking: bool,
+    pub affective_dialog: bool,
+    pub cached_content: bool,
+    pub audio_only_response: bool,
+    pub async_functions: bool,
+}
+
+/// Resolve wire capabilities strictly by model identity.
+pub(crate) fn capabilities_for(model: &str) -> GeminiLiveCapabilities {
+    let normalized = normalize_model_id(model);
+    let identifier = normalized.strip_prefix("models/").unwrap_or(&normalized);
+
+    match identifier {
+        // Standard Gemini 3.8 Live: interleaved reasoning, audio-only, async functions by default
+        "gemini-3.8-live" | "gemini-3.8-flash-live" => GeminiLiveCapabilities {
+            configurable_thinking: false, // thinking_config rejected
+            affective_dialog: false,      // Deprecated/removed
+            cached_content: false,        // Live stream caching unsupported
+            audio_only_response: true,    // Output modality must be AUDIO
+            async_functions: true,        // NON_BLOCKING wire behavior supported
+        },
+
+        // Gemini 3.8 Live Extended Thinking: supports thinking_config, requires async tools
+        "gemini-3.8-live-extended-thinking" => GeminiLiveCapabilities {
+            configurable_thinking: true,  // thinking_config supported
+            affective_dialog: false,
+            cached_content: false,
+            audio_only_response: true,
+            async_functions: true,
+        },
+
+        // Legacy 3.1 Flash Live Preview
+        "gemini-3.1-flash-live-preview" => GeminiLiveCapabilities {
+            configurable_thinking: true,  // Accepts thinking_level in setup
+            affective_dialog: true,       // Supported in preview
+            cached_content: false,        // Live stream caching unsupported
+            audio_only_response: false,   // Allowed ["AUDIO", "TEXT"]
+            async_functions: false,       // Defaulted to blocking tool execution
+        },
+
+        // Safe baseline for unknown / experimental live endpoints
+        _ => GeminiLiveCapabilities {
+            configurable_thinking: false,
+            affective_dialog: false,
+            cached_content: false,
+            audio_only_response: true,
+            async_functions: false,
+        },
+    }
+}
+
 /// Backend configuration for Gemini Live connections.
 ///
 /// Determines how to authenticate and which endpoint to connect to.
@@ -717,9 +771,11 @@ impl GeminiRealtimeSession {
         let adapter: Arc<dyn adk_core::SchemaAdapter> =
             Arc::new(adk_gemini::schema_adapter::GeminiSchemaAdapter::with_dialect(dialect));
 
+        let caps = capabilities_for(&normalized_model);
+
         // 1. Compile tools BEFORE establishing the WebSocket connection.
         // If any tool fails to compile (semantic loss), we abort early.
-        let tools = convert_tools(config.tools.clone(), &schema_cache, adapter.as_ref())?;
+        let tools = convert_tools(config.tools.clone(), &schema_cache, adapter.as_ref(), caps)?;
 
         let ws_stream = match &backend {
             GeminiLiveBackend::Studio { api_key, endpoint_url } => {
@@ -972,7 +1028,7 @@ impl GeminiRealtimeSession {
         compiled_tools: Option<Vec<Value>>,
         private_resume_handle: Option<String>,
     ) -> Result<()> {
-        let setup = Self::build_setup_message(model, config, compiled_tools, private_resume_handle);
+        let setup = Self::build_setup_message(model, config, compiled_tools, private_resume_handle)?;
 
         if self.activity_detection == ActivityDetection::Manual {
             tracing::warn!(
@@ -992,9 +1048,56 @@ impl GeminiRealtimeSession {
         config: RealtimeConfig,
         compiled_tools: Option<Vec<Value>>,
         private_resume_handle: Option<String>,
-    ) -> GeminiClientMessage<'_> {
+    ) -> Result<GeminiClientMessage<'_>> {
+        let caps = capabilities_for(model);
+
+        if !caps.configurable_thinking {
+            if let Some(extra) = &config.extra {
+                if extra.get("thinking_level").is_some() {
+                    return Err(RealtimeError::config(format!(
+                        "model '{model}' does not support configurable thinking"
+                    )));
+                }
+            }
+        }
+
+        if !caps.affective_dialog && config.affective_dialog == Some(true) {
+            return Err(RealtimeError::config(format!(
+                "model '{model}' does not support affective dialog"
+            )));
+        }
+
+        if !caps.cached_content && config.cached_content.is_some() {
+            return Err(RealtimeError::config(format!(
+                "model '{model}' does not support cached content"
+            )));
+        }
+
+        let effective_modalities = if caps.audio_only_response {
+            if let Some(modalities) = &config.modalities {
+                let has_audio = modalities.iter().any(|m| m.eq_ignore_ascii_case("audio"));
+                if !has_audio {
+                    return Err(RealtimeError::config(format!(
+                        "model '{model}' requires AUDIO response modality, got '{modalities:?}'"
+                    )));
+                }
+                if modalities.len() > 1 {
+                    tracing::info!(
+                        model,
+                        ?modalities,
+                        "model requires audio-only response; sanitizing responseModalities to [\"AUDIO\"]"
+                    );
+                }
+                vec!["AUDIO".to_string()]
+            } else {
+                vec!["AUDIO".to_string()]
+            }
+        } else {
+            gemini_response_modalities(config.modalities.as_deref())
+        };
+
         let mut generation_config = json!({
-            "responseModalities": gemini_response_modalities(config.modalities.as_deref()),
+            "responseModalities": effective_modalities,
         });
 
         if let Some(voice) = &config.voice {
@@ -1017,11 +1120,12 @@ impl GeminiRealtimeSession {
             generation_config["enableAffectiveDialog"] = json!(true);
         }
 
-        if let Some(extra) = &config.extra
-            && let Some(thinking_level) = extra.get("thinking_level")
-            && let Some(obj) = generation_config.as_object_mut()
-        {
-            obj.insert("thinkingConfig".to_string(), json!({ "thinkingLevel": thinking_level }));
+        if let Some(extra) = &config.extra {
+            if let Some(thinking_level) = extra.get("thinking_level") {
+                if let Some(obj) = generation_config.as_object_mut() {
+                    obj.insert("thinkingConfig".to_string(), json!({ "thinkingLevel": thinking_level }));
+                }
+            }
         }
 
         // Computed before anything moves out of `config`.
@@ -1040,7 +1144,7 @@ impl GeminiRealtimeSession {
         // native-audio turns. An empty object turns the feature on.
         let transcription = config.input_audio_transcription.as_ref().map(|_| json!({}));
 
-        GeminiClientMessage {
+        Ok(GeminiClientMessage {
             setup: Some(GeminiSetup {
                 model: Some(normalized_model),
                 system_instruction,
@@ -1053,7 +1157,7 @@ impl GeminiRealtimeSession {
                 realtime_input_config,
             }),
             ..Default::default()
-        }
+        })
     }
 
     /// Send a raw message to the writer task via local mpsc queue.
@@ -2448,6 +2552,7 @@ fn convert_tools(
     tools: Option<Vec<ToolDefinition>>,
     cache: &adk_core::SchemaCache,
     adapter: &dyn adk_core::SchemaAdapter,
+    caps: GeminiLiveCapabilities,
 ) -> Result<Option<Vec<Value>>> {
     let Some(tools) = tools else {
         return Ok(None);
@@ -2460,6 +2565,9 @@ fn convert_tools(
             .map_err(|e| RealtimeError::protocol(format!("Invalid tool name {}: {}", t.name, e)))?;
 
         let mut decl = json!({ "name": t.name });
+        if caps.async_functions {
+            decl["behavior"] = json!("BLOCKING");
+        }
         if let Some(desc) = &t.description {
             decl["description"] = json!(desc);
         }
@@ -2513,7 +2621,8 @@ mod tests {
         fn declaration(dialect: GeminiSchemaDialect) -> Value {
             let adapter = adk_gemini::schema_adapter::GeminiSchemaAdapter::with_dialect(dialect);
             let cache = adk_core::SchemaCache::new();
-            let tools = convert_tools(Some(vec![intake_tool()]), &cache, &adapter)
+            let caps = capabilities_for("models/gemini-3.1-flash-live-preview");
+            let tools = convert_tools(Some(vec![intake_tool()]), &cache, &adapter, caps)
                 .expect("the fixture compiles")
                 .expect("tools were supplied");
             tools[0]["functionDeclarations"][0].clone()
@@ -2558,8 +2667,9 @@ mod tests {
         fn a_parameterless_tool_declares_its_empty_schema_on_the_same_field() {
             let adapter = adk_gemini::schema_adapter::GeminiSchemaAdapter::json_schema();
             let cache = adk_core::SchemaCache::new();
+            let caps = capabilities_for("models/gemini-3.1-flash-live-preview");
 
-            let tools = convert_tools(Some(vec![ToolDefinition::new("hangup")]), &cache, &adapter)
+            let tools = convert_tools(Some(vec![ToolDefinition::new("hangup")]), &cache, &adapter, caps)
                 .expect("a parameterless tool compiles")
                 .expect("tools were supplied");
             let declaration = &tools[0]["functionDeclarations"][0];
@@ -3916,6 +4026,138 @@ mod tests {
 }
 
 #[cfg(test)]
+mod gemini_38_compatibility_tests {
+    use super::*;
+
+    #[test]
+    fn test_gemini_38_capabilities() {
+        let caps = capabilities_for("models/gemini-3.8-live");
+        assert!(!caps.configurable_thinking);
+        assert!(!caps.affective_dialog);
+        assert!(!caps.cached_content);
+        assert!(caps.audio_only_response);
+        assert!(caps.async_functions);
+
+        let caps_ext = capabilities_for("models/gemini-3.8-live-extended-thinking");
+        assert!(caps_ext.configurable_thinking);
+        assert!(!caps_ext.affective_dialog);
+        assert!(!caps_ext.cached_content);
+        assert!(caps_ext.audio_only_response);
+        assert!(caps_ext.async_functions);
+
+        let caps_fallback = capabilities_for("models/unknown-experimental-model");
+        assert!(!caps_fallback.configurable_thinking);
+        assert!(!caps_fallback.affective_dialog);
+        assert!(!caps_fallback.cached_content);
+        assert!(caps_fallback.audio_only_response);
+        assert!(!caps_fallback.async_functions);
+
+        let caps_31 = capabilities_for("models/gemini-3.1-flash-live-preview");
+        assert!(caps_31.configurable_thinking);
+        assert!(caps_31.affective_dialog);
+        assert!(!caps_31.cached_content);
+        assert!(!caps_31.audio_only_response);
+        assert!(!caps_31.async_functions);
+    }
+
+    #[test]
+    fn test_gemini_38_extended_thinking_supports_thinking_config() {
+        let model = "models/gemini-3.8-live-extended-thinking";
+        let config_thinking = RealtimeConfig {
+            extra: Some(json!({ "thinking_level": "HIGH" })),
+            ..Default::default()
+        };
+        let msg = GeminiRealtimeSession::build_setup_message(model, config_thinking, None, None)
+            .expect("setup builds successfully for extended thinking with thinking_level");
+
+        let js = serde_json::to_value(&msg).unwrap();
+        let setup = js.get("setup").expect("setup field present");
+        let gen_config = setup.get("generationConfig").expect("generationConfig present");
+        assert_eq!(gen_config.get("thinkingConfig"), Some(&json!({ "thinkingLevel": "HIGH" })));
+    }
+
+    #[test]
+    fn test_gemini_38_setup_serialization_and_tool_blocking_behavior() {
+        let adapter = adk_gemini::schema_adapter::GeminiSchemaAdapter::new();
+        let cache = adk_core::SchemaCache::new();
+        let caps = capabilities_for("models/gemini-3.8-live");
+
+        let tool = ToolDefinition::new("get_weather").with_description("Get weather").with_parameters(json!({
+            "type": "object",
+            "properties": {
+                "city": { "type": "string" }
+            }
+        }));
+
+        let compiled_tools = convert_tools(Some(vec![tool]), &cache, &adapter, caps).expect("compiles");
+
+        let config = RealtimeConfig::default().with_instruction("Hello");
+        let message = GeminiRealtimeSession::build_setup_message("models/gemini-3.8-live", config, compiled_tools, None)
+            .expect("setup builds successfully");
+
+        let js = serde_json::to_value(&message).unwrap();
+        let setup = js.get("setup").expect("setup field present");
+
+        assert_eq!(setup.get("model").and_then(Value::as_str), Some("models/gemini-3.8-live"));
+
+        let gen_config = setup.get("generationConfig").expect("generationConfig present");
+        assert_eq!(gen_config.get("responseModalities"), Some(&json!(["AUDIO"])));
+        assert!(gen_config.get("thinkingConfig").is_none());
+        assert!(gen_config.get("enableAffectiveDialog").is_none());
+
+        let tools = setup.get("tools").and_then(Value::as_array).expect("tools array");
+        let func_decl = &tools[0]["functionDeclarations"][0];
+        assert_eq!(func_decl.get("name").and_then(Value::as_str), Some("get_weather"));
+        assert_eq!(func_decl.get("behavior").and_then(Value::as_str), Some("BLOCKING"));
+        assert!(func_decl.get("parameters").is_some());
+    }
+
+    #[test]
+    fn test_gemini_38_rejects_unsupported_configurations() {
+        let model = "models/gemini-3.8-live";
+
+        // 1. Thinking level
+        let config_thinking = RealtimeConfig {
+            extra: Some(json!({ "thinking_level": "HIGH" })),
+            ..Default::default()
+        };
+        let err = GeminiRealtimeSession::build_setup_message(model, config_thinking, None, None).unwrap_err();
+        assert!(err.to_string().contains("does not support configurable thinking"));
+
+        // 2. Affective dialog
+        let config_affective = RealtimeConfig::default().with_affective_dialog(true);
+        let err = GeminiRealtimeSession::build_setup_message(model, config_affective, None, None).unwrap_err();
+        assert!(err.to_string().contains("does not support affective dialog"));
+
+        // 3. Cached content
+        let mut config_cached = RealtimeConfig::default();
+        config_cached.cached_content = Some("cached-resource-123".to_string());
+        let err = GeminiRealtimeSession::build_setup_message(model, config_cached, None, None).unwrap_err();
+        assert!(err.to_string().contains("does not support cached content"));
+
+        // 4. Non-AUDIO response modality (e.g. TEXT)
+        let config_text = RealtimeConfig {
+            modalities: Some(vec!["text".to_string()]),
+            ..Default::default()
+        };
+        let err = GeminiRealtimeSession::build_setup_message(model, config_text, None, None).unwrap_err();
+        assert!(err.to_string().contains("requires AUDIO response modality"));
+
+        // 5. Provider-neutral modality defaults containing AUDIO (e.g. ["text", "audio"]) are sanitized
+        let config_mixed = RealtimeConfig {
+            modalities: Some(vec!["text".to_string(), "audio".to_string()]),
+            ..Default::default()
+        };
+        let msg = GeminiRealtimeSession::build_setup_message(model, config_mixed, None, None)
+            .expect("setup builds successfully for mixed modalities containing audio");
+        let js = serde_json::to_value(&msg).unwrap();
+        let setup = js.get("setup").expect("setup field present");
+        let gen_config = setup.get("generationConfig").expect("generationConfig present");
+        assert_eq!(gen_config.get("responseModalities"), Some(&json!(["AUDIO"])));
+    }
+}
+
+#[cfg(test)]
 mod teardown_tests {
     use super::*;
     use crate::config::{VadConfig, VadMode};
@@ -4052,7 +4294,7 @@ mod teardown_tests {
     }
 
     fn setup_json(config: RealtimeConfig) -> Value {
-        let msg = GeminiRealtimeSession::build_setup_message("models/test", config, None, None);
+        let msg = GeminiRealtimeSession::build_setup_message("models/gemini-3.1-flash-live-preview", config, None, None).unwrap();
         serde_json::to_value(&msg).expect("setup serializes")
     }
 
@@ -4460,8 +4702,9 @@ mod teardown_tests {
     fn tools_default_to_the_legacy_parameters_field() {
         let cache = adk_core::SchemaCache::new();
         let adapter = adk_gemini::schema_adapter::GeminiSchemaAdapter::new();
+        let caps = capabilities_for("models/gemini-3.1-flash-live-preview");
         let tools =
-            convert_tools(Some(tool_with_constrained_schema()), &cache, &adapter).unwrap().unwrap();
+            convert_tools(Some(tool_with_constrained_schema()), &cache, &adapter, caps).unwrap().unwrap();
         let decl = &tools[0]["functionDeclarations"][0];
 
         assert!(decl.get("parameters").is_some(), "{decl}");
@@ -4476,8 +4719,9 @@ mod teardown_tests {
     fn json_schema_dialect_posts_under_parameters_json_schema() {
         let cache = adk_core::SchemaCache::new();
         let adapter = adk_gemini::schema_adapter::GeminiSchemaAdapter::json_schema();
+        let caps = capabilities_for("models/gemini-3.1-flash-live-preview");
         let tools =
-            convert_tools(Some(tool_with_constrained_schema()), &cache, &adapter).unwrap().unwrap();
+            convert_tools(Some(tool_with_constrained_schema()), &cache, &adapter, caps).unwrap().unwrap();
         let decl = &tools[0]["functionDeclarations"][0];
 
         assert!(decl.get("parameters").is_none(), "both fields sent: {decl}");
@@ -4506,8 +4750,9 @@ mod teardown_tests {
         // having to carry schema state its production paths never read.
         let adapter =
             adk_gemini::schema_adapter::GeminiSchemaAdapter::with_dialect(session.dialect);
+        let caps = capabilities_for(&session.reconnect_model);
         let tools =
-            convert_tools(config.tools.clone(), &adk_core::SchemaCache::new(), &adapter).unwrap();
+            convert_tools(config.tools.clone(), &adk_core::SchemaCache::new(), &adapter, caps).unwrap();
         session.send_setup_with_compiled_tools("models/test", config, tools, None).await.unwrap();
 
         let frame = next_frame(&mut server).await;
