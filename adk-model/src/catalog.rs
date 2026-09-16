@@ -60,7 +60,7 @@ pub const COHERE_DEFAULT: &str = "command-a-plus-05-2026";
 /// Recommended OpenAI Realtime model.
 pub const OPENAI_REALTIME_DEFAULT: &str = "gpt-realtime-2.1";
 /// Recommended Gemini Live model.
-pub const GEMINI_LIVE_DEFAULT: &str = "gemini-3.1-flash-live-preview";
+pub const GEMINI_LIVE_DEFAULT: &str = "gemini-3.8-live";
 /// Recommended OpenAI live transcription model.
 pub const OPENAI_LIVE_TRANSCRIPTION_DEFAULT: &str = "gpt-live-transcribe";
 /// Recommended Gemini speech-to-text model.
@@ -412,6 +412,13 @@ pub const MODEL_CATALOG: &[ModelCatalogEntry] = &[
         "sonic-2",
         ModelLifecycle::Deprecated,
         CARTESIA_DEFAULT,
+        None,
+    ),
+    ModelCatalogEntry::obsolete(
+        "gemini-live",
+        "gemini-3.1-flash-live-preview",
+        ModelLifecycle::Deprecated,
+        GEMINI_LIVE_DEFAULT,
         None,
     ),
     ModelCatalogEntry::obsolete(
