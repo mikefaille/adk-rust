@@ -80,7 +80,7 @@ Then **Connect**, press **Start mic** and/or **Start camera**, and try:
 | `OPENAI_API_KEY` | For OpenAI | OpenAI API key |
 | `GEMINI_API_KEY` / `GOOGLE_API_KEY` | For Gemini | Google AI Studio key |
 | `OPENAI_REALTIME_MODEL` | No | Default `gpt-realtime` |
-| `GEMINI_REALTIME_MODEL` | No | Default `models/gemini-3.1-flash-live-preview` (or a native-audio model when `CS_AFFECTIVE=1`) |
+| `GEMINI_REALTIME_MODEL` | No | Default `models/gemini-3.8-live` (or a native-audio model when `CS_AFFECTIVE=1`) |
 | `CS_AFFECTIVE` | No | `1` to enable Gemini native affective dialogue (uses a native-audio model; trades some tool-calling reliability) |
 | `PORT` | No | Server port (default `3066`) |
 

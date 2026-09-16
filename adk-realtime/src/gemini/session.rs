@@ -1052,14 +1052,13 @@ impl GeminiRealtimeSession {
     ) -> Result<GeminiClientMessage<'_>> {
         let caps = capabilities_for(model);
 
-        if !caps.configurable_thinking {
-            if let Some(extra) = &config.extra {
-                if extra.get("thinking_level").is_some() {
-                    return Err(RealtimeError::config(format!(
-                        "model '{model}' does not support configurable thinking"
-                    )));
-                }
-            }
+        if !caps.configurable_thinking
+            && let Some(extra) = &config.extra
+            && extra.get("thinking_level").is_some()
+        {
+            return Err(RealtimeError::config(format!(
+                "model '{model}' does not support configurable thinking"
+            )));
         }
 
         if !caps.affective_dialog && config.affective_dialog == Some(true) {
@@ -1121,15 +1120,14 @@ impl GeminiRealtimeSession {
             generation_config["enableAffectiveDialog"] = json!(true);
         }
 
-        if let Some(extra) = &config.extra {
-            if let Some(thinking_level) = extra.get("thinking_level") {
-                if let Some(obj) = generation_config.as_object_mut() {
-                    obj.insert(
-                        "thinkingConfig".to_string(),
-                        json!({ "thinkingLevel": thinking_level }),
-                    );
-                }
-            }
+        if let Some(extra) = &config.extra
+            && let Some(thinking_level) = extra.get("thinking_level")
+            && let Some(obj) = generation_config.as_object_mut()
+        {
+            obj.insert(
+                "thinkingConfig".to_string(),
+                json!({ "thinkingLevel": thinking_level }),
+            );
         }
 
         // Computed before anything moves out of `config`.
@@ -4145,8 +4143,10 @@ mod gemini_38_compatibility_tests {
         assert!(err.to_string().contains("does not support affective dialog"));
 
         // 3. Cached content
-        let mut config_cached = RealtimeConfig::default();
-        config_cached.cached_content = Some("cached-resource-123".to_string());
+        let config_cached = RealtimeConfig {
+            cached_content: Some("cached-resource-123".to_string()),
+            ..Default::default()
+        };
         let err = GeminiRealtimeSession::build_setup_message(model, config_cached, None, None)
             .unwrap_err();
         assert!(err.to_string().contains("does not support cached content"));
