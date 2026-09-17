@@ -530,6 +530,7 @@ impl RealtimeAgent {
             tools.push(ToolDefinition {
                 name: "transfer_to_agent".to_string(),
                 description: Some("Transfer execution to another agent.".to_string()),
+                behavior: None,
                 parameters: Some(serde_json::json!({
                     "type": "object",
                     "properties": {
@@ -1074,6 +1075,7 @@ impl Agent for RealtimeAgent {
                                 let response = ToolResponse {
                                     call_id,
                                     output: result,
+                                    scheduling: None,
                                 };
                                 if let Err(e) = session.send_tool_response(response).await {
                                     yield Err(AdkError::model(format!("Failed to send tool response: {}", e)));

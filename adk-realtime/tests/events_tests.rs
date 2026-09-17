@@ -19,6 +19,7 @@ fn test_tool_response_creation() {
     let response = ToolResponse {
         call_id: "call_123".to_string(),
         output: serde_json::json!({"temperature": 72, "condition": "sunny"}),
+        scheduling: None,
     };
 
     assert_eq!(response.call_id, "call_123");

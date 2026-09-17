@@ -885,7 +885,7 @@ impl RealtimeRunner {
         if !self.runner_config.auto_respond_tools {
             return Ok(());
         }
-        let response = ToolResponse { call_id: call_id.to_string(), output };
+        let response = ToolResponse { call_id: call_id.to_string(), output, scheduling: None };
         if let Err(e) =
             self.invoke_write(|s| async move { s.send_tool_output(response).await }).await
         {
@@ -1244,7 +1244,8 @@ impl RealtimeRunner {
                 "error": "circuit_breaker_open"
             });
             if self.runner_config.auto_respond_tools {
-                let response = ToolResponse { call_id: call_id.to_string(), output: result };
+                let response =
+                    ToolResponse { call_id: call_id.to_string(), output: result, scheduling: None };
                 if let Err(e) =
                     self.invoke_write(|s| async move { s.send_tool_output(response).await }).await
                 {
@@ -1306,7 +1307,8 @@ impl RealtimeRunner {
         };
 
         if self.runner_config.auto_respond_tools {
-            let response = ToolResponse { call_id: call_id.to_string(), output: result };
+            let response =
+                ToolResponse { call_id: call_id.to_string(), output: result, scheduling: None };
             if let Err(e) =
                 self.invoke_write(|s| async move { s.send_tool_output(response).await }).await
             {
@@ -1479,7 +1481,7 @@ mod runner_tests {
     }
 
     fn tool_def(name: &str) -> ToolDefinition {
-        ToolDefinition { name: name.into(), description: None, parameters: None }
+        ToolDefinition { name: name.into(), description: None, parameters: None, behavior: None }
     }
 
     fn ok_tool() -> FnToolHandler<impl Fn(&ToolCall) -> Result<serde_json::Value> + Send + Sync> {
@@ -2429,6 +2431,7 @@ mod runner_tests {
         let tool_response = ToolResponse {
             call_id: "call_gen0_123".to_string(),
             output: serde_json::json!({ "result": "stale" }),
+            scheduling: None,
         };
 
         let send_res = runner.send_tool_response(tool_response).await;

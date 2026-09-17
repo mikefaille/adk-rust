@@ -817,6 +817,7 @@ async fn test_tool_future_failure_in_run_with_cancellation_recovers_and_continue
         name: "test_tool".to_string(),
         description: None,
         parameters: None,
+        behavior: None,
     };
 
     let runner = RealtimeRunner::builder()

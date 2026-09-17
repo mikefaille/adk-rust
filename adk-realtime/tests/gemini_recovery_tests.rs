@@ -1090,6 +1090,7 @@ async fn test_live_gemini_managed_recovery_interruption() {
                 let response = ToolResponse {
                     call_id,
                     output: json!({ "status": "probed", "value": probed_val }),
+                    scheduling: None,
                 };
                 runner
                     .send_tool_response(response)
@@ -1130,6 +1131,7 @@ async fn test_live_gemini_managed_recovery_interruption() {
                     let response = ToolResponse {
                         call_id,
                         output: json!({ "status": "probed", "value": probed_val }),
+                        scheduling: None,
                     };
                     runner
                         .send_tool_response(response)
@@ -1385,6 +1387,7 @@ async fn test_live_gemini_goaway_make_before_break_rotation() {
                     let response = ToolResponse {
                         call_id,
                         output: json!({ "status": "probed", "value": probed_val }),
+                        scheduling: None,
                     };
                     runner
                         .send_tool_response(response)
