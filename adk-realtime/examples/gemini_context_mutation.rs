@@ -37,6 +37,7 @@ async fn main() -> anyhow::Result<()> {
     let lookup_tool = ToolDefinition {
         name: "lookup_account".into(),
         description: Some("Look up a customer account by ID".into()),
+        behavior: None,
         parameters: Some(json!({
             "type": "object",
             "properties": {
@@ -118,6 +119,7 @@ async fn main() -> anyhow::Result<()> {
     let billing_tools = vec![ToolDefinition {
         name: "get_invoice".into(),
         description: Some("Retrieve an invoice by number".into()),
+        behavior: None,
         parameters: Some(json!({
             "type": "object",
             "properties": {

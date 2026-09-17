@@ -184,8 +184,37 @@ impl From<adk_core::ToolContract> for ToolDefinition {
             name: contract.name,
             description: Some(contract.description),
             parameters: contract.schema.parameters,
+            behavior: None,
         }
     }
+}
+
+/// Execution behavior of a declared realtime tool.
+///
+/// This models the Gemini Live `behavior` field on a function declaration:
+/// `BLOCKING` holds the turn until the client returns the function response,
+/// while `NON_BLOCKING` lets the model continue generating while the tool
+/// executes. `None` omits the field and keeps the provider default.
+///
+/// The OpenAI Realtime API defines no such field, so the OpenAI session setup
+/// ignores this value. Callers who need a provider-agnostic async contract
+/// should not infer one from this hint — it is a Gemini-scoped declaration.
+///
+/// # Example
+///
+/// ```rust
+/// use adk_realtime::config::{ToolBehavior, ToolDefinition};
+///
+/// let def = ToolDefinition::new("request_payment")
+///     .with_behavior(ToolBehavior::NonBlocking);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ToolBehavior {
+    /// Hold the turn until the function response returns.
+    Blocking,
+    /// Let the model continue while the tool executes.
+    NonBlocking,
 }
 
 /// Tool/function definition for realtime sessions.
@@ -199,12 +228,15 @@ pub struct ToolDefinition {
     /// JSON Schema for parameters.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parameters: Option<Value>,
+    /// Execution behavior hint (Gemini Live only; see [`ToolBehavior`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub behavior: Option<ToolBehavior>,
 }
 
 impl ToolDefinition {
     /// Create a new tool definition.
     pub fn new(name: impl Into<String>) -> Self {
-        Self { name: name.into(), description: None, parameters: None }
+        Self { name: name.into(), description: None, parameters: None, behavior: None }
     }
 
     /// Set the tool description.
@@ -218,6 +250,46 @@ impl ToolDefinition {
         self.parameters = Some(schema);
         self
     }
+
+    /// Set the execution behavior hint (Gemini Live only).
+    pub fn with_behavior(mut self, behavior: ToolBehavior) -> Self {
+        self.behavior = Some(behavior);
+        self
+    }
+}
+
+/// Delivery scheduling of a function response, sent back with the response
+/// itself (Gemini Live `toolResponse.functionResponses[].scheduling`).
+///
+/// Wire spelling proven by live probe against `models/gemini-3.8-live`
+/// (2026-09-17, `/tmp/live_probe.py`, log in session record): `SILENT` was
+/// accepted and the model stayed quiet about the result (0 audio bytes in
+/// 25 s); `INTERRUPT` was accepted and the model spoke the result (~172 kB
+/// audio, turn completed); `INTERRUPTED` was rejected with WS 1007
+/// `Invalid value at 'tool_response.function_responses[0].scheduling'` —
+/// the model-page spelling is a documentation error. `WHEN_IDLE` is in the
+/// same documented enum; its acceptance was confirmed by a follow-up probe
+/// case (see scheduling enum history in this file's git log).
+///
+/// Like [`ToolBehavior`], this has no OpenAI Realtime counterpart: the
+/// OpenAI session setup ignores it.
+///
+/// # Example
+///
+/// ```rust
+/// use adk_realtime::config::FunctionResponseScheduling;
+///
+/// let scheduling = FunctionResponseScheduling::WhenIdle;
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum FunctionResponseScheduling {
+    /// Deliver silently; the model uses the knowledge later in the discussion.
+    Silent,
+    /// Wait until the model finishes what it is currently doing.
+    WhenIdle,
+    /// Interrupt what the model is doing and report the response right away.
+    Interrupt,
 }
 
 /// Configuration for a realtime session.

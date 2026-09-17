@@ -10,6 +10,8 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::config::FunctionResponseScheduling;
+
 // ── Custom serde for base64-encoded audio ───────────────────────────────
 
 fn deserialize_audio_bytes<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
@@ -685,6 +687,11 @@ pub struct ToolResponse {
     pub call_id: String,
     /// The result/output of the tool execution.
     pub output: Value,
+    /// Delivery scheduling hint (Gemini Live only; see
+    /// [`FunctionResponseScheduling`]). `None` omits the field and keeps the
+    /// provider default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scheduling: Option<FunctionResponseScheduling>,
 }
 
 impl ToolResponse {
@@ -693,12 +700,19 @@ impl ToolResponse {
         Self {
             call_id: call_id.into(),
             output: serde_json::to_value(output).unwrap_or(Value::Null),
+            scheduling: None,
         }
     }
 
     /// Create a tool response from a string output.
     pub fn from_string(call_id: impl Into<String>, output: impl Into<String>) -> Self {
-        Self { call_id: call_id.into(), output: Value::String(output.into()) }
+        Self { call_id: call_id.into(), output: Value::String(output.into()), scheduling: None }
+    }
+
+    /// Set the delivery scheduling hint (Gemini Live only).
+    pub fn with_scheduling(mut self, scheduling: FunctionResponseScheduling) -> Self {
+        self.scheduling = Some(scheduling);
+        self
     }
 }
 

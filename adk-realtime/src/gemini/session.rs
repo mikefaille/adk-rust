@@ -4,7 +4,7 @@
 //! for both AI Studio (API key) and Vertex AI (OAuth/ADC) backends.
 
 use crate::audio::{AudioChunk, AudioFormat};
-use crate::config::{RealtimeConfig, ToolDefinition, VadMode};
+use crate::config::{FunctionResponseScheduling, RealtimeConfig, ToolDefinition, VadMode};
 use crate::error::{RealtimeError, Result};
 use crate::events::{ClientEvent, ServerEvent, ToolResponse};
 use crate::recovery::{
@@ -355,6 +355,8 @@ struct GeminiFunctionResponse {
     id: String,
     name: String,
     response: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scheduling: Option<FunctionResponseScheduling>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1052,14 +1054,13 @@ impl GeminiRealtimeSession {
     ) -> Result<GeminiClientMessage<'_>> {
         let caps = capabilities_for(model);
 
-        if !caps.configurable_thinking {
-            if let Some(extra) = &config.extra {
-                if extra.get("thinking_level").is_some() {
-                    return Err(RealtimeError::config(format!(
-                        "model '{model}' does not support configurable thinking"
-                    )));
-                }
-            }
+        if !caps.configurable_thinking
+            && let Some(extra) = &config.extra
+            && extra.get("thinking_level").is_some()
+        {
+            return Err(RealtimeError::config(format!(
+                "model '{model}' does not support configurable thinking"
+            )));
         }
 
         if !caps.affective_dialog && config.affective_dialog == Some(true) {
@@ -1121,15 +1122,11 @@ impl GeminiRealtimeSession {
             generation_config["enableAffectiveDialog"] = json!(true);
         }
 
-        if let Some(extra) = &config.extra {
-            if let Some(thinking_level) = extra.get("thinking_level") {
-                if let Some(obj) = generation_config.as_object_mut() {
-                    obj.insert(
-                        "thinkingConfig".to_string(),
-                        json!({ "thinkingLevel": thinking_level }),
-                    );
-                }
-            }
+        if let Some(extra) = &config.extra
+            && let Some(thinking_level) = extra.get("thinking_level")
+            && let Some(obj) = generation_config.as_object_mut()
+        {
+            obj.insert("thinkingConfig".to_string(), json!({ "thinkingLevel": thinking_level }));
         }
 
         // Computed before anything moves out of `config`.
@@ -1897,6 +1894,7 @@ impl RealtimeSession for GeminiRealtimeSession {
                     id: response.call_id,
                     name,
                     response: output,
+                    scheduling: response.scheduling,
                 }],
             }),
             ..Default::default()
@@ -2575,6 +2573,16 @@ fn convert_tools(
         if let Some(desc) = &t.description {
             decl["description"] = json!(desc);
         }
+        // `behavior` is a Gemini Live declaration field with no OpenAI
+        // counterpart; the OpenAI session setup never reads it.
+        if let Some(behavior) = &t.behavior {
+            decl["behavior"] = serde_json::to_value(behavior).map_err(|e| {
+                RealtimeError::protocol(format!(
+                    "Failed to serialize behavior for tool {}: {e}",
+                    t.name
+                ))
+            })?;
+        }
         // The adapter names the field, because the field and the dialect are one
         // decision. `parameters` and `parametersJsonSchema` are mutually
         // exclusive, and posting a schema under the wrong one is not a degraded
@@ -2610,6 +2618,7 @@ mod tests {
 
     mod tool_declarations {
         use super::*;
+        use crate::config::ToolBehavior;
 
         fn intake_tool() -> ToolDefinition {
             ToolDefinition::new("submit_conversational_result").with_parameters(json!({
@@ -2627,6 +2636,16 @@ mod tests {
             let cache = adk_core::SchemaCache::new();
             let caps = capabilities_for("models/gemini-3.1-flash-live-preview");
             let tools = convert_tools(Some(vec![intake_tool()]), &cache, &adapter, caps)
+                .expect("the fixture compiles")
+                .expect("tools were supplied");
+            tools[0]["functionDeclarations"][0].clone()
+        }
+
+        fn declaration_for(tool: ToolDefinition, model: &str) -> Value {
+            let adapter = adk_gemini::schema_adapter::GeminiSchemaAdapter::json_schema();
+            let cache = adk_core::SchemaCache::new();
+            let caps = capabilities_for(model);
+            let tools = convert_tools(Some(vec![tool]), &cache, &adapter, caps)
                 .expect("the fixture compiles")
                 .expect("tools were supplied");
             tools[0]["functionDeclarations"][0].clone()
@@ -2684,6 +2703,33 @@ mod tests {
                 json!({"type": "object", "properties": {}})
             );
             assert!(declaration.get("parameters").is_none(), "{declaration}");
+        }
+
+        /// A declared behavior overrides the capability default, so a
+        /// NON_BLOCKING tool actually runs async on 3.8 — otherwise the
+        /// declaration is a comment and the turn blocks while the caller pays.
+        #[test]
+        fn a_declared_behavior_overrides_the_capability_default() {
+            let declaration = declaration_for(
+                ToolDefinition::new("request_payment").with_behavior(ToolBehavior::NonBlocking),
+                "models/gemini-3.8-live",
+            );
+
+            assert_eq!(declaration["behavior"], json!("NON_BLOCKING"), "{declaration}");
+        }
+
+        /// No declared behavior means the capability default decides: 3.8
+        /// declares BLOCKING, older models send no key and keep their old wire.
+        #[test]
+        fn unset_behavior_falls_back_to_the_capability_default() {
+            let modern = declaration_for(ToolDefinition::new("hangup"), "models/gemini-3.8-live");
+            assert_eq!(modern["behavior"], json!("BLOCKING"), "{modern}");
+
+            let legacy = declaration_for(
+                ToolDefinition::new("hangup"),
+                "models/gemini-3.1-flash-live-preview",
+            );
+            assert!(legacy.get("behavior").is_none(), "{legacy}");
         }
 
         /// Studio keeps its historical dialect unless a caller opts in.
@@ -3023,6 +3069,7 @@ mod tests {
                 name: "a".repeat(65),
                 description: Some("description".to_string()),
                 parameters: Some(json!({"type": "object"})),
+                behavior: None,
             }]),
             ..Default::default()
         };
@@ -3514,6 +3561,7 @@ mod tests {
         let tool_response = ToolResponse {
             call_id: "call_gen0_789".to_string(),
             output: json!({ "user": "alice" }),
+            scheduling: None,
         };
 
         let err = session1.send_tool_response(tool_response).await.unwrap_err();
@@ -3524,6 +3572,78 @@ mod tests {
             rx1.try_recv().is_err(),
             "Zero tool response messages must reach Session 1's write queue"
         );
+    }
+
+    /// Scheduling rides the function response it belongs to: a declared
+    /// WHEN_IDLE reaches the wire verbatim, and an unset scheduling omits
+    /// the key so existing integrations see byte-identical frames.
+    #[tokio::test]
+    async fn tool_response_scheduling_reaches_the_wire_verbatim() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let _server = tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    if let Ok(ws) = tokio_tungstenite::accept_async(stream).await {
+                        let (_sink, mut stream) = ws.split();
+                        while stream.next().await.is_some() {}
+                    }
+                });
+            }
+        });
+
+        let ws = tokio_tungstenite::connect_async(format!("ws://{addr}")).await.unwrap().0;
+        let (_sink, source) = ws.split();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(10);
+        let writer_task = tokio::spawn(async {});
+
+        let session = GeminiRealtimeSession::new_for_test(
+            "session-scheduling".to_string(),
+            format!("ws://{addr}"),
+            "models/gemini-3.1-flash-live-preview".to_string(),
+            tx,
+            writer_task,
+            source,
+        );
+
+        for call_id in ["call_sched_1", "call_sched_2"] {
+            let fc_raw = json!({
+                "toolCall": {
+                    "functionCalls": [{ "name": "probe", "id": call_id, "args": {} }]
+                }
+            })
+            .to_string();
+            assert_eq!(session.translate_gemini_event(&fc_raw).unwrap().len(), 1);
+        }
+
+        session
+            .send_tool_response(
+                ToolResponse::new("call_sched_1", json!({ "result": "ok" }))
+                    .with_scheduling(FunctionResponseScheduling::WhenIdle),
+            )
+            .await
+            .unwrap();
+        let frame = rx.try_recv().expect("scheduled response must reach the write queue");
+        let wire: Value = match frame {
+            Message::Text(text) => serde_json::from_str(&text).unwrap(),
+            other => panic!("expected a text frame, got {other:?}"),
+        };
+        assert_eq!(
+            wire["toolResponse"]["functionResponses"][0]["scheduling"],
+            json!("WHEN_IDLE"),
+            "{wire}"
+        );
+
+        session
+            .send_tool_response(ToolResponse::new("call_sched_2", json!({ "result": "ok" })))
+            .await
+            .unwrap();
+        let frame = rx.try_recv().expect("unscheduled response must reach the write queue");
+        let wire: Value = match frame {
+            Message::Text(text) => serde_json::from_str(&text).unwrap(),
+            other => panic!("expected a text frame, got {other:?}"),
+        };
+        assert!(wire["toolResponse"]["functionResponses"][0].get("scheduling").is_none(), "{wire}");
     }
 
     #[tokio::test]
@@ -4145,8 +4265,10 @@ mod gemini_38_compatibility_tests {
         assert!(err.to_string().contains("does not support affective dialog"));
 
         // 3. Cached content
-        let mut config_cached = RealtimeConfig::default();
-        config_cached.cached_content = Some("cached-resource-123".to_string());
+        let config_cached = RealtimeConfig {
+            cached_content: Some("cached-resource-123".to_string()),
+            ..Default::default()
+        };
         let err = GeminiRealtimeSession::build_setup_message(model, config_cached, None, None)
             .unwrap_err();
         assert!(err.to_string().contains("does not support cached content"));
@@ -4714,6 +4836,7 @@ mod teardown_tests {
                 "additionalProperties": false,
                 "properties": {"n": {"type": "string", "minLength": 7}}
             })),
+            behavior: None,
         }]
     }
 

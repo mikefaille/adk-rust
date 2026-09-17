@@ -38,6 +38,7 @@ async fn main() -> anyhow::Result<()> {
     let weather_tool = ToolDefinition {
         name: "get_weather".into(),
         description: Some("Get current weather for a city".into()),
+        behavior: None,
         parameters: Some(json!({
             "type": "object",
             "properties": {
@@ -103,6 +104,7 @@ async fn main() -> anyhow::Result<()> {
     let travel_tools = vec![ToolDefinition {
         name: "search_flights".into(),
         description: Some("Search for flights between cities".into()),
+        behavior: None,
         parameters: Some(json!({
             "type": "object",
             "properties": {

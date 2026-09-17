@@ -14,6 +14,7 @@ pub fn get_weather_tool_def() -> ToolDefinition {
     ToolDefinition {
         name: "get_weather".to_string(),
         description: Some("Get current weather conditions for a city".to_string()),
+        behavior: None,
         parameters: Some(json!({
             "type": "object",
             "properties": {
@@ -36,6 +37,7 @@ pub fn search_flights_tool_def() -> ToolDefinition {
     ToolDefinition {
         name: "search_flights".to_string(),
         description: Some("Search for available flights between two cities".to_string()),
+        behavior: None,
         parameters: Some(json!({
             "type": "object",
             "properties": {
@@ -66,6 +68,7 @@ pub fn set_timer_tool_def() -> ToolDefinition {
     ToolDefinition {
         name: "set_timer".to_string(),
         description: Some("Set a timer for a specified number of seconds".to_string()),
+        behavior: None,
         parameters: Some(json!({
             "type": "object",
             "properties": {
