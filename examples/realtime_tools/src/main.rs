@@ -69,6 +69,7 @@ async fn main() -> anyhow::Result<()> {
     let weather_tool = ToolDefinition {
         name: "get_weather".into(),
         description: Some("Get current weather for a city".into()),
+        behavior: None,
         parameters: Some(json!({
             "type": "object",
             "properties": {
@@ -81,6 +82,7 @@ async fn main() -> anyhow::Result<()> {
     let calc_tool = ToolDefinition {
         name: "calculate".into(),
         description: Some("Evaluate a math expression".into()),
+        behavior: None,
         parameters: Some(json!({
             "type": "object",
             "properties": {
@@ -93,6 +95,7 @@ async fn main() -> anyhow::Result<()> {
     let time_tool = ToolDefinition {
         name: "get_time".into(),
         description: Some("Get current time in a timezone".into()),
+        behavior: None,
         parameters: Some(json!({
             "type": "object",
             "properties": {

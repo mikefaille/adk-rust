@@ -141,6 +141,7 @@ fn process_refund_def() -> ToolDefinition {
         description: Some(
             "Issue a refund for an order. Only call when a refund is clearly warranted.".into(),
         ),
+        behavior: None,
         parameters: Some(json!({
             "type": "object",
             "properties": {
@@ -175,6 +176,7 @@ fn connect_to_human_def() -> ToolDefinition {
         description: Some(
             "Transfer the customer to a human agent for complex or sensitive issues.".into(),
         ),
+        behavior: None,
         parameters: Some(json!({
             "type": "object",
             "properties": {
