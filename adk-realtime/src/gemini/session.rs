@@ -2646,6 +2646,16 @@ mod tests {
             tools[0]["functionDeclarations"][0].clone()
         }
 
+        fn declaration_for(tool: ToolDefinition, model: &str) -> Value {
+            let adapter = adk_gemini::schema_adapter::GeminiSchemaAdapter::json_schema();
+            let cache = adk_core::SchemaCache::new();
+            let caps = capabilities_for(model);
+            let tools = convert_tools(Some(vec![tool]), &cache, &adapter, caps)
+                .expect("the fixture compiles")
+                .expect("tools were supplied");
+            tools[0]["functionDeclarations"][0].clone()
+        }
+
         /// The field is chosen by the dialect, and exactly one is written.
         /// `parameters` and `parametersJsonSchema` are mutually exclusive, and
         /// sending a JSON Schema under the older name closes the Live socket
@@ -2700,31 +2710,31 @@ mod tests {
             assert!(declaration.get("parameters").is_none(), "{declaration}");
         }
 
-        /// A declared behavior reaches the wire verbatim, so a NON_BLOCKING
-        /// tool actually runs async — otherwise the declaration is a comment
-        /// and the turn blocks while the caller pays.
+        /// A declared behavior overrides the capability default, so a
+        /// NON_BLOCKING tool actually runs async on 3.8 — otherwise the
+        /// declaration is a comment and the turn blocks while the caller pays.
         #[test]
-        fn a_declared_behavior_reaches_the_wire_verbatim() {
-            let adapter = adk_gemini::schema_adapter::GeminiSchemaAdapter::json_schema();
-            let cache = adk_core::SchemaCache::new();
-
-            let tool =
-                ToolDefinition::new("request_payment").with_behavior(ToolBehavior::NonBlocking);
-            let tools = convert_tools(Some(vec![tool]), &cache, &adapter)
-                .expect("a behavior-declared tool compiles")
-                .expect("tools were supplied");
-            let declaration = &tools[0]["functionDeclarations"][0];
+        fn a_declared_behavior_overrides_the_capability_default() {
+            let declaration = declaration_for(
+                ToolDefinition::new("request_payment").with_behavior(ToolBehavior::NonBlocking),
+                "models/gemini-3.8-live",
+            );
 
             assert_eq!(declaration["behavior"], json!("NON_BLOCKING"), "{declaration}");
         }
 
-        /// No behavior set means no behavior key: the provider default holds
-        /// and existing callers see byte-identical declarations.
+        /// No declared behavior means the capability default decides: 3.8
+        /// declares BLOCKING, older models send no key and keep their old wire.
         #[test]
-        fn an_unset_behavior_omits_the_key() {
-            let declaration = declaration(GeminiSchemaDialect::OpenApiSubset);
+        fn unset_behavior_falls_back_to_the_capability_default() {
+            let modern = declaration_for(ToolDefinition::new("hangup"), "models/gemini-3.8-live");
+            assert_eq!(modern["behavior"], json!("BLOCKING"), "{modern}");
 
-            assert!(declaration.get("behavior").is_none(), "{declaration}");
+            let legacy = declaration_for(
+                ToolDefinition::new("hangup"),
+                "models/gemini-3.1-flash-live-preview",
+            );
+            assert!(legacy.get("behavior").is_none(), "{legacy}");
         }
 
         /// Studio keeps its historical dialect unless a caller opts in.
