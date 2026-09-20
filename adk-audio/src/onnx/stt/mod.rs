@@ -335,10 +335,9 @@ impl OnnxSttProvider {
         session_name: &str,
     ) -> ort::session::builder::SessionBuilder {
         match ep {
+            #[cfg(feature = "cuda")]
             OnnxExecutionProvider::Cuda => {
-                match builder.with_execution_providers([
-                    ort::execution_providers::CUDAExecutionProvider::default().build(),
-                ]) {
+                match builder.with_execution_providers([ort::ep::CUDA::default().build()]) {
                     Ok(b) => b,
                     Err(e) => {
                         tracing::warn!(
@@ -348,10 +347,16 @@ impl OnnxSttProvider {
                     }
                 }
             }
+            #[cfg(not(feature = "cuda"))]
+            OnnxExecutionProvider::Cuda => {
+                tracing::warn!(
+                    "CUDA for {session_name} needs the `cuda` feature, falling back to CPU"
+                );
+                builder
+            }
+            #[cfg(feature = "coreml")]
             OnnxExecutionProvider::CoreMl => {
-                match builder.with_execution_providers([
-                    ort::execution_providers::CoreMLExecutionProvider::default().build(),
-                ]) {
+                match builder.with_execution_providers([ort::ep::CoreML::default().build()]) {
                     Ok(b) => b,
                     Err(e) => {
                         tracing::warn!(
@@ -360,6 +365,13 @@ impl OnnxSttProvider {
                         Session::builder().unwrap_or_else(|_| unreachable!())
                     }
                 }
+            }
+            #[cfg(not(feature = "coreml"))]
+            OnnxExecutionProvider::CoreMl => {
+                tracing::warn!(
+                    "CoreML for {session_name} needs the `coreml` feature, falling back to CPU"
+                );
+                builder
             }
             OnnxExecutionProvider::DirectMl => {
                 tracing::warn!("DirectML not available for {session_name}, falling back to CPU");

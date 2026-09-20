@@ -149,24 +149,32 @@ impl OnnxTtsProvider {
         }
 
         builder = match config.execution_provider {
+            #[cfg(feature = "cuda")]
             OnnxExecutionProvider::Cuda => builder
-                .with_execution_providers([
-                    ort::execution_providers::CUDAExecutionProvider::default().build(),
-                ])
+                .with_execution_providers([ort::ep::CUDA::default().build()])
                 .map_err(|e| AudioError::Tts {
                     provider: "ONNX".into(),
                     message: format!(
                         "CUDA execution provider failed: {e}. Ensure CUDA toolkit is installed."
                     ),
                 })?,
+            #[cfg(not(feature = "cuda"))]
+            OnnxExecutionProvider::Cuda => {
+                tracing::warn!("CUDA needs the `cuda` feature, falling back to CPU");
+                builder
+            }
+            #[cfg(feature = "coreml")]
             OnnxExecutionProvider::CoreMl => builder
-                .with_execution_providers([
-                    ort::execution_providers::CoreMLExecutionProvider::default().build(),
-                ])
+                .with_execution_providers([ort::ep::CoreML::default().build()])
                 .map_err(|e| AudioError::Tts {
                     provider: "ONNX".into(),
                     message: format!("CoreML execution provider failed: {e}."),
                 })?,
+            #[cfg(not(feature = "coreml"))]
+            OnnxExecutionProvider::CoreMl => {
+                tracing::warn!("CoreML needs the `coreml` feature, falling back to CPU");
+                builder
+            }
             OnnxExecutionProvider::DirectMl => {
                 tracing::warn!("DirectML not available on this platform, falling back to CPU");
                 builder
