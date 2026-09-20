@@ -84,7 +84,9 @@ jobs:
     - uses: cachix/cachix-action@v17
       with:
         name: devenv
-    - run: nix profile install nixpkgs#devenv
+    # Pinned nixpkgs rev (matches devenv.lock:nixpkgs-src) so the devenv CLI
+    # version evaluating the committed lock is reproducible, not channel drift.
+    - run: nix profile install github:NixOS/nixpkgs/c7def046b9a883d46974757852106483d741586f#devenv
 
 
     - name: Run clippy
@@ -117,7 +119,9 @@ jobs:
     - uses: cachix/cachix-action@v17
       with:
         name: devenv
-    - run: nix profile install nixpkgs#devenv
+    # Pinned nixpkgs rev (matches devenv.lock:nixpkgs-src) so the devenv CLI
+    # version evaluating the committed lock is reproducible, not channel drift.
+    - run: nix profile install github:NixOS/nixpkgs/c7def046b9a883d46974757852106483d741586f#devenv
 
     - name: Run tests
       run: CI=true devenv shell ws-test-ci | tee test.log
