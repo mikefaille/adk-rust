@@ -297,6 +297,25 @@ impl SmartAudioBuffer {
         self.buffer.capacity()
     }
 
+    /// Number of buffered samples not yet flushed.
+    pub fn len(&self) -> usize {
+        self.buffer.len()
+    }
+
+    /// Whether the buffer holds no samples.
+    pub fn is_empty(&self) -> bool {
+        self.buffer.is_empty()
+    }
+
+    /// Discard buffered samples while keeping the allocation.
+    ///
+    /// Reset-in-place for control boundaries (StopStream/Mute): unlike
+    /// replacing the buffer with `SmartAudioBuffer::new`, the next fill
+    /// reuses the existing capacity instead of reallocating.
+    pub fn clear(&mut self) {
+        self.buffer.clear();
+    }
+
     /// Process the buffered samples with a closure and then clear the buffer while retaining capacity.
     ///
     /// This is a more efficient alternative to `flush()` when the samples don't need
@@ -365,6 +384,28 @@ mod tests {
         let mut buffer = SmartAudioBuffer::new(1000, 100);
         assert!(buffer.flush().is_none());
         assert!(buffer.flush_remaining().is_none());
+    }
+
+    #[test]
+    fn test_smart_audio_buffer_clear_preserves_capacity() {
+        let mut buffer = SmartAudioBuffer::new(16_000, 20);
+        // 10 ms of audio: below the 20 ms flush threshold, so it stays buffered.
+        buffer.push(&[1; 160]);
+        assert_eq!(buffer.len(), 160);
+        assert!(!buffer.is_empty());
+        let capacity = buffer.capacity();
+        assert!(capacity >= 160);
+
+        buffer.clear();
+        buffer.clear();
+
+        assert_eq!(buffer.len(), 0);
+        assert!(buffer.is_empty());
+        assert_eq!(buffer.capacity(), capacity);
+
+        // Refill of the prior size must not reallocate.
+        buffer.push(&[1; 160]);
+        assert_eq!(buffer.capacity(), capacity);
     }
 
     #[test]
