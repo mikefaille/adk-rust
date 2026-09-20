@@ -16,6 +16,40 @@ fn test_tts_with_mock_url(mock_url: String) -> GeminiTts {
     GeminiTts::new(config).expect("GeminiTts::new failed")
 }
 
+/// Read and discard one full HTTP/1.1 request (headers plus Content-Length body).
+///
+/// The raw-TCP mock servers must drain the client's POST before responding:
+/// closing a socket with unread received bytes makes Windows send RST instead
+/// of FIN, which races the client's in-flight reads and flakes the test.
+async fn drain_http_request(socket: &mut tokio::net::TcpStream) {
+    use tokio::io::AsyncReadExt;
+    let mut buf = Vec::new();
+    let mut tmp = [0u8; 1024];
+    let body_len: usize = loop {
+        let n = socket.read(&mut tmp).await.expect("read request failed");
+        assert!(n > 0, "client closed before sending full request");
+        buf.extend_from_slice(&tmp[..n]);
+        if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+            let headers = String::from_utf8_lossy(&buf[..pos]);
+            let len = headers
+                .lines()
+                .find_map(|l| {
+                    l.strip_prefix("Content-Length:").or_else(|| l.strip_prefix("content-length:"))
+                })
+                .and_then(|v| v.trim().parse::<usize>().ok())
+                .unwrap_or(0);
+            let header_end = pos + 4;
+            buf.drain(..header_end);
+            break len;
+        }
+    };
+    while buf.len() < body_len {
+        let n = socket.read(&mut tmp).await.expect("read request body failed");
+        assert!(n > 0, "client closed before sending full body");
+        buf.extend_from_slice(&tmp[..n]);
+    }
+}
+
 #[tokio::test]
 async fn test_gemini_tts_streaming_delayed_stream_and_first_audio() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -26,6 +60,9 @@ async fn test_gemini_tts_streaming_delayed_stream_and_first_audio() {
     tokio::spawn(async move {
         let (mut socket, _) = listener.accept().await.unwrap();
         use tokio::io::AsyncWriteExt;
+
+        // Drain the POST first: closing with unread request bytes RSTs on Windows.
+        drain_http_request(&mut socket).await;
 
         let b64_chunk1 = base64::Engine::encode(
             &base64::engine::general_purpose::STANDARD,
@@ -52,8 +89,6 @@ async fn test_gemini_tts_streaming_delayed_stream_and_first_audio() {
         // Wait until consumer confirms receipt of frame 1 before releasing remaining SSE stream
         let _ = frame1_rx.await;
 
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
         // Send delta 2 and completion event
         let chunk2_sse = format!(
             "data: {{\"event_type\":\"step.delta\",\"index\":0,\"delta\":{{\"type\":\"audio\",\"data\":\"{}\",\"mime_type\":\"audio/l16;rate=24000\",\"sample_rate\":24000,\"channels\":1}}}}\n\n\
@@ -62,18 +97,17 @@ async fn test_gemini_tts_streaming_delayed_stream_and_first_audio() {
         );
         socket.write_all(chunk2_sse.as_bytes()).await.unwrap();
         socket.flush().await.unwrap();
+        socket.shutdown().await.unwrap();
     });
 
     let mock_url = format!("http://{}/v1beta/interactions", addr);
     let tts = test_tts_with_mock_url(mock_url);
-    let start_time = std::time::Instant::now();
 
     let request = TtsRequest { text: "Hello streaming world!".to_string(), ..Default::default() };
     let mut stream = tts.synthesize_stream(&request).await.expect("synthesize_stream failed");
 
     // Recv frame 1
     let frame1 = stream.next().await.expect("frame 1 missing").expect("frame 1 error");
-    let first_audio_ts = start_time.elapsed();
 
     // Signal provider server that consumer received frame 1
     let _ = frame1_tx.send(());
@@ -82,14 +116,6 @@ async fn test_gemini_tts_streaming_delayed_stream_and_first_audio() {
     let frame2 = stream.next().await.expect("frame 2 missing").expect("frame 2 error");
     let end_res = stream.next().await;
     assert!(end_res.is_none(), "Stream should terminate after completion");
-    let completion_ts = start_time.elapsed();
-
-    assert!(
-        first_audio_ts < completion_ts,
-        "first consumer audio timestamp ({:?}) < provider completion timestamp ({:?})",
-        first_audio_ts,
-        completion_ts
-    );
 
     assert_eq!(frame1.sample_rate, 24000);
     assert_eq!(frame1.channels, 1);
@@ -645,6 +671,9 @@ async fn test_pipeline_emits_first_audio_before_provider_completion() {
         let (mut socket, _) = listener.accept().await.unwrap();
         use tokio::io::AsyncWriteExt;
 
+        // Drain the POST first: closing with unread request bytes RSTs on Windows.
+        drain_http_request(&mut socket).await;
+
         let b64_chunk1 = base64::Engine::encode(
             &base64::engine::general_purpose::STANDARD,
             [0x01, 0x02, 0x03, 0x04],
@@ -667,8 +696,6 @@ async fn test_pipeline_emits_first_audio_before_provider_completion() {
         // Wait until pipeline outputs frame #1
         let _ = frame1_rx.await;
 
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
         let chunk2_sse = format!(
             "data: {{\"event_type\":\"step.delta\",\"index\":0,\"delta\":{{\"type\":\"audio\",\"data\":\"{}\",\"mime_type\":\"audio/l16;rate=24000\",\"sample_rate\":24000,\"channels\":1}}}}\n\n\
              data: {{\"event_type\":\"interaction.completed\",\"interaction\":{{\"id\":\"int_123\",\"status\":\"completed\"}}}}\n\n",
@@ -676,6 +703,7 @@ async fn test_pipeline_emits_first_audio_before_provider_completion() {
         );
         socket.write_all(chunk2_sse.as_bytes()).await.unwrap();
         socket.flush().await.unwrap();
+        socket.shutdown().await.unwrap();
     });
 
     let mock_url = format!("http://{}/v1beta/interactions", addr);
@@ -686,7 +714,6 @@ async fn test_pipeline_emits_first_audio_before_provider_completion() {
         .expect("build_tts should succeed");
 
     let mut handle = pipeline_handle;
-    let start_time = std::time::Instant::now();
     handle
         .input_tx
         .send(adk_audio::pipeline::types::PipelineInput::Text("Hello world.".to_string()))
@@ -694,7 +721,6 @@ async fn test_pipeline_emits_first_audio_before_provider_completion() {
         .expect("send text should succeed");
 
     let first_out = handle.output_rx.recv().await;
-    let first_audio_ts = start_time.elapsed();
 
     assert!(first_out.is_some());
     if let Some(PipelineOutput::Audio(frame)) = first_out {
@@ -707,7 +733,6 @@ async fn test_pipeline_emits_first_audio_before_provider_completion() {
     let _ = frame1_tx.send(());
 
     let second_out = handle.output_rx.recv().await;
-    let completion_ts = start_time.elapsed();
 
     assert!(second_out.is_some());
     if let Some(PipelineOutput::Audio(frame)) = second_out {
@@ -716,13 +741,85 @@ async fn test_pipeline_emits_first_audio_before_provider_completion() {
         panic!("Expected Audio output frame #2");
     }
 
-    assert!(
-        first_audio_ts < completion_ts,
-        "first audio timestamp ({:?}) < completion timestamp ({:?})",
-        first_audio_ts,
-        completion_ts
-    );
-
     let m = handle.metrics.read().await;
     assert!(m.tts_first_audio_latency_ms >= 0.0);
+}
+
+#[tokio::test]
+async fn test_gemini_tts_crlf_event_stream_parses() {
+    let mock_server = MockServer::start().await;
+
+    // Gemini terminates SSE lines with CRLF, so events split on CRLF CRLF.
+    let audio_b64 = base64::Engine::encode(
+        &base64::engine::general_purpose::STANDARD,
+        [0x01, 0x02, 0x03, 0x04],
+    );
+    let sse_body = format!(
+        "data: {{\"event_type\":\"interaction.created\",\"interaction\":{{\"id\":\"int_123\",\"status\":\"in_progress\"}}}}\r\n\r\n\
+         data: {{\"event_type\":\"step.delta\",\"index\":0,\"delta\":{{\"type\":\"audio\",\"data\":\"{audio_b64}\",\"mime_type\":\"audio/l16;rate=24000\",\"sample_rate\":24000,\"channels\":1}}}}\r\n\r\n\
+         data: {{\"event_type\":\"interaction.completed\",\"interaction\":{{\"id\":\"int_123\",\"status\":\"completed\"}}}}\r\n\r\n"
+    );
+
+    Mock::given(method("POST"))
+        .and(path("/interactions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(sse_body)
+                .append_header("content-type", "text/event-stream"),
+        )
+        .mount(&mock_server)
+        .await;
+
+    let tts = test_tts_with_mock_url(mock_server.uri());
+    let request = TtsRequest { text: "CRLF test".to_string(), ..Default::default() };
+
+    let mut stream = tts.synthesize_stream(&request).await.expect("stream creation failed");
+    let frame = stream.next().await.expect("frame missing").expect("frame error");
+    assert_eq!(frame.data.as_ref(), &[0x02, 0x01, 0x04, 0x03]);
+    assert!(stream.next().await.is_none(), "Stream should terminate after completion");
+}
+
+/// Consuming a complete SSE stream must not depend on wall-clock time: under
+/// a paused clock the whole stream drains with zero time elapsed. If the
+/// client ever blocks on time here, nextest's slow-timeout terminates the test.
+#[tokio::test(start_paused = true)]
+async fn test_gemini_tts_stream_drains_without_time_advance() {
+    let mock_server = MockServer::start().await;
+
+    let audio_b64 = base64::Engine::encode(
+        &base64::engine::general_purpose::STANDARD,
+        [0x05, 0x06, 0x07, 0x08],
+    );
+    let sse_body = format!(
+        "data: {{\"event_type\":\"interaction.created\",\"interaction\":{{\"id\":\"int_123\",\"status\":\"in_progress\"}}}}\n\n\
+         data: {{\"event_type\":\"step.delta\",\"index\":0,\"delta\":{{\"type\":\"audio\",\"data\":\"{audio_b64}\",\"mime_type\":\"audio/l16;rate=24000\",\"sample_rate\":24000,\"channels\":1}}}}\n\n\
+         data: {{\"event_type\":\"interaction.completed\",\"interaction\":{{\"id\":\"int_123\",\"status\":\"completed\"}}}}\n\n"
+    );
+
+    Mock::given(method("POST"))
+        .and(path("/interactions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(sse_body)
+                .append_header("content-type", "text/event-stream"),
+        )
+        .mount(&mock_server)
+        .await;
+
+    let tts = test_tts_with_mock_url(mock_server.uri());
+    let request = TtsRequest { text: "Paused clock test".to_string(), ..Default::default() };
+
+    let clock_start = tokio::time::Instant::now();
+    let mut stream = tts.synthesize_stream(&request).await.expect("stream creation failed");
+    let mut frames = Vec::new();
+    while let Some(res) = stream.next().await {
+        frames.push(res.expect("frame error"));
+    }
+    assert_eq!(frames.len(), 1);
+    assert_eq!(frames[0].data.as_ref(), &[0x06, 0x05, 0x08, 0x07]);
+    assert_eq!(
+        clock_start.elapsed(),
+        std::time::Duration::ZERO,
+        "client must not wait on wall-clock time"
+    );
 }

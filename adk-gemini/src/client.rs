@@ -342,7 +342,7 @@ pub enum Error {
     },
 
     /// Failed to read a Server-Sent Events (SSE) part from the stream.
-    #[snafu(display("failed to obtain stream SSE part"))]
+    #[snafu(display("failed to obtain stream SSE part: {source}"))]
     BadPart {
         /// The underlying event stream error.
         source: EventStreamError<reqwest::Error>,
@@ -1781,5 +1781,20 @@ mod client_tests {
             location: "europe-west4".to_string(),
         };
         assert_eq!(config.endpoint(), "https://europe-west4-aiplatform.googleapis.com");
+    }
+}
+
+#[cfg(test)]
+mod error_display_tests {
+    use super::Error;
+    use eventsource_stream::EventStreamError;
+
+    #[test]
+    fn bad_part_display_includes_source() {
+        let utf8_err = String::from_utf8(vec![0xFF]).unwrap_err();
+        let err = Error::BadPart { source: EventStreamError::Utf8(utf8_err) };
+        let msg = err.to_string();
+        assert!(msg.contains("failed to obtain stream SSE part"), "message was: {msg}");
+        assert!(msg.contains("utf-8"), "source missing from message: {msg}");
     }
 }
