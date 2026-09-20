@@ -147,6 +147,20 @@ jobs:
         sudo apt-get update
         sudo apt-get install -y cmake protobuf-compiler libespeak-ng-dev libglib2.0-dev
 
+    # webrtc-sys 0.3.45 (via `livekit` in adk-realtime `full`) builds against a
+    # hermetic libc++ requiring clang >= 21, but ubuntu-24.04 runners ship only
+    # clang 16/17/18. Install pinned-major clang-21 from apt.llvm.org (default
+    # bundle: clang/lldb/lld/clangd — notably NOT `all`) and point the C/C++
+    # toolchain at it. Gated to realtime-full: no other matrix entry compiles
+    # webrtc-sys.
+    - name: Install clang 21 (realtime-full)
+      if: runner.os == 'Linux' && matrix.name == 'realtime-full'
+      run: |
+        curl -fsSL https://apt.llvm.org/llvm.sh | sudo bash -s -- 21
+        echo "CC=clang-21" >> "$GITHUB_ENV"
+        echo "CXX=clang++-21" >> "$GITHUB_ENV"
+        clang-21 --version
+
     - name: Install system dependencies (macOS)
       if: runner.os == 'macOS'
       run: brew install cmake protobuf espeak-ng
