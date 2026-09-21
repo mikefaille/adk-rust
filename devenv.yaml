@@ -1,9 +1,8 @@
 inputs:
   nixpkgs:
-    # Pinned to the refreshed lock rev: `devenv update` leaves a ?rev= input
-    # alone, so refreshes are explicit rev bumps, not silent branch drift.
-    # Refresh with: devenv update nixpkgs --rev <new-rev> (then devenv info).
-    url: github:cachix/devenv-nixpkgs?rev=c2f38fe7f9e04d9aadd354d380f2bd40531d9737
+    # Floating on rolling: `devenv update` moves this with everything else,
+    # no explicit rev bumps. Pin to ?rev= only to freeze a known-good rev.
+    url: github:cachix/devenv-nixpkgs/rolling
   git-hooks:
     url: github:cachix/git-hooks.nix
     inputs:

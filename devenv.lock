@@ -68,8 +68,8 @@
       },
       "original": {
         "owner": "cachix",
+        "ref": "rolling",
         "repo": "devenv-nixpkgs",
-        "rev": "c2f38fe7f9e04d9aadd354d380f2bd40531d9737",
         "type": "github"
       }
     },
