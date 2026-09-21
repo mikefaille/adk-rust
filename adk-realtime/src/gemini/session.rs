@@ -1102,14 +1102,23 @@ impl GeminiRealtimeSession {
             "responseModalities": effective_modalities,
         });
 
-        if let Some(voice) = &config.voice {
-            generation_config["speechConfig"] = json!({
-                "voiceConfig": {
+        // `languageCode` and `voiceConfig` are siblings under one
+        // `speechConfig`: a pinned language without a voice still constrains
+        // the session, and a voice without a language serializes exactly as
+        // before (no present-but-null `languageCode`).
+        if config.voice.is_some() || config.language.is_some() {
+            let mut speech_config = json!({});
+            if let Some(language) = &config.language {
+                speech_config["languageCode"] = json!(language);
+            }
+            if let Some(voice) = &config.voice {
+                speech_config["voiceConfig"] = json!({
                     "prebuiltVoiceConfig": {
                         "voiceName": voice
                     }
-                }
-            });
+                });
+            }
+            generation_config["speechConfig"] = speech_config;
         }
 
         if let Some(temp) = config.temperature {
@@ -4243,6 +4252,75 @@ mod gemini_38_compatibility_tests {
         assert_eq!(func_decl.get("name").and_then(Value::as_str), Some("get_weather"));
         assert_eq!(func_decl.get("behavior").and_then(Value::as_str), Some("BLOCKING"));
         assert!(func_decl.get("parameters").is_some());
+    }
+
+    fn setup_generation_config(config: RealtimeConfig) -> Value {
+        let message = GeminiRealtimeSession::build_setup_message(
+            "models/gemini-3.8-live",
+            config,
+            None,
+            None,
+        )
+        .expect("setup builds successfully");
+        let js = serde_json::to_value(&message).unwrap();
+        js.get("setup")
+            .expect("setup field present")
+            .get("generationConfig")
+            .expect("generationConfig present")
+            .clone()
+    }
+
+    /// The wire pin: a configured output language reaches the setup as
+    /// `speechConfig.languageCode`, beside the voice — the session-level
+    /// constraint that holds the line's language when the model ignores
+    /// the prompt's.
+    #[test]
+    fn pinned_language_reaches_speech_config_language_code() {
+        let gen_config = setup_generation_config(
+            RealtimeConfig::default().with_voice("Puck").with_language("en-US"),
+        );
+
+        assert_eq!(
+            gen_config.get("speechConfig"),
+            Some(&json!({
+                "languageCode": "en-US",
+                "voiceConfig": {
+                    "prebuiltVoiceConfig": { "voiceName": "Puck" }
+                }
+            }))
+        );
+    }
+
+    /// A language without a voice still constrains the session: the pin
+    /// must not depend on a voice being configured.
+    #[test]
+    fn pinned_language_without_a_voice_still_constrains_the_session() {
+        let gen_config = setup_generation_config(RealtimeConfig::default().with_language("fr-CA"));
+
+        assert_eq!(gen_config.get("speechConfig"), Some(&json!({ "languageCode": "fr-CA" })));
+    }
+
+    /// The unpinned path must not move: a voice without a language sends
+    /// the same `speechConfig` as before (no present-but-null
+    /// `languageCode`), and a config with neither sends no `speechConfig`
+    /// at all.
+    #[test]
+    fn unpinned_setups_are_byte_identical_to_before() {
+        let voiced = setup_generation_config(RealtimeConfig::default().with_voice("Puck"));
+        assert_eq!(
+            voiced.get("speechConfig"),
+            Some(&json!({
+                "voiceConfig": {
+                    "prebuiltVoiceConfig": { "voiceName": "Puck" }
+                }
+            }))
+        );
+
+        let bare = setup_generation_config(RealtimeConfig::default());
+        assert!(
+            bare.get("speechConfig").is_none(),
+            "no voice and no language must send no speechConfig, got {bare}"
+        );
     }
 
     #[test]

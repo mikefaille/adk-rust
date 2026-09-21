@@ -19,6 +19,14 @@ fn test_realtime_config_builder() {
 }
 
 #[test]
+fn test_realtime_config_language_pin() {
+    let config = RealtimeConfig::default().with_language("en-US");
+
+    assert_eq!(config.language, Some("en-US".to_string()));
+    assert!(RealtimeConfig::default().language.is_none());
+}
+
+#[test]
 fn test_vad_config_server_vad() {
     let vad = VadConfig {
         mode: VadMode::ServerVad,

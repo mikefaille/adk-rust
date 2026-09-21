@@ -307,6 +307,15 @@ pub struct RealtimeConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub voice: Option<String>,
 
+    /// BCP-47 output language (e.g. `en-US`), pinned per session.
+    ///
+    /// On Gemini Live this becomes `generationConfig.speechConfig.languageCode`,
+    /// which constrains the model's spoken language at the session level rather
+    /// than through instruction prose. Ignored by providers without an output
+    /// language control.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+
     /// Output modalities: ["text"], ["audio"], or ["text", "audio"].
     #[serde(skip_serializing_if = "Option::is_none")]
     pub modalities: Option<Vec<String>>,
@@ -457,6 +466,12 @@ impl RealtimeConfig {
         self
     }
 
+    /// Pin the BCP-47 output language for the session.
+    pub fn with_language(mut self, language: impl Into<String>) -> Self {
+        self.language = Some(language.into());
+        self
+    }
+
     /// Set output modalities.
     pub fn with_modalities(mut self, modalities: Vec<String>) -> Self {
         self.modalities = Some(modalities);
@@ -577,6 +592,12 @@ impl RealtimeConfigBuilder {
     /// Set the voice.
     pub fn voice(mut self, voice: impl Into<String>) -> Self {
         self.config.voice = Some(voice.into());
+        self
+    }
+
+    /// Pin the BCP-47 output language for the session.
+    pub fn language(mut self, language: impl Into<String>) -> Self {
+        self.config.language = Some(language.into());
         self
     }
 
