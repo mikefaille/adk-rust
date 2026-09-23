@@ -1,4 +1,6 @@
-use adk_gemini::{Gemini, GenerationConfig, Part, PrebuiltVoiceConfig, SpeechConfig, VoiceConfig};
+use adk_gemini::{
+    Gemini, GenerationConfig, Model, Part, PrebuiltVoiceConfig, SpeechConfig, VoiceConfig,
+};
 use base64::{Engine as _, engine::general_purpose};
 use display_error_chain::DisplayErrorChain;
 use std::fs::File;
@@ -32,7 +34,7 @@ async fn do_main() -> Result<(), Box<dyn std::error::Error>> {
         std::env::var("GEMINI_API_KEY").expect("Please set GEMINI_API_KEY environment variable");
 
     // Create client with TTS-enabled model
-    let client = Gemini::with_model(api_key, "models/gemini-2.5-flash-preview-tts".to_string())
+    let client = Gemini::with_model(api_key, Model::Gemini31FlashTts)
         .expect("unable to create Gemini API client");
 
     info!("starting gemini speech generation example");
@@ -123,7 +125,7 @@ async fn do_main() -> Result<(), Box<dyn std::error::Error>> {
             info!("1. make sure GEMINI_API_KEY environment variable is set");
             info!("2. verify you have access to the Gemini TTS model");
             info!("3. check your internet connection");
-            info!("4. ensure the model 'gemini-2.5-flash-preview-tts' is available");
+            info!("4. ensure the model 'gemini-3.1-flash-tts-preview' is available");
         }
     }
 

@@ -221,6 +221,19 @@ impl GeminiPricing {
         cache_storage_per_hour: 0.0,
     };
 
+    /// Gemini 3.1 Flash Preview TTS.
+    ///
+    /// Text input $0.50/MTok. Audio output $10.00/MTok.
+    pub const GEMINI_31_FLASH_TTS: Self = Self {
+        input: 0.50,
+        input_long: 0.50,
+        output: 10.00,
+        output_long: 10.00,
+        cache_input: 0.0,
+        cache_input_long: 0.0,
+        cache_storage_per_hour: 0.0,
+    };
+
     /// Gemini 2.5 Flash Image.
     ///
     /// Text/image input $0.30/MTok. Image output ~$30/MTok (~$0.039/image).
@@ -334,6 +347,7 @@ impl GeminiPricing {
             Model::Gemini31ProPreview => Self::GEMINI_31_PRO_PREVIEW,
             Model::Gemini31FlashLite => Self::GEMINI_31_FLASH_LITE,
             Model::Gemini31FlashImage => Self::GEMINI_31_FLASH_IMAGE,
+            Model::Gemini31FlashTts => Self::GEMINI_31_FLASH_TTS,
             Model::Gemini3FlashPreview => Self::GEMINI_3_FLASH_PREVIEW,
             Model::Gemini3ProImage | Model::Gemini3ProImagePreview => Self::GEMINI_3_PRO_IMAGE,
             Model::Gemini25Pro => Self::GEMINI_25_PRO,
@@ -387,6 +401,7 @@ impl GeminiPricing {
             "gemini-3.1-pro-preview" => Self::GEMINI_31_PRO_PREVIEW,
             "gemini-3.1-flash-lite" => Self::GEMINI_31_FLASH_LITE,
             "gemini-3.1-flash-image" => Self::GEMINI_31_FLASH_IMAGE,
+            "gemini-3.1-flash-tts-preview" => Self::GEMINI_31_FLASH_TTS,
             "gemini-3.1-flash-live-preview" => Self::GEMINI_31_FLASH_LIVE,
             "gemini-3-flash-preview" => Self::GEMINI_3_FLASH_PREVIEW,
             "gemini-3-pro-image" => Self::GEMINI_3_PRO_IMAGE,

@@ -99,6 +99,38 @@ fn test_may_2026_ga_models_roundtrip() {
 }
 
 #[test]
+fn test_tts_models_roundtrip() {
+    // TTS models: the current 3.1 Flash default plus the 2.5 preview predecessors.
+    for (model, wire) in [
+        (Model::Gemini31FlashTts, "models/gemini-3.1-flash-tts-preview"),
+        (Model::Gemini25FlashPreviewTts, "models/gemini-2.5-flash-preview-tts"),
+        (Model::Gemini25ProPreviewTts, "models/gemini-2.5-pro-preview-tts"),
+    ] {
+        assert_eq!(model.as_str(), wire);
+        let serialized = serde_json::to_value(&model).unwrap();
+        assert_eq!(serialized, json!(wire));
+        let bare = wire.strip_prefix("models/").unwrap();
+        assert_eq!(Model::from(bare.to_string()), model);
+        assert_eq!(Model::from(wire.to_string()), model);
+    }
+
+    // Vertex AI resource path uses the bare model id.
+    assert_eq!(
+        Model::Gemini31FlashTts.vertex_model_path("my-project", "us-central1"),
+        "projects/my-project/locations/us-central1/publishers/google/models/gemini-3.1-flash-tts-preview"
+    );
+
+    // Pricing resolves for the typed variant and the raw model id alike.
+    let pricing = crate::pricing::GeminiPricing::for_model(&Model::Gemini31FlashTts).unwrap();
+    assert_eq!(pricing.input, 0.50);
+    assert_eq!(pricing.output, 10.00);
+    let by_id =
+        crate::pricing::GeminiPricing::for_model_id("gemini-3.1-flash-tts-preview").unwrap();
+    assert_eq!(by_id.input, 0.50);
+    assert_eq!(by_id.output, 10.00);
+}
+
+#[test]
 fn test_function_response_id_strict_matching() {
     use crate::FunctionResponse;
 

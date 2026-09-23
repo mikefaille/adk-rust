@@ -1,4 +1,4 @@
-use adk_gemini::{Gemini, GenerationConfig, Part, SpeakerVoiceConfig, SpeechConfig};
+use adk_gemini::{Gemini, GenerationConfig, Model, Part, SpeakerVoiceConfig, SpeechConfig};
 use base64::{Engine as _, engine::general_purpose};
 use display_error_chain::DisplayErrorChain;
 use std::fs::File;
@@ -32,7 +32,7 @@ async fn do_main() -> Result<(), Box<dyn std::error::Error>> {
         std::env::var("GEMINI_API_KEY").expect("Please set GEMINI_API_KEY environment variable");
 
     // Create client with TTS-enabled model
-    let client = Gemini::with_model(api_key, "models/gemini-2.5-flash-preview-tts".to_string())
+    let client = Gemini::with_model(api_key, Model::Gemini31FlashTts)
         .expect("unable to create Gemini API client");
 
     info!("starting gemini multi-speaker speech generation example");
@@ -155,7 +155,7 @@ Alice: I couldn't agree more. It's remarkable how far AI-generated speech has co
             error!("   3. Check your internet connection");
             error!("   4. Ensure speaker names in dialogue match configured speakers");
             error!(
-                "   5. Make sure the model 'gemini-2.5-flash-preview-tts' supports multi-speaker TTS"
+                "   5. Make sure the model 'gemini-3.1-flash-tts-preview' supports multi-speaker TTS"
             );
         }
     }

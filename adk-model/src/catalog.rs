@@ -429,6 +429,20 @@ pub const MODEL_CATALOG: &[ModelCatalogEntry] = &[
         None,
     ),
     ModelCatalogEntry::obsolete(
+        "gemini-tts",
+        "gemini-2.5-flash-preview-tts",
+        ModelLifecycle::Deprecated,
+        GEMINI_TTS_DEFAULT,
+        None,
+    ),
+    ModelCatalogEntry::obsolete(
+        "gemini-tts",
+        "gemini-2.5-pro-preview-tts",
+        ModelLifecycle::Deprecated,
+        GEMINI_TTS_DEFAULT,
+        None,
+    ),
+    ModelCatalogEntry::obsolete(
         "gemini-live",
         "gemini-live-2.5-flash-preview",
         ModelLifecycle::Retired,

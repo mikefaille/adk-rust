@@ -66,6 +66,9 @@ pub enum Model {
     /// Gemini 3.1 Flash Image (Nano Banana 2) — GA native image generation.
     #[serde(rename = "models/gemini-3.1-flash-image")]
     Gemini31FlashImage,
+    /// Gemini 3.1 Flash preview with TTS support.
+    #[serde(rename = "models/gemini-3.1-flash-tts-preview")]
+    Gemini31FlashTts,
 
     // ── Gemini 3 ─────────────────────────────────────────────────
     /// Gemini 3 Pro preview.
@@ -165,6 +168,7 @@ impl Model {
             Model::Gemini31ProPreview => "models/gemini-3.1-pro-preview",
             Model::Gemini31FlashLite => "models/gemini-3.1-flash-lite",
             Model::Gemini31FlashImage => "models/gemini-3.1-flash-image",
+            Model::Gemini31FlashTts => "models/gemini-3.1-flash-tts-preview",
             Model::Gemini3ProPreview => "models/gemini-3-pro-preview",
             Model::Gemini3ProImage => "models/gemini-3-pro-image",
             Model::Gemini3ProImagePreview => "models/gemini-3-pro-image-preview",
@@ -198,6 +202,7 @@ impl Model {
             Model::Gemini31ProPreview => "gemini-3.1-pro-preview",
             Model::Gemini31FlashLite => "gemini-3.1-flash-lite",
             Model::Gemini31FlashImage => "gemini-3.1-flash-image",
+            Model::Gemini31FlashTts => "gemini-3.1-flash-tts-preview",
             Model::Gemini3ProPreview => "gemini-3-pro-preview",
             Model::Gemini3ProImage => "gemini-3-pro-image",
             Model::Gemini3ProImagePreview => "gemini-3-pro-image-preview",
@@ -241,6 +246,7 @@ impl From<String> for Model {
             "gemini-3.1-pro-preview" => Self::Gemini31ProPreview,
             "gemini-3.1-flash-lite" => Self::Gemini31FlashLite,
             "gemini-3.1-flash-image" => Self::Gemini31FlashImage,
+            "gemini-3.1-flash-tts-preview" => Self::Gemini31FlashTts,
             // Gemini 3 models
             "gemini-3-pro-preview" => Self::Gemini3ProPreview,
             "gemini-3-pro-image" => Self::Gemini3ProImage,

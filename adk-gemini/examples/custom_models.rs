@@ -54,7 +54,7 @@ async fn do_main() -> Result<(), Box<dyn std::error::Error>> {
     // 5. Using Model::Custom for any other model
     let client_custom_enum = Gemini::with_model(
         api_key.clone(),
-        Model::Custom("models/gemini-2.5-flash-preview-tts".to_string()),
+        Model::Custom("models/gemini-3.1-flash-tts-preview".to_string()),
     )?;
     info!("created client with Model::Custom for text-to-speech model");
 
