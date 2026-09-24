@@ -34,7 +34,7 @@ async fn do_main() -> Result<(), Box<dyn std::error::Error>> {
         std::env::var("GEMINI_API_KEY").expect("Please set GEMINI_API_KEY environment variable");
 
     // Create client with TTS-enabled model
-    let client = Gemini::with_model(api_key, Model::Gemini31FlashTts)
+    let client = Gemini::with_model(api_key, Model::Gemini38FlashTts)
         .expect("unable to create Gemini API client");
 
     info!("starting gemini speech generation example");
@@ -125,7 +125,7 @@ async fn do_main() -> Result<(), Box<dyn std::error::Error>> {
             info!("1. make sure GEMINI_API_KEY environment variable is set");
             info!("2. verify you have access to the Gemini TTS model");
             info!("3. check your internet connection");
-            info!("4. ensure the model 'gemini-3.1-flash-tts-preview' is available");
+            info!("4. ensure the model 'gemini-3.8-flash-tts' is available");
         }
     }
 

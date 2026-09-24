@@ -32,7 +32,7 @@ async fn do_main() -> Result<(), Box<dyn std::error::Error>> {
         std::env::var("GEMINI_API_KEY").expect("Please set GEMINI_API_KEY environment variable");
 
     // Create client with TTS-enabled model
-    let client = Gemini::with_model(api_key, Model::Gemini31FlashTts)
+    let client = Gemini::with_model(api_key, Model::Gemini38FlashTts)
         .expect("unable to create Gemini API client");
 
     info!("starting gemini multi-speaker speech generation example");
@@ -154,9 +154,7 @@ Alice: I couldn't agree more. It's remarkable how far AI-generated speech has co
             error!("   2. Verify you have access to the Gemini TTS model");
             error!("   3. Check your internet connection");
             error!("   4. Ensure speaker names in dialogue match configured speakers");
-            error!(
-                "   5. Make sure the model 'gemini-3.1-flash-tts-preview' supports multi-speaker TTS"
-            );
+            error!("   5. Make sure the model 'gemini-3.8-flash-tts' supports multi-speaker TTS");
         }
     }
 

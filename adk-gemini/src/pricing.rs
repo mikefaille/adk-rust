@@ -221,6 +221,36 @@ impl GeminiPricing {
         cache_storage_per_hour: 0.0,
     };
 
+    /// Gemini 3.8 Flash TTS (GA).
+    ///
+    /// Standard tier promo rates through 2026-12-31 (double 2027-01-01):
+    /// text input $0.50/MTok, audio output $9.00/MTok, input caching
+    /// $0.125/MTok, storage $0.50/MTok/hr.
+    pub const GEMINI_38_FLASH_TTS: Self = Self {
+        input: 0.50,
+        input_long: 0.50,
+        output: 9.00,
+        output_long: 9.00,
+        cache_input: 0.125,
+        cache_input_long: 0.125,
+        cache_storage_per_hour: 0.50,
+    };
+
+    /// Gemini 3.8 Flash-Lite TTS (GA).
+    ///
+    /// Standard tier promo rates through 2026-12-31 (double 2027-01-01):
+    /// text input $0.50/MTok, audio output $6.00/MTok, input caching
+    /// $0.125/MTok, storage $0.50/MTok/hr.
+    pub const GEMINI_38_FLASH_LITE_TTS: Self = Self {
+        input: 0.50,
+        input_long: 0.50,
+        output: 6.00,
+        output_long: 6.00,
+        cache_input: 0.125,
+        cache_input_long: 0.125,
+        cache_storage_per_hour: 0.50,
+    };
+
     /// Gemini 3.1 Flash Preview TTS.
     ///
     /// Text input $0.50/MTok. Audio output $10.00/MTok.
@@ -347,6 +377,8 @@ impl GeminiPricing {
             Model::Gemini31ProPreview => Self::GEMINI_31_PRO_PREVIEW,
             Model::Gemini31FlashLite => Self::GEMINI_31_FLASH_LITE,
             Model::Gemini31FlashImage => Self::GEMINI_31_FLASH_IMAGE,
+            Model::Gemini38FlashTts => Self::GEMINI_38_FLASH_TTS,
+            Model::Gemini38FlashLiteTts => Self::GEMINI_38_FLASH_LITE_TTS,
             Model::Gemini31FlashTts => Self::GEMINI_31_FLASH_TTS,
             Model::Gemini3FlashPreview => Self::GEMINI_3_FLASH_PREVIEW,
             Model::Gemini3ProImage | Model::Gemini3ProImagePreview => Self::GEMINI_3_PRO_IMAGE,
@@ -401,6 +433,8 @@ impl GeminiPricing {
             "gemini-3.1-pro-preview" => Self::GEMINI_31_PRO_PREVIEW,
             "gemini-3.1-flash-lite" => Self::GEMINI_31_FLASH_LITE,
             "gemini-3.1-flash-image" => Self::GEMINI_31_FLASH_IMAGE,
+            "gemini-3.8-flash-tts" => Self::GEMINI_38_FLASH_TTS,
+            "gemini-3.8-flash-lite-tts" => Self::GEMINI_38_FLASH_LITE_TTS,
             "gemini-3.1-flash-tts-preview" => Self::GEMINI_31_FLASH_TTS,
             "gemini-3.1-flash-live-preview" => Self::GEMINI_31_FLASH_LIVE,
             "gemini-3-flash-preview" => Self::GEMINI_3_FLASH_PREVIEW,

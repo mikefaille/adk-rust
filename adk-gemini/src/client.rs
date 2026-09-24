@@ -51,6 +51,13 @@ static V1_BASE_URL: LazyLock<Url> = LazyLock::new(|| {
 /// Use [`Model::Custom`] for model IDs not yet represented as variants.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize, Serialize)]
 pub enum Model {
+    // ── Gemini 3.8 ──────────────────────────────────────────────
+    /// Gemini 3.8 Flash TTS — GA studio-grade speech generation.
+    #[serde(rename = "models/gemini-3.8-flash-tts")]
+    Gemini38FlashTts,
+    /// Gemini 3.8 Flash-Lite TTS — GA cost-efficient conversational speech.
+    #[serde(rename = "models/gemini-3.8-flash-lite-tts")]
+    Gemini38FlashLiteTts,
     // ── Gemini 3.5 ──────────────────────────────────────────────
     /// Gemini 3.5 Flash.
     #[serde(rename = "models/gemini-3.5-flash")]
@@ -164,6 +171,8 @@ impl Model {
     pub fn as_str(&self) -> &str {
         #[allow(deprecated)]
         match self {
+            Model::Gemini38FlashTts => "models/gemini-3.8-flash-tts",
+            Model::Gemini38FlashLiteTts => "models/gemini-3.8-flash-lite-tts",
             Model::Gemini35Flash => "models/gemini-3.5-flash",
             Model::Gemini31ProPreview => "models/gemini-3.1-pro-preview",
             Model::Gemini31FlashLite => "models/gemini-3.1-flash-lite",
@@ -198,6 +207,8 @@ impl Model {
     pub fn vertex_model_path(&self, project_id: &str, location: &str) -> String {
         #[allow(deprecated)]
         let model_id = match self {
+            Model::Gemini38FlashTts => "gemini-3.8-flash-tts",
+            Model::Gemini38FlashLiteTts => "gemini-3.8-flash-lite-tts",
             Model::Gemini35Flash => "gemini-3.5-flash",
             Model::Gemini31ProPreview => "gemini-3.1-pro-preview",
             Model::Gemini31FlashLite => "gemini-3.1-flash-lite",
@@ -240,6 +251,9 @@ impl From<String> for Model {
         // Match known model names (with or without "models/" prefix) to proper variants.
         let bare = model.strip_prefix("models/").unwrap_or(&model);
         match bare {
+            // Gemini 3.8 models
+            "gemini-3.8-flash-tts" => Self::Gemini38FlashTts,
+            "gemini-3.8-flash-lite-tts" => Self::Gemini38FlashLiteTts,
             // Gemini 3.5 models (latest generation)
             "gemini-3.5-flash" => Self::Gemini35Flash,
             // Gemini 3.1 models
