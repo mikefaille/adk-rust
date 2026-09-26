@@ -50,6 +50,7 @@ static V1_BASE_URL: LazyLock<Url> = LazyLock::new(|| {
 /// Each variant maps to a specific model version on the Gemini API.
 /// Use [`Model::Custom`] for model IDs not yet represented as variants.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize, Serialize)]
+#[non_exhaustive]
 pub enum Model {
     // ── Gemini 3.8 ──────────────────────────────────────────────
     /// Gemini 3.8 Flash TTS — GA studio-grade speech generation.
