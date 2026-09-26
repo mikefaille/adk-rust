@@ -7,7 +7,7 @@
 // Sampling remains available only as a compatibility feature. rmcp marks the
 // protocol surface deprecated under SEP-2577, so deprecation warnings are
 // intentionally contained in this bridge while existing users migrate.
-#![cfg_attr(feature = "mcp-sampling", allow(deprecated))]
+#![allow(deprecated)]
 
 use std::sync::Arc;
 
