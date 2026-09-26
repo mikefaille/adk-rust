@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use futures::FutureExt;
 use rmcp::model::{
-    ClientConfig, ElicitRequestParams, ElicitResult, ElicitationAction, ElicitationCapability,
+    ClientInfo, ElicitRequestParams, ElicitResult, ElicitationAction, ElicitationCapability,
     ElicitationSchema, FormElicitationCapability, InputRequest, InputRequests, InputResponses,
     UrlElicitationCapability,
 };
@@ -255,8 +255,8 @@ impl AdkClientHandler {
 }
 
 impl rmcp::handler::client::ClientHandler for AdkClientHandler {
-    fn get_info(&self) -> ClientConfig {
-        let mut info = ClientConfig::default();
+    fn get_info(&self) -> ClientInfo {
+        let mut info = ClientInfo::default();
         let elicitation = ElicitationCapability::new()
             .with_form(FormElicitationCapability::new())
             .with_url(UrlElicitationCapability::new());

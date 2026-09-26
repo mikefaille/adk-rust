@@ -51,6 +51,13 @@ static V1_BASE_URL: LazyLock<Url> = LazyLock::new(|| {
 /// Use [`Model::Custom`] for model IDs not yet represented as variants.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize, Serialize)]
 pub enum Model {
+    // ── Gemini 3.8 ──────────────────────────────────────────────
+    /// Gemini 3.8 Flash TTS — GA studio-grade speech generation.
+    #[serde(rename = "models/gemini-3.8-flash-tts")]
+    Gemini38FlashTts,
+    /// Gemini 3.8 Flash-Lite TTS — GA cost-efficient conversational speech.
+    #[serde(rename = "models/gemini-3.8-flash-lite-tts")]
+    Gemini38FlashLiteTts,
     // ── Gemini 3.5 ──────────────────────────────────────────────
     /// Gemini 3.5 Flash.
     #[serde(rename = "models/gemini-3.5-flash")]
@@ -66,6 +73,9 @@ pub enum Model {
     /// Gemini 3.1 Flash Image (Nano Banana 2) — GA native image generation.
     #[serde(rename = "models/gemini-3.1-flash-image")]
     Gemini31FlashImage,
+    /// Gemini 3.1 Flash preview with TTS support.
+    #[serde(rename = "models/gemini-3.1-flash-tts-preview")]
+    Gemini31FlashTts,
 
     // ── Gemini 3 ─────────────────────────────────────────────────
     /// Gemini 3 Pro preview.
@@ -161,10 +171,13 @@ impl Model {
     pub fn as_str(&self) -> &str {
         #[allow(deprecated)]
         match self {
+            Model::Gemini38FlashTts => "models/gemini-3.8-flash-tts",
+            Model::Gemini38FlashLiteTts => "models/gemini-3.8-flash-lite-tts",
             Model::Gemini35Flash => "models/gemini-3.5-flash",
             Model::Gemini31ProPreview => "models/gemini-3.1-pro-preview",
             Model::Gemini31FlashLite => "models/gemini-3.1-flash-lite",
             Model::Gemini31FlashImage => "models/gemini-3.1-flash-image",
+            Model::Gemini31FlashTts => "models/gemini-3.1-flash-tts-preview",
             Model::Gemini3ProPreview => "models/gemini-3-pro-preview",
             Model::Gemini3ProImage => "models/gemini-3-pro-image",
             Model::Gemini3ProImagePreview => "models/gemini-3-pro-image-preview",
@@ -194,10 +207,13 @@ impl Model {
     pub fn vertex_model_path(&self, project_id: &str, location: &str) -> String {
         #[allow(deprecated)]
         let model_id = match self {
+            Model::Gemini38FlashTts => "gemini-3.8-flash-tts",
+            Model::Gemini38FlashLiteTts => "gemini-3.8-flash-lite-tts",
             Model::Gemini35Flash => "gemini-3.5-flash",
             Model::Gemini31ProPreview => "gemini-3.1-pro-preview",
             Model::Gemini31FlashLite => "gemini-3.1-flash-lite",
             Model::Gemini31FlashImage => "gemini-3.1-flash-image",
+            Model::Gemini31FlashTts => "gemini-3.1-flash-tts-preview",
             Model::Gemini3ProPreview => "gemini-3-pro-preview",
             Model::Gemini3ProImage => "gemini-3-pro-image",
             Model::Gemini3ProImagePreview => "gemini-3-pro-image-preview",
@@ -235,12 +251,16 @@ impl From<String> for Model {
         // Match known model names (with or without "models/" prefix) to proper variants.
         let bare = model.strip_prefix("models/").unwrap_or(&model);
         match bare {
+            // Gemini 3.8 models
+            "gemini-3.8-flash-tts" => Self::Gemini38FlashTts,
+            "gemini-3.8-flash-lite-tts" => Self::Gemini38FlashLiteTts,
             // Gemini 3.5 models (latest generation)
             "gemini-3.5-flash" => Self::Gemini35Flash,
             // Gemini 3.1 models
             "gemini-3.1-pro-preview" => Self::Gemini31ProPreview,
             "gemini-3.1-flash-lite" => Self::Gemini31FlashLite,
             "gemini-3.1-flash-image" => Self::Gemini31FlashImage,
+            "gemini-3.1-flash-tts-preview" => Self::Gemini31FlashTts,
             // Gemini 3 models
             "gemini-3-pro-preview" => Self::Gemini3ProPreview,
             "gemini-3-pro-image" => Self::Gemini3ProImage,

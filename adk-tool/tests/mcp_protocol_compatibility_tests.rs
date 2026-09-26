@@ -424,8 +424,8 @@ async fn a_server_from_another_implementation_still_works() {
 struct DualStackServer;
 
 impl rmcp::ServerHandler for DualStackServer {
-    fn get_info(&self) -> rmcp::model::ServerConfig {
-        rmcp::model::ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
+    fn get_info(&self) -> rmcp::model::ServerInfo {
+        rmcp::model::ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("dual-stack-server", "1.0.0"))
     }
 
@@ -572,9 +572,9 @@ async fn a_tool_call_over_2026_07_28_returns_its_result() {
 struct AncientServer;
 
 impl rmcp::ServerHandler for AncientServer {
-    fn get_info(&self) -> rmcp::model::ServerConfig {
+    fn get_info(&self) -> rmcp::model::ServerInfo {
         let mut info =
-            rmcp::model::ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
+            rmcp::model::ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
                 .with_server_info(Implementation::new("ancient-server", "0.1.0"));
         info.protocol_version = ProtocolVersion::V_2024_11_05;
         info
@@ -628,8 +628,8 @@ struct TaskServer {
 }
 
 impl rmcp::ServerHandler for TaskServer {
-    fn get_info(&self) -> rmcp::model::ServerConfig {
-        rmcp::model::ServerConfig::new(
+    fn get_info(&self) -> rmcp::model::ServerInfo {
+        rmcp::model::ServerInfo::new(
             ServerCapabilities::builder().enable_tools().enable_tasks().build(),
         )
         .with_server_info(Implementation::new("task-server", "1.0.0"))
