@@ -825,6 +825,11 @@ pub struct SpeechConfig {
     /// Multi-speaker voice configuration
     #[serde(skip_serializing_if = "Option::is_none")]
     pub multi_speaker_voice_config: Option<MultiSpeakerVoiceConfig>,
+    /// BCP-47 output language (e.g. `en-US`). Pins the synthesis language the
+    /// way a Live session's `speechConfig.languageCode` does; callers that
+    /// leave this unset get provider-default language behavior.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub language_code: Option<String>,
 }
 
 /// Voice configuration for text-to-speech
@@ -870,6 +875,31 @@ impl SpeechConfig {
                 prebuilt_voice_config: Some(PrebuiltVoiceConfig { voice_name: voice_name.into() }),
             }),
             multi_speaker_voice_config: None,
+            language_code: None,
+        }
+    }
+
+    /// Create a new speech config with a single voice and a pinned BCP-47
+    /// output language.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use adk_gemini::generation::model::SpeechConfig;
+    ///
+    /// let config = SpeechConfig::single_voice_with_language("Puck", "en-US");
+    /// assert_eq!(config.language_code.as_deref(), Some("en-US"));
+    /// ```
+    pub fn single_voice_with_language(
+        voice_name: impl Into<String>,
+        language_code: impl Into<String>,
+    ) -> Self {
+        Self {
+            voice_config: Some(VoiceConfig {
+                prebuilt_voice_config: Some(PrebuiltVoiceConfig { voice_name: voice_name.into() }),
+            }),
+            multi_speaker_voice_config: None,
+            language_code: Some(language_code.into()),
         }
     }
 
@@ -880,6 +910,7 @@ impl SpeechConfig {
             multi_speaker_voice_config: Some(MultiSpeakerVoiceConfig {
                 speaker_voice_configs: speakers,
             }),
+            language_code: None,
         }
     }
 }

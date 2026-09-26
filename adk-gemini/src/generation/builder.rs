@@ -358,6 +358,18 @@ impl ContentBuilder {
         self.with_speech_config(speech_config).with_audio_output()
     }
 
+    /// Sets a single voice plus a pinned BCP-47 output language for
+    /// text-to-speech generation, mirroring a Live session's
+    /// `speechConfig` voice + language pairing.
+    pub fn with_voice_and_language(
+        self,
+        voice_name: impl Into<String>,
+        language_code: impl Into<String>,
+    ) -> Self {
+        let speech_config = SpeechConfig::single_voice_with_language(voice_name, language_code);
+        self.with_speech_config(speech_config).with_audio_output()
+    }
+
     /// Sets multi-speaker configuration for text-to-speech generation.
     pub fn with_multi_speaker_config(self, speakers: Vec<SpeakerVoiceConfig>) -> Self {
         let speech_config = SpeechConfig::multi_speaker(speakers);
