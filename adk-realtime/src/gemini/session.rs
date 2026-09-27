@@ -35,11 +35,24 @@ type WsSource = futures::stream::SplitStream<WsStream>;
 const WRITER_CHANNEL_CAPACITY: usize = 64;
 const AUDIO_FLUSH_TARGET_MS: usize = 40;
 
+/// Bare Gemini Live model ids, without the `models/` resource prefix.
+/// `capabilities_for` strips the prefix before matching, so the gate sees
+/// these identifiers whether the caller passes a bare id or a resource name.
+/// The per-model support matrix comes from the Live capabilities docs: the
+/// 3.8 family (Live, Live Extended Thinking) honors both conversational
+/// knobs — `proactivity.proactiveAudio` at the setup root and
+/// `generationConfig.enableAffectiveDialog` — while 3.1 Flash Live honors
+/// neither. Unknown ids fail closed to the safe baseline below.
+const GEMINI_38_LIVE: &str = "gemini-3.8-live";
+const GEMINI_38_LIVE_EXTENDED_THINKING: &str = "gemini-3.8-live-extended-thinking";
+const GEMINI_31_FLASH_LIVE_PREVIEW: &str = "gemini-3.1-flash-live-preview";
+
 /// Feature flags and wire capabilities for Gemini Live models.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct GeminiLiveCapabilities {
     pub configurable_thinking: bool,
     pub affective_dialog: bool,
+    pub proactive_audio: bool,
     pub cached_content: bool,
     pub audio_only_response: bool,
     pub async_functions: bool,
@@ -52,27 +65,30 @@ pub(crate) fn capabilities_for(model: &str) -> GeminiLiveCapabilities {
 
     match identifier {
         // Standard Gemini 3.8 Live: interleaved reasoning, audio-only, async functions by default
-        "gemini-3.8-live" | "gemini-3.8-flash-live" => GeminiLiveCapabilities {
+        GEMINI_38_LIVE => GeminiLiveCapabilities {
             configurable_thinking: false, // thinking_config rejected
-            affective_dialog: false,      // Deprecated/removed
+            affective_dialog: true,       // generationConfig.enableAffectiveDialog honored
+            proactive_audio: true,        // proactivity.proactiveAudio honored
             cached_content: false,        // Live stream caching unsupported
             audio_only_response: true,    // Output modality must be AUDIO
             async_functions: true,        // NON_BLOCKING wire behavior supported
         },
 
         // Gemini 3.8 Live Extended Thinking: supports thinking_config, requires async tools
-        "gemini-3.8-live-extended-thinking" => GeminiLiveCapabilities {
+        GEMINI_38_LIVE_EXTENDED_THINKING => GeminiLiveCapabilities {
             configurable_thinking: true, // thinking_config supported
-            affective_dialog: false,
+            affective_dialog: true,      // generationConfig.enableAffectiveDialog honored
+            proactive_audio: true,       // proactivity.proactiveAudio honored
             cached_content: false,
             audio_only_response: true,
             async_functions: true,
         },
 
         // Legacy 3.1 Flash Live Preview
-        "gemini-3.1-flash-live-preview" => GeminiLiveCapabilities {
+        GEMINI_31_FLASH_LIVE_PREVIEW => GeminiLiveCapabilities {
             configurable_thinking: true, // Accepts thinking_level in setup
-            affective_dialog: true,      // Supported in preview
+            affective_dialog: false,     // Live docs exclude 3.1 Flash Live
+            proactive_audio: false,      // Live docs exclude 3.1 Flash Live
             cached_content: false,       // Live stream caching unsupported
             audio_only_response: false,  // Allowed ["AUDIO", "TEXT"]
             async_functions: false,      // Defaulted to blocking tool execution
@@ -82,6 +98,7 @@ pub(crate) fn capabilities_for(model: &str) -> GeminiLiveCapabilities {
         _ => GeminiLiveCapabilities {
             configurable_thinking: false,
             affective_dialog: false,
+            proactive_audio: false,
             cached_content: false,
             audio_only_response: true,
             async_functions: false,
@@ -278,6 +295,11 @@ struct GeminiSetup {
     /// every `VadConfig` the caller set was accepted and discarded.
     #[serde(skip_serializing_if = "Option::is_none")]
     realtime_input_config: Option<Value>,
+    /// Proactive behavior policy (`{ "proactiveAudio": true }`): lets the
+    /// model ignore irrelevant audio instead of responding to it. Omitted
+    /// unless the model honors it — see `capabilities_for`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    proactivity: Option<Value>,
 }
 
 /// `activityStart` / `activityEnd`.
@@ -1069,6 +1091,12 @@ impl GeminiRealtimeSession {
             )));
         }
 
+        if !caps.proactive_audio && config.proactive_audio == Some(true) {
+            return Err(RealtimeError::config(format!(
+                "model '{model}' does not support proactive audio"
+            )));
+        }
+
         if !caps.cached_content && config.cached_content.is_some() {
             return Err(RealtimeError::config(format!(
                 "model '{model}' does not support cached content"
@@ -1126,7 +1154,8 @@ impl GeminiRealtimeSession {
         }
 
         // Emotion-aware ("affective") dialog — a generationConfig field, honored
-        // by native-audio models on the v1alpha endpoint.
+        // by 3.8 Live models on the v1beta endpoint (the reference SDK nests
+        // LiveConnectConfig.enable_affective_dialog here).
         if config.affective_dialog == Some(true) {
             generation_config["enableAffectiveDialog"] = json!(true);
         }
@@ -1154,6 +1183,15 @@ impl GeminiRealtimeSession {
         // native-audio turns. An empty object turns the feature on.
         let transcription = config.input_audio_transcription.as_ref().map(|_| json!({}));
 
+        // Proactive audio filtering. The capability gate above already rejected
+        // this knob on models the docs exclude, so reaching here with it set
+        // means the model honors it.
+        let proactivity = if config.proactive_audio == Some(true) {
+            Some(json!({ "proactiveAudio": true }))
+        } else {
+            None
+        };
+
         Ok(GeminiClientMessage {
             setup: Some(GeminiSetup {
                 model: Some(normalized_model),
@@ -1165,6 +1203,7 @@ impl GeminiRealtimeSession {
                 input_audio_transcription: transcription.clone(),
                 output_audio_transcription: transcription,
                 realtime_input_config,
+                proactivity,
             }),
             ..Default::default()
         })
@@ -3036,6 +3075,7 @@ mod tests {
             input_audio_transcription: None,
             output_audio_transcription: None,
             realtime_input_config: None,
+            proactivity: None,
         };
         let wrapper = GeminiClientMessage { setup: Some(setup), ..Default::default() };
         let js = serde_json::to_value(&wrapper).unwrap();
@@ -3051,6 +3091,13 @@ mod tests {
         let c = RealtimeConfig::default().with_affective_dialog(true);
         assert_eq!(c.affective_dialog, Some(true));
         assert_eq!(RealtimeConfig::default().affective_dialog, None);
+    }
+
+    #[test]
+    fn test_proactive_audio_builder_sets_config() {
+        let c = RealtimeConfig::default().with_proactive_audio(true);
+        assert_eq!(c.proactive_audio, Some(true));
+        assert_eq!(RealtimeConfig::default().proactive_audio, None);
     }
 
     #[test]
@@ -4167,14 +4214,16 @@ mod gemini_38_compatibility_tests {
     fn test_gemini_38_capabilities() {
         let caps = capabilities_for("models/gemini-3.8-live");
         assert!(!caps.configurable_thinking);
-        assert!(!caps.affective_dialog);
+        assert!(caps.affective_dialog);
+        assert!(caps.proactive_audio);
         assert!(!caps.cached_content);
         assert!(caps.audio_only_response);
         assert!(caps.async_functions);
 
         let caps_ext = capabilities_for("models/gemini-3.8-live-extended-thinking");
         assert!(caps_ext.configurable_thinking);
-        assert!(!caps_ext.affective_dialog);
+        assert!(caps_ext.affective_dialog);
+        assert!(caps_ext.proactive_audio);
         assert!(!caps_ext.cached_content);
         assert!(caps_ext.audio_only_response);
         assert!(caps_ext.async_functions);
@@ -4182,16 +4231,91 @@ mod gemini_38_compatibility_tests {
         let caps_fallback = capabilities_for("models/unknown-experimental-model");
         assert!(!caps_fallback.configurable_thinking);
         assert!(!caps_fallback.affective_dialog);
+        assert!(!caps_fallback.proactive_audio);
         assert!(!caps_fallback.cached_content);
         assert!(caps_fallback.audio_only_response);
         assert!(!caps_fallback.async_functions);
 
         let caps_31 = capabilities_for("models/gemini-3.1-flash-live-preview");
         assert!(caps_31.configurable_thinking);
-        assert!(caps_31.affective_dialog);
+        assert!(!caps_31.affective_dialog);
+        assert!(!caps_31.proactive_audio);
         assert!(!caps_31.cached_content);
         assert!(!caps_31.audio_only_response);
         assert!(!caps_31.async_functions);
+    }
+
+    #[test]
+    fn test_setup_emits_proactivity_on_supported_model() {
+        let config = RealtimeConfig::default().with_proactive_audio(true);
+        let message = GeminiRealtimeSession::build_setup_message(
+            "models/gemini-3.8-live",
+            config,
+            None,
+            None,
+        )
+        .expect("setup builds successfully for 3.8 Live with proactive audio");
+
+        let js = serde_json::to_value(&message).unwrap();
+        let setup = js.get("setup").expect("setup field present");
+        assert_eq!(setup.get("proactivity"), Some(&json!({ "proactiveAudio": true })));
+
+        // Unset means omitted, not present-but-false: the server must see no
+        // proactivity field at all for models that do not honor it.
+        let message = GeminiRealtimeSession::build_setup_message(
+            "models/gemini-3.8-live",
+            RealtimeConfig::default(),
+            None,
+            None,
+        )
+        .expect("setup builds successfully");
+        let js = serde_json::to_value(&message).unwrap();
+        let setup = js.get("setup").expect("setup field present");
+        assert!(setup.get("proactivity").is_none());
+    }
+
+    #[test]
+    fn test_setup_rejects_proactivity_on_excluded_models() {
+        for model in ["models/gemini-3.1-flash-live-preview", "models/unknown-experimental-model"] {
+            let config = RealtimeConfig::default().with_proactive_audio(true);
+            let err =
+                GeminiRealtimeSession::build_setup_message(model, config, None, None).unwrap_err();
+            assert!(
+                err.to_string().contains("does not support proactive audio"),
+                "unexpected error for {model}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_setup_emits_affective_dialog_on_supported_model() {
+        let config = RealtimeConfig::default().with_affective_dialog(true);
+        let message = GeminiRealtimeSession::build_setup_message(
+            "models/gemini-3.8-live",
+            config,
+            None,
+            None,
+        )
+        .expect("setup builds successfully for 3.8 Live with affective dialog");
+
+        let js = serde_json::to_value(&message).unwrap();
+        let setup = js.get("setup").expect("setup field present");
+        let gen_config = setup.get("generationConfig").expect("generationConfig present");
+        assert_eq!(gen_config.get("enableAffectiveDialog"), Some(&json!(true)));
+        assert!(setup.get("proactivity").is_none());
+    }
+
+    #[test]
+    fn test_setup_rejects_affective_dialog_on_excluded_models() {
+        for model in ["models/gemini-3.1-flash-live-preview", "models/unknown-experimental-model"] {
+            let config = RealtimeConfig::default().with_affective_dialog(true);
+            let err =
+                GeminiRealtimeSession::build_setup_message(model, config, None, None).unwrap_err();
+            assert!(
+                err.to_string().contains("does not support affective dialog"),
+                "unexpected error for {model}: {err}"
+            );
+        }
     }
 
     #[test]
@@ -4336,13 +4460,9 @@ mod gemini_38_compatibility_tests {
             .unwrap_err();
         assert!(err.to_string().contains("does not support configurable thinking"));
 
-        // 2. Affective dialog
-        let config_affective = RealtimeConfig::default().with_affective_dialog(true);
-        let err = GeminiRealtimeSession::build_setup_message(model, config_affective, None, None)
-            .unwrap_err();
-        assert!(err.to_string().contains("does not support affective dialog"));
-
-        // 3. Cached content
+        // 2. Cached content (affective dialog is honored on 3.8 — its
+        // rejection on excluded models lives in
+        // test_setup_rejects_affective_dialog_on_excluded_models).
         let config_cached = RealtimeConfig {
             cached_content: Some("cached-resource-123".to_string()),
             ..Default::default()
@@ -4351,14 +4471,14 @@ mod gemini_38_compatibility_tests {
             .unwrap_err();
         assert!(err.to_string().contains("does not support cached content"));
 
-        // 4. Non-AUDIO response modality (e.g. TEXT)
+        // 3. Non-AUDIO response modality (e.g. TEXT)
         let config_text =
             RealtimeConfig { modalities: Some(vec!["text".to_string()]), ..Default::default() };
         let err =
             GeminiRealtimeSession::build_setup_message(model, config_text, None, None).unwrap_err();
         assert!(err.to_string().contains("requires AUDIO response modality"));
 
-        // 5. Provider-neutral modality defaults containing AUDIO (e.g. ["text", "audio"]) are sanitized
+        // 4. Provider-neutral modality defaults containing AUDIO (e.g. ["text", "audio"]) are sanitized
         let config_mixed = RealtimeConfig {
             modalities: Some(vec!["text".to_string(), "audio".to_string()]),
             ..Default::default()

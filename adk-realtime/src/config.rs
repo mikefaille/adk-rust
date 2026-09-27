@@ -365,10 +365,17 @@ pub struct RealtimeConfig {
     pub interruption_detection: Option<InterruptionDetection>,
 
     /// Enable emotion-aware ("affective") dialog, where the model adapts its
-    /// tone to the user's emotional state. Gemini Live native-audio models only
-    /// (requires the v1alpha endpoint); ignored by other providers.
+    /// tone to the user's emotional state. Gemini Live only, honored per
+    /// model on the v1beta endpoint (see `capabilities_for`); ignored by
+    /// other providers.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub affective_dialog: Option<bool>,
+
+    /// Let the model proactively ignore irrelevant audio (background speech,
+    /// noise) instead of responding to it. Gemini Live only, honored per
+    /// model (see `capabilities_for`); ignored by other providers.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proactive_audio: Option<bool>,
 
     /// Provider-specific options.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -535,10 +542,19 @@ impl RealtimeConfig {
         self
     }
 
-    /// Enable emotion-aware ("affective") dialog. Only honored by Gemini Live
-    /// native-audio models (v1alpha); a no-op for other providers/models.
+    /// Enable emotion-aware ("affective") dialog. Only honored by
+    /// Gemini Live models whose capabilities include it; a no-op for other
+    /// providers/models.
     pub fn with_affective_dialog(mut self, enabled: bool) -> Self {
         self.affective_dialog = Some(enabled);
+        self
+    }
+
+    /// Let the model proactively ignore irrelevant audio. Only honored by
+    /// Gemini Live models whose capabilities include it; a no-op for other
+    /// providers/models.
+    pub fn with_proactive_audio(mut self, enabled: bool) -> Self {
+        self.proactive_audio = Some(enabled);
         self
     }
 
