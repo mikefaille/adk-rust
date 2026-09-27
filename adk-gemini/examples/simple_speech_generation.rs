@@ -46,8 +46,10 @@ async fn do_main() -> Result<(), Box<dyn std::error::Error>> {
         speech_config: Some(SpeechConfig {
             voice_config: Some(VoiceConfig {
                 prebuilt_voice_config: Some(PrebuiltVoiceConfig { voice_name: "Puck".to_string() }),
+                voice: None,
             }),
             multi_speaker_voice_config: None,
+            language_code: None,
         }),
         ..Default::default()
     };
