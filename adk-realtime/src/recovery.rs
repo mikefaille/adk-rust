@@ -138,6 +138,7 @@ pub struct RecoveryPolicy {
     deadline: Duration,
     initial_delay: Duration,
     max_delay: Duration,
+    enabled: bool,
 }
 
 impl Default for RecoveryPolicy {
@@ -147,12 +148,14 @@ impl Default for RecoveryPolicy {
     /// - initial_delay = 50ms
     /// - max_delay = 500ms
     /// - deterministic/no jitter by default
+    /// - enabled = true
     fn default() -> Self {
         Self {
             max_attempts: NonZeroU32::new(3).unwrap(),
             deadline: Duration::from_secs(5),
             initial_delay: Duration::from_millis(50),
             max_delay: Duration::from_millis(500),
+            enabled: true,
         }
     }
 }
@@ -204,6 +207,21 @@ impl RecoveryPolicy {
     /// Set the maximum delay between recovery attempts.
     pub fn with_max_delay(mut self, max_delay: Duration) -> Self {
         self.max_delay = max_delay;
+        self
+    }
+
+    /// Whether managed recovery is enabled.
+    pub fn enabled(&self) -> bool {
+        self.enabled
+    }
+
+    /// Enable or disable managed recovery.
+    ///
+    /// Disabled is a kill-switch: failure reports fail fast without building a
+    /// replacement transaction or spawning a recovery worker, and planned
+    /// rotations keep the current generation authoritative. Enabled by default.
+    pub fn with_enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
         self
     }
 }

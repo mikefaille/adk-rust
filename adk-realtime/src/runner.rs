@@ -783,16 +783,30 @@ impl RealtimeRunner {
     }
 
     /// Authoritatively spawn planned proactive replacement and notify the application event handler.
-    async fn handle_planned_rotation(&self, gen_id: u64, time_left: Option<String>) -> Result<()> {
+    async fn handle_planned_rotation(
+        &self,
+        gen_id: u64,
+        session_id: &str,
+        time_left: Option<String>,
+    ) -> Result<()> {
+        tracing::info!(
+            generation = gen_id,
+            session.id = session_id,
+            recovery.marker = "planned_rotation.received",
+            recovery.time_left = time_left.as_deref(),
+            "planned rotation received; spawning proactive replacement"
+        );
         let supervisor = Arc::clone(&self.supervisor);
         let time_left_clone = time_left.clone();
+        let session_id_owned = session_id.to_string();
         tokio::spawn(async move {
             let cause = RecoveryCause::PlannedRotation { time_left: time_left_clone };
             if let Err(e) = supervisor.execute_planned_replacement(gen_id, cause).await {
                 // Fixed category, not the error Display: recovery errors
                 // carry provider text (CWE-532).
                 tracing::warn!(
-                    gen_id,
+                    generation = gen_id,
+                    session.id = session_id_owned.as_str(),
                     error = crate::recovery::error_category(&e),
                     "proactive planned replacement attempt failed; keeping generation N authoritative"
                 );
@@ -835,7 +849,13 @@ impl RealtimeRunner {
 
             match self.poll_session_next(&mut watcher, current_gen_id, &session).await {
                 Some(Ok(ServerEvent::PlannedRotation { time_left })) => {
-                    let _ = self.handle_planned_rotation(current_gen_id, time_left.clone()).await;
+                    let _ = self
+                        .handle_planned_rotation(
+                            current_gen_id,
+                            session.session_id(),
+                            time_left.clone(),
+                        )
+                        .await;
                     return Some(Ok(ServerEvent::PlannedRotation { time_left }));
                 }
                 Some(Ok(event)) => return Some(Ok(event)),
@@ -1089,12 +1109,19 @@ impl RealtimeRunner {
                 self.event_handler.on_tool_calls_cancelled(&call_ids).await?;
             }
             ServerEvent::PlannedRotation { time_left } => {
-                let target_gen = match gen_id {
-                    Some(id) => Some(id),
-                    None => self.supervisor.get_active_generation().await.ok().map(|g| g.id),
-                };
-                if let Some(target_gen_id) = target_gen {
-                    self.handle_planned_rotation(target_gen_id, time_left).await?;
+                // One fetch serves both the fallback generation and the log identity.
+                let active = self.supervisor.get_active_generation().await.ok();
+                let target_gen_id = gen_id.or_else(|| active.as_ref().map(|g| g.id));
+                if let Some(target_gen_id) = target_gen_id {
+                    // The supervisor retains only the active generation, so a session
+                    // id is attributable only when the target IS the active one.
+                    // Otherwise leave it empty: `generation` already names the target.
+                    let session_id = active
+                        .as_ref()
+                        .filter(|g| g.id == target_gen_id)
+                        .map(|g| g.session.session_id().to_string())
+                        .unwrap_or_default();
+                    self.handle_planned_rotation(target_gen_id, &session_id, time_left).await?;
                 } else {
                     self.event_handler.on_planned_rotation(time_left.as_deref()).await?;
                 }

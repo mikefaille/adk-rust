@@ -162,6 +162,10 @@ required-features = ["gemini", "recovery-test-utils", "integration"]
 name = "mock_websocket_server"
 required-features = ["gemini", "recovery-test-utils", "integration"]
 
+[[test]]
+name = "gemini_supervisor_rebuild_tests"
+required-features = ["gemini"]
+
 [features]
 default = []
 # Allow diagnostics to include bounded raw provider frames. Off by default because

@@ -1340,6 +1340,14 @@ impl GeminiRealtimeSession {
                 ServerEvent::SessionCreated { .. } => {
                     self.setup_complete_seen.store(true, Ordering::SeqCst);
                 }
+                ServerEvent::PlannedRotation { time_left } => {
+                    tracing::info!(
+                        session.id = %self.session_id,
+                        recovery.marker = "goaway.received",
+                        recovery.time_left = time_left.as_deref(),
+                        "gemini live goaway planned rotation received"
+                    );
+                }
                 ServerEvent::FunctionCallDone { call_id, name, .. } => {
                     self.call_names.lock().insert(call_id.clone(), name.clone());
                 }
@@ -1610,10 +1618,31 @@ impl GeminiRealtimeSession {
     }
 }
 
+/// Fixed log label for a recovery cause. Never renders the cause payload:
+/// read/write failures carry server-controlled text (CWE-532).
+fn recovery_cause_kind(cause: &RecoveryCause) -> &'static str {
+    match cause {
+        RecoveryCause::ReadFailed(_) => "read-failed",
+        RecoveryCause::WriteFailed(_) => "write-failed",
+        RecoveryCause::UnexpectedEof => "unexpected-eof",
+        RecoveryCause::PlannedRotation { .. } => "planned-rotation",
+    }
+}
+
+/// Fixed log category for the error inside a read/write cause, if any.
+fn recovery_cause_error_category(cause: &RecoveryCause) -> Option<&'static str> {
+    match cause {
+        RecoveryCause::ReadFailed(err) | RecoveryCause::WriteFailed(err) => {
+            Some(crate::recovery::error_category(err))
+        }
+        RecoveryCause::UnexpectedEof | RecoveryCause::PlannedRotation { .. } => None,
+    }
+}
+
 #[async_trait]
 impl RealtimeRecovery for GeminiRealtimeSession {
     fn classify(&self, cause: &RecoveryCause) -> RecoveryDisposition {
-        match cause {
+        let disposition = match cause {
             RecoveryCause::ReadFailed(err) | RecoveryCause::WriteFailed(err) => {
                 if err.is_connection_reset() {
                     RecoveryDisposition::Recoverable
@@ -1652,15 +1681,32 @@ impl RealtimeRecovery for GeminiRealtimeSession {
             RecoveryCause::UnexpectedEof | RecoveryCause::PlannedRotation { .. } => {
                 RecoveryDisposition::Recoverable
             }
-        }
+        };
+        tracing::info!(
+            session.id = %self.session_id,
+            recovery.marker = "cause.classified",
+            recovery.cause = recovery_cause_kind(cause),
+            recovery.error_category = recovery_cause_error_category(cause),
+            recovery.disposition = ?disposition,
+            "recovery cause classified"
+        );
+        disposition
     }
 
     fn classify_attempt_error(&self, error: &RealtimeError) -> RecoveryDisposition {
-        if error.is_connection_reset() {
+        let disposition = if error.is_connection_reset() {
             RecoveryDisposition::Recoverable
         } else {
             RecoveryDisposition::Fatal
-        }
+        };
+        tracing::info!(
+            session.id = %self.session_id,
+            recovery.marker = "attempt.classified",
+            recovery.error_category = crate::recovery::error_category(error),
+            recovery.disposition = ?disposition,
+            "recovery attempt error classified"
+        );
+        disposition
     }
 
     async fn recover(&self, context: RecoveryContext<'_>) -> Result<RecoveredSession> {

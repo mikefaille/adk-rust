@@ -233,6 +233,7 @@ impl ReplacementPhase {
 pub(crate) struct ReplacementTxn {
     pub(crate) id: u64,
     pub(crate) _target_generation_id: u64,
+    pub(crate) originating_session_id: String,
     pub(crate) phase: parking_lot::Mutex<ReplacementPhase>,
     pub(crate) cancel_token: CancellationToken,
     pub(crate) outcome_tx: tokio::sync::watch::Sender<Option<Result<RecoveryOutcome>>>,
@@ -240,11 +241,17 @@ pub(crate) struct ReplacementTxn {
 }
 
 impl ReplacementTxn {
-    pub fn new(id: u64, target_generation_id: u64, phase: ReplacementPhase) -> Self {
+    pub fn new(
+        id: u64,
+        target_generation_id: u64,
+        originating_session_id: String,
+        phase: ReplacementPhase,
+    ) -> Self {
         let (outcome_tx, outcome_rx) = tokio::sync::watch::channel(None);
         Self {
             id,
             _target_generation_id: target_generation_id,
+            originating_session_id,
             phase: parking_lot::Mutex::new(phase),
             cancel_token: CancellationToken::new(),
             outcome_tx,
@@ -865,6 +872,16 @@ impl RecoverySupervisor {
                         )));
                     }
 
+                    if !self.policy.enabled() {
+                        tracing::info!(
+                            generation = active.id,
+                            session.id = active.session.session_id(),
+                            recovery.marker = "recovery.disabled",
+                            "planned rotation received while managed recovery disabled; keeping current generation"
+                        );
+                        return Ok(RecoveryOutcome::Stale(active.session.clone()));
+                    }
+
                     if let Some(existing_planned) = planned {
                         (Arc::clone(existing_planned), existing_planned.outcome_rx.clone())
                     } else {
@@ -892,7 +909,12 @@ impl RecoverySupervisor {
                         let txn_id = *next_txn_id;
                         *next_txn_id += 1;
                         let phase = ReplacementPhase::Planned { cause: cause.clone(), deadline };
-                        let txn = Arc::new(ReplacementTxn::new(txn_id, active.id + 1, phase));
+                        let txn = Arc::new(ReplacementTxn::new(
+                            txn_id,
+                            active.id + 1,
+                            active.session.session_id().to_string(),
+                            phase,
+                        ));
                         let rx = txn.outcome_rx.clone();
                         let active_arc = Arc::clone(active);
                         *planned = Some(Arc::clone(&txn));
@@ -944,6 +966,22 @@ impl RecoverySupervisor {
                         )));
                     }
 
+                    if !self.policy.enabled() {
+                        let active_arc = Arc::clone(active);
+                        active_arc.fail();
+                        tracing::warn!(
+                            generation = active_arc.id,
+                            session.id = active_arc.session.session_id(),
+                            recovery.marker = "recovery.disabled",
+                            "failure reported while managed recovery disabled; failing fast without replacement"
+                        );
+                        *state = ManagedState::Terminal {
+                            reason: TerminalReason::Exhausted,
+                            _last_generation: Some(active_arc),
+                        };
+                        return Err(RealtimeError::provider("managed recovery disabled by policy"));
+                    }
+
                     // Active generation failed! Monotonically close write gate
                     active.fail();
                     let active_arc = Arc::clone(active);
@@ -964,7 +1002,12 @@ impl RecoverySupervisor {
                         let deadline = tokio::time::Instant::now() + self.policy.deadline();
                         let phase =
                             ReplacementPhase::Recovering { cause: report.cause.clone(), deadline };
-                        let txn = Arc::new(ReplacementTxn::new(txn_id, active_arc.id + 1, phase));
+                        let txn = Arc::new(ReplacementTxn::new(
+                            txn_id,
+                            active_arc.id + 1,
+                            active_arc.session.session_id().to_string(),
+                            phase,
+                        ));
                         let rx = txn.outcome_rx.clone();
                         *state = ManagedState::Recovering {
                             failed: Arc::clone(&active_arc),
@@ -1038,11 +1081,28 @@ impl RecoverySupervisor {
                 AttemptKind::Planned
             };
 
+            tracing::info!(
+                generation = originating_gen.id,
+                session.id = originating_gen.session.session_id(),
+                txn.id = txn.id,
+                recovery.marker = "replacement.start",
+                recovery.kind =
+                    if initial_kind == AttemptKind::Planned { "planned" } else { "recovering" },
+                "starting managed replacement worker"
+            );
+
             let recovery_impl = match originating_gen.session.recovery() {
                 Some(r) => r,
                 None => {
                     let err = RealtimeError::provider("active session does not support recovery");
-                    tracing::error!(generation = originating_gen.id, err = %err, "recovery not supported");
+                    tracing::error!(
+                        generation = originating_gen.id,
+                        session.id = originating_gen.session.session_id(),
+                        txn.id = txn.id,
+                        recovery.marker = "replacement.terminal",
+                        err = %err,
+                        "recovery not supported"
+                    );
                     let ctx = AttemptContext {
                         originating_gen_id: originating_gen.id,
                         kind: initial_kind,
@@ -1062,7 +1122,14 @@ impl RecoverySupervisor {
                 let err = RealtimeError::provider(
                     "fatal recovery cause detected; performing zero provider attempts",
                 );
-                tracing::warn!(generation = originating_gen.id, err = %err, "fatal cause classification");
+                tracing::warn!(
+                    generation = originating_gen.id,
+                    session.id = originating_gen.session.session_id(),
+                    txn.id = txn.id,
+                    recovery.marker = "cause.fatal",
+                    err = %err,
+                    "fatal cause classification"
+                );
                 let ctx = AttemptContext {
                     originating_gen_id: originating_gen.id,
                     kind: initial_kind,
@@ -1132,7 +1199,10 @@ impl RecoverySupervisor {
                     );
                     tracing::warn!(
                         generation = originating_gen.id,
+                        session.id = originating_gen.session.session_id(),
+                        txn.id = txn.id,
                         attempt = attempt_idx,
+                        recovery.marker = "cause.fatal",
                         err = %err,
                         "fatal cause classification during recovery"
                     );
@@ -1219,6 +1289,8 @@ impl RecoverySupervisor {
 
                 tracing::debug!(
                     generation = originating_gen.id,
+                    session.id = originating_gen.session.session_id(),
+                    txn.id = txn.id,
                     attempt = attempt_idx,
                     "building replacement candidate"
                 );
@@ -1400,7 +1472,9 @@ impl RecoverySupervisor {
                 {
                     tracing::warn!(
                         generation = originating_gen.id,
-                        txn_id = txn.id,
+                        session.id = originating_gen.session.session_id(),
+                        txn.id = txn.id,
+                        recovery.marker = "replacement.terminal",
                         "worker exiting loop with authoritative Recovering; defensive terminalization"
                     );
                     let last_gen = Arc::clone(failed);
@@ -1483,6 +1557,15 @@ impl RecoverySupervisor {
                                     let continuity = recovered.continuity;
                                     let (next_gen, old) =
                                         core_guard.publish_serving(session.clone(), None);
+                                    tracing::info!(
+                                        generation = ctx.originating_gen_id,
+                                        session.id = txn.originating_session_id.as_str(),
+                                        txn.id = txn.id,
+                                        recovery.marker = "replacement.published",
+                                        recovery.new_session_id = session.session_id(),
+                                        recovery.continuity = ?continuity,
+                                        "planned replacement published new generation"
+                                    );
                                     old_session_to_close = old;
                                     published_next_gen = Some(next_gen);
                                     if let Some(ref mut cg) = candidate_guard {
@@ -1497,6 +1580,14 @@ impl RecoverySupervisor {
                             }
                             Err(err) => {
                                 *planned = None;
+                                tracing::info!(
+                                    generation = ctx.originating_gen_id,
+                                    session.id = txn.originating_session_id.as_str(),
+                                    txn.id = txn.id,
+                                    recovery.marker = "replacement.keep_serving",
+                                    error_category = error_category(&err),
+                                    "planned replacement attempt failed; keeping current generation authoritative"
+                                );
                                 final_outcome_to_send = Some(Err(err));
                                 transition = AttemptTransition::KeepServing;
                             }
@@ -1542,6 +1633,15 @@ impl RecoverySupervisor {
                                     let continuity = recovered.continuity;
                                     let (next_gen, old) =
                                         core_guard.publish_serving(session.clone(), None);
+                                    tracing::info!(
+                                        generation = ctx.originating_gen_id,
+                                        session.id = txn.originating_session_id.as_str(),
+                                        txn.id = txn.id,
+                                        recovery.marker = "replacement.published",
+                                        recovery.new_session_id = session.session_id(),
+                                        recovery.continuity = ?continuity,
+                                        "recovery published new generation"
+                                    );
                                     old_session_to_close = old;
                                     published_next_gen = Some(next_gen);
                                     if let Some(ref mut cg) = candidate_guard {
@@ -1581,6 +1681,10 @@ impl RecoverySupervisor {
                                     // Debug-format cause, session, backend, or endpoint
                                     // either (endpoint queries are caller credentials).
                                     tracing::warn!(
+                                        generation = ctx.originating_gen_id,
+                                        session.id = txn.originating_session_id.as_str(),
+                                        txn.id = txn.id,
+                                        recovery.marker = "replacement.terminal",
                                         cause_disposition = ?cause_disposition,
                                         error_disposition = ?error_disposition,
                                         exhausted = ctx.is_exhausted(),
@@ -1834,6 +1938,40 @@ mod tests {
             }
         }
         assert_eq!(success_count, 3);
+    }
+
+    #[tokio::test]
+    async fn test_disabled_policy_skips_worker_construction() {
+        let recover_count = Arc::new(AtomicUsize::new(0));
+
+        let mock_rec = Arc::new(CoalescingRecovery {
+            recover_count: Arc::clone(&recover_count),
+            active_recoveries: Arc::new(AtomicUsize::new(0)),
+            max_active_recoveries: Arc::new(AtomicUsize::new(0)),
+        });
+
+        let initial_session = Arc::new(MockSession {
+            id: "gen-0".to_string(),
+            recovery: Some(Arc::clone(&mock_rec) as Arc<dyn RealtimeRecovery>),
+        });
+
+        let policy = RecoveryPolicy::default().with_enabled(false);
+
+        let config = Arc::new(tokio::sync::RwLock::new(crate::config::RealtimeConfig::default()));
+        let supervisor = RecoverySupervisor::with_initial_session(policy, config, initial_session);
+
+        let planned = supervisor
+            .execute_planned_replacement(0, RecoveryCause::PlannedRotation { time_left: None })
+            .await
+            .unwrap();
+        assert!(matches!(planned, RecoveryOutcome::Stale(_)));
+
+        let report = FailureReport { generation: 0, cause: RecoveryCause::UnexpectedEof };
+        let res = supervisor.report_failure(report).await;
+        assert!(res.is_err());
+
+        assert_eq!(recover_count.load(Ordering::SeqCst), 0);
+        assert_eq!(supervisor.status().await, TransportStatus::Exhausted);
     }
 
     #[tokio::test]
