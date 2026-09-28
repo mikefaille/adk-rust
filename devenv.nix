@@ -71,6 +71,11 @@
     dbus               # Required for libdbus-sys (used by keyring in adk-cli for secure credential storage)
     pkgs.dbus.dev
 
+    # ALSA headers for cpal-based audio (examples/desktop_audio via alsa-sys);
+    # the pre-push examples gate fails without them. CI installs libasound2-dev.
+    pkgs.alsa-lib
+    pkgs.alsa-lib.dev
+
     # Protobuf (for gRPC codegen if needed)
     protobuf
 
@@ -115,8 +120,8 @@
     # Explicitly set PROTOC for build-scripts (e.g., lance-encoding)
     PROTOC = "${pkgs.protobuf}/bin/protoc";
 
-    # Ensure pkg-config can find glib and dbus
-    PKG_CONFIG_PATH = "${pkgs.glib.dev}/lib/pkgconfig:${pkgs.dbus.dev}/lib/pkgconfig:$PKG_CONFIG_PATH";
+    # Ensure pkg-config can find glib, dbus and alsa
+    PKG_CONFIG_PATH = "${pkgs.glib.dev}/lib/pkgconfig:${pkgs.dbus.dev}/lib/pkgconfig:${pkgs.alsa-lib.dev}/lib/pkgconfig:$PKG_CONFIG_PATH";
   };
 
   # --------------------------------------------------------------------------
