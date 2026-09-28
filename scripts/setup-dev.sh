@@ -83,6 +83,19 @@ else
   miss "cargo — install from https://rustup.rs"
 fi
 
+# Pinned toolchain — rust-toolchain.toml is the single source of truth, but a
+# shadowing cargo (e.g. from nix) silently ignores it and gates then run on the
+# wrong compiler. Compare the resolved cargo against the pin.
+PINNED_TOOLCHAIN="$(sed -n 's/^channel *= *"//p' "$(dirname "${BASH_SOURCE[0]}")/../rust-toolchain.toml" 2>/dev/null | cut -d'"' -f1 | head -1)"
+if [[ -n "$PINNED_TOOLCHAIN" ]] && command -v cargo &>/dev/null; then
+  CARGO_VERSION="$(cargo --version | awk '{print $2}')"
+  if [[ "$CARGO_VERSION" == "$PINNED_TOOLCHAIN" ]]; then
+    ok "cargo $CARGO_VERSION matches rust-toolchain.toml pin"
+  else
+    warn "cargo $CARGO_VERSION ignores rust-toolchain.toml pin ($PINNED_TOOLCHAIN) — order PATH so rustup shims precede other cargos"
+  fi
+fi
+
 echo ""
 echo "Build acceleration (optional):"
 
@@ -141,6 +154,20 @@ if command -v protoc &>/dev/null; then
 else
   miss "protoc — needed for adk-rag --features lancedb"
   install_pkg protoc protobuf protobuf-compiler
+fi
+
+# ALSA headers — examples/desktop_audio (cpal) links alsa-sys on Linux, so the
+# pre-push examples gate fails without them. CI installs libasound2-dev on the
+# examples runners; macOS uses CoreAudio and needs nothing.
+if [[ "$OS" == "Linux" ]]; then
+  if pkg-config --exists alsa 2>/dev/null; then
+    ok "alsa $(pkg-config --modversion alsa 2>/dev/null)"
+  else
+    miss "alsa — needed for examples/desktop_audio (pre-push gate)"
+    install_pkg alsa-lib alsa-lib libasound2-dev
+  fi
+else
+  ok "alsa — not needed on $OS (CoreAudio)"
 fi
 
 # NASM is only consumed by aws-lc-sys on MSVC targets, so Unix hosts never need
