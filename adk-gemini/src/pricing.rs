@@ -253,12 +253,14 @@ impl GeminiPricing {
 
     /// Gemini 3.1 Flash Preview TTS.
     ///
-    /// Text input $0.50/MTok. Audio output $10.00/MTok.
+    /// Standard tier: text input $1.00/MTok, audio output $20.00/MTok.
+    /// (Batch is $0.50/$10.00; this table tracks Standard like every other row.)
+    /// Source: https://ai.google.dev/gemini-api/docs/pricing (read 2026-09-24).
     pub const GEMINI_31_FLASH_TTS: Self = Self {
-        input: 0.50,
-        input_long: 0.50,
-        output: 10.00,
-        output_long: 10.00,
+        input: 1.00,
+        input_long: 1.00,
+        output: 20.00,
+        output_long: 20.00,
         cache_input: 0.0,
         cache_input_long: 0.0,
         cache_storage_per_hour: 0.0,
