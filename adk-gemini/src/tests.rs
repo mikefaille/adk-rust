@@ -137,8 +137,8 @@ fn test_tts_models_roundtrip() {
     assert_eq!(lite.input, 0.50);
     assert_eq!(lite.output, 6.00);
     let legacy = crate::pricing::GeminiPricing::for_model(&Model::Gemini31FlashTts).unwrap();
-    assert_eq!(legacy.input, 0.50);
-    assert_eq!(legacy.output, 10.00);
+    assert_eq!(legacy.input, 1.00);
+    assert_eq!(legacy.output, 20.00);
 }
 
 #[test]
