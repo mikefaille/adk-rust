@@ -55,6 +55,8 @@ fn frame() -> AudioChunk {
 /// reconstruction that drifts with the crate. That pins the old
 /// `chunks_exact` idiom deliberately — modernizing it would defeat the test.
 // Pinned historical baseline, not production code: see above.
+// unknown_lints: the clippy lint below postdates the pinned 1.95 tier.
+#[allow(unknown_lints)]
 #[allow(clippy::chunks_exact_to_as_chunks)]
 fn decode_owned(data: &[u8]) -> Vec<i16> {
     let mut samples = Vec::with_capacity(data.len() / size_of::<i16>());

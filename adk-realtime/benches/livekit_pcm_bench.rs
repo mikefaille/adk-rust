@@ -1,5 +1,8 @@
 // This bench times decode idioms against each other; `chunks_exact` is one
 // of the arms being measured, so modernizing it would change the subject.
+// The lint below only exists on newer clippy (1.98 devenv gate); the pinned
+// 1.95 feature-coverage tier must not fail on the unknown name.
+#![allow(unknown_lints)]
 #![allow(clippy::chunks_exact_to_as_chunks)]
 
 use std::borrow::Cow;
