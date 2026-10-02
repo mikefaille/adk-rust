@@ -1,4 +1,7 @@
 //! Example demonstrating how to cancel a batch operation when the user presses CTRL-C.
+
+// See batch_generate.rs: retry-by-returning-the-batch plus per-example crate roots.
+#![allow(clippy::result_large_err)]
 //!
 //! This example shows:
 //! 1. Creating a batch operation with multiple requests

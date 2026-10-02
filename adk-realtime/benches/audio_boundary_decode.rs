@@ -45,7 +45,10 @@ fn frame() -> AudioChunk {
 ///
 /// Holding a copy here keeps the comparison honest after the production source
 /// changed: the "before" arm is the code that actually shipped, not a
-/// reconstruction that drifts with the crate.
+/// reconstruction that drifts with the crate. That pins the old
+/// `chunks_exact` idiom deliberately — modernizing it would defeat the bench.
+// Pinned historical baseline, not production code: see above.
+#[allow(clippy::chunks_exact_to_as_chunks)]
 fn decode_owned(data: &[u8]) -> Vec<i16> {
     let mut samples = Vec::with_capacity(data.len() / size_of::<i16>());
     for chunk in data.chunks_exact(size_of::<i16>()) {

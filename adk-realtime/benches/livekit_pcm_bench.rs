@@ -1,3 +1,7 @@
+// This bench times decode idioms against each other; `chunks_exact` is one
+// of the arms being measured, so modernizing it would change the subject.
+#![allow(clippy::chunks_exact_to_as_chunks)]
+
 use std::borrow::Cow;
 use std::hint::black_box;
 use std::time::{Duration, Instant};
