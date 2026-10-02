@@ -1,3 +1,4 @@
+#![allow(clippy::result_large_err)]
 #![deny(missing_docs)]
 
 //! # adk-gemini

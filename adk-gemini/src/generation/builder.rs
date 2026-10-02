@@ -358,6 +358,42 @@ impl ContentBuilder {
         self.with_speech_config(speech_config).with_audio_output()
     }
 
+    /// Sets a single voice plus a pinned BCP-47 output language for
+    /// text-to-speech generation, mirroring a Live session's
+    /// `speechConfig` voice + language pairing.
+    pub fn with_voice_and_language(
+        self,
+        voice_name: impl Into<String>,
+        language_code: impl Into<String>,
+    ) -> Self {
+        let speech_config = SpeechConfig::single_voice_with_language(voice_name, language_code);
+        self.with_speech_config(speech_config).with_audio_output()
+    }
+
+    /// Sets a single flat voice reference for text-to-speech generation.
+    ///
+    /// `voice_ref` is a prebuilt voice name (`Puck`) or a Voice Design
+    /// persona id (`voice_...`): the flat `voiceConfig.voice` field accepts
+    /// both, while [`Self::with_voice`] 400-rejects designed ids.
+    pub fn with_voice_ref(self, voice_ref: impl Into<String>) -> Self {
+        let speech_config = SpeechConfig::single_voice_ref(voice_ref);
+        self.with_speech_config(speech_config).with_audio_output()
+    }
+
+    /// Sets a single flat voice reference plus a pinned BCP-47 output
+    /// language for text-to-speech generation, mirroring a Live session's
+    /// `speechConfig` voice + language pairing. Same contract as
+    /// [`Self::with_voice_ref`]: `voice_ref` accepts prebuilt names and
+    /// Voice Design persona ids alike.
+    pub fn with_voice_ref_and_language(
+        self,
+        voice_ref: impl Into<String>,
+        language_code: impl Into<String>,
+    ) -> Self {
+        let speech_config = SpeechConfig::single_voice_ref_with_language(voice_ref, language_code);
+        self.with_speech_config(speech_config).with_audio_output()
+    }
+
     /// Sets multi-speaker configuration for text-to-speech generation.
     pub fn with_multi_speaker_config(self, speakers: Vec<SpeakerVoiceConfig>) -> Self {
         let speech_config = SpeechConfig::multi_speaker(speakers);

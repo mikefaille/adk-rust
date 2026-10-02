@@ -408,6 +408,19 @@ pub enum ServerEvent {
         call_ids: Vec<ToolCallId>,
     },
 
+    /// Token usage for completed response(s).
+    ///
+    /// Shape only — counts and per-modality splits, never transcript or
+    /// audio. Gemini Live sends this as a top-level `usageMetadata` block,
+    /// either alone or riding alongside `serverContent` at turn end.
+    #[serde(rename = "response.usage")]
+    Usage {
+        /// Unique event ID.
+        event_id: String,
+        /// The token counts.
+        usage: Usage,
+    },
+
     /// Response output item added.
     #[serde(rename = "response.output_item.added")]
     OutputItemAdded {
@@ -667,6 +680,59 @@ pub struct RateLimit {
     pub remaining: u64,
     /// Time until reset.
     pub reset_seconds: f64,
+}
+
+/// Token usage for completed response(s), as carried by
+/// [`ServerEvent::Usage`].
+///
+/// Provider-neutral counts; every field is optional because providers send
+/// only what applies. `None` means the provider did not report that count,
+/// not zero.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Usage {
+    /// Tokens in the prompt.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_token_count: Option<u32>,
+    /// Tokens in the response.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub response_token_count: Option<u32>,
+    /// Total tokens billed for the turn.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_token_count: Option<u32>,
+    /// Tokens served from cached content.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cached_content_token_count: Option<u32>,
+    /// Tokens spent on thinking/reasoning.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thoughts_token_count: Option<u32>,
+    /// Prompt tokens spent on tool use.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_use_prompt_token_count: Option<u32>,
+    /// Prompt tokens split by modality.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_tokens_details: Option<Vec<ModalityTokenCount>>,
+    /// Response tokens split by modality.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub response_tokens_details: Option<Vec<ModalityTokenCount>>,
+    /// Cached tokens split by modality.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_tokens_details: Option<Vec<ModalityTokenCount>>,
+    /// Tool-use prompt tokens split by modality.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_use_prompt_tokens_details: Option<Vec<ModalityTokenCount>>,
+}
+
+/// How many of a token count were of one modality.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModalityTokenCount {
+    /// Modality label as the provider sent it (e.g. `"TEXT"`, `"AUDIO"`).
+    /// A string rather than an enum so a new provider modality parses
+    /// instead of failing the frame.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub modality: Option<String>,
+    /// Token count for this modality.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_count: Option<u32>,
 }
 
 /// A simplified tool call representation.

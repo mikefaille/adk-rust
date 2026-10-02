@@ -35,11 +35,24 @@ type WsSource = futures::stream::SplitStream<WsStream>;
 const WRITER_CHANNEL_CAPACITY: usize = 64;
 const AUDIO_FLUSH_TARGET_MS: usize = 40;
 
+/// Bare Gemini Live model ids, without the `models/` resource prefix.
+/// `capabilities_for` strips the prefix before matching, so the gate sees
+/// these identifiers whether the caller passes a bare id or a resource name.
+/// The per-model support matrix comes from the Live capabilities docs: the
+/// 3.8 family (Live, Live Extended Thinking) honors both conversational
+/// knobs — `proactivity.proactiveAudio` at the setup root and
+/// `generationConfig.enableAffectiveDialog` — while 3.1 Flash Live honors
+/// neither. Unknown ids fail closed to the safe baseline below.
+const GEMINI_38_LIVE: &str = "gemini-3.8-live";
+const GEMINI_38_LIVE_EXTENDED_THINKING: &str = "gemini-3.8-live-extended-thinking";
+const GEMINI_31_FLASH_LIVE_PREVIEW: &str = "gemini-3.1-flash-live-preview";
+
 /// Feature flags and wire capabilities for Gemini Live models.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct GeminiLiveCapabilities {
     pub configurable_thinking: bool,
     pub affective_dialog: bool,
+    pub proactive_audio: bool,
     pub cached_content: bool,
     pub audio_only_response: bool,
     pub async_functions: bool,
@@ -52,27 +65,30 @@ pub(crate) fn capabilities_for(model: &str) -> GeminiLiveCapabilities {
 
     match identifier {
         // Standard Gemini 3.8 Live: interleaved reasoning, audio-only, async functions by default
-        "gemini-3.8-live" | "gemini-3.8-flash-live" => GeminiLiveCapabilities {
+        GEMINI_38_LIVE => GeminiLiveCapabilities {
             configurable_thinking: false, // thinking_config rejected
-            affective_dialog: false,      // Deprecated/removed
+            affective_dialog: true,       // generationConfig.enableAffectiveDialog honored
+            proactive_audio: true,        // proactivity.proactiveAudio honored
             cached_content: false,        // Live stream caching unsupported
             audio_only_response: true,    // Output modality must be AUDIO
             async_functions: true,        // NON_BLOCKING wire behavior supported
         },
 
         // Gemini 3.8 Live Extended Thinking: supports thinking_config, requires async tools
-        "gemini-3.8-live-extended-thinking" => GeminiLiveCapabilities {
+        GEMINI_38_LIVE_EXTENDED_THINKING => GeminiLiveCapabilities {
             configurable_thinking: true, // thinking_config supported
-            affective_dialog: false,
+            affective_dialog: true,      // generationConfig.enableAffectiveDialog honored
+            proactive_audio: true,       // proactivity.proactiveAudio honored
             cached_content: false,
             audio_only_response: true,
             async_functions: true,
         },
 
         // Legacy 3.1 Flash Live Preview
-        "gemini-3.1-flash-live-preview" => GeminiLiveCapabilities {
+        GEMINI_31_FLASH_LIVE_PREVIEW => GeminiLiveCapabilities {
             configurable_thinking: true, // Accepts thinking_level in setup
-            affective_dialog: true,      // Supported in preview
+            affective_dialog: false,     // Live docs exclude 3.1 Flash Live
+            proactive_audio: false,      // Live docs exclude 3.1 Flash Live
             cached_content: false,       // Live stream caching unsupported
             audio_only_response: false,  // Allowed ["AUDIO", "TEXT"]
             async_functions: false,      // Defaulted to blocking tool execution
@@ -82,6 +98,7 @@ pub(crate) fn capabilities_for(model: &str) -> GeminiLiveCapabilities {
         _ => GeminiLiveCapabilities {
             configurable_thinking: false,
             affective_dialog: false,
+            proactive_audio: false,
             cached_content: false,
             audio_only_response: true,
             async_functions: false,
@@ -278,6 +295,11 @@ struct GeminiSetup {
     /// every `VadConfig` the caller set was accepted and discarded.
     #[serde(skip_serializing_if = "Option::is_none")]
     realtime_input_config: Option<Value>,
+    /// Proactive behavior policy (`{ "proactiveAudio": true }`): lets the
+    /// model ignore irrelevant audio instead of responding to it. Omitted
+    /// unless the model honors it — see `capabilities_for`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    proactivity: Option<Value>,
 }
 
 /// `activityStart` / `activityEnd`.
@@ -391,6 +413,65 @@ struct GeminiToolCallCancellation {
     /// ids withdraws nothing, which is a no-op rather than a protocol error.
     #[serde(default)]
     ids: Vec<String>,
+}
+
+/// `UsageMetadata` on a Live server message: token counts for completed
+/// response(s), plus per-modality splits where Google sends them.
+///
+/// Outside the `messageType` union, so it rides alongside whatever else the
+/// frame carries — in practice `serverContent` at turn end, or alone —
+/// rather than as one more exclusive arm. Counts only, never transcript or
+/// audio.
+///
+/// Field names follow the Live reference, which says `responseTokenCount` /
+/// `responseTokensDetails` where the REST surface says `candidates*`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GeminiUsageMetadata {
+    prompt_token_count: Option<u32>,
+    cached_content_token_count: Option<u32>,
+    response_token_count: Option<u32>,
+    tool_use_prompt_token_count: Option<u32>,
+    thoughts_token_count: Option<u32>,
+    total_token_count: Option<u32>,
+    prompt_tokens_details: Option<Vec<GeminiModalityTokenCount>>,
+    cache_tokens_details: Option<Vec<GeminiModalityTokenCount>>,
+    response_tokens_details: Option<Vec<GeminiModalityTokenCount>>,
+    tool_use_prompt_tokens_details: Option<Vec<GeminiModalityTokenCount>>,
+}
+
+/// One Live `ModalityTokenCount`: how many of the tokens were of one modality.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GeminiModalityTokenCount {
+    modality: Option<String>,
+    token_count: Option<u32>,
+}
+
+impl From<GeminiModalityTokenCount> for crate::events::ModalityTokenCount {
+    fn from(value: GeminiModalityTokenCount) -> Self {
+        Self { modality: value.modality, token_count: value.token_count }
+    }
+}
+
+impl From<GeminiUsageMetadata> for crate::events::Usage {
+    fn from(value: GeminiUsageMetadata) -> Self {
+        let details = |entries: Option<Vec<GeminiModalityTokenCount>>| {
+            entries.map(|v| v.into_iter().map(crate::events::ModalityTokenCount::from).collect())
+        };
+        Self {
+            prompt_token_count: value.prompt_token_count,
+            response_token_count: value.response_token_count,
+            total_token_count: value.total_token_count,
+            cached_content_token_count: value.cached_content_token_count,
+            thoughts_token_count: value.thoughts_token_count,
+            tool_use_prompt_token_count: value.tool_use_prompt_token_count,
+            prompt_tokens_details: details(value.prompt_tokens_details),
+            response_tokens_details: details(value.response_tokens_details),
+            cache_tokens_details: details(value.cache_tokens_details),
+            tool_use_prompt_tokens_details: details(value.tool_use_prompt_tokens_details),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1069,6 +1150,12 @@ impl GeminiRealtimeSession {
             )));
         }
 
+        if !caps.proactive_audio && config.proactive_audio == Some(true) {
+            return Err(RealtimeError::config(format!(
+                "model '{model}' does not support proactive audio"
+            )));
+        }
+
         if !caps.cached_content && config.cached_content.is_some() {
             return Err(RealtimeError::config(format!(
                 "model '{model}' does not support cached content"
@@ -1126,7 +1213,8 @@ impl GeminiRealtimeSession {
         }
 
         // Emotion-aware ("affective") dialog — a generationConfig field, honored
-        // by native-audio models on the v1alpha endpoint.
+        // by 3.8 Live models on the v1beta endpoint (the reference SDK nests
+        // LiveConnectConfig.enable_affective_dialog here).
         if config.affective_dialog == Some(true) {
             generation_config["enableAffectiveDialog"] = json!(true);
         }
@@ -1154,6 +1242,15 @@ impl GeminiRealtimeSession {
         // native-audio turns. An empty object turns the feature on.
         let transcription = config.input_audio_transcription.as_ref().map(|_| json!({}));
 
+        // Proactive audio filtering. The capability gate above already rejected
+        // this knob on models the docs exclude, so reaching here with it set
+        // means the model honors it.
+        let proactivity = if config.proactive_audio == Some(true) {
+            Some(json!({ "proactiveAudio": true }))
+        } else {
+            None
+        };
+
         Ok(GeminiClientMessage {
             setup: Some(GeminiSetup {
                 model: Some(normalized_model),
@@ -1165,6 +1262,7 @@ impl GeminiRealtimeSession {
                 input_audio_transcription: transcription.clone(),
                 output_audio_transcription: transcription,
                 realtime_input_config,
+                proactivity,
             }),
             ..Default::default()
         })
@@ -1366,6 +1464,24 @@ impl GeminiRealtimeSession {
         Self::translate_event_logged(raw, None)
     }
 
+    /// Surface top-level `usageMetadata` as a [`ServerEvent::Usage`].
+    ///
+    /// Returns `None` when the frame carries no usage block. A present but
+    /// mistyped block is a protocol error, like a malformed
+    /// `toolCallCancellation`: the counts feed cost proof, and silently
+    /// dropping billing data is worse than a visible error.
+    fn parse_usage_event(value: &Value) -> Result<Option<ServerEvent>> {
+        let Some(raw) = value.get("usageMetadata") else {
+            return Ok(None);
+        };
+        let usage: GeminiUsageMetadata = serde_json::from_value(raw.clone())
+            .map_err(|e| RealtimeError::protocol(format!("Malformed usageMetadata: {e}")))?;
+        Ok(Some(ServerEvent::Usage {
+            event_id: uuid::Uuid::new_v4().to_string(),
+            usage: usage.into(),
+        }))
+    }
+
     pub(crate) fn translate_event_logged(
         raw: &str,
         frame_log: Option<&FrameLog>,
@@ -1488,6 +1604,14 @@ impl GeminiRealtimeSession {
                 });
             }
 
+            // `usageMetadata` sits outside the `messageType` union: a
+            // turn-final `serverContent` frame typically carries the turn's
+            // token counts alongside `turnComplete`. Surface them here so the
+            // turn's content and its counts arrive together.
+            if let Some(usage) = Self::parse_usage_event(&value)? {
+                events.push(usage);
+            }
+
             if !events.is_empty() {
                 return Ok(events);
             }
@@ -1604,6 +1728,14 @@ impl GeminiRealtimeSession {
                     })
                 })
                 .collect();
+        }
+
+        // Standalone usage frame. Usage riding `serverContent` is handled in
+        // that branch above; anything reaching here alongside usage is a
+        // control frame this translator otherwise ignores, so the usage is
+        // the whole signal.
+        if let Some(usage) = Self::parse_usage_event(&value)? {
+            return Ok(vec![usage]);
         }
 
         Ok(vec![ServerEvent::Unknown])
@@ -3036,6 +3168,7 @@ mod tests {
             input_audio_transcription: None,
             output_audio_transcription: None,
             realtime_input_config: None,
+            proactivity: None,
         };
         let wrapper = GeminiClientMessage { setup: Some(setup), ..Default::default() };
         let js = serde_json::to_value(&wrapper).unwrap();
@@ -3051,6 +3184,13 @@ mod tests {
         let c = RealtimeConfig::default().with_affective_dialog(true);
         assert_eq!(c.affective_dialog, Some(true));
         assert_eq!(RealtimeConfig::default().affective_dialog, None);
+    }
+
+    #[test]
+    fn test_proactive_audio_builder_sets_config() {
+        let c = RealtimeConfig::default().with_proactive_audio(true);
+        assert_eq!(c.proactive_audio, Some(true));
+        assert_eq!(RealtimeConfig::default().proactive_audio, None);
     }
 
     #[test]
@@ -3359,6 +3499,118 @@ mod tests {
             }
             other => panic!("expected one ToolCallCancelled, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn usage_metadata_frame_translates_to_usage() {
+        let raw = json!({
+            "usageMetadata": {
+                "promptTokenCount": 120,
+                "cachedContentTokenCount": 40,
+                "responseTokenCount": 60,
+                "toolUsePromptTokenCount": 10,
+                "thoughtsTokenCount": 25,
+                "totalTokenCount": 205,
+                "promptTokensDetails": [
+                    { "modality": "TEXT", "tokenCount": 80 },
+                    { "modality": "AUDIO", "tokenCount": 40 }
+                ],
+                "cacheTokensDetails": [{ "modality": "TEXT", "tokenCount": 40 }],
+                "responseTokensDetails": [{ "modality": "AUDIO", "tokenCount": 60 }],
+                "toolUsePromptTokensDetails": [{ "modality": "TEXT", "tokenCount": 10 }],
+                // Preview surface: an unknown field must not break parsing.
+                "someFutureField": { "nested": true }
+            }
+        })
+        .to_string();
+        let events = GeminiRealtimeSession::translate_event_static(&raw).unwrap();
+
+        match events.as_slice() {
+            [ServerEvent::Usage { usage, .. }] => {
+                assert_eq!(usage.prompt_token_count, Some(120));
+                assert_eq!(usage.cached_content_token_count, Some(40));
+                assert_eq!(usage.response_token_count, Some(60));
+                assert_eq!(usage.tool_use_prompt_token_count, Some(10));
+                assert_eq!(usage.thoughts_token_count, Some(25));
+                assert_eq!(usage.total_token_count, Some(205));
+                let prompt = usage.prompt_tokens_details.as_deref().expect("prompt details");
+                assert_eq!(prompt.len(), 2);
+                assert_eq!(prompt[0].modality.as_deref(), Some("TEXT"));
+                assert_eq!(prompt[0].token_count, Some(80));
+                assert_eq!(prompt[1].modality.as_deref(), Some("AUDIO"));
+                assert_eq!(prompt[1].token_count, Some(40));
+                let response = usage.response_tokens_details.as_deref().expect("response details");
+                assert_eq!(response.len(), 1);
+                assert_eq!(response[0].modality.as_deref(), Some("AUDIO"));
+                assert_eq!(response[0].token_count, Some(60));
+                let cache = usage.cache_tokens_details.as_deref().expect("cache details");
+                assert_eq!(cache.len(), 1);
+                assert_eq!(cache[0].token_count, Some(40));
+                let tool_use =
+                    usage.tool_use_prompt_tokens_details.as_deref().expect("tool-use details");
+                assert_eq!(tool_use.len(), 1);
+                assert_eq!(tool_use[0].token_count, Some(10));
+            }
+            other => panic!("expected one Usage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn usage_metadata_absent_counts_are_none_not_zero() {
+        // Google sends only what applies; a missing count is unknown, and
+        // reporting it as zero would corrupt cost proof downstream.
+        let raw = json!({ "usageMetadata": { "totalTokenCount": 12 } }).to_string();
+        let events = GeminiRealtimeSession::translate_event_static(&raw).unwrap();
+
+        match events.as_slice() {
+            [ServerEvent::Usage { usage, .. }] => {
+                assert_eq!(usage.total_token_count, Some(12));
+                assert_eq!(usage.prompt_token_count, None);
+                assert_eq!(usage.response_token_count, None);
+                assert_eq!(usage.cached_content_token_count, None);
+                assert_eq!(usage.thoughts_token_count, None);
+                assert_eq!(usage.tool_use_prompt_token_count, None);
+                assert!(usage.prompt_tokens_details.is_none());
+                assert!(usage.response_tokens_details.is_none());
+            }
+            other => panic!("expected one Usage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn usage_metadata_riding_server_content_arrives_with_the_turn() {
+        // `usageMetadata` sits outside the `messageType` union: a turn-final
+        // frame carries the turn's content and its counts together, and the
+        // translator must surface both, not just the first arm that matches.
+        let raw = json!({
+            "serverContent": { "turnComplete": true },
+            "usageMetadata": {
+                "promptTokenCount": 50,
+                "responseTokenCount": 20,
+                "totalTokenCount": 70
+            }
+        })
+        .to_string();
+        let events = GeminiRealtimeSession::translate_event_static(&raw).unwrap();
+
+        match events.as_slice() {
+            [ServerEvent::ResponseDone { .. }, ServerEvent::Usage { usage, .. }] => {
+                assert_eq!(usage.prompt_token_count, Some(50));
+                assert_eq!(usage.response_token_count, Some(20));
+                assert_eq!(usage.total_token_count, Some(70));
+            }
+            other => panic!("expected ResponseDone then Usage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn usage_metadata_mistyped_counts_are_a_protocol_error() {
+        // The counts feed cost proof: a mistyped block must fail loudly
+        // rather than silently drop billing data.
+        let raw = json!({ "usageMetadata": { "promptTokenCount": "lots" } }).to_string();
+        let result = GeminiRealtimeSession::translate_event_static(&raw);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Malformed usageMetadata"));
     }
 
     #[test]
@@ -4167,14 +4419,16 @@ mod gemini_38_compatibility_tests {
     fn test_gemini_38_capabilities() {
         let caps = capabilities_for("models/gemini-3.8-live");
         assert!(!caps.configurable_thinking);
-        assert!(!caps.affective_dialog);
+        assert!(caps.affective_dialog);
+        assert!(caps.proactive_audio);
         assert!(!caps.cached_content);
         assert!(caps.audio_only_response);
         assert!(caps.async_functions);
 
         let caps_ext = capabilities_for("models/gemini-3.8-live-extended-thinking");
         assert!(caps_ext.configurable_thinking);
-        assert!(!caps_ext.affective_dialog);
+        assert!(caps_ext.affective_dialog);
+        assert!(caps_ext.proactive_audio);
         assert!(!caps_ext.cached_content);
         assert!(caps_ext.audio_only_response);
         assert!(caps_ext.async_functions);
@@ -4182,16 +4436,91 @@ mod gemini_38_compatibility_tests {
         let caps_fallback = capabilities_for("models/unknown-experimental-model");
         assert!(!caps_fallback.configurable_thinking);
         assert!(!caps_fallback.affective_dialog);
+        assert!(!caps_fallback.proactive_audio);
         assert!(!caps_fallback.cached_content);
         assert!(caps_fallback.audio_only_response);
         assert!(!caps_fallback.async_functions);
 
         let caps_31 = capabilities_for("models/gemini-3.1-flash-live-preview");
         assert!(caps_31.configurable_thinking);
-        assert!(caps_31.affective_dialog);
+        assert!(!caps_31.affective_dialog);
+        assert!(!caps_31.proactive_audio);
         assert!(!caps_31.cached_content);
         assert!(!caps_31.audio_only_response);
         assert!(!caps_31.async_functions);
+    }
+
+    #[test]
+    fn test_setup_emits_proactivity_on_supported_model() {
+        let config = RealtimeConfig::default().with_proactive_audio(true);
+        let message = GeminiRealtimeSession::build_setup_message(
+            "models/gemini-3.8-live",
+            config,
+            None,
+            None,
+        )
+        .expect("setup builds successfully for 3.8 Live with proactive audio");
+
+        let js = serde_json::to_value(&message).unwrap();
+        let setup = js.get("setup").expect("setup field present");
+        assert_eq!(setup.get("proactivity"), Some(&json!({ "proactiveAudio": true })));
+
+        // Unset means omitted, not present-but-false: the server must see no
+        // proactivity field at all for models that do not honor it.
+        let message = GeminiRealtimeSession::build_setup_message(
+            "models/gemini-3.8-live",
+            RealtimeConfig::default(),
+            None,
+            None,
+        )
+        .expect("setup builds successfully");
+        let js = serde_json::to_value(&message).unwrap();
+        let setup = js.get("setup").expect("setup field present");
+        assert!(setup.get("proactivity").is_none());
+    }
+
+    #[test]
+    fn test_setup_rejects_proactivity_on_excluded_models() {
+        for model in ["models/gemini-3.1-flash-live-preview", "models/unknown-experimental-model"] {
+            let config = RealtimeConfig::default().with_proactive_audio(true);
+            let err =
+                GeminiRealtimeSession::build_setup_message(model, config, None, None).unwrap_err();
+            assert!(
+                err.to_string().contains("does not support proactive audio"),
+                "unexpected error for {model}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_setup_emits_affective_dialog_on_supported_model() {
+        let config = RealtimeConfig::default().with_affective_dialog(true);
+        let message = GeminiRealtimeSession::build_setup_message(
+            "models/gemini-3.8-live",
+            config,
+            None,
+            None,
+        )
+        .expect("setup builds successfully for 3.8 Live with affective dialog");
+
+        let js = serde_json::to_value(&message).unwrap();
+        let setup = js.get("setup").expect("setup field present");
+        let gen_config = setup.get("generationConfig").expect("generationConfig present");
+        assert_eq!(gen_config.get("enableAffectiveDialog"), Some(&json!(true)));
+        assert!(setup.get("proactivity").is_none());
+    }
+
+    #[test]
+    fn test_setup_rejects_affective_dialog_on_excluded_models() {
+        for model in ["models/gemini-3.1-flash-live-preview", "models/unknown-experimental-model"] {
+            let config = RealtimeConfig::default().with_affective_dialog(true);
+            let err =
+                GeminiRealtimeSession::build_setup_message(model, config, None, None).unwrap_err();
+            assert!(
+                err.to_string().contains("does not support affective dialog"),
+                "unexpected error for {model}: {err}"
+            );
+        }
     }
 
     #[test]
@@ -4336,13 +4665,9 @@ mod gemini_38_compatibility_tests {
             .unwrap_err();
         assert!(err.to_string().contains("does not support configurable thinking"));
 
-        // 2. Affective dialog
-        let config_affective = RealtimeConfig::default().with_affective_dialog(true);
-        let err = GeminiRealtimeSession::build_setup_message(model, config_affective, None, None)
-            .unwrap_err();
-        assert!(err.to_string().contains("does not support affective dialog"));
-
-        // 3. Cached content
+        // 2. Cached content (affective dialog is honored on 3.8 — its
+        // rejection on excluded models lives in
+        // test_setup_rejects_affective_dialog_on_excluded_models).
         let config_cached = RealtimeConfig {
             cached_content: Some("cached-resource-123".to_string()),
             ..Default::default()
@@ -4351,14 +4676,14 @@ mod gemini_38_compatibility_tests {
             .unwrap_err();
         assert!(err.to_string().contains("does not support cached content"));
 
-        // 4. Non-AUDIO response modality (e.g. TEXT)
+        // 3. Non-AUDIO response modality (e.g. TEXT)
         let config_text =
             RealtimeConfig { modalities: Some(vec!["text".to_string()]), ..Default::default() };
         let err =
             GeminiRealtimeSession::build_setup_message(model, config_text, None, None).unwrap_err();
         assert!(err.to_string().contains("requires AUDIO response modality"));
 
-        // 5. Provider-neutral modality defaults containing AUDIO (e.g. ["text", "audio"]) are sanitized
+        // 4. Provider-neutral modality defaults containing AUDIO (e.g. ["text", "audio"]) are sanitized
         let config_mixed = RealtimeConfig {
             modalities: Some(vec!["text".to_string(), "audio".to_string()]),
             ..Default::default()

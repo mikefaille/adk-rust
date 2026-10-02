@@ -423,6 +423,9 @@ async fn a_server_from_another_implementation_still_works() {
 #[derive(Clone, Default)]
 struct DualStackServer;
 
+// `ServerInfo` is deprecated upstream (SEP-2577); allowed until the
+// deferred `ServerConfig` migration, like the lib bridge.
+#[allow(deprecated)]
 impl rmcp::ServerHandler for DualStackServer {
     fn get_info(&self) -> rmcp::model::ServerInfo {
         rmcp::model::ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
@@ -571,6 +574,8 @@ async fn a_tool_call_over_2026_07_28_returns_its_result() {
 #[derive(Clone, Default)]
 struct AncientServer;
 
+// See `DualStackServer` above: deferred `ServerConfig` migration.
+#[allow(deprecated)]
 impl rmcp::ServerHandler for AncientServer {
     fn get_info(&self) -> rmcp::model::ServerInfo {
         let mut info =
@@ -627,6 +632,8 @@ struct TaskServer {
     tasks: Arc<rmcp::task_manager::TaskManager>,
 }
 
+// See `DualStackServer` above: deferred `ServerConfig` migration.
+#[allow(deprecated)]
 impl rmcp::ServerHandler for TaskServer {
     fn get_info(&self) -> rmcp::model::ServerInfo {
         rmcp::model::ServerInfo::new(

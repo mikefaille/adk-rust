@@ -1,6 +1,10 @@
 //! Batch generate content example
 //!
 //! This example demonstrates how to use the synchronous batch generate content API to generate content for multiple requests at once.
+
+// Retry-by-returning-the-batch needs the batch in `Err`; examples are their
+// own crate roots, so they carry the workspace's usual allow themselves.
+#![allow(clippy::result_large_err)]
 //!
 //! To run this example, you need to have a Gemini API key. You can get one from the Google AI Studio.
 //!

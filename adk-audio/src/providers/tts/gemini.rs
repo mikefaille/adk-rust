@@ -465,7 +465,7 @@ impl TtsProvider for GeminiTts {
                                 if decoded.len() % 2 != 0 {
                                     l16_remainder = decoded.pop();
                                 }
-                                for chunk in decoded.chunks_exact_mut(2) {
+                                for chunk in decoded.as_chunks_mut::<2>().0 {
                                     chunk.swap(0, 1);
                                 }
                             }

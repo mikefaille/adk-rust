@@ -825,6 +825,11 @@ pub struct SpeechConfig {
     /// Multi-speaker voice configuration
     #[serde(skip_serializing_if = "Option::is_none")]
     pub multi_speaker_voice_config: Option<MultiSpeakerVoiceConfig>,
+    /// BCP-47 output language (e.g. `en-US`). Pins the synthesis language the
+    /// way a Live session's `speechConfig.languageCode` does; callers that
+    /// leave this unset get provider-default language behavior.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub language_code: Option<String>,
 }
 
 /// Voice configuration for text-to-speech
@@ -834,6 +839,12 @@ pub struct VoiceConfig {
     /// Prebuilt voice configuration
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prebuilt_voice_config: Option<PrebuiltVoiceConfig>,
+    /// Flat voice reference: a prebuilt voice name (`Puck`) or a Voice
+    /// Design persona id (`voice_...`). The `prebuiltVoiceConfig` shape
+    /// rejects designed ids (`400 No matching speaker voice found`); the
+    /// flat field accepts both. Set exactly one of the two shapes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub voice: Option<String>,
 }
 
 /// Prebuilt voice configuration
@@ -868,8 +879,93 @@ impl SpeechConfig {
         Self {
             voice_config: Some(VoiceConfig {
                 prebuilt_voice_config: Some(PrebuiltVoiceConfig { voice_name: voice_name.into() }),
+                voice: None,
             }),
             multi_speaker_voice_config: None,
+            language_code: None,
+        }
+    }
+
+    /// Create a new speech config with a single flat voice reference.
+    ///
+    /// `voice_ref` is a prebuilt voice name (`Puck`) or a Voice Design
+    /// persona id (`voice_...`): the flat `voiceConfig.voice` field accepts
+    /// both, while `prebuiltVoiceConfig.voiceName` 400-rejects designed
+    /// ids. Prefer this over [`SpeechConfig::single_voice`] whenever the
+    /// voice may be tenant-provisioned.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use adk_gemini::generation::model::SpeechConfig;
+    ///
+    /// let config = SpeechConfig::single_voice_ref("voice_j6kib7m0vm6k");
+    /// let voice = config.voice_config.expect("voice config present");
+    /// assert_eq!(voice.voice.as_deref(), Some("voice_j6kib7m0vm6k"));
+    /// assert!(voice.prebuilt_voice_config.is_none());
+    /// ```
+    pub fn single_voice_ref(voice_ref: impl Into<String>) -> Self {
+        Self {
+            voice_config: Some(VoiceConfig {
+                prebuilt_voice_config: None,
+                voice: Some(voice_ref.into()),
+            }),
+            multi_speaker_voice_config: None,
+            language_code: None,
+        }
+    }
+
+    /// Create a new speech config with a single voice and a pinned BCP-47
+    /// output language.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use adk_gemini::generation::model::SpeechConfig;
+    ///
+    /// let config = SpeechConfig::single_voice_with_language("Puck", "en-US");
+    /// assert_eq!(config.language_code.as_deref(), Some("en-US"));
+    /// ```
+    pub fn single_voice_with_language(
+        voice_name: impl Into<String>,
+        language_code: impl Into<String>,
+    ) -> Self {
+        Self {
+            voice_config: Some(VoiceConfig {
+                prebuilt_voice_config: Some(PrebuiltVoiceConfig { voice_name: voice_name.into() }),
+                voice: None,
+            }),
+            multi_speaker_voice_config: None,
+            language_code: Some(language_code.into()),
+        }
+    }
+
+    /// Create a new speech config with a single flat voice reference and a
+    /// pinned BCP-47 output language.
+    ///
+    /// Same contract as [`SpeechConfig::single_voice_ref`]: `voice_ref`
+    /// accepts prebuilt names and Voice Design persona ids alike.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use adk_gemini::generation::model::SpeechConfig;
+    ///
+    /// let config =
+    ///     SpeechConfig::single_voice_ref_with_language("voice_j6kib7m0vm6k", "en-US");
+    /// assert_eq!(config.language_code.as_deref(), Some("en-US"));
+    /// ```
+    pub fn single_voice_ref_with_language(
+        voice_ref: impl Into<String>,
+        language_code: impl Into<String>,
+    ) -> Self {
+        Self {
+            voice_config: Some(VoiceConfig {
+                prebuilt_voice_config: None,
+                voice: Some(voice_ref.into()),
+            }),
+            multi_speaker_voice_config: None,
+            language_code: Some(language_code.into()),
         }
     }
 
@@ -880,6 +976,7 @@ impl SpeechConfig {
             multi_speaker_voice_config: Some(MultiSpeakerVoiceConfig {
                 speaker_voice_configs: speakers,
             }),
+            language_code: None,
         }
     }
 }
@@ -891,7 +988,34 @@ impl SpeakerVoiceConfig {
             speaker: speaker.into(),
             voice_config: VoiceConfig {
                 prebuilt_voice_config: Some(PrebuiltVoiceConfig { voice_name: voice_name.into() }),
+                voice: None,
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SpeechConfig;
+
+    #[test]
+    fn voice_ref_serializes_to_the_flat_wire_shape() {
+        let config = SpeechConfig::single_voice_ref_with_language("voice_j6kib7m0vm6k", "en-US");
+        assert_eq!(
+            serde_json::to_value(&config).expect("speech config serializes"),
+            serde_json::json!({
+                "voiceConfig": { "voice": "voice_j6kib7m0vm6k" },
+                "languageCode": "en-US",
+            }),
+        );
+    }
+
+    #[test]
+    fn voice_ref_without_language_omits_the_pin() {
+        let config = SpeechConfig::single_voice_ref("Puck");
+        assert_eq!(
+            serde_json::to_value(&config).expect("speech config serializes"),
+            serde_json::json!({ "voiceConfig": { "voice": "Puck" } }),
+        );
     }
 }
