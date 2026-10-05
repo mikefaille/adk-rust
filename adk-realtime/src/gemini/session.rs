@@ -6,7 +6,7 @@
 use crate::audio::{AudioChunk, AudioFormat};
 use crate::config::{FunctionResponseScheduling, RealtimeConfig, ToolDefinition, VadMode};
 use crate::error::{RealtimeError, Result};
-use crate::events::{ClientEvent, ServerEvent, ToolResponse};
+use crate::events::{ClientEvent, InteractionStatus, ServerEvent, ToolResponse};
 use crate::recovery::{
     RealtimeRecovery, RecoveredSession, RecoveryCause, RecoveryContext, RecoveryContinuity,
     RecoveryDisposition,
@@ -1604,6 +1604,44 @@ impl GeminiRealtimeSession {
                 });
             }
 
+            // Turn-boundary signals the translator previously dropped: the
+            // model is waiting for input, content generation ended, and the
+            // server's interaction state. Booleans and enums only — like the
+            // frame-shape log, these must never carry transcript text.
+            if let Some(waiting) = content.get("waitingForInput")
+                && waiting.as_bool().unwrap_or(false)
+            {
+                events.push(ServerEvent::ModelWaitingForInput {
+                    event_id: uuid::Uuid::new_v4().to_string(),
+                });
+            }
+
+            if let Some(done) = content.get("generationComplete")
+                && done.as_bool().unwrap_or(false)
+            {
+                events.push(ServerEvent::GenerationComplete {
+                    event_id: uuid::Uuid::new_v4().to_string(),
+                });
+            }
+
+            if let Some(raw) = content.get("interactionStatus").and_then(Value::as_str) {
+                let status = match raw {
+                    "IDLE" => InteractionStatus::Idle,
+                    "IN_PROGRESS" => InteractionStatus::InProgress,
+                    _ => {
+                        tracing::debug!(
+                            interaction_status = raw,
+                            "unknown interactionStatus; surfacing as Unknown"
+                        );
+                        InteractionStatus::Unknown
+                    }
+                };
+                events.push(ServerEvent::InteractionStatus {
+                    event_id: uuid::Uuid::new_v4().to_string(),
+                    status,
+                });
+            }
+
             // `usageMetadata` sits outside the `messageType` union: a
             // turn-final `serverContent` frame typically carries the turn's
             // token counts alongside `turnComplete`. Surface them here so the
@@ -2451,6 +2489,9 @@ fn log_frame_shape(value: &Value, log: Option<&FrameLog>) {
         interrupted = flag("interrupted"),
         turn_complete = flag("turnComplete"),
         generation_complete = flag("generationComplete"),
+        waiting_for_input = flag("waitingForInput"),
+        interaction_status =
+            content.and_then(|c| c.get("interactionStatus")).and_then(|v| v.as_str()),
         input_transcript_len = text_len("inputTranscription"),
         output_transcript_len = text_len("outputTranscription"),
         model_turn_parts = parts.map(|p| p.len()),
@@ -3611,6 +3652,145 @@ mod tests {
         let result = GeminiRealtimeSession::translate_event_static(&raw);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Malformed usageMetadata"));
+    }
+
+    #[test]
+    fn waiting_for_input_surfaces_model_waiting() {
+        let raw = json!({ "serverContent": { "waitingForInput": true } }).to_string();
+        let events = GeminiRealtimeSession::translate_event_static(&raw).unwrap();
+
+        assert!(
+            matches!(events.as_slice(), [ServerEvent::ModelWaitingForInput { .. }]),
+            "waitingForInput must surface as ModelWaitingForInput, got {events:?}"
+        );
+    }
+
+    #[test]
+    fn generation_complete_surfaces_event() {
+        // Previously only recorded in the frame-shape log, never surfaced.
+        let raw = json!({ "serverContent": { "generationComplete": true } }).to_string();
+        let events = GeminiRealtimeSession::translate_event_static(&raw).unwrap();
+
+        assert!(
+            matches!(events.as_slice(), [ServerEvent::GenerationComplete { .. }]),
+            "generationComplete must surface as GenerationComplete, got {events:?}"
+        );
+    }
+
+    #[test]
+    fn interaction_status_maps_both_known_values() {
+        for (wire, expected) in
+            [("IDLE", InteractionStatus::Idle), ("IN_PROGRESS", InteractionStatus::InProgress)]
+        {
+            let raw = json!({ "serverContent": { "interactionStatus": wire } }).to_string();
+            let events = GeminiRealtimeSession::translate_event_static(&raw).unwrap();
+
+            match events.as_slice() {
+                [ServerEvent::InteractionStatus { status, .. }] => {
+                    assert_eq!(*status, expected, "wire value {wire}");
+                }
+                other => panic!("expected one InteractionStatus, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn unknown_interaction_status_parses_as_unknown() {
+        // A new provider status must not fail the frame or drop the turn's
+        // other signals — it degrades to present-but-unrecognized.
+        let raw = json!({
+            "serverContent": {
+                "turnComplete": true,
+                "interactionStatus": "SOME_FUTURE_STATE"
+            }
+        })
+        .to_string();
+        let events = GeminiRealtimeSession::translate_event_static(&raw).unwrap();
+
+        match events.as_slice() {
+            [ServerEvent::ResponseDone { .. }, ServerEvent::InteractionStatus { status, .. }] => {
+                assert_eq!(*status, InteractionStatus::Unknown);
+            }
+            other => panic!("expected ResponseDone then InteractionStatus, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn turn_signals_absent_keeps_previous_frame_shape() {
+        // All-absent case: a turn-final frame without the new fields must
+        // keep exactly the events it produced before they existed.
+        let raw = json!({ "serverContent": { "turnComplete": true } }).to_string();
+        let events = GeminiRealtimeSession::translate_event_static(&raw).unwrap();
+
+        assert!(
+            matches!(events.as_slice(), [ServerEvent::ResponseDone { .. }]),
+            "absent signals must add no events, got {events:?}"
+        );
+    }
+
+    #[test]
+    fn false_turn_flags_emit_nothing() {
+        // Present-but-false is the server saying "not this"; only `true`
+        // is a signal. An otherwise empty frame still degrades to Unknown.
+        let raw = json!({
+            "serverContent": { "waitingForInput": false, "generationComplete": false }
+        })
+        .to_string();
+        let events = GeminiRealtimeSession::translate_event_static(&raw).unwrap();
+
+        assert!(
+            matches!(events.as_slice(), [ServerEvent::Unknown]),
+            "false flags must emit nothing, got {events:?}"
+        );
+    }
+
+    #[test]
+    fn combined_turn_signal_fixture_surfaces_all_three() {
+        let raw = json!({
+            "serverContent": {
+                "turnComplete": true,
+                "waitingForInput": true,
+                "generationComplete": true,
+                "interactionStatus": "IN_PROGRESS"
+            }
+        })
+        .to_string();
+        let events = GeminiRealtimeSession::translate_event_static(&raw).unwrap();
+
+        match events.as_slice() {
+            [
+                ServerEvent::ResponseDone { .. },
+                ServerEvent::ModelWaitingForInput { .. },
+                ServerEvent::GenerationComplete { .. },
+                ServerEvent::InteractionStatus { status, .. },
+            ] => {
+                assert_eq!(*status, InteractionStatus::InProgress);
+            }
+            other => panic!("expected all four turn signals in order, got {other:?}"),
+        }
+
+        // The wire tags consumers match on, pinned: a rename here breaks
+        // every downstream deserializer silently.
+        let tags: Vec<String> = events
+            .iter()
+            .map(|e| {
+                serde_json::to_value(e)
+                    .expect("event serializes")
+                    .get("type")
+                    .and_then(|t| t.as_str())
+                    .expect("tagged")
+                    .to_owned()
+            })
+            .collect();
+        assert_eq!(
+            tags,
+            [
+                "response.done",
+                "response.waiting_for_input",
+                "response.generation_complete",
+                "session.interaction_status"
+            ]
+        );
     }
 
     #[test]

@@ -421,6 +421,40 @@ pub enum ServerEvent {
         usage: Usage,
     },
 
+    /// The model finished its turn and is waiting for user input.
+    ///
+    /// Gemini Live sends this as `serverContent.waitingForInput`. A
+    /// turn-boundary signal — the model will produce nothing further until
+    /// the client sends more input — carrying no content.
+    #[serde(rename = "response.waiting_for_input")]
+    ModelWaitingForInput {
+        /// Unique event ID.
+        event_id: String,
+    },
+
+    /// The model's generation for this turn finished.
+    ///
+    /// Gemini Live sends this as `serverContent.generationComplete`,
+    /// alongside `turnComplete` (which maps to [`ServerEvent::ResponseDone`]).
+    #[serde(rename = "response.generation_complete")]
+    GenerationComplete {
+        /// Unique event ID.
+        event_id: String,
+    },
+
+    /// Whether the server considers an interaction in progress.
+    ///
+    /// Gemini Live sends this as `serverContent.interactionStatus`
+    /// (`IDLE` / `IN_PROGRESS`). A state snapshot, not a transition: the
+    /// same value may arrive on consecutive frames.
+    #[serde(rename = "session.interaction_status")]
+    InteractionStatus {
+        /// Unique event ID.
+        event_id: String,
+        /// The reported status.
+        status: InteractionStatus,
+    },
+
     /// Response output item added.
     #[serde(rename = "response.output_item.added")]
     OutputItemAdded {
@@ -625,6 +659,27 @@ pub enum ServerEvent {
     },
 
     /// Unknown event type (for forward compatibility).
+    #[serde(other)]
+    Unknown,
+}
+
+/// Whether the server considers an interaction in progress, as carried by
+/// [`ServerEvent::InteractionStatus`].
+///
+/// Mirrors Gemini Live's `serverContent.interactionStatus`: `IDLE` when no
+/// interaction is in progress, `IN_PROGRESS` while one is. An unrecognized
+/// value parses as [`InteractionStatus::Unknown`] instead of failing the
+/// frame, so a new provider status degrades to "present but unrecognized"
+/// rather than dropping the turn's other signals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum InteractionStatus {
+    /// The server is idle, awaiting input.
+    #[serde(rename = "IDLE")]
+    Idle,
+    /// An interaction is in progress.
+    #[serde(rename = "IN_PROGRESS")]
+    InProgress,
+    /// A status value this version does not recognize.
     #[serde(other)]
     Unknown,
 }
