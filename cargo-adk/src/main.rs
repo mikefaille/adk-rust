@@ -1908,49 +1908,39 @@ fn create_project(
     Ok(())
 }
 
-/// Create a project using the composable system (registry → composition → codegen).
-///
-/// This handles new templates, enterprise patterns, and legacy templates with addons.
-#[allow(clippy::too_many_arguments)]
-fn create_project_composable(
-    name: &str,
+/// Resolves the base template name and effective list of capability addons from the registry,
+/// accounting for enterprise pattern definitions and user-requested addons.
+fn determine_template_and_addons(
+    registry: &TemplateRegistry,
     template: &str,
+    addons: &[String],
+) -> (String, Vec<String>) {
+    if let Some(pattern) = registry.resolve_pattern(template) {
+        let mut all_addons: Vec<String> =
+            pattern.included_addons.iter().map(|a| a.to_string()).collect();
+        for addon in addons {
+            if !all_addons.contains(addon) {
+                all_addons.push(addon.clone());
+            }
+        }
+        (pattern.base_template.to_string(), all_addons)
+    } else {
+        (template.to_string(), addons.to_vec())
+    }
+}
+
+/// Resolves a composition manifest, validates provider model requirements,
+/// and applies any model selection override.
+fn prepare_composition_manifest(
+    registry: &TemplateRegistry,
+    base_template: &str,
+    effective_addons: &[String],
     provider: &str,
     model_override: Option<&str>,
-    output_dir: Option<&Path>,
-    json_output: bool,
-    with_yaml: bool,
-    addons: &[String],
-    template_dir: Option<&Path>,
-    dry_run: bool,
-) -> Result<(), String> {
-    let mut registry = TemplateRegistry::builtin();
-    if let Some(dir) = template_dir {
-        registry.load_custom_dir(dir)?;
-    }
-
-    // Determine the base template and effective addons
-    let (base_template, effective_addons) =
-        if let Some(pattern) = registry.resolve_pattern(template) {
-            // Enterprise pattern: resolve to base_template + pattern addons + user addons
-            let mut all_addons: Vec<String> =
-                pattern.included_addons.iter().map(|a| a.to_string()).collect();
-            for addon in addons {
-                if !all_addons.contains(addon) {
-                    all_addons.push(addon.clone());
-                }
-            }
-            (pattern.base_template.to_string(), all_addons)
-        } else {
-            // Direct template (new composable or legacy with addons)
-            (template.to_string(), addons.to_vec())
-        };
-
-    // Convert addons to &str slice for resolve_composition
+) -> Result<cargo_adk::composition::CompositionManifest, String> {
     let addon_refs: Vec<&str> = effective_addons.iter().map(|s| s.as_str()).collect();
 
-    // Resolve composition
-    let mut manifest = resolve_composition(&registry, &base_template, &addon_refs, provider)
+    let mut manifest = resolve_composition(registry, base_template, &addon_refs, provider)
         .map_err(|e| e.to_string())?;
 
     if adk_model::catalog::requires_explicit_model(provider) && model_override.is_none() {
@@ -1959,65 +1949,56 @@ fn create_project_composable(
         ));
     }
 
-    // Apply model override if provided
     if let Some(model_id) = model_override {
         adk_model::catalog::validate_model_selection(provider, model_id)
             .map_err(|error| error.to_string())?;
         manifest.model_override = Some(model_id.to_string());
     }
 
-    // Generate project files
-    let mut files = generate_project_with_registry(&registry, &manifest, name);
+    Ok(manifest)
+}
 
-    // Optionally include a YAML agent definition
-    if with_yaml {
-        files.push(cargo_adk::composition::GeneratedFile {
-            path: format!("agents/{name}.yaml"),
-            content: generate_yaml_definition(
-                name,
-                provider,
-                &manifest.template_name,
-                model_override,
-            ),
-        });
-    }
+/// Formats and emits dry-run output either as structured JSON or human-readable text.
+fn handle_dry_run(
+    manifest: &cargo_adk::composition::CompositionManifest,
+    files: &[cargo_adk::composition::GeneratedFile],
+    json_output: bool,
+) {
+    let dry_output = DryRunOutput {
+        files: files
+            .iter()
+            .map(|f| DryRunFile { path: f.path.clone(), size_bytes: f.content.len() })
+            .collect(),
+        feature_set: manifest.feature_set.iter().cloned().collect(),
+        dependencies: std::iter::once(format!("adk-rust = {ADK_VERSION}"))
+            .chain(
+                manifest.dependencies.iter().map(|d| format!("{} = {}", d.crate_name, d.version)),
+            )
+            .collect(),
+        env_vars: manifest.env_vars.iter().map(|(k, _)| k.clone()).collect(),
+    };
 
-    // Handle dry-run mode
-    if dry_run {
-        let dry_output = DryRunOutput {
-            files: files
-                .iter()
-                .map(|f| DryRunFile { path: f.path.clone(), size_bytes: f.content.len() })
-                .collect(),
-            feature_set: manifest.feature_set.iter().cloned().collect(),
-            dependencies: std::iter::once(format!("adk-rust = {ADK_VERSION}"))
-                .chain(
-                    manifest
-                        .dependencies
-                        .iter()
-                        .map(|d| format!("{} = {}", d.crate_name, d.version)),
-                )
-                .collect(),
-            env_vars: manifest.env_vars.iter().map(|(k, _)| k.clone()).collect(),
-        };
-
-        if json_output {
-            println!("{}", serde_json::to_string_pretty(&dry_output).unwrap_or_default());
-        } else {
-            println!("Dry run — files that would be generated:\n");
-            for file in &dry_output.files {
-                println!("  {:<20} ({} bytes)", file.path, file.size_bytes);
-            }
-            println!("\nFeatures: [{}]", dry_output.feature_set.join(", "));
-            if !dry_output.env_vars.is_empty() {
-                println!("Env vars: {}", dry_output.env_vars.join(", "));
-            }
-            println!("\nNo files were written to disk.");
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&dry_output).unwrap_or_default());
+    } else {
+        println!("Dry run — files that would be generated:\n");
+        for file in &dry_output.files {
+            println!("  {:<20} ({} bytes)", file.path, file.size_bytes);
         }
-        return Ok(());
+        println!("\nFeatures: [{}]", dry_output.feature_set.join(", "));
+        if !dry_output.env_vars.is_empty() {
+            println!("Env vars: {}", dry_output.env_vars.join(", "));
+        }
+        println!("\nNo files were written to disk.");
     }
+}
 
-    // Write files to disk
+/// Creates project target directories and writes generated project files to disk.
+fn write_project_files(
+    name: &str,
+    files: &[cargo_adk::composition::GeneratedFile],
+    output_dir: Option<&Path>,
+) -> Result<PathBuf, String> {
     let base_dir = output_dir.unwrap_or_else(|| Path::new("."));
     let project_path = base_dir.join(name);
 
@@ -2025,7 +2006,7 @@ fn create_project_composable(
         return Err(format!("directory '{}' already exists", project_path.display()));
     }
 
-    for file in &files {
+    for file in files {
         let file_path = project_path.join(&file.path);
         if let Some(parent) = file_path.parent() {
             fs::create_dir_all(parent).map_err(|e| format!("failed to create directory: {e}"))?;
@@ -2034,7 +2015,19 @@ fn create_project_composable(
             .map_err(|e| format!("failed to write {}: {e}", file.path))?;
     }
 
-    // Build output
+    Ok(project_path)
+}
+
+/// Prints project creation output in either human-readable text or JSON format.
+fn print_project_created_output(
+    project_path: &Path,
+    template: &str,
+    provider: &str,
+    effective_addons: &[String],
+    manifest: &cargo_adk::composition::CompositionManifest,
+    files: &[cargo_adk::composition::GeneratedFile],
+    json_output: bool,
+) {
     let files_created: Vec<String> = files.iter().map(|f| f.path.clone()).collect();
 
     if json_output {
@@ -2064,6 +2057,70 @@ fn create_project_composable(
         println!("  cp .env.example .env    # add your API key");
         println!("  cargo run");
     }
+}
+
+/// Create a project using the composable system (registry → composition → codegen).
+///
+/// This handles new templates, enterprise patterns, and legacy templates with addons.
+#[allow(clippy::too_many_arguments)]
+fn create_project_composable(
+    name: &str,
+    template: &str,
+    provider: &str,
+    model_override: Option<&str>,
+    output_dir: Option<&Path>,
+    json_output: bool,
+    with_yaml: bool,
+    addons: &[String],
+    template_dir: Option<&Path>,
+    dry_run: bool,
+) -> Result<(), String> {
+    let mut registry = TemplateRegistry::builtin();
+    if let Some(dir) = template_dir {
+        registry.load_custom_dir(dir)?;
+    }
+
+    let (base_template, effective_addons) =
+        determine_template_and_addons(&registry, template, addons);
+
+    let manifest = prepare_composition_manifest(
+        &registry,
+        &base_template,
+        &effective_addons,
+        provider,
+        model_override,
+    )?;
+
+    let mut files = generate_project_with_registry(&registry, &manifest, name);
+
+    if with_yaml {
+        files.push(cargo_adk::composition::GeneratedFile {
+            path: format!("agents/{name}.yaml"),
+            content: generate_yaml_definition(
+                name,
+                provider,
+                &manifest.template_name,
+                model_override,
+            ),
+        });
+    }
+
+    if dry_run {
+        handle_dry_run(&manifest, &files, json_output);
+        return Ok(());
+    }
+
+    let project_path = write_project_files(name, &files, output_dir)?;
+
+    print_project_created_output(
+        &project_path,
+        template,
+        provider,
+        &effective_addons,
+        &manifest,
+        &files,
+        json_output,
+    );
 
     Ok(())
 }
@@ -2886,6 +2943,93 @@ mod tests {
 
         // Verify main.rs references A2aServer
         assert!(main_rs.contains("A2aServer"), "a2a template main.rs must use A2aServer");
+    }
+
+    #[test]
+    fn test_determine_template_and_addons_direct_template() {
+        let registry = TemplateRegistry::builtin();
+        let user_addons = vec!["telemetry".to_string(), "auth".to_string()];
+        let (base, addons) = determine_template_and_addons(&registry, "llm", &user_addons);
+        assert_eq!(base, "llm");
+        assert_eq!(addons, vec!["telemetry", "auth"]);
+    }
+
+    #[test]
+    fn test_determine_template_and_addons_pattern() {
+        let registry = TemplateRegistry::builtin();
+        let user_addons = vec!["auth".to_string(), "memory".to_string()];
+        let (base, addons) = determine_template_and_addons(&registry, "production", &user_addons);
+        assert_eq!(base, "llm");
+        // Pattern "production" includes ["telemetry", "auth", "sessions", "health"]
+        // Merged list should contain telemetry, auth, sessions, health, memory without duplicating auth.
+        assert!(addons.contains(&"telemetry".to_string()));
+        assert!(addons.contains(&"auth".to_string()));
+        assert!(addons.contains(&"sessions".to_string()));
+        assert!(addons.contains(&"memory".to_string()));
+        assert_eq!(addons.iter().filter(|a| *a == "auth").count(), 1);
+    }
+
+    #[test]
+    fn test_prepare_composition_manifest_valid() {
+        let registry = TemplateRegistry::builtin();
+        let manifest = prepare_composition_manifest(
+            &registry,
+            "llm",
+            &["telemetry".to_string()],
+            "gemini",
+            None,
+        )
+        .expect("manifest preparation should succeed");
+        assert_eq!(manifest.template_name, "llm");
+        assert_eq!(manifest.provider, "gemini");
+        assert!(manifest.feature_set.contains("telemetry"));
+    }
+
+    #[test]
+    fn test_prepare_composition_manifest_explicit_model_required() {
+        let registry = TemplateRegistry::builtin();
+        let err = prepare_composition_manifest(&registry, "llm", &[], "azure-ai", None)
+            .expect_err("azure-ai provider requires explicit model override");
+        assert!(err.contains("pass --model"));
+    }
+
+    #[test]
+    fn test_prepare_composition_manifest_model_override() {
+        let registry = TemplateRegistry::builtin();
+        let manifest =
+            prepare_composition_manifest(&registry, "llm", &[], "gemini", Some("gemini-2.5-flash"))
+                .expect("model override should be applied");
+        assert_eq!(manifest.model_override.as_deref(), Some("gemini-2.5-flash"));
+    }
+
+    #[test]
+    fn test_write_project_files() {
+        let tmp = std::env::temp_dir().join("cargo-adk-test-write-files");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+
+        let files = vec![
+            cargo_adk::composition::GeneratedFile {
+                path: "Cargo.toml".to_string(),
+                content: "dummy cargo content".to_string(),
+            },
+            cargo_adk::composition::GeneratedFile {
+                path: "src/main.rs".to_string(),
+                content: "fn main() {}".to_string(),
+            },
+        ];
+
+        let project_path = write_project_files("my-written-agent", &files, Some(&tmp))
+            .expect("files should be written");
+        assert_eq!(project_path, tmp.join("my-written-agent"));
+        assert!(project_path.join("Cargo.toml").exists());
+        assert!(project_path.join("src/main.rs").exists());
+
+        let err = write_project_files("my-written-agent", &files, Some(&tmp))
+            .expect_err("should fail if directory already exists");
+        assert!(err.contains("already exists"));
+
+        let _ = fs::remove_dir_all(&tmp);
     }
 
     // ── Property-Based Tests ────────────────────────────────────────────────
