@@ -1,7 +1,8 @@
 //! Gemini native audio TTS provider using the Interactions API.
 //!
 //! Supports all Gemini TTS models:
-//! - `gemini-3.1-flash-tts-preview` — expressive, audio tags, multi-speaker (default)
+//! - `gemini-3.8-flash-tts` — expressive, audio tags, multi-speaker (default)
+//! - `gemini-3.1-flash-tts-preview` — retired predecessor
 //! - `gemini-2.5-flash-preview-tts` — fast, multi-speaker
 //! - `gemini-2.5-pro-preview-tts` — high-fidelity, multi-speaker
 
@@ -26,7 +27,8 @@ use crate::traits::{TtsProvider, TtsRequest, Voice};
 /// Available Gemini TTS model IDs.
 #[allow(dead_code)]
 pub mod models {
-    /// Gemini 3.1 Flash TTS — expressive audio tags, multi-speaker, low-latency.
+    /// Gemini 3.1 Flash TTS — retired; kept for pinned callers. New code uses
+    /// `adk_model::catalog::GEMINI_TTS_DEFAULT`.
     pub const GEMINI_3_1_FLASH_TTS: &str = "gemini-3.1-flash-tts-preview";
     /// Gemini 2.5 Flash TTS — fast, multi-speaker.
     pub const GEMINI_2_5_FLASH_TTS: &str = "gemini-2.5-flash-preview-tts";
@@ -57,7 +59,7 @@ impl SpeakerConfig {
 /// ```rust,ignore
 /// use adk_audio::GeminiTts;
 ///
-/// // Default: gemini-3.1-flash-tts-preview
+/// // Default: gemini-3.8-flash-tts (adk_model::catalog::GEMINI_TTS_DEFAULT)
 /// let tts = GeminiTts::from_env()?;
 ///
 /// // Specific model
@@ -91,7 +93,7 @@ impl GeminiTts {
 
     /// Create with explicit config.
     pub fn new(config: CloudTtsConfig) -> AudioResult<Self> {
-        let model = models::GEMINI_3_1_FLASH_TTS.to_string();
+        let model = adk_model::catalog::GEMINI_TTS_DEFAULT.to_string();
         let mut builder =
             GeminiBuilder::new(&config.api_key).with_model(Model::from(model.clone()));
         if let Some(ref base) = config.base_url {
