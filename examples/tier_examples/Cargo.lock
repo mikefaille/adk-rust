@@ -70,6 +70,7 @@ version = "2.1.0"
 dependencies = [
  "adk-core",
  "adk-gemini",
+ "adk-model",
  "async-stream",
  "async-trait",
  "base64 0.22.1",

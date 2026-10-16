@@ -173,6 +173,7 @@ version = "2.1.0"
 dependencies = [
  "adk-core",
  "adk-gemini",
+ "adk-model",
  "adk-realtime",
  "async-stream",
  "async-trait",

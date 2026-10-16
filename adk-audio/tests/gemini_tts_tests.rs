@@ -475,7 +475,7 @@ async fn test_gemini_tts_http_boundary_contract() {
         .and(header("x-goog-api-key", "test-api-key"))
         .and(header("Api-Revision", "2026-05-20"))
         .and(wiremock::matchers::body_json(serde_json::json!({
-            "model": "gemini-3.1-flash-tts-preview",
+            "model": "gemini-3.8-flash-tts",
             "input": "HTTP boundary contract test",
             "response_format": {
                 "type": "audio"

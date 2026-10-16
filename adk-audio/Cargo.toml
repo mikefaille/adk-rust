@@ -32,6 +32,7 @@ pin-project-lite = "0.2"
 reqwest = { workspace = true, features = ["multipart"], optional = true }
 base64 = { version = "0.22", optional = true }
 adk-gemini = { workspace = true, features = ["interactions"], optional = true }
+adk-model = { workspace = true, optional = true }
 url = "2"
 
 
@@ -86,7 +87,7 @@ wiremock = "0.6"
 
 [features]
 default = ["tts", "stt"]
-tts = ["dep:reqwest", "dep:base64", "dep:adk-gemini"]
+tts = ["dep:reqwest", "dep:base64", "dep:adk-gemini", "dep:adk-model"]
 stt = ["dep:reqwest", "dep:tokio-tungstenite"]
 music = ["dep:reqwest"]
 # Built-in DSP processors use no external dependencies.
