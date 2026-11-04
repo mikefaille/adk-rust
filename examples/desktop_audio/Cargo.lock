@@ -38,6 +38,8 @@ name = "adk-audio"
 version = "3.0.0"
 dependencies = [
  "adk-core",
+ "adk-gemini",
+ "adk-model",
  "async-stream",
  "async-trait",
  "base64",
@@ -53,6 +55,7 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
  "tracing",
+ "url",
 ]
 
 [[package]]

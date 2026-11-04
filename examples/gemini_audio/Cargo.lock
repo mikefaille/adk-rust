@@ -72,6 +72,8 @@ name = "adk-audio"
 version = "3.0.0"
 dependencies = [
  "adk-core",
+ "adk-gemini",
+ "adk-model",
  "async-stream",
  "async-trait",
  "base64 0.22.1",
@@ -86,6 +88,7 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
  "tracing",
+ "url",
 ]
 
 [[package]]
@@ -135,6 +138,7 @@ dependencies = [
  "chrono",
  "futures",
  "http",
+ "reqwest 0.12.28",
  "rustls",
  "serde",
  "serde_json",

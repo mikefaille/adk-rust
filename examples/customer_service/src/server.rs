@@ -37,6 +37,7 @@ use serde_json::json;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tracing::{info, warn};
 
+use adk_core::ToolEffect;
 use adk_realtime::config::{RealtimeConfig, ToolDefinition, VadConfig};
 use adk_realtime::events::{ServerEvent, ToolCall};
 use adk_realtime::gemini::{GeminiLiveBackend, GeminiRealtimeModel};
@@ -153,6 +154,7 @@ fn process_refund_def() -> ToolDefinition {
             "Issue a refund for an order. Only call when a refund is clearly warranted.".into(),
         ),
         behavior: None,
+        effect: ToolEffect::NonIdempotent,
         parameters: Some(json!({
             "type": "object",
             "properties": {
@@ -188,6 +190,7 @@ fn connect_to_human_def() -> ToolDefinition {
             "Transfer the customer to a human agent for complex or sensitive issues.".into(),
         ),
         behavior: None,
+        effect: ToolEffect::NonIdempotent,
         parameters: Some(json!({
             "type": "object",
             "properties": {

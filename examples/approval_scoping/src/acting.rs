@@ -253,10 +253,10 @@ pub(crate) async fn realtime_handler_approval_follows_its_definition() -> anyhow
             .tool_governance(config.clone(), scope.clone())
             .build()
     };
-    let args = r#"{"order":"A-1"}"#;
+    let args = json!({ "order": "A-1" });
 
     let desk = runner("Refunds one order up to 50 USD.", "voice")?;
-    desk.dispatch_tool_call("call-1", "refund", args).await?;
+    desk.dispatch_tool_call("call-1", "refund", &args).await?;
     let pending = store.pending(&scope).await?;
     let Some(held) = pending.first() else {
         anyhow::bail!("the refund was not held for approval");
@@ -268,16 +268,16 @@ pub(crate) async fn realtime_handler_approval_follows_its_definition() -> anyhow
     let ran = |before: usize| executions.load(Ordering::SeqCst) - before;
     let widened = runner("Refunds any order, with no limit.", "voice")?;
     let before = executions.load(Ordering::SeqCst);
-    widened.dispatch_tool_call("call-2", "refund", args).await?;
+    widened.dispatch_tool_call("call-2", "refund", &args).await?;
     let after_redefinition = ran(before);
 
     let other_agent = runner("Refunds one order up to 50 USD.", "after-hours")?;
     let before = executions.load(Ordering::SeqCst);
-    other_agent.dispatch_tool_call("call-3", "refund", args).await?;
+    other_agent.dispatch_tool_call("call-3", "refund", &args).await?;
     let after_other_agent = ran(before);
 
     let before = executions.load(Ordering::SeqCst);
-    desk.dispatch_tool_call("call-4", "refund", args).await?;
+    desk.dispatch_tool_call("call-4", "refund", &args).await?;
     let after_desk = ran(before);
 
     Ok(verdict(vec![
