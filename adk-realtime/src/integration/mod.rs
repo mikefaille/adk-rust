@@ -413,7 +413,8 @@ impl IntegratedRealtimeRunner {
                 Err(e) => {
                     tracing::warn!(
                         session_id = %inner.identity.session_id,
-                        error = %e,
+                        error.kind = %e.category,
+                        error.code = e.code,
                         "session load failed (non-fatal)"
                     );
                 }
@@ -455,7 +456,8 @@ impl IntegratedRealtimeRunner {
                 }
                 Err(e) => {
                     tracing::warn!(
-                        error = %e,
+                        error.kind = %e.category,
+                        error.code = e.code,
                         "memory query failed (non-fatal)"
                     );
                 }
@@ -726,7 +728,7 @@ impl IntegratedRealtimeRunner {
                             tracing::warn!(
                                 tool = %name,
                                 call_id = %call_id,
-                                error = %e,
+                                error.kind = e.kind(),
                                 "tool dispatch failed (non-fatal)"
                             );
                         }
@@ -737,7 +739,7 @@ impl IntegratedRealtimeRunner {
                             && let Err(e) = task_inner.runner.respond_after_tools().await
                         {
                             tracing::warn!(
-                                error = %e,
+                                error.kind = e.kind(),
                                 "post-tool response trigger failed (non-fatal)"
                             );
                         } else if spawn_token.is_cancelled() {
@@ -749,7 +751,7 @@ impl IntegratedRealtimeRunner {
                     tracing::warn!(
                         tool = %name,
                         call_id = %call_id,
-                        error = %e,
+                        error.kind = e.kind(),
                         "tool dispatch failed (non-fatal)"
                     );
                 }
@@ -762,7 +764,10 @@ impl IntegratedRealtimeRunner {
             if let ServerEvent::ResponseDone { .. } = server_event
                 && let Err(e) = inner.runner.respond_after_tools().await
             {
-                tracing::warn!(error = %e, "post-tool response trigger failed (non-fatal)");
+                tracing::warn!(
+                    error.kind = e.kind(),
+                    "post-tool response trigger failed (non-fatal)"
+                );
             }
         }
 
@@ -920,7 +925,7 @@ impl Inner {
         if let Some(session_service) = &self.session_service
             && let Err(e) = session_service.append_event(&self.identity.session_id, event).await
         {
-            tracing::warn!(error = %e, "{failure}");
+            tracing::warn!(error.kind = %e.category, error.code = e.code, "{failure}");
         }
     }
 
@@ -975,7 +980,7 @@ impl Inner {
                 // The audio already played cannot be unsaid; what can be stopped is stopped,
                 // and nothing of the turn reaches the session or memory.
                 if let Err(e) = self.runner.interrupt().await {
-                    tracing::warn!(error = %e, "interrupting a blocked response failed");
+                    tracing::warn!(error.kind = e.kind(), "interrupting a blocked response failed");
                 }
                 let (guardrail, reason) = match &error {
                     GuardrailError::Blocked { failures, .. } => failures
@@ -1045,7 +1050,7 @@ impl Inner {
                         )
                         .await
                     {
-                        tracing::warn!(error = %e, "memory persist failed (non-fatal)");
+                        tracing::warn!(error.kind = %e.category, error.code = e.code, "memory persist failed (non-fatal)");
                     }
                 }
 
@@ -1248,20 +1253,12 @@ impl Inner {
                                 // and screening live, so the unscreened result is withheld.
                                 // The tool has already run, and the model is told so it does
                                 // not repeat a side effect.
-                                if self.runner.records_payloads() {
-                                    tracing::error!(
-                                        tool = tool.name(),
-                                        error = %e.diagnostics(),
-                                        error.message = %e.message,
-                                        "after_tool_call plugin failed; withholding the tool result"
-                                    );
-                                } else {
-                                    tracing::error!(
-                                        tool = tool.name(),
-                                        error = %e.diagnostics(),
-                                        "after_tool_call plugin failed; withholding the tool result"
-                                    );
-                                }
+                                tracing::error!(
+                                    tool = tool.name(),
+                                    error.kind = %e.category,
+                                    error.code = e.code,
+                                    "after_tool_call plugin failed; withholding the tool result"
+                                );
                                 outcome.result = adk_core::result_withheld_response(
                                     tool.name(),
                                     &e,
@@ -1280,20 +1277,12 @@ impl Inner {
                     // Fail closed. A before-tool plugin is where authorization, redaction, and
                     // policy live, so executing the tool when that pipeline fails turns a
                     // broken guard into no guard. The model receives the error instead.
-                    if self.runner.records_payloads() {
-                        tracing::error!(
-                            tool = tool.name(),
-                            error = %e.diagnostics(),
-                            error.message = %e.message,
-                            "before_tool_call plugin failed; refusing the tool"
-                        );
-                    } else {
-                        tracing::error!(
-                            tool = tool.name(),
-                            error = %e.diagnostics(),
-                            "before_tool_call plugin failed; refusing the tool"
-                        );
-                    }
+                    tracing::error!(
+                        tool = tool.name(),
+                        error.kind = %e.category,
+                        error.code = e.code,
+                        "before_tool_call plugin failed; refusing the tool"
+                    );
                     let failure = if self.runner.exposes_tool_error_messages() {
                         e.to_string()
                     } else {
@@ -1428,20 +1417,12 @@ impl Inner {
                     Some(result) => match result {
                         Ok(Ok(value)) => value,
                         Ok(Err(e)) => {
-                            if self.runner.records_payloads() {
-                                tracing::warn!(
-                                    tool = tool.name(),
-                                    error = %e.diagnostics(),
-                                    error.message = %e.message,
-                                    "realtime tool failed"
-                                );
-                            } else {
-                                tracing::warn!(
-                                    tool = tool.name(),
-                                    error = %e.diagnostics(),
-                                    "realtime tool failed"
-                                );
-                            }
+                            tracing::warn!(
+                                tool = tool.name(),
+                                error.kind = %e.category,
+                                error.code = e.code,
+                                "realtime tool failed"
+                            );
                             let response = adk_core::tool_error_response(
                                 tool.name(),
                                 &e,

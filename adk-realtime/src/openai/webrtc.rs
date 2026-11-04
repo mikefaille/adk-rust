@@ -793,7 +793,7 @@ struct Driver {
 impl Driver {
     async fn run(mut self) {
         if let Err(error) = self.drive().await {
-            tracing::warn!(error = %error, "openai webrtc transport stopped");
+            tracing::warn!(error.kind = error.kind(), "openai webrtc transport stopped");
             let _ = self.event_tx.send(Err(error));
         }
         self.connected.store(false, Ordering::Relaxed);
@@ -867,7 +867,7 @@ impl Driver {
                         self.send(Ok(event));
                     }
                     Err(error) => {
-                        tracing::warn!(error = %error, payload.bytes = data.data.len(), "realtime event failed to parse");
+                        tracing::warn!(error.kind = %adk_core::json_error_summary(&error), payload.bytes = data.data.len(), "realtime event failed to parse");
                     }
                 }
             }
