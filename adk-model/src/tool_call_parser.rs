@@ -233,11 +233,7 @@ fn parse_llama_format(text: &str, _parts: &mut Vec<Part>) -> Option<Vec<Part>> {
     }
 
     let json_str = text[start + tag.len()..].trim();
-    if let Some(part) = parse_json_tool_call(json_str) {
-        result.push(part);
-    } else {
-        return None;
-    }
+    result.push(parse_json_tool_call(json_str)?);
 
     Some(result)
 }
@@ -466,11 +462,7 @@ fn parse_action_tag_format(text: &str) -> Option<Vec<Part>> {
     let end = after_open.find(end_tag)?;
     let inner = after_open[..end].trim();
 
-    if let Some(part) = parse_json_tool_call(inner) {
-        result.push(part);
-    } else {
-        return None;
-    }
+    result.push(parse_json_tool_call(inner)?);
 
     let trailing = &after_open[end + end_tag.len()..];
     if !trailing.is_empty() {

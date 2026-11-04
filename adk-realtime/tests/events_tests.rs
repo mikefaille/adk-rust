@@ -19,6 +19,7 @@ fn test_tool_response_creation() {
     let response = ToolResponse {
         call_id: "call_123".to_string(),
         output: serde_json::json!({"temperature": 72, "condition": "sunny"}),
+        scheduling: None,
     };
 
     assert_eq!(response.call_id, "call_123");
@@ -154,7 +155,9 @@ fn test_server_event_function_call_done_deserialization() {
         ServerEvent::FunctionCallDone { call_id, name, arguments, .. } => {
             assert_eq!(call_id, "call_abc");
             assert_eq!(name, "get_weather");
-            assert!(arguments.contains("NYC"));
+            // In raw deserialization, it's still a string.
+            // The normalization happens in the session's receive_raw.
+            assert_eq!(arguments, "{\"location\":\"NYC\"}");
         }
         _ => panic!("Expected FunctionCallDone event"),
     }

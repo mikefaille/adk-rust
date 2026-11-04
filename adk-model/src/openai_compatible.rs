@@ -337,6 +337,15 @@ impl OpenAICompatibleConfig {
             .with_provider_name("cohere")
             .with_base_url("https://api.cohere.com/compatibility/v1")
     }
+
+    /// Preset for Moonshot / Kimi OpenAI-compatible API endpoints.
+    ///
+    /// Base URL: `https://api.moonshot.ai/v1`
+    pub fn kimi(api_key: impl Into<String>, model: impl Into<String>) -> Self {
+        Self::new(api_key, model)
+            .with_provider_name("kimi")
+            .with_base_url("https://api.moonshot.ai/v1")
+    }
 }
 
 /// Error codes a compatible client reports.
@@ -395,6 +404,8 @@ pub struct OpenAICompatible {
     parallel_tool_calls: bool,
     reasoning_replay_field: Option<ReasoningReplayField>,
     error_codes: ErrorCodes,
+    adapter: std::sync::Arc<dyn SchemaAdapter>,
+    cache: SchemaCache,
 }
 
 /// Builds the redirect-free HTTP client; adapters receive defaults on each request.
@@ -442,6 +453,12 @@ impl OpenAICompatible {
     ) -> Result<Self, AdkError> {
         crate::catalog::warn_if_obsolete(&config.provider_name, &config.model);
         let base_url = config.base_url.unwrap_or_else(|| "https://api.openai.com/v1".to_string());
+        let adapter: std::sync::Arc<dyn SchemaAdapter> = if config.provider_name == "kimi" {
+            std::sync::Arc::new(adk_core::KimiSchemaAdapter)
+        } else {
+            std::sync::Arc::new(GenericSchemaAdapter)
+        };
+        let cache = SchemaCache::for_adapter(std::sync::Arc::clone(&adapter));
 
         let timeouts = crate::HttpTimeouts::default();
         Ok(Self {
@@ -459,6 +476,8 @@ impl OpenAICompatible {
             parallel_tool_calls: config.parallel_tool_calls,
             reasoning_replay_field: None,
             error_codes: ErrorCodes::COMPATIBLE,
+            adapter,
+            cache,
         })
     }
 
@@ -511,6 +530,11 @@ impl OpenAICompatible {
     pub fn with_timeouts(mut self, timeouts: crate::HttpTimeouts) -> Result<Self, AdkError> {
         self.http = compatible_http_client(timeouts, &self.provider_name)?;
         Ok(self)
+    }
+
+    /// Access the custom schema adapter for this provider.
+    pub fn schema_adapter(&self) -> &dyn SchemaAdapter {
+        self.adapter.as_ref()
     }
 
     /// Set the retry configuration (builder pattern).
@@ -692,7 +716,7 @@ pub(crate) fn build_request_json(
     request_builder.model(model).messages(messages);
 
     if !request.tools.is_empty() {
-        let tools = convert::convert_tools(&request.tools, adapter, cache);
+        let tools = convert::convert_tools(&request.tools, adapter, cache)?;
         request_builder.tools(tools);
         // OpenAI defaults parallel_tool_calls to true.
         request_builder.parallel_tool_calls(capabilities.parallel_tool_calls);
@@ -932,6 +956,10 @@ impl Llm for OpenAICompatible {
         &self.model
     }
 
+    fn schema_adapter(&self) -> &dyn SchemaAdapter {
+        self.adapter.as_ref()
+    }
+
     #[tracing::instrument(
         name = "model.generate_content",
         skip_all,
@@ -976,11 +1004,8 @@ impl Llm for OpenAICompatible {
         let declared_tools: std::collections::HashSet<String> =
             request.tools.keys().cloned().collect();
 
-        // Normalize tool schemas at request time using the schema adapter.
+        // Normalize tool schemas at request time using the instance schema adapter and cache.
         let adapter = self.schema_adapter();
-        use std::sync::LazyLock;
-        static SCHEMA_CACHE: LazyLock<SchemaCache> =
-            LazyLock::new(|| SchemaCache::for_adapter(std::sync::Arc::new(GenericSchemaAdapter)));
         let request_body = build_request_json(
             &model,
             &request,
@@ -991,7 +1016,7 @@ impl Llm for OpenAICompatible {
             },
             reasoning_replay_field,
             adapter,
-            &SCHEMA_CACHE,
+            &self.cache,
         )?;
 
         let usage_span = adk_telemetry::llm_generate_span(&provider_name, &model, stream);
@@ -1894,5 +1919,162 @@ mod tests {
         });
         let response = convert::from_raw_openai_response("openai", &raw, &Default::default());
         assert_eq!(response.provider_metadata.unwrap()["logprobs"]["content"][0]["token"], "1");
+    }
+
+    #[test]
+    fn kimi_preset_sets_endpoint_and_instantiates_adapter() {
+        let config = OpenAICompatibleConfig::kimi("test-kimi-key", "moonshot-v1-8k");
+        assert_eq!(config.provider_name, "kimi");
+        assert_eq!(config.model, "moonshot-v1-8k");
+        assert_eq!(config.base_url.as_deref(), Some("https://api.moonshot.ai/v1"));
+
+        let client = OpenAICompatible::new(config).expect("client builds");
+        assert_eq!(client.schema_adapter().identifier(), "kimi");
+        assert!(client.schema_adapter().validate_tool_name("valid_tool_name").is_ok());
+        assert!(
+            client.schema_adapter().validate_tool_name("ab").is_err(),
+            "tool name under 3 chars is invalid for Kimi"
+        );
+
+        // Verify trait object polymorphism through `&dyn Llm`
+        let llm: &dyn Llm = &client;
+        assert_eq!(llm.schema_adapter().identifier(), "kimi");
+    }
+
+    #[test]
+    fn build_request_json_enforces_kimi_tool_name_validation_and_compilation() {
+        let config = OpenAICompatibleConfig::kimi("test-kimi-key", "moonshot-v1-8k");
+        let client = OpenAICompatible::new(config).expect("client builds");
+
+        // 1. Invalid tool name under 3 chars fails request building locally
+        let mut invalid_tools = std::collections::HashMap::new();
+        invalid_tools.insert(
+            "ab".to_string(),
+            serde_json::json!({
+                "description": "Short tool name",
+                "parameters": { "type": "object" }
+            }),
+        );
+        let invalid_request = LlmRequest {
+            model: "moonshot-v1-8k".to_string(),
+            contents: vec![],
+            tools: invalid_tools,
+            config: None,
+            previous_response_id: None,
+        };
+        let err = build_request_json(
+            "moonshot-v1-8k",
+            &invalid_request,
+            &None,
+            ChatCapabilities { parallel_tool_calls: false, native_pdf: false },
+            None,
+            client.schema_adapter(),
+            &client.cache,
+        );
+        assert!(err.is_err(), "Invalid Kimi tool name 'ab' must fail request building locally");
+
+        // 2. Overlong Kimi tool name (>64 chars) fails request building
+        let mut overlong_tools = std::collections::HashMap::new();
+        let overlong_name = "a".repeat(65);
+        overlong_tools.insert(
+            overlong_name,
+            serde_json::json!({
+                "description": "Overlong tool name",
+                "parameters": { "type": "object" }
+            }),
+        );
+        let overlong_request = LlmRequest {
+            model: "moonshot-v1-8k".to_string(),
+            contents: vec![],
+            tools: overlong_tools,
+            config: None,
+            previous_response_id: None,
+        };
+        let err_overlong = build_request_json(
+            "moonshot-v1-8k",
+            &overlong_request,
+            &None,
+            ChatCapabilities { parallel_tool_calls: false, native_pdf: false },
+            None,
+            client.schema_adapter(),
+            &client.cache,
+        );
+        assert!(
+            err_overlong.is_err(),
+            "Overlong Kimi tool name (>64 chars) must fail request building before truncation"
+        );
+
+        // 3. Kimi tool parameter schema with non-object root type or external $ref fails compilation
+        let mut unsupported_schema_tools = std::collections::HashMap::new();
+        unsupported_schema_tools.insert(
+            "get_user_info".to_string(),
+            serde_json::json!({
+                "description": "Get user info",
+                "parameters": {
+                    "type": "string", // Non-object root type
+                }
+            }),
+        );
+        let unsupported_request = LlmRequest {
+            model: "moonshot-v1-8k".to_string(),
+            contents: vec![],
+            tools: unsupported_schema_tools,
+            config: None,
+            previous_response_id: None,
+        };
+        let err_schema = build_request_json(
+            "moonshot-v1-8k",
+            &unsupported_request,
+            &None,
+            ChatCapabilities { parallel_tool_calls: false, native_pdf: false },
+            None,
+            client.schema_adapter(),
+            &client.cache,
+        );
+        assert!(
+            err_schema.is_err(),
+            "Kimi tool schema with non-object root type must fail compilation"
+        );
+
+        // 4. Kimi tool parameter schema with valid internal $ref and anyOf succeeds
+        let mut valid_mfjs_tools = std::collections::HashMap::new();
+        valid_mfjs_tools.insert(
+            "get_weather".to_string(),
+            serde_json::json!({
+                "description": "Get weather forecast",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "location": {
+                            "anyOf": [
+                                { "type": "string" },
+                                { "$ref": "#/$defs/LocationObj" }
+                            ]
+                        }
+                    }
+                }
+            }),
+        );
+        let valid_mfjs_request = LlmRequest {
+            model: "moonshot-v1-8k".to_string(),
+            contents: vec![],
+            tools: valid_mfjs_tools,
+            config: None,
+            previous_response_id: None,
+        };
+        let body = build_request_json(
+            "moonshot-v1-8k",
+            &valid_mfjs_request,
+            &None,
+            ChatCapabilities { parallel_tool_calls: false, native_pdf: false },
+            None,
+            client.schema_adapter(),
+            &client.cache,
+        )
+        .expect("Kimi tool request with internal $ref and anyOf must build under MFJS spec");
+
+        let tools_json = body.get("tools").and_then(|t| t.as_array()).expect("tools array");
+        assert_eq!(tools_json.len(), 1);
+        assert_eq!(tools_json[0]["function"]["name"].as_str(), Some("get_weather"));
     }
 }

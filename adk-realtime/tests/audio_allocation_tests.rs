@@ -52,7 +52,12 @@ fn frame() -> AudioChunk {
 ///
 /// Holding a copy here keeps the comparison honest after the production source
 /// changed: the "before" arm is the code that actually shipped, not a
-/// reconstruction that drifts with the crate.
+/// reconstruction that drifts with the crate. That pins the old
+/// `chunks_exact` idiom deliberately — modernizing it would defeat the test.
+// Pinned historical baseline, not production code: see above.
+// unknown_lints: the clippy lint below postdates the pinned 1.95 tier.
+#[allow(unknown_lints)]
+#[allow(clippy::chunks_exact_to_as_chunks)]
 fn decode_owned(data: &[u8]) -> Vec<i16> {
     let mut samples = Vec::with_capacity(data.len() / size_of::<i16>());
     // Deliberately not a constant size: this "before" snapshot must keep the
@@ -135,7 +140,7 @@ fn pcm16_decode_allocation_invariants() {
     assert_arms_agree(&chunk);
 
     let owned = measure_allocations(|| {
-        let samples = decode_owned(black_box(chunk.data.as_slice()));
+        let samples = decode_owned(black_box(chunk.data.as_ref()));
         consume(samples.as_ref())
     });
     let borrowed = measure_allocations(|| {

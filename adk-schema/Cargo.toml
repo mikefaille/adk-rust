@@ -1,0 +1,45 @@
+[package]
+name = "adk-schema"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Canonical JSON Schema documents and validation for ADK"
+documentation = "https://docs.rs/adk-schema"
+keywords = ["json-schema", "schema", "validation", "adk", "ai"]
+categories = ["data-structures", "encoding", "api-bindings"]
+readme = "README.md"
+
+[dependencies]
+serde_json.workspace = true
+thiserror.workspace = true
+sha2.workspace = true
+hex.workspace = true
+schemars = { version = "1.2", optional = true }
+jsonschema = { version = "0.47", optional = true, default-features = false }
+adk-core = { workspace = true, optional = true }
+
+[features]
+default = []
+schemars = ["dep:schemars"]
+runtime-validation = ["dep:jsonschema"]
+# Projection + loss reporting for every `adk_core::SchemaAdapter`, via a blanket
+# extension trait. Off by default so this crate stays usable as a standalone
+# JSON Schema library with no ADK dependency.
+adapters = ["dep:adk-core"]
+
+[[example]]
+name = "what_to_ask_next"
+
+[[example]]
+name = "what_the_provider_dropped"
+required-features = ["adapters"]
+
+# `default = []`, so a docs.rs build that took the defaults would publish a page
+# with no validation, no schemars generation and no adapter projection — every
+# reason to reach for this crate, absent. Build the whole surface and label each
+# item with the feature it needs.
+[dev-dependencies]
+adk-core = { workspace = true }
+adk-gemini = { workspace = true }

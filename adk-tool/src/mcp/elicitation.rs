@@ -13,6 +13,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use futures::FutureExt;
+// `ClientInfo` is deprecated upstream (SEP-2577, use `ClientConfig`); the
+// migration is deferred, so the import stays allowed like the bridge below.
+#[allow(deprecated)]
 use rmcp::model::{
     ElicitRequest, ElicitRequestParams, ElicitResult, ElicitationAction, ElicitationCapability,
     ElicitationSchema, FormElicitationCapability, InitializeRequestParams, InputRequest,
@@ -585,6 +588,9 @@ impl AdkClientHandler {
     }
 }
 
+// The trait still speaks the deprecated `ClientInfo`; allowed until the
+// deferred `ClientConfig` migration, per the import above.
+#[allow(deprecated)]
 impl rmcp::handler::client::ClientHandler for AdkClientHandler {
     fn get_info(&self) -> InitializeRequestParams {
         let mut info = InitializeRequestParams::default();

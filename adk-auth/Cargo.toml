@@ -81,9 +81,9 @@ google-cloud-gax = { version = "1.9", default-features = false, optional = true 
 
 # Enterprise audit sinks (optional)
 sqlx = { workspace = true, features = ["runtime-tokio", "postgres", "chrono", "json", "derive", "tls-rustls-aws-lc-rs"], optional = true }
-opentelemetry = { version = "0.32", optional = true }
-opentelemetry_sdk = { version = "0.32", features = ["rt-tokio"], optional = true }
-opentelemetry-otlp = { version = "0.32", features = ["grpc-tonic"], optional = true }
+opentelemetry = { version = "0.33", optional = true }
+opentelemetry_sdk = { version = "0.33", features = ["rt-tokio"], optional = true }
+opentelemetry-otlp = { version = "0.33", features = ["grpc-tonic"], optional = true }
 
 [dev-dependencies]
 aws-lc-rs = "1.18"

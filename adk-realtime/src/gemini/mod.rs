@@ -25,10 +25,8 @@
 //!         api_key: std::env::var("GOOGLE_API_KEY")?
 //!     };
 //!
-//!     let model = GeminiRealtimeModel::new(
-//!         backend,
-//!         "models/gemini-3.1-flash-live-preview",
-//!     );
+//!     // Only Gemini 3.8 Live is supported; see `DEFAULT_MODEL`.
+//!     let model = GeminiRealtimeModel::new(backend, "models/gemini-3.8-live");
 //!
 //!     let config = RealtimeConfig::default()
 //!         .with_instruction("You are a helpful assistant.");
@@ -47,7 +45,7 @@ mod session;
 pub use model::GeminiRealtimeModel;
 pub use session::{
     ActivityDetection, ActivitySignalOutcome, ActivitySignaller, GeminiLiveBackend,
-    GeminiRealtimeSession,
+    GeminiRealtimeSession, normalize_model_id,
 };
 
 #[cfg(feature = "vertex-live")]
@@ -62,7 +60,7 @@ pub const GEMINI_LIVE_URL: &str = "wss://generativelanguage.googleapis.com/ws/go
 pub const VERTEX_LIVE_URL_TEMPLATE: &str = "wss://{region}-aiplatform.googleapis.com/ws/google.cloud.aiplatform.v1beta1.LlmBidiService/BidiGenerateContent?project_id={project_id}";
 
 /// Default model for Gemini Live.
-pub const DEFAULT_MODEL: &str = "models/gemini-3.1-flash-live-preview";
+pub const DEFAULT_MODEL: &str = "models/gemini-3.8-live";
 
 /// Available voices for Gemini Live (varies by model).
 pub const GEMINI_VOICES: &[&str] = &["Puck", "Charon", "Kore", "Fenrir", "Aoede"];

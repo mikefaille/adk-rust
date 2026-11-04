@@ -125,6 +125,11 @@ async fn main() -> anyhow::Result<()> {
         .agent(agent)
         .bind_addr("127.0.0.1:9090")
         .agent_card_url("http://localhost:9090")
+        .agent_card_name("My Production Agent")
+        .agent_card_description("Handles customer queries via A2A")
+        .agent_card_version("3.0.0")
+        .streaming(true)
+        .push_notifications(false)
         .build()?;
 
     server.serve().await?;

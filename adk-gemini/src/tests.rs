@@ -157,6 +157,49 @@ fn test_may_2026_ga_models_roundtrip() {
 }
 
 #[test]
+fn test_tts_models_roundtrip() {
+    // TTS models: the current 3.8 Flash GA defaults plus their predecessors.
+    for (model, wire) in [
+        (Model::Gemini38FlashTts, "models/gemini-3.8-flash-tts"),
+        (Model::Gemini38FlashLiteTts, "models/gemini-3.8-flash-lite-tts"),
+        (Model::Gemini31FlashTts, "models/gemini-3.1-flash-tts-preview"),
+        (Model::Gemini25FlashPreviewTts, "models/gemini-2.5-flash-preview-tts"),
+        (Model::Gemini25ProPreviewTts, "models/gemini-2.5-pro-preview-tts"),
+    ] {
+        assert_eq!(model.as_str(), wire);
+        let serialized = serde_json::to_value(&model).unwrap();
+        assert_eq!(serialized, json!(wire));
+        let bare = wire.strip_prefix("models/").unwrap();
+        assert_eq!(Model::from(bare.to_string()), model);
+        assert_eq!(Model::from(wire.to_string()), model);
+    }
+
+    // Vertex AI resource path uses the bare model id.
+    assert_eq!(
+        Model::Gemini38FlashTts.vertex_model_path("my-project", "us-central1"),
+        "projects/my-project/locations/us-central1/publishers/google/models/gemini-3.8-flash-tts"
+    );
+    assert_eq!(
+        Model::Gemini31FlashTts.vertex_model_path("my-project", "us-central1"),
+        "projects/my-project/locations/us-central1/publishers/google/models/gemini-3.1-flash-tts-preview"
+    );
+
+    // Pricing resolves for the typed variants and the raw model ids alike.
+    let pricing = crate::pricing::GeminiPricing::for_model(&Model::Gemini38FlashTts).unwrap();
+    assert_eq!(pricing.input, 0.50);
+    assert_eq!(pricing.output, 9.00);
+    let by_id = crate::pricing::GeminiPricing::for_model_id("gemini-3.8-flash-tts").unwrap();
+    assert_eq!(by_id.input, 0.50);
+    assert_eq!(by_id.output, 9.00);
+    let lite = crate::pricing::GeminiPricing::for_model(&Model::Gemini38FlashLiteTts).unwrap();
+    assert_eq!(lite.input, 0.50);
+    assert_eq!(lite.output, 6.00);
+    let legacy = crate::pricing::GeminiPricing::for_model(&Model::Gemini31FlashTts).unwrap();
+    assert_eq!(legacy.input, 0.50);
+    assert_eq!(legacy.output, 10.00);
+}
+
+#[test]
 fn test_function_response_id_strict_matching() {
     use crate::FunctionResponse;
 

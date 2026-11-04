@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`RealtimeSession::begin_activity()`** (`adk-realtime`, ported from
+  `mikefaille/main`): the opening edge of a manually delimited input turn,
+  defaulting to a no-op so a backend with no manual-turn concept is not forced
+  to invent one. On Gemini in manual mode it emits `activityStart`; under
+  server-side detection it is silent, because the server owns detection there
+  and the frame is not legal in that mode.
+- **`VadConfig::start_of_speech_sensitivity` / `end_of_speech_sensitivity`**
+  (ported from `mikefaille/main`): the two coarse levels Gemini Live exposes,
+  as `Option`, defaulting to `None`. No value is emitted for a field left
+  unset.
+- **Twilio Media Streams transport, managed recovery supervisor, `adk-schema`
+  crate, Gemini 3.1/3.8 TTS models, LiveKit 0.9.1** (ported from
+  `mikefaille/main`). See the port commits for the full list.
+
+### Changed
+
+- **`commit_audio` now closes the turn on Gemini in manual mode** (ported from
+  `mikefaille/main`), sending `activityEnd` after flushing the audio buffer.
+  Behaviour under server-side detection is unchanged and pinned by a test.
+- **The Gemini `automaticActivityDetection` projection now always states
+  `disabled`** in any object it emits (ported from `mikefaille/main`).
+
 ## [3.0.0] - 2026-10-10
 
 ## [2.3.0] - 2026-10-09

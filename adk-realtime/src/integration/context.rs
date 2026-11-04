@@ -48,6 +48,9 @@ pub struct RealtimeToolContext {
     acting: Option<ActingContext>,
     /// The agent the call is governed under.
     agent_name: String,
+    /// The fence token of the call this context serves, when the runner
+    /// dispatched it under one.
+    cancellation_token: Option<tokio_util::sync::CancellationToken>,
 }
 
 impl RealtimeToolContext {
@@ -79,7 +82,22 @@ impl RealtimeToolContext {
             run_config: None,
             acting: None,
             agent_name: crate::runner::DEFAULT_REALTIME_AGENT_NAME.to_string(),
+            cancellation_token: None,
         }
+    }
+
+    /// Carries the fence token of the dispatched call, so
+    /// [`is_cancelled`](adk_core::ToolContext::is_cancelled) reports a
+    /// provider withdrawal of the call while the tool runs.
+    #[must_use]
+    pub fn with_cancellation_token(mut self, token: tokio_util::sync::CancellationToken) -> Self {
+        self.cancellation_token = Some(token);
+        self
+    }
+
+    /// The fence token carried by this context, if any.
+    pub fn cancellation_token(&self) -> Option<&tokio_util::sync::CancellationToken> {
+        self.cancellation_token.as_ref()
     }
 
     /// Names the agent the call is governed under, which
@@ -220,6 +238,10 @@ impl ToolContext for RealtimeToolContext {
         &self.function_call_id
     }
 
+    fn is_cancelled(&self) -> bool {
+        self.cancellation_token.as_ref().is_some_and(|token| token.is_cancelled())
+    }
+
     fn actions(&self) -> EventActions {
         self.actions.lock().unwrap().clone()
     }
@@ -283,6 +305,19 @@ pub trait ToolContextFactory: Send + Sync {
     /// * `function_call_id` - The unique identifier for this tool invocation,
     ///   as provided by the realtime provider.
     fn create_context(&self, function_call_id: &str) -> Arc<dyn ToolContext>;
+
+    /// Creates a context carrying the dispatched call's fence `token`, so
+    /// the tool observes a provider withdrawal through
+    /// [`is_cancelled`](adk_core::ToolContext::is_cancelled). The
+    /// default drops the token; factories serving a
+    /// [`RealtimeToolContext`] override it.
+    fn create_context_with_cancellation(
+        &self,
+        function_call_id: &str,
+        _token: Option<tokio_util::sync::CancellationToken>,
+    ) -> Arc<dyn ToolContext> {
+        self.create_context(function_call_id)
+    }
 }
 
 /// Default [`ToolContextFactory`] implementation that creates [`RealtimeToolContext`]
@@ -315,13 +350,25 @@ pub struct DefaultToolContextFactory {
 
 impl ToolContextFactory for DefaultToolContextFactory {
     fn create_context(&self, function_call_id: &str) -> Arc<dyn ToolContext> {
-        Arc::new(RealtimeToolContext::new(
+        self.create_context_with_cancellation(function_call_id, None)
+    }
+
+    fn create_context_with_cancellation(
+        &self,
+        function_call_id: &str,
+        token: Option<tokio_util::sync::CancellationToken>,
+    ) -> Arc<dyn ToolContext> {
+        let mut ctx = RealtimeToolContext::new(
             self.identity.app_name.clone(),
             self.identity.user_id.clone(),
             self.identity.session_id.clone(),
             function_call_id.to_string(),
             self.memory_service.clone(),
-        ))
+        );
+        if let Some(token) = token {
+            ctx = ctx.with_cancellation_token(token);
+        }
+        Arc::new(ctx)
     }
 }
 
@@ -339,6 +386,14 @@ pub(crate) struct IdentityToolContextFactory {
 
 impl ToolContextFactory for IdentityToolContextFactory {
     fn create_context(&self, function_call_id: &str) -> Arc<dyn ToolContext> {
+        self.create_context_with_cancellation(function_call_id, None)
+    }
+
+    fn create_context_with_cancellation(
+        &self,
+        function_call_id: &str,
+        token: Option<tokio_util::sync::CancellationToken>,
+    ) -> Arc<dyn ToolContext> {
         let mut ctx = RealtimeToolContext::new(
             self.identity.app_name.clone(),
             self.identity.user_id.clone(),
@@ -358,6 +413,9 @@ impl ToolContextFactory for IdentityToolContextFactory {
                     &self.identity.user_id,
                 ))
                 .with_run_config(run_config.clone());
+        }
+        if let Some(token) = token {
+            ctx = ctx.with_cancellation_token(token);
         }
         Arc::new(ctx)
     }

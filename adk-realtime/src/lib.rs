@@ -93,11 +93,14 @@
 pub mod agent;
 pub mod audio;
 pub mod config;
+pub mod dispatch;
 pub mod error;
 pub mod events;
 pub mod model;
+pub mod recovery;
 pub mod runner;
 pub mod session;
+pub mod transport;
 
 // Provider implementations
 #[cfg(feature = "openai")]
@@ -134,10 +137,15 @@ pub use scripted::{ScriptedRealtimeModel, ScriptedReply, ScriptedStep};
 pub use agent::{RealtimeAgent, RealtimeAgentBuilder};
 pub use audio::{AudioEncoding, AudioFormat};
 pub use config::{
-    InterruptionDetection, RealtimeConfig, RealtimeConfigBuilder, VadConfig, VadMode,
+    InterruptionDetection, LanguageCode, LanguageCodeError, RealtimeConfig, RealtimeConfigBuilder,
+    VadConfig, VadMode,
 };
 pub use error::{RealtimeError, Result};
 pub use events::{ClientEvent, ServerEvent, ToolCall, ToolResponse};
 pub use model::{BoxedModel, RealtimeModel};
+pub use recovery::{
+    DeliveryCertainty, RealtimeRecovery, RecoveredSession, RecoveryCause, RecoveryContext,
+    RecoveryContinuity, RecoveryDisposition, RecoveryPolicy,
+};
 pub use runner::RealtimeRunner;
 pub use session::{BoxedSession, DisconnectReason, RealtimeSession, RealtimeSessionExt};

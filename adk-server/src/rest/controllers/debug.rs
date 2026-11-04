@@ -105,6 +105,10 @@ pub async fn get_session_traces(
     Extension(request_context): Extension<Option<adk_core::RequestContext>>,
     Path(session_id): Path<String>,
 ) -> Result<Json<Vec<serde_json::Value>>, StatusCode> {
+    if request_context.is_some() && !controller.config.security.expose_admin_debug {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
     if let Some(exporter) = &controller.config.span_exporter {
         let traces = exporter.get_session_trace(&session_id);
         if let Some(context) = request_context.as_ref() {

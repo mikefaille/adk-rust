@@ -453,7 +453,7 @@ pub fn function_call(call_id: &str, name: &str, args: Value) -> ServerEvent {
         output_index: 0,
         call_id: call_id.to_string(),
         name: name.to_string(),
-        arguments: args.to_string(),
+        arguments: args,
     }
 }
 
@@ -524,12 +524,20 @@ mod tests {
         let session = model.connect(RealtimeConfig::default()).await.unwrap();
         // A tool output before its turn in the script emits nothing.
         session
-            .send_tool_output(ToolResponse { call_id: "c".into(), output: json!({}) })
+            .send_tool_output(ToolResponse {
+                call_id: "c".into(),
+                output: json!({}),
+                scheduling: None,
+            })
             .await
             .unwrap();
         session.send_text("go").await.unwrap();
         session
-            .send_tool_output(ToolResponse { call_id: "c".into(), output: json!({}) })
+            .send_tool_output(ToolResponse {
+                call_id: "c".into(),
+                output: json!({}),
+                scheduling: None,
+            })
             .await
             .unwrap();
         let mut transcript = String::new();

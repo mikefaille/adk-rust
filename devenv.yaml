@@ -1,5 +1,7 @@
 inputs:
   nixpkgs:
+    # Floating on rolling: `devenv update` moves this with everything else,
+    # no explicit rev bumps. Pin to ?rev= only to freeze a known-good rev.
     url: github:cachix/devenv-nixpkgs/rolling
   git-hooks:
     url: github:cachix/git-hooks.nix

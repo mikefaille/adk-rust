@@ -72,6 +72,16 @@ impl std::fmt::Display for DisconnectReason {
     }
 }
 
+pub trait RealtimeLifecycle: Send + Sync {
+    /// Subscribe to the monotonic deadline before which this live session
+    /// should be replaced.
+    ///
+    /// `None` means no planned replacement deadline is currently known.
+    fn subscribe_replacement_deadline(
+        &self,
+    ) -> tokio::sync::watch::Receiver<Option<std::time::Instant>>;
+}
+
 #[async_trait]
 pub trait RealtimeSession: Send + Sync {
     /// Get the session ID.
@@ -79,6 +89,33 @@ pub trait RealtimeSession: Send + Sync {
 
     /// Check if the session is currently connected.
     fn is_connected(&self) -> bool;
+
+    /// Retrieve the recovery capability of the session if supported.
+    ///
+    /// By default, a session does not support recovery and returns `None`.
+    fn recovery(&self) -> Option<&dyn crate::recovery::RealtimeRecovery> {
+        None
+    }
+
+    /// Retrieve the lifecycle capability of the session if supported.
+    ///
+    /// By default, a session does not provide advance lifecycle information and returns `None`.
+    fn lifecycle(&self) -> Option<&dyn RealtimeLifecycle> {
+        None
+    }
+
+    /// The audio format this provider emits in `ServerEvent::AudioDelta`.
+    ///
+    /// Callers that relabel or forward model audio (e.g. a transport bridge)
+    /// MUST tag the raw bytes with this format, not a hardcoded literal or the
+    /// destination's target format — the model always emits its own native
+    /// format regardless of what a downstream transport ultimately wants.
+    /// The default matches every provider implemented today (Gemini Live and
+    /// OpenAI Realtime both emit PCM16 @ 24 kHz); override it for a provider
+    /// whose native output differs.
+    fn native_audio_output_format(&self) -> crate::audio::AudioFormat {
+        crate::audio::AudioFormat::pcm16_24khz()
+    }
 
     /// Why the stream ended, if the provider said and the session recorded it.
     ///
@@ -125,7 +162,32 @@ pub trait RealtimeSession: Send + Sync {
         self.send_tool_response(response).await
     }
 
+    /// Report that a manually delimited input turn has begun.
+    ///
+    /// The opening edge of the turn that [`commit_audio`](Self::commit_audio)
+    /// closes. A caller running its own voice-activity detection reports the
+    /// start of caller speech here.
+    ///
+    /// This is deliberately **not** [`interrupt`](Self::interrupt). On some
+    /// backends the two currently put the same bytes on the wire — on Gemini
+    /// both open an activity — but they are different statements: one says the
+    /// human began speaking, the other asks to abandon the model's current
+    /// response. A caller that means the first should not have to say the
+    /// second, and a backend that stops conflating them must not break callers
+    /// that chose the right name.
+    ///
+    /// Defaults to a no-op, because a backend with no manual-turn concept has
+    /// nothing to report and reporting it is not an error. Backends that do
+    /// have one override this.
+    async fn begin_activity(&self) -> Result<()> {
+        Ok(())
+    }
+
     /// Commit the audio buffer (for manual VAD mode).
+    ///
+    /// The closing edge of a manually delimited input turn, and on a backend
+    /// with explicit activity signalling it is that boundary — not merely a
+    /// buffer flush.
     async fn commit_audio(&self) -> Result<()>;
 
     /// Clear the audio input buffer.
@@ -150,6 +212,12 @@ pub trait RealtimeSession: Send + Sync {
 
     /// Close the session gracefully.
     async fn close(&self) -> Result<()>;
+
+    /// Abruptly break the transport without a graceful close frame for testing recovery.
+    #[cfg(any(test, feature = "recovery-test-utils"))]
+    async fn force_transport_break(&self) -> Result<()> {
+        self.close().await
+    }
 
     /// Attempt to mutate the session parameters mid-flight.
     ///

@@ -310,6 +310,12 @@
 5 adk-realtime openai
 # The Gemini Live session: setup, usage reports, the audio stream end on commit.
 5 adk-realtime gemini
+# The Twilio Media Streams transport and G.711 codecs (ported from mikefaille/main):
+# in no default, so no other pair compiles them.
+5 adk-realtime twilio
+# The Vertex AI Live session (OAuth2/ADC auth path): nightly compiles it via the
+# umbrella -full combo but nothing executes its tests.
+5 adk-realtime vertex-live
 5 adk-session vertex-session
 5 adk-session postgres
 # Durable stores on every backend: compiles them and runs the SQLite conformance suites;

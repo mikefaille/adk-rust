@@ -267,6 +267,7 @@ pub fn convert_tools(
 ) -> Result<Vec<ToolUnionParam>, ConversionError> {
     let mut tools = tools.iter().collect::<Vec<_>>();
     tools.sort_unstable_by_key(|(name, _)| *name);
+    let mut seen_wire_names = std::collections::HashSet::with_capacity(tools.len());
     tools
         .into_iter()
         .map(|(name, decl)| {
@@ -282,17 +283,39 @@ pub fn convert_tools(
 
             let description = decl.get("description").and_then(|d| d.as_str()).map(String::from);
 
-            let input_schema =
-                decl.get("parameters").cloned().unwrap_or_else(|| adapter.empty_schema());
-            let mut normalized_schema = cache.normalize(&input_schema);
-            let strict = decl.get("strict").and_then(Value::as_bool);
-            if strict != Some(true) {
-                super::schema_adapter::nest_composition(&mut normalized_schema);
-            }
+            // 1. Validate original tool name via the schema adapter first
+            adapter.validate_tool_name(name).map_err(|e| {
+                ConversionError::InvalidToolDeclaration(format!(
+                    "invalid tool name '{name}' for adapter '{}': {e}",
+                    adapter.identifier()
+                ))
+            })?;
 
+            // 2. Normalize tool name
             let normalized_name = adapter.normalize_tool_name(name);
 
-            let mut tool_param = ToolParam::new(normalized_name.into_owned(), normalized_schema);
+            // 3. Detect duplicate normalized wire names
+            if !seen_wire_names.insert(normalized_name.to_string()) {
+                return Err(ConversionError::InvalidToolDeclaration(format!(
+                    "tool name collision: multiple tools normalized to wire name '{normalized_name}' for adapter '{}'",
+                    adapter.identifier()
+                )));
+            }
+
+            let input_schema =
+                decl.get("parameters").cloned().unwrap_or_else(|| adapter.empty_schema());
+            let mut compiled_schema = cache.get_or_compile(&input_schema, adapter).map_err(|e| {
+                ConversionError::InvalidToolDeclaration(format!(
+                    "invalid parameter schema for tool '{name}' under adapter '{}': {e}",
+                    adapter.identifier()
+                ))
+            })?;
+            let strict = decl.get("strict").and_then(Value::as_bool);
+            if strict != Some(true) {
+                super::schema_adapter::nest_composition(&mut compiled_schema);
+            }
+
+            let mut tool_param = ToolParam::new(normalized_name.into_owned(), compiled_schema);
             if let Some(desc) = description {
                 tool_param = tool_param.with_description(desc);
             }

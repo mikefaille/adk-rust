@@ -116,6 +116,15 @@
 //! - `user:` - User preferences (persists across sessions)
 //! - `app:` - Application state (application-wide)
 //! - `temp:` - Visible for the rest of the invocation; session services do not persist it
+//!
+//! ## Tool Contract Ownership
+//!
+//! ADK-Rust maintains a strict separation of concerns for tool contracts:
+//! - **adk-core**: Owns provider-neutral contracts (`ToolContract`) and schema adapter interfaces (`SchemaAdapter`).
+//! - **adk-tool**: Generates static contracts from Rust DTOs using `schemars`.
+//! - **provider crates**: Compile canonical contracts into provider-specific wire declarations.
+//! - **adk-realtime**: Transports provider calls and preserves parsed argument values.
+//! - **applications**: Own semantic validation, authorization, side effects, and durable proof.
 #![allow(clippy::result_large_err)]
 #![deny(missing_docs)]
 
@@ -326,7 +335,9 @@ pub use schedule::{
     FirePlan, InMemoryScheduleStore, MissedFirePolicy, Schedule, ScheduleSpec, ScheduleStore,
     firing_idempotency_key, plan_fires,
 };
-pub use schema_adapter::{GenericSchemaAdapter, SchemaAdapter};
+pub use schema_adapter::{
+    GenericSchemaAdapter, KimiSchemaAdapter, SchemaAdapter, SchemaCompileError,
+};
 pub use schema_cache::SchemaCache;
 pub use shared_state::{SharedState, SharedStateError};
 pub use spend::{
@@ -338,8 +349,9 @@ pub use steering::{
     SteeringInbox, SteeringMarker, SteeringMessage, validate_steering_message,
 };
 pub use tool::{
-    DUPLICATE_TOOL_NAME_CODE, RetryBudget, Tool, ToolContext, ToolEffect, ToolExecutionStrategy,
-    ToolPredicate, ToolRegistry, Toolset, ValidationMode, ensure_unique_tool_names,
+    DUPLICATE_TOOL_NAME_CODE, RetryBudget, Tool, ToolContext, ToolContract, ToolEffect,
+    ToolExecutionStrategy, ToolPredicate, ToolRegistry, ToolSchema, Toolset, ValidationMode,
+    ensure_unique_tool_names,
 };
 pub use tool_concurrency::{ConcurrencyPermit, ToolConcurrencyManager};
 pub use tool_response::{

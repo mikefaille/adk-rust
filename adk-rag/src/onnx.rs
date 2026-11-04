@@ -188,8 +188,10 @@ impl OnnxEmbeddingProvider {
         tokenizer.with_padding(Some(PaddingParams::default()));
 
         let mut builder = Session::builder()
-            .and_then(|builder| builder.with_optimization_level(GraphOptimizationLevel::Level3))
             .map_err(|e| error(format!("failed to create the session builder: {e}")))?;
+        builder = builder
+            .with_optimization_level(GraphOptimizationLevel::Level3)
+            .map_err(|e| error(format!("failed to set the optimization level: {e}")))?;
         if let Some(threads) = config.threads {
             builder = builder
                 .with_intra_threads(threads)

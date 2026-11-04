@@ -58,6 +58,36 @@ pub enum VadMode {
     None,
 }
 
+/// How readily the provider decides that speech has **started**.
+///
+/// Coarse levels, because that is what Gemini Live exposes; `threshold` is a
+/// raw probability and is not representable there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StartOfSpeechSensitivity {
+    /// Detect the start of speech more often.
+    High,
+    /// Detect it less often.
+    Low,
+}
+
+/// How readily the provider decides that speech has **ended**.
+///
+/// This does not compete with [`VadConfig::silence_duration_ms`] — the two are
+/// sequential stages of one decision. Sensitivity governs whether silence is
+/// judged to be an ending at all; the duration governs how long that ending
+/// must persist before the turn closes. Setting both conservatively
+/// (`Low` with a long silence budget) is two conservative stages in series,
+/// which is a choice worth making deliberately rather than by accident.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EndOfSpeechSensitivity {
+    /// End the turn more eagerly.
+    High,
+    /// End it less eagerly.
+    Low,
+}
+
 /// VAD configuration options.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct VadConfig {
@@ -73,6 +103,12 @@ pub struct VadConfig {
     /// Prefix padding (ms) to include before detected speech.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prefix_padding_ms: Option<u32>,
+    /// How readily speech start is detected. `None` leaves it to the provider.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_of_speech_sensitivity: Option<StartOfSpeechSensitivity>,
+    /// How readily speech end is detected. `None` leaves it to the provider.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end_of_speech_sensitivity: Option<EndOfSpeechSensitivity>,
     /// Whether to interrupt the model when user starts speaking.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub interrupt_response: Option<bool>,
@@ -82,13 +118,32 @@ pub struct VadConfig {
 }
 
 impl Default for VadConfig {
+    /// Server VAD with **no tuning overrides**.
+    ///
+    /// Every field beyond `mode` is `None` on purpose, so that `Some(_)` means
+    /// "the caller chose this" and nothing else can. Previously this carried
+    /// `silence_duration_ms: Some(500)` and `interrupt_response: Some(true)`,
+    /// which made a default indistinguishable from a decision — and both
+    /// provider projections dutifully forwarded them, installing an
+    /// end-of-speech threshold nobody selected as live turn-taking policy.
+    ///
+    /// The number was not harmless. Gemini's server default is roughly 800 ms
+    /// and Google recommends 500 ms only as a floor, warning that lower
+    /// thresholds "often cause fragmented audio that degrades transcription
+    /// and model response quality". Asking for server VAD now means asking
+    /// for the provider's own tuning, which is what it reads like.
+    ///
+    /// This is why the projections need no rule about which values to trust:
+    /// there is no default left to mistake for a choice.
     fn default() -> Self {
         Self {
+            start_of_speech_sensitivity: None,
+            end_of_speech_sensitivity: None,
             mode: VadMode::ServerVad,
-            silence_duration_ms: Some(500),
+            silence_duration_ms: None,
             threshold: None,
             prefix_padding_ms: None,
-            interrupt_response: Some(true),
+            interrupt_response: None,
             eagerness: None,
         }
     }
@@ -123,6 +178,54 @@ impl VadConfig {
     }
 }
 
+impl From<adk_core::ToolContract> for ToolDefinition {
+    fn from(contract: adk_core::ToolContract) -> Self {
+        Self {
+            name: contract.name,
+            description: Some(contract.description),
+            parameters: contract.schema.parameters,
+            behavior: None,
+            // A contract declares no effect; repeating the call may repeat a
+            // side effect, so it is treated as non-idempotent.
+            effect: adk_core::ToolEffect::NonIdempotent,
+        }
+    }
+}
+
+/// The default effect of a declared tool: non-idempotent, because repeating
+/// an undeclared call may repeat its side effect.
+fn default_tool_effect() -> adk_core::ToolEffect {
+    adk_core::ToolEffect::NonIdempotent
+}
+
+/// Execution behavior of a declared realtime tool.
+///
+/// This models the Gemini Live `behavior` field on a function declaration:
+/// `BLOCKING` holds the turn until the client returns the function response,
+/// while `NON_BLOCKING` lets the model continue generating while the tool
+/// executes. `None` omits the field and keeps the provider default.
+///
+/// The OpenAI Realtime API defines no such field, so the OpenAI session setup
+/// ignores this value. Callers who need a provider-agnostic async contract
+/// should not infer one from this hint — it is a Gemini-scoped declaration.
+///
+/// # Example
+///
+/// ```rust
+/// use adk_realtime::config::{ToolBehavior, ToolDefinition};
+///
+/// let def = ToolDefinition::new("request_payment")
+///     .with_behavior(ToolBehavior::NonBlocking);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ToolBehavior {
+    /// Hold the turn until the function response returns.
+    Blocking,
+    /// Let the model continue while the tool executes.
+    NonBlocking,
+}
+
 /// Tool/function definition for realtime sessions.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolDefinition {
@@ -134,12 +237,34 @@ pub struct ToolDefinition {
     /// JSON Schema for parameters.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parameters: Option<Value>,
+    /// Execution behavior hint (Gemini Live only; see [`ToolBehavior`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub behavior: Option<ToolBehavior>,
+    /// The side-effect class of calls to this tool, threaded into the
+    /// governed call the runner authorizes. Defaults to
+    /// [`ToolEffect::NonIdempotent`](adk_core::ToolEffect::NonIdempotent):
+    /// repeating an undeclared call may repeat its effect, so a call
+    /// cancelled after it started cannot be reported as a success.
+    #[serde(default = "default_tool_effect")]
+    pub effect: adk_core::ToolEffect,
 }
 
 impl ToolDefinition {
     /// Create a new tool definition.
     pub fn new(name: impl Into<String>) -> Self {
-        Self { name: name.into(), description: None, parameters: None }
+        Self {
+            name: name.into(),
+            description: None,
+            parameters: None,
+            behavior: None,
+            effect: adk_core::ToolEffect::NonIdempotent,
+        }
+    }
+
+    /// Set the side-effect class of calls to this tool.
+    pub fn with_effect(mut self, effect: adk_core::ToolEffect) -> Self {
+        self.effect = effect;
+        self
     }
 
     /// Set the tool description.
@@ -193,6 +318,157 @@ impl ToolDefinition {
         });
         adk_core::ToolOrigin::new(crate::runner::REALTIME_HANDLER_ORIGIN, &declaration, None)
     }
+
+    /// Set the execution behavior hint (Gemini Live only).
+    pub fn with_behavior(mut self, behavior: ToolBehavior) -> Self {
+        self.behavior = Some(behavior);
+        self
+    }
+}
+
+/// Delivery scheduling of a function response, sent back with the response
+/// itself (Gemini Live `toolResponse.functionResponses[].scheduling`).
+///
+/// Wire spelling proven by live probe against `models/gemini-3.8-live`
+/// (2026-09-17, `/tmp/live_probe.py`, log in session record): `SILENT` was
+/// accepted and the model stayed quiet about the result (0 audio bytes in
+/// 25 s); `INTERRUPT` was accepted and the model spoke the result (~172 kB
+/// audio, turn completed); `INTERRUPTED` was rejected with WS 1007
+/// `Invalid value at 'tool_response.function_responses[0].scheduling'` —
+/// the model-page spelling is a documentation error. `WHEN_IDLE` is in the
+/// same documented enum; its acceptance was confirmed by a follow-up probe
+/// case (see scheduling enum history in this file's git log).
+///
+/// Like [`ToolBehavior`], this has no OpenAI Realtime counterpart: the
+/// OpenAI session setup ignores it.
+///
+/// # Example
+///
+/// ```rust
+/// use adk_realtime::config::FunctionResponseScheduling;
+///
+/// let scheduling = FunctionResponseScheduling::WhenIdle;
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum FunctionResponseScheduling {
+    /// Deliver silently; the model uses the knowledge later in the discussion.
+    Silent,
+    /// Wait until the model finishes what it is currently doing.
+    WhenIdle,
+    /// Interrupt what the model is doing and report the response right away.
+    Interrupt,
+}
+
+/// A spoken-language tag (RFC 5646 / BCP 47), validated structurally.
+///
+/// The parse checks the tag's shape only — an ASCII primary subtag followed
+/// by hyphen-separated alphanumeric subtags — and keeps no allowlist of
+/// languages or regions, so any well-formed tag (e.g. `fr-CA`) is accepted
+/// while an empty, whitespace-bearing, underscored, or non-ASCII value is
+/// rejected at construction instead of reaching a provider.
+///
+/// Serializes transparently as its string. Deserialization is fail-closed:
+/// a malformed value in a stored config is an error, never a pass-through.
+///
+/// # Example
+///
+/// ```
+/// use adk_realtime::config::LanguageCode;
+///
+/// assert_eq!(LanguageCode::parse("fr-CA").unwrap().as_str(), "fr-CA");
+/// assert!(LanguageCode::parse("fr_CA").is_err());
+/// assert!(LanguageCode::parse("").is_err());
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+#[serde(transparent)]
+pub struct LanguageCode(String);
+
+/// A value was not a structurally valid RFC 5646 language tag.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LanguageCodeError {
+    value: String,
+}
+
+impl std::fmt::Display for LanguageCodeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "invalid RFC 5646 language tag: {:?}", self.value)
+    }
+}
+
+impl std::error::Error for LanguageCodeError {}
+
+impl LanguageCode {
+    /// Parse and validate a language tag.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LanguageCodeError`] when the tag is empty, contains
+    /// whitespace, an underscore, or a non-ASCII character, or is not a
+    /// hyphen-separated sequence of subtags whose primary subtag is 2–8
+    /// ASCII letters and whose remaining subtags are 1–8 ASCII
+    /// alphanumerics.
+    pub fn parse(value: impl AsRef<str>) -> std::result::Result<Self, LanguageCodeError> {
+        let value = value.as_ref();
+        let invalid = || LanguageCodeError { value: value.to_string() };
+        if value.is_empty()
+            || !value.is_ascii()
+            || value.chars().any(|c| c.is_whitespace() || c == '_')
+        {
+            return Err(invalid());
+        }
+        let mut subtags = value.split('-');
+        let primary = subtags.next().unwrap_or_default();
+        if !(2..=8).contains(&primary.len()) || !primary.chars().all(|c| c.is_ascii_alphabetic()) {
+            return Err(invalid());
+        }
+        for subtag in subtags {
+            if subtag.is_empty()
+                || subtag.len() > 8
+                || !subtag.chars().all(|c| c.is_ascii_alphanumeric())
+            {
+                return Err(invalid());
+            }
+        }
+        Ok(Self(value.to_string()))
+    }
+
+    /// The tag as written.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for LanguageCode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl TryFrom<&str> for LanguageCode {
+    type Error = LanguageCodeError;
+
+    fn try_from(value: &str) -> std::result::Result<Self, Self::Error> {
+        Self::parse(value)
+    }
+}
+
+impl TryFrom<String> for LanguageCode {
+    type Error = LanguageCodeError;
+
+    fn try_from(value: String) -> std::result::Result<Self, Self::Error> {
+        Self::parse(value)
+    }
+}
+
+impl<'de> Deserialize<'de> for LanguageCode {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::parse(value).map_err(serde::de::Error::custom)
+    }
 }
 
 /// Configuration for a realtime session.
@@ -209,6 +485,19 @@ pub struct RealtimeConfig {
     /// Voice to use for audio output.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub voice: Option<String>,
+
+    /// Spoken language pinned for the session, validated as an RFC 5646
+    /// tag. Gemini Live sends it as `speechConfig.languageCode`; providers
+    /// without a language field never emit it. `None` leaves detection to
+    /// the provider.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub language: Option<LanguageCode>,
+
+    /// Whether the provider may resume this session after a disconnect.
+    /// `None` and `Some(true)` both enable it (the default); `Some(false)`
+    /// keeps the provider from issuing a resumption handle in its setup.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_resumption: Option<bool>,
 
     /// Output modalities: ["text"], ["audio"], or ["text", "audio"].
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -259,10 +548,17 @@ pub struct RealtimeConfig {
     pub interruption_detection: Option<InterruptionDetection>,
 
     /// Enable emotion-aware ("affective") dialog, where the model adapts its
-    /// tone to the user's emotional state. Gemini Live native-audio models only
-    /// (requires the v1alpha endpoint); ignored by other providers.
+    /// tone to the user's emotional state. Gemini Live only, honored per
+    /// model on the v1beta endpoint (see `capabilities_for`); ignored by
+    /// other providers.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub affective_dialog: Option<bool>,
+
+    /// Let the model proactively ignore irrelevant audio (background speech,
+    /// noise) instead of responding to it. Gemini Live only, honored per
+    /// model (see `capabilities_for`); ignored by other providers.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proactive_audio: Option<bool>,
 
     /// Provider-specific options.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -423,34 +719,68 @@ impl RealtimeConfig {
         self
     }
 
-    /// Enable emotion-aware ("affective") dialog. Only honored by Gemini Live
-    /// native-audio models (v1alpha); a no-op for other providers/models.
+    /// Enable emotion-aware ("affective") dialog. Only honored by
+    /// Gemini Live models whose capabilities include it; a no-op for other
+    /// providers/models.
     pub fn with_affective_dialog(mut self, enabled: bool) -> Self {
         self.affective_dialog = Some(enabled);
         self
     }
 
-    /// Pins the spoken language (BCP-47, e.g. `"en-US"`).
+    /// Pins the spoken language (RFC 5646, e.g. `"en-US"`).
     ///
     /// Gemini Live sends it as `speechConfig.languageCode`, which steers both the voice and
     /// the input/output transcription; without it the model detects the language per turn
     /// and short or accented utterances can be transcribed in the wrong one. Gemini
     /// native-audio output models choose the language automatically and do not honor it.
     ///
-    /// Stored under `extra.language_code`. An `extra` value that is not a JSON object is
-    /// replaced. The OpenAI Realtime session copies every `extra` key into its
-    /// `session.update`, so set it only for a Gemini Live model.
+    /// Stored in the typed [`language`](Self::language) field, never in
+    /// `extra`, so providers without a language field cannot leak it into
+    /// their session setup.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use adk_realtime::config::LanguageCode;
+    /// use adk_realtime::RealtimeConfig;
+    ///
+    /// let config = RealtimeConfig::default()
+    ///     .with_voice("Kore")
+    ///     .with_language(LanguageCode::parse("en-US").unwrap());
+    /// assert_eq!(config.language.unwrap().as_str(), "en-US");
+    /// assert!(config.extra.is_none());
+    /// ```
+    pub fn with_language(mut self, code: LanguageCode) -> Self {
+        self.language = Some(code);
+        self
+    }
+
+    /// Pins the spoken language from a string, validating it as RFC 5646.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LanguageCodeError`] when `code` is not a structurally
+    /// valid tag; the config is not returned in that case.
     ///
     /// # Example
     ///
     /// ```
     /// use adk_realtime::RealtimeConfig;
     ///
-    /// let config = RealtimeConfig::default().with_voice("Kore").with_language("en-US");
-    /// assert_eq!(config.extra.unwrap()["language_code"], "en-US");
+    /// let config = RealtimeConfig::default().try_with_language("fr-CA").unwrap();
+    /// assert_eq!(config.language.unwrap().as_str(), "fr-CA");
+    /// assert!(RealtimeConfig::default().try_with_language("fr_CA").is_err());
     /// ```
-    pub fn with_language(self, code: impl Into<String>) -> Self {
-        self.with_extra("language_code", Value::String(code.into()))
+    pub fn try_with_language(self, code: &str) -> std::result::Result<Self, LanguageCodeError> {
+        Ok(self.with_language(LanguageCode::parse(code)?))
+    }
+
+    /// Sets whether the provider may resume this session after a
+    /// disconnect. Resumption is on unless this is called with `false`;
+    /// with `false` the Gemini Live setup carries no `sessionResumption`.
+    pub fn with_session_resumption(mut self, enabled: bool) -> Self {
+        self.session_resumption = Some(enabled);
+        self
     }
 
     /// Turns on Gemini Live context window compression (a sliding window).
@@ -491,6 +821,14 @@ impl RealtimeConfig {
         };
         extra.insert(key.to_string(), value);
         self.extra = Some(Value::Object(extra));
+        self
+    }
+
+    /// Let the model proactively ignore irrelevant audio. Only honored by
+    /// Gemini Live models whose capabilities include it; a no-op for other
+    /// providers/models.
+    pub fn with_proactive_audio(mut self, enabled: bool) -> Self {
+        self.proactive_audio = Some(enabled);
         self
     }
 
@@ -544,6 +882,29 @@ impl RealtimeConfigBuilder {
     /// Set the voice.
     pub fn voice(mut self, voice: impl Into<String>) -> Self {
         self.config.voice = Some(voice.into());
+        self
+    }
+
+    /// Pin the RFC 5646 output language for the session.
+    pub fn language(mut self, language: LanguageCode) -> Self {
+        self.config = self.config.with_language(language);
+        self
+    }
+
+    /// Pin the output language from a string, validating it as RFC 5646.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LanguageCodeError`] when `language` is not a structurally
+    /// valid tag.
+    pub fn try_language(mut self, language: &str) -> std::result::Result<Self, LanguageCodeError> {
+        self.config = self.config.try_with_language(language)?;
+        Ok(self)
+    }
+
+    /// Set whether the provider may resume the session after a disconnect.
+    pub fn session_resumption(mut self, enabled: bool) -> Self {
+        self.config = self.config.with_session_resumption(enabled);
         self
     }
 

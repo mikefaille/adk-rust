@@ -1,5 +1,7 @@
 //! Audio format definitions and utilities.
 
+pub mod g711;
+
 use std::borrow::Cow;
 
 use serde::{Deserialize, Serialize};
@@ -116,24 +118,24 @@ impl AudioFormat {
 #[derive(Debug, Clone)]
 pub struct AudioChunk {
     /// Raw audio data.
-    pub data: Vec<u8>,
+    pub data: bytes::Bytes,
     /// Audio format of this chunk.
     pub format: AudioFormat,
 }
 
 impl AudioChunk {
     /// Create a new audio chunk.
-    pub fn new(data: Vec<u8>, format: AudioFormat) -> Self {
-        Self { data, format }
+    pub fn new(data: impl Into<bytes::Bytes>, format: AudioFormat) -> Self {
+        Self { data: data.into(), format }
     }
 
     /// Create a PCM16 24kHz audio chunk (OpenAI format).
-    pub fn pcm16_24khz(data: Vec<u8>) -> Self {
+    pub fn pcm16_24khz(data: impl Into<bytes::Bytes>) -> Self {
         Self::new(data, AudioFormat::pcm16_24khz())
     }
 
     /// Create a PCM16 16kHz audio chunk (Gemini input format).
-    pub fn pcm16_16khz(data: Vec<u8>) -> Self {
+    pub fn pcm16_16khz(data: impl Into<bytes::Bytes>) -> Self {
         Self::new(data, AudioFormat::pcm16_16khz())
     }
 
@@ -244,7 +246,7 @@ fn decode_pcm16_le(audio: &[u8]) -> Cow<'_, [i16]> {
             .as_chunks::<{ size_of::<i16>() }>()
             .0
             .iter()
-            .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
+            .map(|chunk| i16::from_le_bytes(*chunk))
             .collect(),
     )
 }
@@ -290,6 +292,48 @@ impl SmartAudioBuffer {
     /// Flush any remaining samples in the buffer.
     pub fn flush_remaining(&mut self) -> Option<Vec<i16>> {
         if self.buffer.is_empty() { None } else { Some(std::mem::take(&mut self.buffer)) }
+    }
+
+    /// Returns the current capacity of the underlying buffer.
+    pub fn capacity(&self) -> usize {
+        self.buffer.capacity()
+    }
+
+    /// Number of buffered samples not yet flushed.
+    pub fn len(&self) -> usize {
+        self.buffer.len()
+    }
+
+    /// Whether the buffer holds no samples.
+    pub fn is_empty(&self) -> bool {
+        self.buffer.is_empty()
+    }
+
+    /// Discard buffered samples while keeping the allocation.
+    ///
+    /// Reset-in-place for control boundaries (StopStream/Mute): unlike
+    /// replacing the buffer with `SmartAudioBuffer::new`, the next fill
+    /// reuses the existing capacity instead of reallocating.
+    pub fn clear(&mut self) {
+        self.buffer.clear();
+    }
+
+    /// Process the buffered samples with a closure and then clear the buffer while retaining capacity.
+    ///
+    /// This is a more efficient alternative to `flush()` when the samples don't need
+    /// to be owned by the caller after the closure returns (e.g., they are immediately
+    /// encoded to base64 or copied).
+    pub fn process_and_clear<F, R>(&mut self, f: F) -> Option<R>
+    where
+        F: FnOnce(&[i16]) -> R,
+    {
+        if self.should_flush() {
+            let result = f(&self.buffer);
+            self.buffer.clear();
+            Some(result)
+        } else {
+            None
+        }
     }
 }
 
@@ -342,6 +386,28 @@ mod tests {
         let mut buffer = SmartAudioBuffer::new(1000, 100);
         assert!(buffer.flush().is_none());
         assert!(buffer.flush_remaining().is_none());
+    }
+
+    #[test]
+    fn test_smart_audio_buffer_clear_preserves_capacity() {
+        let mut buffer = SmartAudioBuffer::new(16_000, 20);
+        // 10 ms of audio: below the 20 ms flush threshold, so it stays buffered.
+        buffer.push(&[1; 160]);
+        assert_eq!(buffer.len(), 160);
+        assert!(!buffer.is_empty());
+        let capacity = buffer.capacity();
+        assert!(capacity >= 160);
+
+        buffer.clear();
+        buffer.clear();
+
+        assert_eq!(buffer.len(), 0);
+        assert!(buffer.is_empty());
+        assert_eq!(buffer.capacity(), capacity);
+
+        // Refill of the prior size must not reallocate.
+        buffer.push(&[1; 160]);
+        assert_eq!(buffer.capacity(), capacity);
     }
 
     #[test]
@@ -431,5 +497,27 @@ mod tests {
     fn test_decode_pcm16_le_empty_input() {
         let samples = decode_pcm16_le(&[]);
         assert!(samples.is_empty());
+    }
+
+    #[test]
+    fn test_smart_audio_buffer_capacity_retention() {
+        let mut buffer = SmartAudioBuffer::new(1000, 10); // 10ms target
+        buffer.push(&[0; 100]); // 100ms
+        let initial_cap = buffer.capacity();
+        assert!(initial_cap >= 100);
+
+        // process_and_clear should retain capacity
+        let processed = buffer.process_and_clear(|samples| {
+            assert_eq!(samples.len(), 100);
+            true
+        });
+        assert!(processed.is_some());
+        assert_eq!(buffer.capacity(), initial_cap);
+        assert!(buffer.buffer.is_empty());
+
+        // flush should LOSE capacity (due to mem::take)
+        buffer.push(&[0; 100]);
+        let _ = buffer.flush();
+        assert_eq!(buffer.capacity(), 0);
     }
 }

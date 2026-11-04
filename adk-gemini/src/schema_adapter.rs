@@ -376,6 +376,16 @@ impl SchemaAdapter for GeminiSchemaAdapter {
         schema
     }
 
+    fn validate_tool_name(&self, name: &str) -> Result<(), adk_core::SchemaCompileError> {
+        if name.len() > 64 {
+            return Err(adk_core::SchemaCompileError::new(format!(
+                "Tool name exceeds Gemini 64-character limit: {}",
+                name
+            )));
+        }
+        Ok(())
+    }
+
     /// Truncates tool names exceeding 64 bytes at a valid UTF-8 character boundary.
     ///
     /// Preserves the prefix of the name, truncating from the end.

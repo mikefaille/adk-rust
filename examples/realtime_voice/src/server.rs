@@ -362,14 +362,9 @@ fn build_model(provider: Provider) -> anyhow::Result<(BoxedModel, &'static str)>
                 .or_else(|_| std::env::var("GOOGLE_API_KEY"))
                 .map_err(|_| anyhow::anyhow!("GEMINI_API_KEY / GOOGLE_API_KEY is not set"))?;
             // AI Studio (API-key) endpoint uses different model names than the
-            // Agent Platform/Vertex endpoint (the crate's default
-            // `models/gemini-live-2.5-flash-native-audio` is the *Vertex* name and
-            // 404s here). We default to the half-cascade live model, which calls
-            // tools far more reliably than the native-audio model — important for
-            // this tool-using agent. For the most natural voice (but weaker tool
-            // use), set GEMINI_REALTIME_MODEL=models/gemini-2.5-flash-native-audio-latest.
+            // Agent Platform/Vertex endpoint (a Vertex-only name 404s here).
             let model_id = std::env::var("GEMINI_REALTIME_MODEL")
-                .unwrap_or_else(|_| "models/gemini-3.1-flash-live-preview".to_string());
+                .unwrap_or_else(|_| adk_realtime::gemini::DEFAULT_MODEL.to_string());
             let model: BoxedModel =
                 Arc::new(GeminiRealtimeModel::new(GeminiLiveBackend::studio(api_key), model_id));
             Ok((model, "Kore")) // Kore: a Gemini Live voice
@@ -693,5 +688,16 @@ mod tests {
         assert_eq!(status(addr, "GET /api/memory", "http://evil.example").await, "403");
         assert_eq!(status(addr, "POST /api/memory/reset", "http://evil.example").await, "403");
         assert_eq!(status(addr, "GET /", &own).await, "200");
+    }
+
+    #[test]
+    fn test_gemini_model_defaults_to_gemini_3_8_live() {
+        unsafe {
+            std::env::set_var("GEMINI_API_KEY", "test_key");
+            std::env::remove_var("GEMINI_REALTIME_MODEL");
+        }
+        let (model, voice) = build_model(Provider::Gemini).unwrap();
+        assert_eq!(model.model_id(), "models/gemini-3.8-live");
+        assert_eq!(voice, "Kore");
     }
 }

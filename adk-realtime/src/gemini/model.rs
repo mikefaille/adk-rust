@@ -9,6 +9,7 @@ use async_trait::async_trait;
 
 use super::session::{GeminiLiveBackend, GeminiRealtimeSession, live_model_name};
 use super::{DEFAULT_MODEL, GEMINI_VOICES};
+use adk_gemini::schema_adapter::GeminiSchemaDialect;
 
 /// Gemini Live model for creating realtime sessions.
 ///
@@ -26,7 +27,7 @@ use super::{DEFAULT_MODEL, GEMINI_VOICES};
 pub struct GeminiRealtimeModel {
     backend: GeminiLiveBackend,
     model_id: String,
-    schema_dialect: adk_gemini::GeminiSchemaDialect,
+    schema_dialect: GeminiSchemaDialect,
 }
 
 impl GeminiRealtimeModel {
@@ -47,8 +48,9 @@ impl GeminiRealtimeModel {
     /// assert_eq!(model.model_id(), "models/gemini-3.1-flash-live-preview");
     /// ```
     pub fn new(backend: GeminiLiveBackend, model_id: impl Into<String>) -> Self {
+        let schema_dialect = GeminiRealtimeSession::default_schema_dialect(&backend);
         let model_id = live_model_name(&backend, &model_id.into());
-        Self { backend, model_id, schema_dialect: Default::default() }
+        Self { backend, model_id, schema_dialect }
     }
 
     /// Create with the default Live model.
@@ -56,17 +58,15 @@ impl GeminiRealtimeModel {
         Self::new(backend, DEFAULT_MODEL)
     }
 
-    /// Declare the schema dialect this model's tool schemas are reduced to.
-    ///
-    /// Must match the adapter that produced them. Pair
-    /// [`GeminiSchemaAdapter::json_schema()`](adk_gemini::GeminiSchemaAdapter::json_schema)
-    /// with [`GeminiSchemaDialect::JsonSchema`](adk_gemini::GeminiSchemaDialect::JsonSchema)
-    /// so the constraints it preserved are posted under the field that accepts
-    /// them. The default is the legacy OpenAPI subset, so this changes nothing
-    /// unless called.
-    pub fn with_schema_dialect(mut self, dialect: adk_gemini::GeminiSchemaDialect) -> Self {
+    /// Choose the dialect tool schemas are written in.
+    pub fn with_schema_dialect(mut self, dialect: GeminiSchemaDialect) -> Self {
         self.schema_dialect = dialect;
         self
+    }
+
+    /// The dialect this model writes tool schemas in.
+    pub fn schema_dialect(&self) -> GeminiSchemaDialect {
+        self.schema_dialect
     }
 }
 

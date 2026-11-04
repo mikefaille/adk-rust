@@ -75,7 +75,7 @@ pub const COHERE_DEFAULT: &str = "command-a-plus-05-2026";
 /// Recommended OpenAI Realtime model.
 pub const OPENAI_REALTIME_DEFAULT: &str = "gpt-realtime-2.1";
 /// Recommended Gemini Live model.
-pub const GEMINI_LIVE_DEFAULT: &str = "gemini-3.1-flash-live-preview";
+pub const GEMINI_LIVE_DEFAULT: &str = "gemini-3.8-live";
 /// Recommended OpenAI live transcription model.
 pub const OPENAI_LIVE_TRANSCRIPTION_DEFAULT: &str = "gpt-live-transcribe";
 /// Recommended Gemini speech-to-text model.
@@ -85,7 +85,7 @@ pub const DEEPGRAM_DEFAULT: &str = "nova-3";
 /// Recommended Cartesia text-to-speech model.
 pub const CARTESIA_DEFAULT: &str = "sonic-3.5";
 /// Recommended Gemini text-to-speech model.
-pub const GEMINI_TTS_DEFAULT: &str = "gemini-3.1-flash-tts-preview";
+pub const GEMINI_TTS_DEFAULT: &str = "gemini-3.8-flash-tts";
 /// Recommended Gemini embedding model.
 pub const GEMINI_EMBEDDING_DEFAULT: &str = "gemini-embedding-2";
 /// Recommended OpenAI embedding model.
@@ -318,7 +318,8 @@ pub const MODEL_CATALOG: &[ModelCatalogEntry] = &[
     ),
     ModelCatalogEntry::default("deepgram", DEEPGRAM_DEFAULT, ModelRole::Transcription),
     ModelCatalogEntry::default("cartesia", CARTESIA_DEFAULT, ModelRole::Speech),
-    ModelCatalogEntry::default_preview("gemini-tts", GEMINI_TTS_DEFAULT, ModelRole::Speech),
+    ModelCatalogEntry::default("gemini-tts", GEMINI_TTS_DEFAULT, ModelRole::Speech),
+    ModelCatalogEntry::active("gemini-tts", "gemini-3.8-flash-lite-tts", ModelRole::Speech),
     ModelCatalogEntry::default("openai-embedding", OPENAI_EMBEDDING_DEFAULT, ModelRole::Embedding),
     ModelCatalogEntry::obsolete(
         "gemini",
@@ -448,9 +449,37 @@ pub const MODEL_CATALOG: &[ModelCatalogEntry] = &[
     ),
     ModelCatalogEntry::obsolete(
         "gemini-live",
+        "gemini-3.1-flash-live-preview",
+        ModelLifecycle::Deprecated,
+        GEMINI_LIVE_DEFAULT,
+        None,
+    ),
+    ModelCatalogEntry::obsolete(
+        "gemini-live",
         "gemini-2.5-flash-native-audio-preview-12-2025",
         ModelLifecycle::Deprecated,
         GEMINI_LIVE_DEFAULT,
+        None,
+    ),
+    ModelCatalogEntry::obsolete(
+        "gemini-tts",
+        "gemini-3.1-flash-tts-preview",
+        ModelLifecycle::Deprecated,
+        GEMINI_TTS_DEFAULT,
+        None,
+    ),
+    ModelCatalogEntry::obsolete(
+        "gemini-tts",
+        "gemini-2.5-flash-preview-tts",
+        ModelLifecycle::Deprecated,
+        GEMINI_TTS_DEFAULT,
+        None,
+    ),
+    ModelCatalogEntry::obsolete(
+        "gemini-tts",
+        "gemini-2.5-pro-preview-tts",
+        ModelLifecycle::Deprecated,
+        GEMINI_TTS_DEFAULT,
         None,
     ),
     ModelCatalogEntry::obsolete(

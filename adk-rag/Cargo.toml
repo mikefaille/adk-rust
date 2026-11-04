@@ -46,8 +46,9 @@ sqlx = { workspace = true, features = ["runtime-tokio", "tls-rustls-aws-lc-rs", 
 surrealdb = { version = "3.0.1", features = ["kv-mem", "kv-rocksdb"], optional = true }
 surrealdb-types = { version = "3.0.1", optional = true }
 # `OnnxEmbeddingProvider` (feature `onnx`). The ort pin is adk-audio's: rc.12 renamed
-# `ort::execution_providers`, so a floating pre-release breaks every ONNX feature.
-ort = { version = "=2.0.0-rc.11", optional = true }
+# `ort::execution_providers` to `ort::ep`, so a floating pre-release breaks every ONNX
+# feature. Code uses the `ort::ep`-era paths.
+ort = { version = "=2.0.0-rc.13", optional = true }
 # `esaxx_fast` links a C++ object built against the static CRT, which rust-lld refuses next
 # to ort's dynamic-CRT objects on MSVC; `onig` alone is the feature set candle-core uses.
 tokenizers = { version = "0.22", default-features = false, features = ["onig"], optional = true }

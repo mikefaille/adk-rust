@@ -29,6 +29,13 @@ pub trait OpenAITransportLink: Send + Sync {
     /// Send PCM16 audio. For WebSocket, defaults to base64 encoding over `send_raw`.
     /// For WebRTC, this is MUST be overridden to directly write to the media track.
     async fn send_audio(&self, audio: &crate::audio::AudioChunk) -> Result<()> {
+        // OpenAI Realtime GA currently supports only mono PCM16 at 24kHz.
+        if audio.format != crate::audio::AudioFormat::pcm16_24khz() {
+            return Err(RealtimeError::config(format!(
+                "this OpenAI adapter currently supports only pcm16 at 24kHz mono, received: {:?}",
+                audio.format
+            )));
+        }
         self.send_audio_base64(&audio.to_base64()).await
     }
 
@@ -112,10 +119,13 @@ pub(crate) fn convert_config_to_openai(config: &crate::config::RealtimeConfig) -
     if let Some(vad) = &config.turn_detection {
         let turn_detection = match vad.mode {
             VadMode::ServerVad => {
-                let mut cfg = json!({
-                    "type": "server_vad",
-                    "interrupt_response": true
-                });
+                // `interrupt_response` was hardcoded `true` here, so a caller
+                // who set `Some(false)` was silently overruled. Forwarded only
+                // when chosen; omitted otherwise, leaving OpenAI's own default.
+                let mut cfg = json!({ "type": "server_vad" });
+                if let Some(interrupt) = vad.interrupt_response {
+                    cfg["interrupt_response"] = json!(interrupt);
+                }
                 if let Some(ms) = vad.silence_duration_ms {
                     cfg["silence_duration_ms"] = json!(ms);
                 }
@@ -128,10 +138,10 @@ pub(crate) fn convert_config_to_openai(config: &crate::config::RealtimeConfig) -
                 Some(cfg)
             }
             VadMode::SemanticVad => {
-                let mut cfg = json!({
-                    "type": "semantic_vad",
-                    "interrupt_response": true
-                });
+                let mut cfg = json!({ "type": "semantic_vad" });
+                if let Some(interrupt) = vad.interrupt_response {
+                    cfg["interrupt_response"] = json!(interrupt);
+                }
                 if let Some(eagerness) = &vad.eagerness {
                     cfg["eagerness"] = json!(eagerness);
                 }
@@ -186,10 +196,17 @@ pub(crate) fn convert_config_to_openai(config: &crate::config::RealtimeConfig) -
     // Provider-specific overrides: merge `extra` object keys into the session
     // (caller values win). This is the supported escape hatch for GA fields the
     // typed config doesn't model — e.g. `reasoning`, `speed`, `prompt`.
+    // `language_code` is never emitted: the pinned language lives in the
+    // typed `RealtimeConfig::language` field, which this projection does
+    // not read, and a legacy `extra.language_code` must not leak into an
+    // OpenAI session either.
     if let Some(Value::Object(extra)) = &config.extra
         && let Value::Object(session) = &mut session_config
     {
         for (key, value) in extra {
+            if key == "language_code" {
+                continue;
+            }
             session.insert(key.clone(), value.clone());
         }
     }
@@ -418,6 +435,19 @@ pub(crate) fn translate_client_message(role: &str, parts: Vec<adk_core::types::P
 mod tests {
     use super::*;
     use adk_core::types::Part;
+
+    #[test]
+    fn openai_session_never_emits_language_code() {
+        // Neither the typed language field nor a legacy `extra` key may
+        // reach an OpenAI session update.
+        let mut config =
+            crate::config::RealtimeConfig::default().try_with_language("fr-CA").unwrap();
+        config.extra = Some(json!({ "language_code": "fr-CA", "speed": 1.1 }));
+        let session = convert_config_to_openai(&config);
+        assert!(session.get("language_code").is_none(), "{session}");
+        assert!(session.get("language").is_none(), "{session}");
+        assert_eq!(session["speed"], json!(1.1), "other extras still merge: {session}");
+    }
 
     #[test]
     fn test_openai_translate_text_only() {

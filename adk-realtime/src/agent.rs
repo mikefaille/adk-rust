@@ -65,7 +65,7 @@ use adk_core::{
 use async_stream::stream;
 use async_trait::async_trait;
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 const MAX_BUFFERED_PLAYBACK_AUDIO_BYTES: usize = 16 * 1024 * 1024;
 
@@ -294,6 +294,8 @@ impl RealtimeAgentBuilder {
             silence_duration_ms: Some(500),
             interrupt_response: Some(true),
             eagerness: None,
+            start_of_speech_sensitivity: None,
+            end_of_speech_sensitivity: None,
         });
         self
     }
@@ -668,14 +670,8 @@ impl RealtimeAgent {
         }
 
         // Convert ADK tools to realtime tool definitions
-        let tool_defs: Vec<ToolDefinition> = resolved_tools
-            .iter()
-            .map(|t| ToolDefinition {
-                name: t.name().to_string(),
-                description: Some(t.enhanced_description().to_string()),
-                parameters: t.parameters_schema(),
-            })
-            .collect();
+        let tool_defs: Vec<ToolDefinition> =
+            resolved_tools.iter().map(|t| ToolDefinition::from(t.contract())).collect();
 
         if !tool_defs.is_empty() {
             config.tools = Some(tool_defs);
@@ -687,6 +683,8 @@ impl RealtimeAgent {
             tools.push(ToolDefinition {
                 name: "transfer_to_agent".to_string(),
                 description: Some("Transfer execution to another agent.".to_string()),
+                behavior: None,
+                effect: adk_core::ToolEffect::NonIdempotent,
                 parameters: Some(serde_json::json!({
                     "type": "object",
                     "properties": {
@@ -955,7 +953,7 @@ impl Agent for RealtimeAgent {
                             &ctx,
                             &tool,
                             &function_call_id,
-                            &held.args.to_string(),
+                            &held.args,
                             &DispatchHooks {
                                 before_tool_callbacks: before_tool_callbacks.as_ref(),
                                 after_tool_callbacks: after_tool_callbacks.as_ref(),
@@ -1318,6 +1316,7 @@ impl Agent for RealtimeAgent {
                                         output: serde_json::json!({
                                             "error": "transfer_to_agent needs an `agent_name` argument"
                                         }),
+                                        scheduling: None,
                                     };
                                     if let Err(e) = session.send_tool_response(response).await {
                                         yield Err(AdkError::model(format!("Failed to send tool response: {}", e)));
@@ -1393,6 +1392,7 @@ impl Agent for RealtimeAgent {
                                 let response = ToolResponse {
                                     call_id,
                                     output: result,
+                                    scheduling: None,
                                 };
                                 if let Err(e) = session.send_tool_response(response).await {
                                     yield Err(AdkError::model(format!("Failed to send tool response: {}", e)));
@@ -1533,6 +1533,7 @@ impl Agent for RealtimeAgent {
                     handle.abort();
                 }
                 // Stop the avatar session
+                #[allow(clippy::collapsible_if)]
                 if let (Some(provider), Some(sess_id)) = (&avatar_provider, &avatar_session_id) {
                     if let Err(e) = provider.stop_session(sess_id).await {
                         tracing::warn!(error = %e, "avatar session cleanup failed");
@@ -1723,7 +1724,7 @@ async fn dispatch_tool(
     ctx: &Arc<dyn InvocationContext>,
     tool: &Arc<dyn Tool>,
     call_id: &str,
-    arguments: &str,
+    arguments: &serde_json::Value,
     hooks: &DispatchHooks<'_>,
     resumes: Option<adk_core::ToolConfirmationRequest>,
 ) -> Result<ToolDispatch> {
@@ -2029,12 +2030,16 @@ fn content_to_tool_result(content: &Content) -> serde_json::Value {
 struct RealtimeToolContext {
     parent_ctx: Arc<dyn InvocationContext>,
     function_call_id: String,
-    actions: Mutex<EventActions>,
+    actions: std::sync::RwLock<EventActions>,
 }
 
 impl RealtimeToolContext {
     fn new(parent_ctx: Arc<dyn InvocationContext>, function_call_id: String) -> Self {
-        Self { parent_ctx, function_call_id, actions: Mutex::new(EventActions::default()) }
+        Self {
+            parent_ctx,
+            function_call_id,
+            actions: std::sync::RwLock::new(EventActions::default()),
+        }
     }
 }
 
@@ -2097,11 +2102,11 @@ impl ToolContext for RealtimeToolContext {
     }
 
     fn actions(&self) -> EventActions {
-        self.actions.lock().unwrap().clone()
+        self.actions.read().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     fn set_actions(&self, actions: EventActions) {
-        *self.actions.lock().unwrap() = actions;
+        *self.actions.write().unwrap_or_else(|e| e.into_inner()) = actions;
     }
 
     async fn search_memory(&self, query: &str) -> Result<Vec<MemoryEntry>> {
@@ -2190,14 +2195,17 @@ mod tool_safety_tests {
         executions: Arc<AtomicUsize>,
     ) -> serde_json::Value {
         let tool: Arc<dyn Tool> = Arc::new(CountingTool { executions });
-        dispatch_with(RunConfig::default(), &tool, "{}", before, after).await.unwrap().result
+        dispatch_with(RunConfig::default(), &tool, &serde_json::json!({}), before, after)
+            .await
+            .unwrap()
+            .result
     }
 
     /// Runs `tool` through the governed realtime dispatch under `config`.
     async fn dispatch_with(
         config: RunConfig,
         tool: &Arc<dyn Tool>,
-        arguments: &str,
+        arguments: &serde_json::Value,
         before: Vec<BeforeToolCallback>,
         after: Vec<AfterToolCallback>,
     ) -> Result<ToolDispatch> {
@@ -2213,7 +2221,7 @@ mod tool_safety_tests {
     async fn dispatch_with_policy(
         config: RunConfig,
         tool: &Arc<dyn Tool>,
-        arguments: &str,
+        arguments: &serde_json::Value,
         before: Vec<BeforeToolCallback>,
         after: Vec<AfterToolCallback>,
         policy: &ToolResultPolicy,
@@ -2269,7 +2277,8 @@ mod tool_safety_tests {
         let config = RunConfig::builder()
             .tool_policy(Arc::new(adk_core::DeclarativePolicy::builder().allow("reviewer").build()))
             .build();
-        let outcome = dispatch_with(config, &tool, "{}", vec![], vec![]).await.unwrap();
+        let outcome =
+            dispatch_with(config, &tool, &serde_json::json!({}), vec![], vec![]).await.unwrap();
         let held = outcome.held.expect("the delegate's request holds this call");
         assert_eq!(held.tool_name, "write_file", "the request is the delegate's");
         assert_eq!(held.function_call_id.as_deref(), Some("call-1"), "under this call's ID");
@@ -2288,7 +2297,8 @@ mod tool_safety_tests {
             .build();
         let held = {
             let config = RunConfig::builder().tool_policy(Arc::new(policy.clone())).build();
-            let outcome = dispatch_with(config, &tool, "{}", vec![], vec![]).await.unwrap();
+            let outcome =
+                dispatch_with(config, &tool, &serde_json::json!({}), vec![], vec![]).await.unwrap();
             assert_eq!(executions.load(Ordering::SeqCst), 0);
             outcome.held.expect("held without a decision")
         };
@@ -2312,7 +2322,10 @@ mod tool_safety_tests {
             after_tool_callbacks: &[],
             policy: &policy,
         };
-        let outcome = dispatch_tool(&ctx, &tool, "call-1", "{}", &hooks, Some(held)).await.unwrap();
+        let outcome =
+            dispatch_tool(&ctx, &tool, "call-1", &serde_json::json!({}), &hooks, Some(held))
+                .await
+                .unwrap();
         assert!(outcome.held.is_none(), "the decision resumed the call");
         assert_eq!(outcome.result, serde_json::json!({ "ran": true }));
         assert_eq!(executions.load(Ordering::SeqCst), 1);
@@ -2331,7 +2344,8 @@ mod tool_safety_tests {
                     .build(),
             ))
             .build();
-        let outcome = dispatch_with(config, &tool, "{}", vec![], vec![]).await.unwrap();
+        let outcome =
+            dispatch_with(config, &tool, &serde_json::json!({}), vec![], vec![]).await.unwrap();
         let held = outcome.held.expect("held without a decision");
         assert_eq!(
             held.acting.as_ref().map(|acting| acting.agent.id.as_str()),
@@ -2362,7 +2376,7 @@ mod tool_safety_tests {
         let outcome = dispatch_with(
             RunConfig::default(),
             &counting(&executions),
-            r#"{"amount": "#,
+            &serde_json::json!(r#"{"amount": "#),
             vec![],
             vec![],
         )
@@ -2381,7 +2395,9 @@ mod tool_safety_tests {
             .tool_policy(Arc::new(adk_core::DeclarativePolicy::builder().build()))
             .build();
         let outcome =
-            dispatch_with(deny_all, &counting(&executions), "{}", vec![], vec![]).await.unwrap();
+            dispatch_with(deny_all, &counting(&executions), &serde_json::json!({}), vec![], vec![])
+                .await
+                .unwrap();
         assert_eq!(executions.load(Ordering::SeqCst), 0);
         assert!(outcome.result["error"].as_str().unwrap_or_default().contains("denied by policy"));
 
@@ -2393,7 +2409,9 @@ mod tool_safety_tests {
             ))
             .build();
         let held =
-            dispatch_with(approval, &counting(&executions), "{}", vec![], vec![]).await.unwrap();
+            dispatch_with(approval, &counting(&executions), &serde_json::json!({}), vec![], vec![])
+                .await
+                .unwrap();
         assert_eq!(executions.load(Ordering::SeqCst), 0);
         assert_eq!(held.held.map(|request| request.tool_name), Some("counting".to_string()));
     }
@@ -2405,10 +2423,11 @@ mod tool_safety_tests {
         control.freeze("drill");
         let config = RunConfig::builder().governance(control).build();
 
-        let error = dispatch_with(config, &counting(&executions), "{}", vec![], vec![])
-            .await
-            .err()
-            .expect("a frozen run must end");
+        let error =
+            dispatch_with(config, &counting(&executions), &serde_json::json!({}), vec![], vec![])
+                .await
+                .err()
+                .expect("a frozen run must end");
 
         assert_eq!(error.code, "governance.frozen");
         assert_eq!(executions.load(Ordering::SeqCst), 0);
@@ -2439,7 +2458,9 @@ mod tool_safety_tests {
     async fn a_tool_that_outlives_its_timeout_is_answered_with_an_error() {
         let tool: Arc<dyn Tool> = Arc::new(SlowTool);
         let outcome =
-            dispatch_with(RunConfig::default(), &tool, "{}", vec![], vec![]).await.unwrap();
+            dispatch_with(RunConfig::default(), &tool, &serde_json::json!({}), vec![], vec![])
+                .await
+                .unwrap();
         assert!(outcome.result["error"].as_str().unwrap_or_default().contains("timed out"));
     }
 
@@ -2459,7 +2480,9 @@ mod tool_safety_tests {
         let executions = Arc::new(AtomicUsize::new(0));
         let config = RunConfig::builder().invocation_hook(Arc::new(RefuseTools)).build();
         let outcome =
-            dispatch_with(config, &counting(&executions), "{}", vec![], vec![]).await.unwrap();
+            dispatch_with(config, &counting(&executions), &serde_json::json!({}), vec![], vec![])
+                .await
+                .unwrap();
         assert_eq!(executions.load(Ordering::SeqCst), 0);
         assert_eq!(outcome.result, serde_json::json!({ "result": "tools are paused" }));
     }
@@ -2573,11 +2596,17 @@ mod tool_safety_tests {
             screen: None,
             expose_error_messages: false,
         };
-        let hidden =
-            dispatch_with_policy(RunConfig::default(), &tool, "{}", vec![], vec![], &policy)
-                .await
-                .unwrap()
-                .result;
+        let hidden = dispatch_with_policy(
+            RunConfig::default(),
+            &tool,
+            &serde_json::json!({}),
+            vec![],
+            vec![],
+            &policy,
+        )
+        .await
+        .unwrap()
+        .result;
         assert_eq!(
             hidden,
             serde_json::json!({
@@ -2586,11 +2615,17 @@ mod tool_safety_tests {
         );
 
         policy.expose_error_messages = true;
-        let shown =
-            dispatch_with_policy(RunConfig::default(), &tool, "{}", vec![], vec![], &policy)
-                .await
-                .unwrap()
-                .result;
+        let shown = dispatch_with_policy(
+            RunConfig::default(),
+            &tool,
+            &serde_json::json!({}),
+            vec![],
+            vec![],
+            &policy,
+        )
+        .await
+        .unwrap()
+        .result;
         assert!(shown["error"].as_str().unwrap_or_default().contains("hunter2"), "{shown}");
     }
 
@@ -2625,7 +2660,7 @@ mod tool_safety_tests {
         let result = dispatch_with_policy(
             RunConfig::default(),
             &counting(&executions),
-            "{}",
+            &serde_json::json!({}),
             vec![],
             vec![],
             &policy,
@@ -2647,7 +2682,7 @@ mod tool_safety_tests {
         let result = dispatch_with_policy(
             RunConfig::default(),
             &counting(&executions),
-            "{}",
+            &serde_json::json!({}),
             vec![],
             vec![],
             &policy,
@@ -2894,8 +2929,15 @@ mod tool_safety_tests {
                 [(ToolEffect::NonIdempotent, "outcome_unknown"), (ToolEffect::Idempotent, "failed")]
             {
                 let tool: Arc<dyn Tool> = Arc::new(Hangs { effect, store: None });
-                let outcome =
-                    dispatch_with(RunConfig::default(), &tool, "{}", vec![], vec![]).await.unwrap();
+                let outcome = dispatch_with(
+                    RunConfig::default(),
+                    &tool,
+                    &serde_json::json!({}),
+                    vec![],
+                    vec![],
+                )
+                .await
+                .unwrap();
                 assert_eq!(
                     outcome.part("slow", "call-1"),
                     part(
@@ -2917,7 +2959,8 @@ mod tool_safety_tests {
                 Arc::new(Hangs { effect: ToolEffect::NonIdempotent, store: Some(store.clone()) });
             let config = RunConfig::builder().approval_store(store.clone()).build();
 
-            let outcome = dispatch_with(config, &tool, "{}", vec![], vec![]).await.unwrap();
+            let outcome =
+                dispatch_with(config, &tool, &serde_json::json!({}), vec![], vec![]).await.unwrap();
 
             assert!(outcome.held.is_none(), "the call is not held");
             assert!(outcome.actions.tool_confirmation.is_none());
@@ -2942,7 +2985,8 @@ mod tool_safety_tests {
                     adk_core::DeclarativePolicy::builder().deny("counting", "closed").build(),
                 ))
                 .build();
-            let outcome = dispatch_with(deny, &tool, "{}", vec![], vec![]).await.unwrap();
+            let outcome =
+                dispatch_with(deny, &tool, &serde_json::json!({}), vec![], vec![]).await.unwrap();
             assert_eq!(
                 outcome.part("counting", "call-1"),
                 part(
@@ -2959,7 +3003,9 @@ mod tool_safety_tests {
                         .build(),
                 ))
                 .build();
-            let outcome = dispatch_with(approval, &tool, "{}", vec![], vec![]).await.unwrap();
+            let outcome = dispatch_with(approval, &tool, &serde_json::json!({}), vec![], vec![])
+                .await
+                .unwrap();
             assert_eq!(
                 outcome.part("counting", "call-1"),
                 part(
@@ -2972,7 +3018,9 @@ mod tool_safety_tests {
             );
 
             let outcome =
-                dispatch_with(RunConfig::default(), &tool, "[1]", vec![], vec![]).await.unwrap();
+                dispatch_with(RunConfig::default(), &tool, &serde_json::json!([1]), vec![], vec![])
+                    .await
+                    .unwrap();
             assert_eq!(
                 outcome.part("counting", "call-1"),
                 part("counting", outcome.result.clone(), status("not_run"))
@@ -2989,7 +3037,9 @@ mod tool_safety_tests {
                 })
             })];
             let outcome =
-                dispatch_with(RunConfig::default(), &tool, "{}", before, vec![]).await.unwrap();
+                dispatch_with(RunConfig::default(), &tool, &serde_json::json!({}), before, vec![])
+                    .await
+                    .unwrap();
             assert_eq!(
                 outcome.part("counting", "call-1"),
                 part(
@@ -3004,7 +3054,9 @@ mod tool_safety_tests {
             assert_eq!(executions.load(Ordering::SeqCst), 0);
 
             let outcome =
-                dispatch_with(RunConfig::default(), &tool, "{}", vec![], vec![]).await.unwrap();
+                dispatch_with(RunConfig::default(), &tool, &serde_json::json!({}), vec![], vec![])
+                    .await
+                    .unwrap();
             assert_eq!(
                 outcome.part("counting", "call-1"),
                 part("counting", serde_json::json!({ "ran": true }), None),
@@ -3038,10 +3090,16 @@ mod tool_safety_tests {
             };
             let blocked = adk_core::result_blocked_response("counting", "screening is down");
 
-            let outcome =
-                dispatch_with_policy(RunConfig::default(), &tool, "{}", vec![], vec![], &policy)
-                    .await
-                    .unwrap();
+            let outcome = dispatch_with_policy(
+                RunConfig::default(),
+                &tool,
+                &serde_json::json!({}),
+                vec![],
+                vec![],
+                &policy,
+            )
+            .await
+            .unwrap();
             assert_eq!(
                 outcome.part("counting", "call-1"),
                 part("counting", blocked.clone(), status("withheld"))
@@ -3051,7 +3109,9 @@ mod tool_safety_tests {
                 .tool_policy(Arc::new(adk_core::DeclarativePolicy::builder().build()))
                 .build();
             let outcome =
-                dispatch_with_policy(deny, &tool, "{}", vec![], vec![], &policy).await.unwrap();
+                dispatch_with_policy(deny, &tool, &serde_json::json!({}), vec![], vec![], &policy)
+                    .await
+                    .unwrap();
             assert_eq!(
                 outcome.part("counting", "call-1"),
                 part("counting", blocked, status("refused"))

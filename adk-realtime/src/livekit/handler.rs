@@ -146,7 +146,15 @@ impl<H: EventHandler> LiveKitEventHandler<H> {
     ///
     /// * `inner` — The inner event handler to delegate to.
     /// * `audio_source` — The LiveKit native audio source to push model audio to.
-    /// * `sample_rate` — Sample rate of the audio (e.g., 24000 for OpenAI, 16000 for Gemini).
+    /// * `sample_rate` — Sample rate of the **model's output** audio. 24000 for
+    ///   both OpenAI and Gemini Live, whose output is documented as raw 16-bit
+    ///   PCM at 24 kHz, little-endian.
+    ///
+    ///   This previously read "16000 for Gemini", which is that provider's
+    ///   *input* rate — what a client resamples microphone audio to before
+    ///   sending, and what this crate puts in `audio/pcm;rate=16000`. Following
+    ///   the old advice here plays 24 kHz samples through a 16 kHz sink, so the
+    ///   caller hears the assistant at two-thirds speed.
     /// * `num_channels` — Number of audio channels (typically 1 for mono).
     pub fn new(
         inner: H,
@@ -221,6 +229,11 @@ impl<H: EventHandler> EventHandler for LiveKitEventHandler<H> {
     async fn on_response_done(&self) -> Result<()> {
         self.state.lock().clear_pending_state("response_done");
         self.inner.on_response_done().await
+    }
+
+    async fn on_response_cancelled(&self) -> Result<()> {
+        self.state.lock().clear_pending_state("response_cancelled");
+        self.inner.on_response_cancelled().await
     }
 
     async fn on_error(&self, error: &RealtimeError) -> Result<()> {
@@ -335,6 +348,17 @@ mod tests {
 
         state.assemble(&[0x01, 0x02, 0x03], "item_a", MONO_FRAME_BYTES);
         state.clear_pending_state("error");
+
+        assert!(state.pending_bytes.is_empty());
+        assert_eq!(state.item_id, None);
+    }
+
+    #[test]
+    fn cancellation_boundary_clears_remainder() {
+        let mut state = RemainderState::new();
+
+        state.assemble(&[0x01, 0x02, 0x03], "item_a", MONO_FRAME_BYTES);
+        state.clear_pending_state("response_cancelled");
 
         assert!(state.pending_bytes.is_empty());
         assert_eq!(state.item_id, None);

@@ -10,6 +10,8 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::config::FunctionResponseScheduling;
+
 // ── Custom serde for base64-encoded audio ───────────────────────────────
 
 fn deserialize_audio_bytes<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
@@ -186,6 +188,85 @@ impl ConversationItem {
 
 // ── Server Events ───────────────────────────────────────────────────────
 
+/// Identifier of a provider-issued function call.
+///
+/// A newtype rather than a bare `String` because these are matched against
+/// each other to decide whether a side effect may proceed, and a
+/// provider-supplied identity that is empty is not an identity. An adapter
+/// that filled such a field with `String::new()` once let an empty value
+/// compare equal to another empty value across three layers before anything
+/// failed; [`ToolCallId::parse`] makes that unrepresentable at the boundary
+/// instead of surprising at the comparison.
+///
+/// Deserialization goes through the same check, which is safe here because
+/// only providers that emit a cancellation frame construct one — the OpenAI
+/// wire format, which is deserialized directly into [`ServerEvent`], has no
+/// `tool_call.cancelled` message.
+///
+/// # Example
+///
+/// ```
+/// use adk_realtime::events::ToolCallId;
+///
+/// let id = ToolCallId::parse("call_1").expect("non-empty");
+/// assert_eq!(id.as_str(), "call_1");
+/// assert!(ToolCallId::parse("   ").is_err());
+/// // Padding is stripped, so a padded id still matches a clean one.
+/// assert_eq!(ToolCallId::parse("  call_1  ").unwrap().as_str(), "call_1");
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+#[serde(transparent)]
+pub struct ToolCallId(String);
+
+impl ToolCallId {
+    /// Accept a provider-supplied call id, rejecting one that carries no
+    /// identity.
+    pub fn parse(value: impl Into<String>) -> std::result::Result<Self, EmptyToolCallId> {
+        let value = value.into();
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            return Err(EmptyToolCallId);
+        }
+        // Store the trimmed form. Validating on `trim()` while keeping the
+        // original let `"  call_1  "` through, and these ids are compared
+        // against the raw `call_id` of an earlier `FunctionCallDone` to decide
+        // whether a side effect may proceed — so a padded id would compare
+        // unequal to the same id delivered clean, and the withdrawal would
+        // silently match nothing. Avoids reallocating in the common case.
+        if trimmed.len() == value.len() {
+            return Ok(Self(value));
+        }
+        Ok(Self(trimmed.to_string()))
+    }
+
+    /// Borrow the underlying identifier, for comparison against a `call_id`
+    /// carried by the not-yet-typed variants of this enum.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for ToolCallId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// A tool call id was empty or whitespace-only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("tool call id is empty")]
+pub struct EmptyToolCallId;
+
+impl<'de> Deserialize<'de> for ToolCallId {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::parse(value).map_err(serde::de::Error::custom)
+    }
+}
+
 /// Events received from the realtime server.
 ///
 /// This is a unified event type that abstracts over provider-specific formats.
@@ -205,12 +286,27 @@ pub enum ServerEvent {
     },
 
     /// Session configuration was updated.
+    ///
+    /// Deprecated: providers in this crate report a created session with
+    /// [`SessionCreated`](Self::SessionCreated) and apply configuration
+    /// updates without a distinct public event. No provider implemented
+    /// here constructs this variant; it is kept only so existing matches
+    /// keep compiling.
+    #[deprecated = "no provider implemented here constructs SessionUpdated; session setup is reported with SessionCreated"]
     #[serde(rename = "session.updated")]
     SessionUpdated {
         /// Unique event ID.
         event_id: String,
         /// Updated session details.
         session: Value,
+    },
+
+    /// Planned rotation requested by provider (e.g., Gemini goAway).
+    #[serde(rename = "session.planned_rotation")]
+    PlannedRotation {
+        /// Optional time remaining before server closes the connection (e.g. "10s").
+        #[serde(skip_serializing_if = "Option::is_none")]
+        time_left: Option<String>,
     },
 
     /// Error occurred.
@@ -281,6 +377,92 @@ pub enum ServerEvent {
         event_id: String,
         /// Final response details.
         response: Value,
+    },
+
+    /// The in-flight response was cancelled before completion, normally
+    /// because the caller began speaking over it (barge-in).
+    ///
+    /// This is a normal lifecycle boundary, not an error. Consumers owning an
+    /// audio sink must discard anything already queued for playback: the
+    /// provider has abandoned that turn, and continuing to play it means
+    /// talking over the caller.
+    ///
+    /// Gemini signals this as `serverContent.interrupted`; the field was
+    /// previously parsed and dropped, so `EventHandler::on_response_cancelled`
+    /// could never fire on that backend.
+    #[serde(rename = "response.cancelled")]
+    ResponseCancelled {
+        /// Unique event ID.
+        event_id: String,
+    },
+
+    /// The provider withdrew function calls it had already issued, normally
+    /// because the caller interrupted the turn that produced them.
+    ///
+    /// The ids correspond to `call_id` values previously delivered by
+    /// [`ServerEvent::FunctionCallDone`]. Per Google's Live API, a cancelled
+    /// call "should not have been executed"; a client that already performed a
+    /// side effect may have to undo it. Ignoring this event means a request the
+    /// caller withdrew can still take effect.
+    ///
+    /// The runner fences work already dispatched under these ids: a call
+    /// that has not started never executes, a read-only call in flight is
+    /// aborted, and a non-idempotent call cancelled after it started is
+    /// answered as outcome-unknown rather than as a success. Whether an
+    /// effect that already landed must be compensated remains the
+    /// application's decision.
+    ///
+    #[serde(rename = "tool_call.cancelled")]
+    ToolCallCancelled {
+        /// Ids of the function calls being withdrawn.
+        call_ids: Vec<ToolCallId>,
+    },
+
+    /// Token usage for completed response(s).
+    ///
+    /// Shape only — counts and per-modality splits, never transcript or
+    /// audio. Gemini Live sends this as a top-level `usageMetadata` block,
+    /// either alone or riding alongside `serverContent` at turn end.
+    #[serde(rename = "response.usage")]
+    Usage {
+        /// Unique event ID.
+        event_id: String,
+        /// The token counts.
+        usage: Usage,
+    },
+
+    /// The model finished its turn and is waiting for user input.
+    ///
+    /// Gemini Live sends this as `serverContent.waitingForInput`. A
+    /// turn-boundary signal — the model will produce nothing further until
+    /// the client sends more input — carrying no content.
+    #[serde(rename = "response.waiting_for_input")]
+    ModelWaitingForInput {
+        /// Unique event ID.
+        event_id: String,
+    },
+
+    /// The model's generation for this turn finished.
+    ///
+    /// Gemini Live sends this as `serverContent.generationComplete`,
+    /// alongside `turnComplete` (which maps to [`ServerEvent::ResponseDone`]).
+    #[serde(rename = "response.generation_complete")]
+    GenerationComplete {
+        /// Unique event ID.
+        event_id: String,
+    },
+
+    /// Whether the server considers an interaction in progress.
+    ///
+    /// Gemini Live sends this as `serverContent.interactionStatus`
+    /// (`IDLE` / `IN_PROGRESS`). A state snapshot, not a transition: the
+    /// same value may arrive on consecutive frames.
+    #[serde(rename = "session.interaction_status")]
+    InteractionStatus {
+        /// Unique event ID.
+        event_id: String,
+        /// The reported status.
+        status: InteractionStatus,
     },
 
     /// Response output item added.
@@ -452,7 +634,7 @@ pub enum ServerEvent {
         /// Function name.
         name: String,
         /// Complete arguments.
-        arguments: String,
+        arguments: Value,
     },
 
     /// Rate limit information.
@@ -508,6 +690,51 @@ pub enum ServerEvent {
     Unknown,
 }
 
+/// Whether the server considers an interaction in progress, as carried by
+/// [`ServerEvent::InteractionStatus`].
+///
+/// Mirrors Gemini Live's `serverContent.interactionStatus`: `IDLE` when no
+/// interaction is in progress, `IN_PROGRESS` while one is. An unrecognized
+/// value parses as [`InteractionStatus::Unknown`] instead of failing the
+/// frame, so a new provider status degrades to "present but unrecognized"
+/// rather than dropping the turn's other signals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum InteractionStatus {
+    /// The server is idle, awaiting input.
+    #[serde(rename = "IDLE")]
+    Idle,
+    /// An interaction is in progress.
+    #[serde(rename = "IN_PROGRESS")]
+    InProgress,
+    /// A status value this version does not recognize.
+    #[serde(other)]
+    Unknown,
+}
+
+/// Which server event carried the evidence that the caller was active.
+///
+/// Content-free on purpose. An application gating an action on "did the caller
+/// do something since we asked?" needs the *ordering* of that evidence and
+/// nothing else, and passing the transcript would invite gating on its words —
+/// which is keyword matching, not a lifecycle boundary, and obliges every
+/// consumer to handle caller speech it may not be allowed to retain.
+///
+/// The variants are ranked by how much they actually establish, weakest first.
+/// A transcript is produced by a remote transcription service and is not
+/// guaranteed to be ordered against other server messages, so its arrival after
+/// a given moment does not prove the speech happened after that moment. Speech
+/// offset from provider VAD is stronger. Neither is as strong as observing the
+/// caller's audio directly, which no provider event can give you.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum CallerActivitySource {
+    /// A partial input transcript arrived. One utterance yields several.
+    TranscriptDelta,
+    /// The provider finalized an input transcript item.
+    TranscriptCompleted,
+    /// The provider's VAD reported the caller stopped speaking.
+    SpeechStopped,
+}
+
 /// Error information from the server.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ErrorInfo {
@@ -537,6 +764,59 @@ pub struct RateLimit {
     pub reset_seconds: f64,
 }
 
+/// Token usage for completed response(s), as carried by
+/// [`ServerEvent::Usage`].
+///
+/// Provider-neutral counts; every field is optional because providers send
+/// only what applies. `None` means the provider did not report that count,
+/// not zero.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Usage {
+    /// Tokens in the prompt.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_token_count: Option<u32>,
+    /// Tokens in the response.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub response_token_count: Option<u32>,
+    /// Total tokens billed for the turn.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_token_count: Option<u32>,
+    /// Tokens served from cached content.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cached_content_token_count: Option<u32>,
+    /// Tokens spent on thinking/reasoning.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thoughts_token_count: Option<u32>,
+    /// Prompt tokens spent on tool use.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_use_prompt_token_count: Option<u32>,
+    /// Prompt tokens split by modality.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_tokens_details: Option<Vec<ModalityTokenCount>>,
+    /// Response tokens split by modality.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub response_tokens_details: Option<Vec<ModalityTokenCount>>,
+    /// Cached tokens split by modality.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_tokens_details: Option<Vec<ModalityTokenCount>>,
+    /// Tool-use prompt tokens split by modality.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_use_prompt_tokens_details: Option<Vec<ModalityTokenCount>>,
+}
+
+/// How many of a token count were of one modality.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModalityTokenCount {
+    /// Modality label as the provider sent it (e.g. `"TEXT"`, `"AUDIO"`).
+    /// A string rather than an enum so a new provider modality parses
+    /// instead of failing the frame.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub modality: Option<String>,
+    /// Token count for this modality.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_count: Option<u32>,
+}
+
 /// A simplified tool call representation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCall {
@@ -555,6 +835,11 @@ pub struct ToolResponse {
     pub call_id: String,
     /// The result/output of the tool execution.
     pub output: Value,
+    /// Delivery scheduling hint (Gemini Live only; see
+    /// [`FunctionResponseScheduling`]). `None` omits the field and keeps the
+    /// provider default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scheduling: Option<FunctionResponseScheduling>,
 }
 
 impl ToolResponse {
@@ -563,11 +848,51 @@ impl ToolResponse {
         Self {
             call_id: call_id.into(),
             output: serde_json::to_value(output).unwrap_or(Value::Null),
+            scheduling: None,
         }
     }
 
     /// Create a tool response from a string output.
     pub fn from_string(call_id: impl Into<String>, output: impl Into<String>) -> Self {
-        Self { call_id: call_id.into(), output: Value::String(output.into()) }
+        Self { call_id: call_id.into(), output: Value::String(output.into()), scheduling: None }
+    }
+
+    /// Set the delivery scheduling hint (Gemini Live only).
+    pub fn with_scheduling(mut self, scheduling: FunctionResponseScheduling) -> Self {
+        self.scheduling = Some(scheduling);
+        self
+    }
+}
+
+#[cfg(test)]
+mod tool_call_id_tests {
+    use super::*;
+
+    #[test]
+    fn empty_and_whitespace_are_not_identities() {
+        assert!(ToolCallId::parse("").is_err());
+        assert!(ToolCallId::parse("   ").is_err());
+        assert!(ToolCallId::parse("\t\n").is_err());
+    }
+
+    #[test]
+    fn padding_is_stripped_so_a_padded_id_still_matches_a_clean_one() {
+        // These are compared against the raw `call_id` of an earlier
+        // `FunctionCallDone` to decide whether a side effect may proceed.
+        // Validating on `trim()` while storing the original would let a padded
+        // id compare unequal to the same id delivered clean, and the
+        // withdrawal would silently match nothing.
+        let padded = ToolCallId::parse("  call_1  ").expect("non-empty");
+        let clean = ToolCallId::parse("call_1").expect("non-empty");
+
+        assert_eq!(padded.as_str(), "call_1");
+        assert_eq!(padded, clean);
+    }
+
+    #[test]
+    fn deserialization_rejects_an_empty_id() {
+        // Strict at the boundary rather than surprising at the comparison.
+        assert!(serde_json::from_str::<ToolCallId>("\"\"").is_err());
+        assert!(serde_json::from_str::<ToolCallId>("\"call_1\"").is_ok());
     }
 }

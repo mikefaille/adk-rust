@@ -149,7 +149,7 @@ pub use builtin::{
 };
 #[cfg(feature = "example-store")]
 pub use example_store::{ExampleStoreClient, ExampleStoreConfig, ExampleStoreProvider};
-pub use function_tool::FunctionTool;
+pub use function_tool::{FunctionTool, schema_for};
 #[cfg(feature = "mcp")]
 pub use mcp::{
     AutoDeclineElicitationHandler, ElicitationHandler, McpAuth, McpDiscoveryLimits,

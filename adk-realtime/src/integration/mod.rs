@@ -662,6 +662,18 @@ impl IntegratedRealtimeRunner {
                 inner.handle_aggregated_event(agg_event).await;
             }
 
+            // Fence dispatched calls the provider has withdrawn, so the
+            // spawn path below and any in-flight dispatch observe it.
+            match server_event {
+                ServerEvent::ToolCallCancelled { call_ids } => {
+                    inner.runner.cancel_tool_calls(call_ids);
+                }
+                ServerEvent::ResponseCancelled { .. } => {
+                    inner.runner.cancel_all_tool_calls();
+                }
+                _ => {}
+            }
+
             // Auto-execute tool calls. Unlike `RealtimeRunner::run`, the pull-based
             // `next_event` path does not dispatch tools on its own, so we do it here:
             // bridged ADK tools and native handlers registered on the builder run,
@@ -677,9 +689,19 @@ impl IntegratedRealtimeRunner {
                     let (call_id, name, arguments) =
                         (call_id.clone(), name.clone(), arguments.clone());
                     task_inner.runner.begin_dispatch();
-                    tokio::spawn(async move {
-                        if let Err(e) =
-                            task_inner.dispatch_with_policy(&call_id, &name, &arguments).await
+                    let fence_token = task_inner.runner.register_tool_call(&call_id, &name);
+                    let spawn_token = fence_token.clone();
+                    let abort_inner = Arc::clone(&task_inner);
+                    let abort_call_id = call_id.clone();
+                    let task = tokio::spawn(async move {
+                        if let Err(e) = task_inner
+                            .dispatch_with_policy_fenced(
+                                &call_id,
+                                &name,
+                                &arguments,
+                                Some(spawn_token.clone()),
+                            )
+                            .await
                         {
                             tracing::warn!(
                                 tool = %name,
@@ -688,15 +710,21 @@ impl IntegratedRealtimeRunner {
                                 "tool dispatch failed (non-fatal)"
                             );
                         }
-                        if task_inner.runner.end_dispatch()
+                        task_inner.runner.unregister_tool_call(&call_id);
+                        // A fenced call is owed no follow-up response.
+                        if !spawn_token.is_cancelled()
+                            && task_inner.runner.end_dispatch()
                             && let Err(e) = task_inner.runner.respond_after_tools().await
                         {
                             tracing::warn!(
                                 error = %e,
                                 "post-tool response trigger failed (non-fatal)"
                             );
+                        } else if spawn_token.is_cancelled() {
+                            let _ = task_inner.runner.end_dispatch();
                         }
                     });
+                    abort_inner.runner.set_tool_abort_handle(&abort_call_id, task.abort_handle());
                 } else if let Err(e) = inner.dispatch_with_policy(call_id, name, arguments).await {
                     tracing::warn!(
                         tool = %name,
@@ -1038,7 +1066,55 @@ impl Inner {
     ///
     /// A name that is not a registered ADK tool is a native handler, and falls through to the
     /// runner's own dispatch. That bypass is now explicit rather than the default.
-    async fn dispatch_with_policy(&self, call_id: &str, name: &str, arguments: &str) -> Result<()> {
+    async fn dispatch_with_policy(
+        &self,
+        call_id: &str,
+        name: &str,
+        arguments: &serde_json::Value,
+    ) -> Result<()> {
+        self.dispatch_with_policy_fenced(call_id, name, arguments, None).await
+    }
+
+    /// [`dispatch_with_policy`](Self::dispatch_with_policy) under a fence
+    /// token (one the caller registered, or a fresh registration here): a
+    /// call fenced before it starts sends nothing, and a call fenced after
+    /// a non-idempotent start is answered outcome-unknown with no
+    /// follow-up response owed.
+    async fn dispatch_with_policy_fenced(
+        &self,
+        call_id: &str,
+        name: &str,
+        arguments: &serde_json::Value,
+        fence_token: Option<tokio_util::sync::CancellationToken>,
+    ) -> Result<()> {
+        let own_token;
+        let token = match &fence_token {
+            Some(token) => token,
+            None => {
+                own_token = self.runner.register_tool_call(call_id, name);
+                &own_token
+            }
+        };
+        if token.is_cancelled() {
+            if fence_token.is_none() {
+                self.runner.unregister_tool_call(call_id);
+            }
+            return Ok(());
+        }
+        let result = self.dispatch_with_policy_inner(call_id, name, arguments, token.clone()).await;
+        if fence_token.is_none() {
+            self.runner.unregister_tool_call(call_id);
+        }
+        result
+    }
+
+    async fn dispatch_with_policy_inner(
+        &self,
+        call_id: &str,
+        name: &str,
+        arguments: &serde_json::Value,
+        token: tokio_util::sync::CancellationToken,
+    ) -> Result<()> {
         let Some(tool) = self.adk_tools.get(name).cloned() else {
             tracing::debug!(
                 tool = %name,
@@ -1050,6 +1126,9 @@ impl Inner {
         let arguments = match crate::runner::parse_tool_arguments(arguments) {
             Ok(arguments) => arguments,
             Err(reason) => {
+                if token.is_cancelled() {
+                    return Ok(());
+                }
                 let refusal = serde_json::json!({
                     "error": format!("Tool '{name}' was not run: {reason}")
                 });
@@ -1062,8 +1141,19 @@ impl Inner {
             arguments,
         };
 
-        let result = self.execute_tool_with_plugins(&tool, &call).await?;
-        self.runner.send_tool_result(call_id, result).await
+        let result =
+            self.execute_tool_with_plugins_fenced(&tool, &call, Some(token.clone())).await?;
+        if token.is_cancelled() && !adk_core::is_outcome_unknown(&result) {
+            // Fenced before it finished: no output reaches the model.
+            return Ok(());
+        }
+        let sent = self.runner.send_tool_result(call_id, result).await;
+        if token.is_cancelled() {
+            // An outcome-unknown answer is reported, but no follow-up
+            // response is owed for a withdrawn call.
+            self.runner.clear_pending_tool_response();
+        }
+        sent
     }
 
     pub(crate) async fn execute_tool_with_plugins(
@@ -1071,7 +1161,16 @@ impl Inner {
         tool: &Arc<dyn adk_core::Tool>,
         call: &crate::events::ToolCall,
     ) -> Result<Value> {
-        let ctx = self.create_tool_context(&call.call_id);
+        self.execute_tool_with_plugins_fenced(tool, call, None).await
+    }
+
+    async fn execute_tool_with_plugins_fenced(
+        &self,
+        tool: &Arc<dyn adk_core::Tool>,
+        call: &crate::events::ToolCall,
+        token: Option<tokio_util::sync::CancellationToken>,
+    ) -> Result<Value> {
+        let ctx = self.create_tool_context_with_cancellation(&call.call_id, token);
 
         let mut outcome = if let Some(ref pm) = self.plugin_manager {
             // Run before_tool_call pipeline
@@ -1270,49 +1369,87 @@ impl Inner {
                 let mut cause = None;
                 // Set when a non-idempotent call timed out, so its effect is unknown.
                 let mut outcome_unknown = false;
-                let result = match tokio::time::timeout(timeout, execution).await {
-                    Ok(Ok(value)) => value,
-                    Ok(Err(e)) => {
-                        if self.runner.records_payloads() {
-                            tracing::warn!(
-                                tool = tool.name(),
-                                error = %e.diagnostics(),
-                                error.message = %e.message,
-                                "realtime tool failed"
-                            );
-                        } else {
-                            tracing::warn!(
-                                tool = tool.name(),
-                                error = %e.diagnostics(),
-                                "realtime tool failed"
-                            );
-                        }
-                        let response = adk_core::tool_error_response(
-                            tool.name(),
-                            &e,
-                            self.runner.exposes_tool_error_messages(),
-                        );
-                        status = Some(adk_core::ToolResultStatus::of_tool_error(&e));
-                        cause = Some(e);
-                        response
+                // The fence token drops the execution when the provider
+                // withdraws the call; a non-idempotent call fenced after
+                // it started is answered outcome-unknown, never success.
+                let fenced = ctx.cancellation_token().cloned();
+                let timed = async {
+                    match fenced {
+                        Some(token) => tokio::select! {
+                            biased;
+                            _ = token.cancelled() => None,
+                            result = tokio::time::timeout(timeout, execution) => Some(result),
+                        },
+                        None => Some(tokio::time::timeout(timeout, execution).await),
                     }
-                    Err(_) => {
-                        let message = format!("Tool '{}' timed out after {timeout:?}", tool.name());
-                        // A timed-out call was dropped mid-flight, as in `LlmAgent`.
+                };
+                let result = match timed.await {
+                    None => {
                         outcome_unknown = tool.effect() == adk_core::ToolEffect::NonIdempotent;
                         status = Some(if outcome_unknown {
                             adk_core::ToolResultStatus::OutcomeUnknown
                         } else {
                             adk_core::ToolResultStatus::Failed
                         });
-                        cause = Some(adk_core::AdkError::new(
-                            adk_core::ErrorComponent::Tool,
-                            adk_core::ErrorCategory::Timeout,
-                            "tool.timeout",
-                            message.clone(),
-                        ));
-                        serde_json::json!({ "error": message })
+                        if outcome_unknown {
+                            adk_core::outcome_unknown_response(format!(
+                                "tool '{}' was cancelled after it started; its outcome is unknown",
+                                tool.name()
+                            ))
+                        } else {
+                            serde_json::json!({
+                                "error": format!(
+                                    "tool '{}' was cancelled before it completed",
+                                    tool.name()
+                                )
+                            })
+                        }
                     }
+                    Some(result) => match result {
+                        Ok(Ok(value)) => value,
+                        Ok(Err(e)) => {
+                            if self.runner.records_payloads() {
+                                tracing::warn!(
+                                    tool = tool.name(),
+                                    error = %e.diagnostics(),
+                                    error.message = %e.message,
+                                    "realtime tool failed"
+                                );
+                            } else {
+                                tracing::warn!(
+                                    tool = tool.name(),
+                                    error = %e.diagnostics(),
+                                    "realtime tool failed"
+                                );
+                            }
+                            let response = adk_core::tool_error_response(
+                                tool.name(),
+                                &e,
+                                self.runner.exposes_tool_error_messages(),
+                            );
+                            status = Some(adk_core::ToolResultStatus::of_tool_error(&e));
+                            cause = Some(e);
+                            response
+                        }
+                        Err(_) => {
+                            let message =
+                                format!("Tool '{}' timed out after {timeout:?}", tool.name());
+                            // A timed-out call was dropped mid-flight, as in `LlmAgent`.
+                            outcome_unknown = tool.effect() == adk_core::ToolEffect::NonIdempotent;
+                            status = Some(if outcome_unknown {
+                                adk_core::ToolResultStatus::OutcomeUnknown
+                            } else {
+                                adk_core::ToolResultStatus::Failed
+                            });
+                            cause = Some(adk_core::AdkError::new(
+                                adk_core::ErrorComponent::Tool,
+                                adk_core::ErrorCategory::Timeout,
+                                "tool.timeout",
+                                message.clone(),
+                            ));
+                            serde_json::json!({ "error": message })
+                        }
+                    },
                 };
                 // An agent tool whose delegate held a call of its own holds this call with
                 // it: the request is the delegate's, and this call resumes once that request
@@ -1464,6 +1601,14 @@ impl Inner {
     /// execution alike. It carries the governance run config and the acting context the
     /// gate authorizes the call under.
     fn create_tool_context(&self, function_call_id: &str) -> Arc<context::RealtimeToolContext> {
+        self.create_tool_context_with_cancellation(function_call_id, None)
+    }
+
+    fn create_tool_context_with_cancellation(
+        &self,
+        function_call_id: &str,
+        token: Option<tokio_util::sync::CancellationToken>,
+    ) -> Arc<context::RealtimeToolContext> {
         let mut ctx = context::RealtimeToolContext::new(
             self.identity.app_name.clone(),
             self.identity.user_id.clone(),
@@ -1482,6 +1627,9 @@ impl Inner {
                     &self.identity.user_id,
                 ))
                 .with_run_config(config.clone());
+        }
+        if let Some(token) = token {
+            ctx = ctx.with_cancellation_token(token);
         }
         Arc::new(ctx)
     }

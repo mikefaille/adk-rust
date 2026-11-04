@@ -152,6 +152,7 @@ fn process_refund_def() -> ToolDefinition {
         description: Some(
             "Issue a refund for an order. Only call when a refund is clearly warranted.".into(),
         ),
+        behavior: None,
         parameters: Some(json!({
             "type": "object",
             "properties": {
@@ -186,6 +187,7 @@ fn connect_to_human_def() -> ToolDefinition {
         description: Some(
             "Transfer the customer to a human agent for complex or sensitive issues.".into(),
         ),
+        behavior: None,
         parameters: Some(json!({
             "type": "object",
             "properties": {
@@ -239,7 +241,7 @@ fn build_model(provider: Provider) -> anyhow::Result<(BoxedModel, &'static str)>
             let default_model = if affective_dialog() {
                 "models/gemini-2.5-flash-native-audio-latest"
             } else {
-                "models/gemini-3.1-flash-live-preview"
+                adk_realtime::gemini::DEFAULT_MODEL
             };
             let model_id = std::env::var("GEMINI_REALTIME_MODEL")
                 .unwrap_or_else(|_| default_model.to_string());

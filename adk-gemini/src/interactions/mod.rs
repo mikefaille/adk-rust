@@ -62,8 +62,8 @@ pub use managed_agent::{CreateAgentRequest, ListAgentsResponse, ManagedAgentBuil
 pub use model::{
     AudioContent, Content, CreateInteractionRequest, DocumentContent, GenerationConfig,
     ImageConfig, ImageContent, Input, Interaction, InteractionStatus, ModalityTokens,
-    ResponseFormat, ResponseModality, ServiceTier, Step, TextContent, ThinkingSummaries, Tool,
-    ToolChoice, Usage, VideoContent,
+    ResponseFormat, ResponseModality, ServiceTier, SpeechConfigEntry, Step, TextContent,
+    ThinkingSummaries, Tool, ToolChoice, Usage, VideoContent,
 };
 pub use sse::{InteractionSseEvent, InteractionStreamError, StepDelta};
 

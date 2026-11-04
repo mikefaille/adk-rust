@@ -57,6 +57,7 @@ The table below assigns one stability tier to every public `adk-*` crate in the 
 | `awp-types` | **Beta** | AWP 1.x and 2.0 protocol types and the 2.0 JSON Schemas, zero `adk-*` dependencies |
 | `adk-devtools` | **Beta** | Coding-agent dev tools scoped to a `Workspace` (new in 2.0.0) |
 | `adk-computer-use` | **Beta** | Governed orchestration for the `computer-use-mcp` server (new in 2.0.0) |
+| `adk-schema` | **Beta** | Canonical JSON Schema documents, bounded ingestion, and role-typed identity |
 | `adk-gcp` | **Beta** | Shared Google Cloud REST plumbing for Vertex AI backends (new in 2.1.0) |
 | `adk-harness` | **Beta** | Governed harness agent: modes, standing approvals, shell, todos, instructions, skills (new in 3.0.0) |
 | `adk-kernel` | **Beta** | Agent kernel: supervisor, process model, wake sources, event bus, control plane (spec 3.2) |
@@ -81,6 +82,7 @@ minor release. Every other crate was promoted to Stable in 1.0.0.
 | `awp-types` | Mirrors the AWP wire format, so it moves with the spec | Stabilize alongside `adk-awp` |
 | `adk-devtools` | New in 2.0.0; the coding-agent tool surface is still being shaped by use | Promote after 1-2 release cycles without breaking changes |
 | `adk-computer-use` | New in 2.0.0; tracks the `computer-use-mcp` wire contracts | Stabilize when the upstream contracts are versioned |
+| `adk-schema` | New in 3.0.0; the introspection surface over canonical documents is still being shaped by use | Promote once the document API absorbs a second consumer without breaking changes |
 | `adk-gcp` | New in 2.1.0; the shared ADC/LRO surface is still absorbing the per-crate GCP clients | Promote once the remaining Vertex backends consume it without API changes |
 | `adk-harness` | New in 3.0.0 (spec 3.1); the team, plan-graph, goal and pack layers are implemented and still taking shape in use | Review for Stable in 3.2.0 (spec 3.1 §12 phase 6) |
 | `adk-kernel` | New with spec 3.2; the agenda and the consolidation tick are in, and drivers, partitions, `/proc` and service installation land in later phases on top of the phase-1 API | Review for Stable once spec 3.2 phases 1–3 ship without breaking changes |

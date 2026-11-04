@@ -5,15 +5,20 @@
 
 use crate::config::{RealtimeConfig, SessionUpdateConfig, ToolDefinition};
 use crate::error::{RealtimeError, Result};
-use crate::events::{ServerEvent, ToolCall, ToolResponse};
+use crate::events::{CallerActivitySource, ServerEvent, ToolCall, ToolResponse};
 use crate::metering::{RealtimePricing, ResponseMeter};
 use crate::model::BoxedModel;
-use crate::session::ContextMutationOutcome;
+use crate::recovery::supervisor::{
+    ConfigSnapshot, FailureReport, RecoveryOutcome, RecoverySupervisor, TransportStatus,
+};
+use crate::recovery::{DeliveryCertainty, RecoveryCause, RecoveryPolicy};
+use crate::session::{ContextMutationOutcome, RealtimeSession};
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use tokio::sync::RwLock;
+use tokio_util::sync::CancellationToken;
 
 /// How long a realtime tool may run before its call is answered with a timeout error.
 pub const DEFAULT_REALTIME_TOOL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
@@ -57,15 +62,20 @@ pub(crate) async fn screen_result(
 /// Empty arguments are an empty object. Anything that is not a JSON object is refused,
 /// so a malformed call is answered with an error instead of running with `{}`.
 pub(crate) fn parse_tool_arguments(
-    arguments: &str,
+    arguments: &serde_json::Value,
 ) -> std::result::Result<serde_json::Value, String> {
-    if arguments.trim().is_empty() {
-        return Ok(serde_json::Value::Object(Default::default()));
-    }
-    match serde_json::from_str::<serde_json::Value>(arguments) {
-        Ok(value @ serde_json::Value::Object(_)) => Ok(value),
-        Ok(_) => Err("its arguments are not a JSON object".to_string()),
-        Err(error) => Err(format!("its arguments are not valid JSON ({error})")),
+    match arguments {
+        serde_json::Value::Object(_) => Ok(arguments.clone()),
+        serde_json::Value::Null => Ok(serde_json::Value::Object(Default::default())),
+        serde_json::Value::String(text) if text.trim().is_empty() => {
+            Ok(serde_json::Value::Object(Default::default()))
+        }
+        serde_json::Value::String(text) => match serde_json::from_str::<serde_json::Value>(text) {
+            Ok(value @ serde_json::Value::Object(_)) => Ok(value),
+            Ok(_) => Err("its arguments are not a JSON object".to_string()),
+            Err(error) => Err(format!("its arguments are not valid JSON ({error})")),
+        },
+        _ => Err("its arguments are not a JSON object".to_string()),
     }
 }
 
@@ -88,15 +98,9 @@ pub enum RunnerState {
     ExecutingTool,
     /// A context mutation was queued while the runner was busy, and must be executed once Idle.
     ///
-    /// **Provider Context:** This state is only utilized by providers that do *not* support
-    /// native mid-flight mutability (e.g., Gemini Live), requiring a physical transport teardown
-    /// and rebuild (Phantom Reconnect). Providers like OpenAI natively apply `session.update`
-    /// frames instantly and will never enter this queued state.
-    ///
-    /// **Queue Policy:** The runner keeps only one pending resumption. If a new session update
-    /// arrives while a resumption is already pending, the previous pending resumption is replaced.
-    /// This is intentional: pending session updates represent desired end state, not an ordered
-    /// command queue. The policy is last write wins.
+    /// Semantics: Last-write-wins for pending mutations. If multiple mutations are requested
+    /// while busy, only the latest configuration and bridge message are retained and executed
+    /// when the runner transitions back to `Idle`.
     PendingResumption {
         /// The new configuration to apply on reconnection.
         config: Box<crate::config::RealtimeConfig>,
@@ -112,6 +116,18 @@ pub enum RunnerState {
 pub trait ToolHandler: Send + Sync {
     /// Execute a tool call and return the result.
     async fn execute(&self, call: &ToolCall) -> Result<serde_json::Value>;
+
+    /// Execute a tool call whose cancellation the runner fences: `token`
+    /// is cancelled when the provider withdraws the call or the response.
+    /// The default ignores it; handlers that create a tool context
+    /// override it so the context reports the cancellation.
+    async fn execute_cancellable(
+        &self,
+        call: &ToolCall,
+        _token: CancellationToken,
+    ) -> Result<serde_json::Value> {
+        self.execute(call).await
+    }
 }
 
 /// A simple function-based tool handler.
@@ -163,6 +179,18 @@ where
     }
 }
 
+/// Maps a server event to the caller-activity evidence it carries, if any.
+pub fn caller_activity_source(event: &ServerEvent) -> Option<CallerActivitySource> {
+    match event {
+        ServerEvent::InputTranscriptDelta { .. } => Some(CallerActivitySource::TranscriptDelta),
+        ServerEvent::InputTranscriptCompleted { .. } => {
+            Some(CallerActivitySource::TranscriptCompleted)
+        }
+        ServerEvent::SpeechStopped { .. } => Some(CallerActivitySource::SpeechStopped),
+        _ => None,
+    }
+}
+
 /// Event handler for processing realtime events.
 #[async_trait]
 pub trait EventHandler: Send + Sync {
@@ -181,6 +209,16 @@ pub trait EventHandler: Send + Sync {
         Ok(())
     }
 
+    /// Called when the provider has finalized one caller-input transcript item.
+    async fn on_input_transcript_completed(&self, _transcript: &str, _item_id: &str) -> Result<()> {
+        Ok(())
+    }
+
+    /// Called whenever a server event indicates the caller was active.
+    async fn on_caller_activity(&self, _source: CallerActivitySource) -> Result<()> {
+        Ok(())
+    }
+
     /// Called when speech is detected.
     async fn on_speech_started(&self, _audio_start_ms: u64) -> Result<()> {
         Ok(())
@@ -196,27 +234,31 @@ pub trait EventHandler: Send + Sync {
         Ok(())
     }
 
-    /// Called on any error.
-    /// Called when the provider transport ends and [`RealtimeRunner::run`] is returning.
+    /// Called when function calls are cancelled.
+    async fn on_tool_calls_cancelled(&self, _call_ids: &[crate::events::ToolCallId]) -> Result<()> {
+        Ok(())
+    }
+
+    /// Called when the provider signals a planned connection rotation (e.g. Gemini goAway).
+    async fn on_planned_rotation(&self, _time_left: Option<&str>) -> Result<()> {
+        Ok(())
+    }
+
+    /// Called when a response is cancelled or interrupted.
+    async fn on_response_cancelled(&self) -> Result<()> {
+        Ok(())
+    }
+
+    /// Called when the provider transport ends terminally and [`RealtimeRunner::run`] is returning.
     ///
-    /// The runner does **not** reconnect automatically. Reconnection is deliberate: it
-    /// requires deciding what context to replay and, on Gemini, whether a resumption token
-    /// is still valid. Without this hook `run` returned `Ok(())` on transport loss, which a
-    /// caller could not tell apart from a graceful [`RealtimeRunner::close`].
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// async fn on_disconnect(&self) -> adk_realtime::Result<()> {
-    ///     tracing::warn!("realtime transport ended; reconnecting");
-    ///     self.reconnect.notify_one();
-    ///     Ok(())
-    /// }
-    /// ```
+    /// Under managed recovery, transient connection losses trigger automatic background recovery.
+    /// `on_disconnect` is invoked only when recovery has exhausted all attempts, encountered a fatal error,
+    /// or when the session is explicitly closed.
     async fn on_disconnect(&self) -> Result<()> {
         Ok(())
     }
 
+    /// Called on any error.
     async fn on_error(&self, _error: &RealtimeError) -> Result<()> {
         Ok(())
     }
@@ -234,7 +276,27 @@ impl EventHandler for NoOpEventHandler {}
 struct PendingToolCall {
     call_id: String,
     name: String,
-    arguments: String,
+    arguments: serde_json::Value,
+    /// Fence generation in force when the provider issued this call. A
+    /// `ResponseCancelled` since then fences the call before it runs.
+    epoch: u64,
+}
+
+/// One in-flight tool call in the cancellation fence.
+struct FencedToolCall {
+    token: CancellationToken,
+    abort_handle: Option<tokio::task::AbortHandle>,
+    effect: adk_core::ToolEffect,
+}
+
+/// The cancellation fence for dispatched tool calls.
+#[derive(Default)]
+struct ToolCallFence {
+    /// Bumped by every `ResponseCancelled`; calls registered under an
+    /// older generation are fenced. `SpeechStarted` alone never bumps it:
+    /// speech onset does not withdraw the response's tool calls.
+    epoch: u64,
+    calls: HashMap<String, FencedToolCall>,
 }
 
 /// Configuration for the RealtimeRunner.
@@ -246,11 +308,18 @@ pub struct RunnerConfig {
     pub auto_respond_tools: bool,
     /// Maximum concurrent tool executions.
     pub max_concurrent_tools: usize,
+    /// Maximum consecutive tool execution failures before tripping the circuit breaker (default: 3).
+    pub max_consecutive_tool_failures: usize,
 }
 
 impl Default for RunnerConfig {
     fn default() -> Self {
-        Self { auto_execute_tools: true, auto_respond_tools: true, max_concurrent_tools: 4 }
+        Self {
+            auto_execute_tools: true,
+            auto_respond_tools: true,
+            max_concurrent_tools: 4,
+            max_consecutive_tool_failures: 3,
+        }
     }
 }
 
@@ -259,6 +328,7 @@ pub struct RealtimeRunnerBuilder {
     model: Option<BoxedModel>,
     config: RealtimeConfig,
     runner_config: RunnerConfig,
+    recovery_policy: RecoveryPolicy,
     tools: HashMap<String, (ToolDefinition, Arc<dyn ToolHandler>)>,
     /// The first name registered twice; `build` rejects it.
     duplicate_tool: Option<String>,
@@ -284,6 +354,7 @@ impl RealtimeRunnerBuilder {
             model: None,
             config: RealtimeConfig::default(),
             runner_config: RunnerConfig::default(),
+            recovery_policy: RecoveryPolicy::default(),
             tools: HashMap::new(),
             duplicate_tool: None,
             event_handler: None,
@@ -424,6 +495,12 @@ impl RealtimeRunnerBuilder {
         self
     }
 
+    /// Set the recovery policy.
+    pub fn recovery_policy(mut self, policy: RecoveryPolicy) -> Self {
+        self.recovery_policy = policy;
+        self
+    }
+
     /// Set the system instruction.
     pub fn instruction(mut self, instruction: impl Into<String>) -> Self {
         self.config.instruction = Some(instruction.into());
@@ -453,9 +530,6 @@ impl RealtimeRunnerBuilder {
     }
 
     /// Register a tool with an `Arc<dyn ToolHandler>` directly.
-    ///
-    /// This is useful when you already have a shared handler and want to avoid
-    /// an extra `Arc` wrapping that the `tool()` method would perform.
     pub fn tool_arc(mut self, definition: ToolDefinition, handler: Arc<dyn ToolHandler>) -> Self {
         let name = definition.name.clone();
         if self.tools.insert(name.clone(), (definition, handler)).is_some() {
@@ -471,9 +545,6 @@ impl RealtimeRunnerBuilder {
     }
 
     /// Set the event handler from an `Arc<dyn EventHandler>` directly.
-    ///
-    /// This is useful when you already have a shared handler and want to avoid
-    /// an extra `Arc` wrapping that the `event_handler()` method would perform.
     pub fn event_handler_arc(mut self, handler: Arc<dyn EventHandler>) -> Self {
         self.event_handler = Some(handler);
         self
@@ -494,7 +565,6 @@ impl RealtimeRunnerBuilder {
             )));
         }
 
-        // Add tool definitions to config
         let mut config = self.config;
         if !self.tools.is_empty() {
             let tool_defs: Vec<ToolDefinition> =
@@ -503,6 +573,7 @@ impl RealtimeRunnerBuilder {
         }
 
         let max_concurrent_tools = self.runner_config.max_concurrent_tools.max(1);
+        let supervisor = Arc::new(RecoverySupervisor::new(self.recovery_policy, config));
 
         // Every response is metered in the run's spend ledger, as `LlmAgent` meters a call.
         let meter = self.governance.as_ref().and_then(|governance| {
@@ -517,13 +588,13 @@ impl RealtimeRunnerBuilder {
 
         Ok(RealtimeRunner {
             model,
-            config: Arc::new(RwLock::new(config)),
             runner_config: self.runner_config,
             tools: self.tools,
             event_handler: self.event_handler.unwrap_or_else(|| Arc::new(NoOpEventHandler)),
-            session: Arc::new(RwLock::new(None)),
+            supervisor,
             state: Arc::new(RwLock::new(RunnerState::Idle)),
             pending_tool_response: AtomicBool::new(false),
+            tool_output_failed: Arc::new(AtomicBool::new(false)),
             tool_permits: Arc::new(tokio::sync::Semaphore::new(max_concurrent_tools)),
             outstanding_tools: Arc::new(AtomicUsize::new(0)),
             response_closed_awaiting_tools: Arc::new(AtomicBool::new(false)),
@@ -533,17 +604,19 @@ impl RealtimeRunnerBuilder {
             expose_tool_error_messages: self.expose_tool_error_messages,
             meter,
             agent_name: self.agent_name,
+            consecutive_tool_failures: Arc::new(AtomicUsize::new(0)),
+            circuit_breaker_tripped: Arc::new(AtomicBool::new(false)),
+            tool_fence: Arc::new(std::sync::Mutex::new(ToolCallFence::default())),
         })
     }
 }
 
-/// A runner that manages a realtime session with tool execution.
+/// A runner that manages a realtime session with automatic recovery and tool execution.
 ///
-/// RealtimeRunner provides a high-level interface for:
-/// - Connecting to realtime providers
-/// - Automatically executing tool calls
-/// - Routing events to handlers
-/// - Managing the session lifecycle
+/// `RealtimeRunner` coordinates bidirectional audio and text streams between an agent
+/// model and an application. It provides single-authority session generation fencing,
+/// managed write boundaries with explicit delivery certainty (`NotAttempted` vs `Indeterminate`),
+/// atomic configuration revision snapshotting, and automatic background connection recovery.
 ///
 /// # Example
 ///
@@ -576,22 +649,15 @@ impl RealtimeRunnerBuilder {
 /// ```
 pub struct RealtimeRunner {
     model: BoxedModel,
-    config: Arc<RwLock<RealtimeConfig>>,
     runner_config: RunnerConfig,
     tools: HashMap<String, (ToolDefinition, Arc<dyn ToolHandler>)>,
     event_handler: Arc<dyn EventHandler>,
-    session: Arc<RwLock<Option<Arc<dyn crate::session::RealtimeSession>>>>,
+    supervisor: Arc<RecoverySupervisor>,
     state: Arc<RwLock<RunnerState>>,
-    /// Set when tool output(s) have been sent for the in-flight response and a
-    /// single follow-up `create_response` is owed once that response finishes.
     pending_tool_response: AtomicBool,
-    /// Bounds how many tool handlers run at once, from
-    /// [`RunnerConfig::max_concurrent_tools`].
+    tool_output_failed: Arc<AtomicBool>,
     tool_permits: Arc<tokio::sync::Semaphore>,
-    /// Tool calls dispatched for the current response and not yet finished.
     outstanding_tools: Arc<AtomicUsize>,
-    /// Set when the dispatching response closed while tool calls were still running, so
-    /// the follow-up `create_response` is owed by whichever tool finishes last.
     response_closed_awaiting_tools: Arc<AtomicBool>,
     /// Policy, kill switch, and confirmation applied to every dispatched call.
     governance: Option<ToolGovernance>,
@@ -605,48 +671,151 @@ pub struct RealtimeRunner {
     meter: Option<ResponseMeter>,
     /// The agent every tool call is governed and metered under.
     agent_name: String,
+    consecutive_tool_failures: Arc<AtomicUsize>,
+    circuit_breaker_tripped: Arc<AtomicBool>,
+    tool_fence: Arc<std::sync::Mutex<ToolCallFence>>,
 }
 
 impl RealtimeRunner {
-    /// Helper to safely acquire a cloned Arc of the current session, dropping the lock.
-    async fn session_handle(&self) -> Result<Arc<dyn crate::session::RealtimeSession>> {
-        let guard = self.session.read().await;
-        guard.as_ref().cloned().ok_or_else(|| RealtimeError::connection("Not connected"))
-    }
-
     /// Create a new builder.
     pub fn builder() -> RealtimeRunnerBuilder {
         RealtimeRunnerBuilder::new()
     }
 
+    /// Single managed write invocation boundary.
+    pub(crate) async fn invoke_write<F, Fut, T>(&self, op: F) -> Result<T>
+    where
+        F: FnOnce(Arc<dyn crate::session::RealtimeSession>) -> Fut,
+        Fut: std::future::Future<Output = Result<T>>,
+    {
+        let gen_item = match self.supervisor.admit_write().await {
+            Ok(g) => g,
+            Err(err) => {
+                return Err(RealtimeError::write_failed(
+                    Arc::new(err),
+                    DeliveryCertainty::NotAttempted,
+                ));
+            }
+        };
+
+        match op(gen_item.session).await {
+            Ok(res) => Ok(res),
+            Err(err) => {
+                let err_arc = Arc::new(err);
+                let report = FailureReport {
+                    generation: gen_item.id,
+                    cause: RecoveryCause::WriteFailed(err_arc.clone()),
+                };
+                let _ = self.supervisor.report_failure(report).await;
+                Err(RealtimeError::write_failed(err_arc, DeliveryCertainty::Indeterminate))
+            }
+        }
+    }
+
     /// Connect to the realtime provider.
     pub async fn connect(&self) -> Result<()> {
-        let config = self.config.read().await.clone();
-        let session = self.model.connect(config).await?;
-        let mut guard = self.session.write().await;
-        *guard = Some(session.into());
+        self.consecutive_tool_failures.store(0, Ordering::Release);
+        self.circuit_breaker_tripped.store(false, Ordering::Release);
+
+        let config_snapshot = self.supervisor.get_config().await;
+        let session = self.model.connect(config_snapshot.config).await?;
+        let session_arc: Arc<dyn crate::session::RealtimeSession> = Arc::from(session);
+
+        if self.supervisor.status().await == TransportStatus::Uninitialized {
+            let _ = self.supervisor.set_initial_session(session_arc).await?;
+        } else {
+            let _ =
+                self.supervisor.publish_replacement(session_arc, config_snapshot.revision).await?;
+        }
         Ok(())
+    }
+
+    /// Install an initial session directly (valid only when uninitialized). Returns generation ID.
+    pub async fn set_initial_session(
+        &self,
+        session: Arc<dyn crate::session::RealtimeSession>,
+    ) -> Result<u64> {
+        let gen_item = self.supervisor.set_initial_session(session).await?;
+        Ok(gen_item.id)
     }
 
     /// Check if currently connected.
     pub async fn is_connected(&self) -> bool {
-        let guard = self.session.read().await;
-        guard.as_ref().map(|s| s.is_connected()).unwrap_or(false)
+        self.supervisor.is_connected().await
     }
 
     /// Get the session ID if connected.
     pub async fn session_id(&self) -> Option<String> {
-        let guard = self.session.read().await;
-        guard.as_ref().map(|s| s.session_id().to_string())
+        self.supervisor
+            .get_active_generation()
+            .await
+            .ok()
+            .map(|g| g.session.session_id().to_string())
     }
 
-    /// Send a client event directly to the session.
+    /// Deliberately force a transport interruption on the active session generation for testing.
     ///
-    /// This method intercepts internal control-plane events (like `UpdateSession`) to route
-    /// them through the provider-agnostic orchestration layer instead of forwarding raw JSON
-    /// to the underlying WebSocket transport. This guarantees that `adk-realtime` never leaks
-    /// invalid event payloads to providers (e.g., OpenAI or Gemini) and universally bridges
-    /// the Cognitive Handoff mechanics transparently.
+    /// Abruptly drops the raw active session transport without closing the managed supervisor,
+    /// triggering the managed failure recovery path on the next read or write operation.
+    #[cfg(any(test, feature = "recovery-test-utils"))]
+    pub async fn force_transport_break_for_testing(&self) -> Result<()> {
+        let gen_item = self.supervisor.get_active_generation().await?;
+        gen_item.session.force_transport_break().await
+    }
+
+    /// Set an integration test recovery barrier on the recovery supervisor.
+    #[cfg(any(test, feature = "recovery-test-utils"))]
+    pub fn set_recovery_barrier_for_testing(
+        &self,
+        barrier: Arc<crate::recovery::TestRecoveryBarrier>,
+    ) {
+        self.supervisor.set_recovery_barrier_for_testing(barrier);
+    }
+
+    /// Subscribe to session generation publication notifications.
+    ///
+    /// Returns a read-only watch receiver that fires when a new authoritative session generation
+    /// is installed or published by the underlying supervisor.
+    ///
+    /// # Liveness vs Authority
+    ///
+    /// This watcher provides a **liveness notification** to wake application-owned buffered-data
+    /// replay loops or subscriber tasks upon generation transition (e.g. `N -> N+1`).
+    /// It is **not** an authority over recovery policy, transport state transitions, or provider handles.
+    /// Candidate connection attempts that fail or are rejected before publication do not advance this watcher.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # use adk_realtime::runner::RealtimeRunner;
+    /// # async fn example(runner: RealtimeRunner) {
+    /// let mut rx = runner.subscribe_generation();
+    /// tokio::spawn(async move {
+    ///     while rx.changed().await.is_ok() {
+    ///         let generation = *rx.borrow();
+    ///         println!("New session generation published: {generation}");
+    ///     }
+    /// });
+    /// # }
+    /// ```
+    pub fn subscribe_generation(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.supervisor.subscribe_generation()
+    }
+
+    /// Returns the connected provider's native audio output format.
+    ///
+    /// This format specifies the sample rate, channel count, and encoding (e.g. PCM16 24kHz)
+    /// emitted by the active session generation.
+    pub async fn native_audio_output_format(&self) -> Result<crate::audio::AudioFormat> {
+        let gen_item = self.supervisor.get_active_generation().await?;
+        Ok(gen_item.session.native_audio_output_format())
+    }
+
+    /// Send a client event directly to the active session generation.
+    ///
+    /// `ClientEvent::UpdateSession` events are intercepted and merged into the canonical
+    /// configuration revision state using [`RealtimeRunner::update_session`]. All other events
+    /// pass through the managed write boundary `invoke_write`.
     pub async fn send_client_event(&self, event: crate::events::ClientEvent) -> Result<()> {
         match event {
             crate::events::ClientEvent::UpdateSession { instructions, tools } => {
@@ -657,25 +826,11 @@ impl RealtimeRunner {
                 });
                 self.update_session(update_config).await
             }
-            other => {
-                let session = self.session_handle().await?;
-                session.send_event(other).await
-            }
+            other => self.invoke_write(|s| async move { s.send_event(other).await }).await,
         }
     }
 
-    /// Internal helper to merge a `SessionUpdateConfig` delta into the canonical `RealtimeConfig` state.
-    ///
-    /// **Why this exists**: The `RealtimeRunner` must maintain an absolute, single source of truth
-    /// for its configuration (`self.config`). Orchestrators fire `SessionUpdateConfig`s as sparse
-    /// partial deltas (intents to hot-swap instructions or tools mid-flight). By accumulating
-    /// these sparse updates into the single `base` config, any subsequent "Phantom Reconnect"
-    /// (e.g., due to a Gemini domain shift or an unexpected network drop) natively inherits all
-    /// prior hot-swaps alongside the immutable transport parameters (like sample rates) defined at startup.
-    ///
-    /// Note: This is intentionally narrow and specifically scoped to merge only
-    /// hot-swappable cognitive fields (instruction, tools, voice, temperature, extra).
-    /// Transport-level attributes like sample rates and audio formats are not dynamically swappable.
+    /// Internal helper to merge a `SessionUpdateConfig` delta into config state.
     fn merge_config(base: &mut RealtimeConfig, update: &SessionUpdateConfig) {
         if let Some(instruction) = &update.0.instruction {
             base.instruction = Some(instruction.clone());
@@ -692,115 +847,110 @@ impl RealtimeRunner {
         if let Some(extra) = &update.0.extra {
             base.extra = Some(extra.clone());
         }
+        if let Some(language) = &update.0.language {
+            base.language = Some(language.clone());
+        }
     }
 
     /// Update the session configuration.
     ///
-    /// Delegates to [`Self::update_session_with_bridge`] with no bridge message.
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// use adk_realtime::config::{SessionUpdateConfig, RealtimeConfig};
-    ///
-    /// async fn example(runner: &adk_realtime::RealtimeRunner) {
-    ///     let update = SessionUpdateConfig(
-    ///         RealtimeConfig::default().with_instruction("You are now a pirate.")
-    ///     );
-    ///     runner.update_session(update).await.unwrap();
-    /// }
-    /// ```
+    /// Merges the delta into the canonical configuration snapshot and increments the configuration revision.
+    /// If the runner is idle, context mutation is attempted immediately (natively or via resumption).
+    /// If the runner is busy generating a response or executing a tool, the resumption is queued in
+    /// [`RunnerState::PendingResumption`] and executed once the runner returns to `Idle`.
     pub async fn update_session(&self, config: SessionUpdateConfig) -> Result<()> {
         self.update_session_with_bridge(config, None).await
     }
 
-    /// Update the session configuration, optionally injecting a bridge message if
-    /// a transport resumption (Phantom Reconnect) occurs.
+    /// Update the session configuration with an optional bridge message.
     ///
-    /// The RealtimeRunner will attempt to mutate the session natively if the underlying
-    /// API supports it (e.g., OpenAI). If it does not (e.g., Gemini), the Runner will
-    /// queue a transport resumption, executing it only when the session
-    /// is in a resumable state (Idle) to prevent data corruption.
-    ///
-    /// The runner keeps only one pending resumption. If a new session update arrives while
-    /// a resumption is already pending, the previous pending resumption is replaced. This is
-    /// intentional: pending session updates represent desired end state, not an ordered command queue.
-    /// The policy is last write wins.
+    /// Behaves like [`update_session`](Self::update_session), but injects the provided text message
+    /// into the conversation stream immediately after resumption completes.
     pub async fn update_session_with_bridge(
         &self,
         config: SessionUpdateConfig,
         bridge_message: Option<String>,
     ) -> Result<()> {
-        // 1. Merge the incoming delta into the runner's canonical, persisted configuration.
-        // This ensures that any future reconnects (e.g., due to network drops) naturally
-        // inherit this latest state.
-        let mut full_config = self.config.write().await;
-        Self::merge_config(&mut full_config, &config);
+        let snapshot =
+            self.supervisor.update_config(|base| Self::merge_config(base, &config)).await;
 
-        let cloned_config = full_config.clone();
-        drop(full_config); // Free the write lock early to avoid deadlocks.
+        let snapshot_for_mutate = snapshot.clone();
+        let mutate_res = self
+            .invoke_write(|s| async move { s.mutate_context(snapshot_for_mutate.config).await })
+            .await?;
 
-        // 2. Safely obtain a cloned handle of the active session.
-        let session = self.session_handle().await?;
-
-        // 3. Delegate the mutation attempt to the provider-specific adapter.
-        match session.mutate_context(cloned_config).await? {
-            // PATH A: Native Mutability (e.g., OpenAI)
-            // The provider natively updated the context over the active WebSocket.
+        match mutate_res {
             ContextMutationOutcome::Applied => {
                 tracing::info!("Context mutated natively mid-flight.");
-
-                // Since the transport wasn't dropped, we can inject the bridge message
-                // immediately as a standard user message to update the model's short-term memory.
                 if let Some(msg) = bridge_message {
                     let event = crate::events::ClientEvent::Message {
                         role: "user".to_string(),
                         parts: vec![adk_core::types::Part::Text { text: msg }],
                     };
-                    session.send_event(event).await?;
+                    self.invoke_write(|s| async move { s.send_event(event).await }).await?;
                 }
                 Ok(())
             }
-
-            // PATH B: Rigid Initialization (e.g., Gemini)
-            // The provider requires us to tear down the WebSocket and establish a new one (Phantom Reconnect).
             ContextMutationOutcome::RequiresResumption(new_config) => {
-                drop(session); // CRITICAL: Drop the cloned handle before attempting state mutation.
-
-                // 4. Check the Runner's internal state machine to ensure it is safe to tear down the socket.
                 let mut state_guard = self.state.write().await;
 
+                let queued_snapshot =
+                    ConfigSnapshot { config: (*new_config).clone(), revision: snapshot.revision };
+
                 if *state_guard == RunnerState::Idle {
-                    // Safe to reconnect: The model is neither generating audio nor executing a tool.
-                    drop(state_guard); // Free state lock before the heavy async network operation.
+                    drop(state_guard);
                     tracing::info!("Runner is idle. Executing resumption immediately.");
 
-                    if let Err(e) =
-                        self.execute_resumption((*new_config).clone(), bridge_message.clone()).await
+                    let model = Arc::clone(&self.model);
+                    let cfg = queued_snapshot.config.clone();
+                    match self
+                        .supervisor
+                        .execute_resumption_with(queued_snapshot.clone(), move || async move {
+                            let s = model.connect(cfg).await?;
+                            Ok(Arc::from(s) as Arc<dyn RealtimeSession>)
+                        })
+                        .await
                     {
-                        tracing::error!("Immediate resumption failed: {}. Queueing for retry.", e);
-                        // If the reconnect fails (e.g., transient network issue), we must not lose the mutation intent.
-                        // We push it back into the queue for the background loop to retry.
-                        let mut fallback_state = self.state.write().await;
-                        *fallback_state = RunnerState::PendingResumption {
-                            config: Box::new(*new_config),
-                            bridge_message,
-                            attempts: 1,
-                        };
-                        return Err(e);
+                        Ok(_) => {
+                            if let Some(msg) = bridge_message {
+                                tracing::info!(
+                                    "Sending bridge message post-resumption via invoke_write."
+                                );
+                                let event = crate::events::ClientEvent::Message {
+                                    role: "user".to_string(),
+                                    parts: vec![adk_core::types::Part::Text { text: msg }],
+                                };
+                                self.invoke_write(|s| async move { s.send_event(event).await })
+                                    .await?;
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                "Immediate resumption failed: {}. Queueing for retry.",
+                                e
+                            );
+                            let mut fallback_state = self.state.write().await;
+                            match &*fallback_state {
+                                RunnerState::PendingResumption { .. } => {
+                                    tracing::info!(
+                                        "Newer resumption intent already queued; preserving newer intent."
+                                    );
+                                }
+                                RunnerState::Idle
+                                | RunnerState::Generating
+                                | RunnerState::ExecutingTool => {
+                                    *fallback_state = RunnerState::PendingResumption {
+                                        config: new_config,
+                                        bridge_message,
+                                        attempts: 1,
+                                    };
+                                }
+                            }
+                            return Err(e);
+                        }
                     }
                 } else {
-                    // Unsafe to reconnect: Tearing down the socket now would corrupt the in-flight context.
-                    // We must queue the mutation. The event loop will execute it once it returns to Idle.
-                    if let RunnerState::PendingResumption { .. } = *state_guard {
-                        tracing::warn!(
-                            "Runner already had a pending resumption. Overwriting with last-write-wins policy."
-                        );
-                    } else {
-                        tracing::info!("Runner is busy ({:?}). Queueing resumption.", *state_guard);
-                    }
-
-                    // Queue the intent using a last-write-wins policy.
+                    tracing::info!("Runner is busy ({:?}). Queueing resumption.", *state_guard);
                     *state_guard = RunnerState::PendingResumption {
                         config: new_config,
                         bridge_message,
@@ -812,160 +962,104 @@ impl RealtimeRunner {
         }
     }
 
-    /// Internal helper to execute a transport resumption (teardown and rebuild).
-    async fn execute_resumption(
-        &self,
-        new_config: crate::config::RealtimeConfig,
-        bridge_message: Option<String>,
-    ) -> Result<()> {
-        tracing::warn!("Executing transport resumption with new configuration.");
-
-        // 1. Extract the old session safely under the write lock.
-        let old_session = {
-            let mut write_guard = self.session.write().await;
-            write_guard.take()
-        };
-
-        // 2. Explicitly tear down the old WebSocket connection to release upstream resources.
-        // Do this WITHOUT holding the lock across `.await`.
-        if let Some(session) = old_session
-            && let Err(e) = session.close().await
-        {
-            tracing::warn!("Failed to cleanly close old session during resumption: {}", e);
-        }
-
-        // 3. Establish a brand new connection using the provider-agnostic factory interface.
-        // If the provider supports resumption natively (like Gemini), the `new_config`
-        // payload already contains the cached `resumeToken`.
-        let new_session = self.model.connect(new_config).await?;
-
-        // 4. Overwrite the active session pointer with the newly connected transport.
-        {
-            let mut write_guard = self.session.write().await;
-            *write_guard = Some(new_session.into());
-        }
-
-        // 5. If the orchestrator provided a bridge message (e.g. to explain the domain shift),
-        // safely inject it into the new connection's context window.
-        if let Some(msg) = bridge_message {
-            self.inject_bridge_message(msg).await?;
-        }
-
-        tracing::info!("Resumption complete. New transport established.");
-        Ok(())
-    }
-
-    /// Internal helper to safely inject a bridge message directly into the active session.
+    /// Send a typed raw-audio chunk to the active session generation.
     ///
-    /// This intentionally bypasses the `send_client_event` router to avoid `E0733`
-    /// (un-Boxed async recursion) where `send_client_event` -> `update_session` ->
-    /// `execute_resumption` -> `send_client_event` creates an infinite compiler loop.
-    async fn inject_bridge_message(&self, msg: String) -> Result<()> {
-        tracing::info!("Injecting bridge message post-resumption.");
-        let event = crate::events::ClientEvent::Message {
-            role: "user".to_string(),
-            parts: vec![adk_core::types::Part::Text { text: msg }],
-        };
-        let session = self.session_handle().await?;
-        session.send_event(event).await
-    }
-
-    /// Send a typed raw-audio chunk to the session.
-    ///
-    /// This preserves the audio format at the provider boundary and lets the
-    /// provider choose its native encoding path. Prefer this method when the
-    /// caller already owns raw audio bytes.
+    /// Routes through the managed write boundary. Admission rejection returns `DeliveryCertainty::NotAttempted`
+    /// without calling the raw session. Failures after raw invocation return `DeliveryCertainty::Indeterminate`
+    /// and report `RecoveryCause::WriteFailed` to trigger managed recovery.
     pub async fn send_audio_chunk(&self, audio: &crate::audio::AudioChunk) -> Result<()> {
-        let session = self.session_handle().await?;
-        session.send_audio(audio).await
+        let chunk = audio.clone();
+        self.invoke_write(|s| async move { s.send_audio(&chunk).await }).await
     }
 
-    /// Send base64-encoded audio to the session.
-    ///
-    /// This compatibility entry point is useful when the caller already has a
-    /// base64 payload. Raw-audio callers should use
-    /// [`send_audio_chunk`](Self::send_audio_chunk) to avoid forcing an encoding
-    /// decision at the provider-neutral runner boundary.
+    /// Send base64-encoded audio to the active session generation.
     pub async fn send_audio(&self, audio_base64: &str) -> Result<()> {
-        let session = self.session_handle().await?;
-        session.send_audio_base64(audio_base64).await
+        self.send_audio_base64(audio_base64).await
     }
 
-    /// Send text to the session.
+    /// Send base64-encoded audio to the active session generation.
+    pub async fn send_audio_base64(&self, audio_base64: &str) -> Result<()> {
+        let payload = audio_base64.to_string();
+        self.invoke_write(|s| async move { s.send_audio_base64(&payload).await }).await
+    }
+
+    /// Send text to the active session generation.
     pub async fn send_text(&self, text: &str) -> Result<()> {
-        let session = self.session_handle().await?;
-        session.send_text(text).await
+        let payload = text.to_string();
+        self.invoke_write(|s| async move { s.send_text(&payload).await }).await
     }
 
-    /// Send a base64-encoded video/image frame (e.g. `image/jpeg`) for
-    /// multimodal input, where the provider supports it (Gemini Live; OpenAI as
-    /// an image-in-context item).
+    /// Send video frame to the active session generation.
     pub async fn send_video_frame(&self, mime_type: &str, data_base64: &str) -> Result<()> {
-        let session = self.session_handle().await?;
-        session.send_video_frame(mime_type, data_base64).await
+        let mime = mime_type.to_string();
+        let data = data_base64.to_string();
+        self.invoke_write(|s| async move { s.send_video_frame(&mime, &data).await }).await
     }
 
-    /// Commit the audio buffer (for manual VAD mode).
+    /// Commit audio buffer for the active session generation.
     pub async fn commit_audio(&self) -> Result<()> {
-        let session = self.session_handle().await?;
-        session.commit_audio().await
+        self.invoke_write(|s| async move { s.commit_audio().await }).await
     }
 
-    /// Trigger a response from the model.
+    /// Report the start of a manually delimited input turn on the active
+    /// session generation.
+    ///
+    /// The opening edge that [`commit_audio`](Self::commit_audio) closes. This
+    /// exists so a caller running its own detection can report caller speech
+    /// through the neutral runner, rather than downcasting to a concrete
+    /// session to reach a backend-specific signaller.
+    pub async fn begin_activity(&self) -> Result<()> {
+        self.invoke_write(|s| async move { s.begin_activity().await }).await
+    }
+
+    /// Trigger model response for the active session generation.
     pub async fn create_response(&self) -> Result<()> {
-        let session = self.session_handle().await?;
-        session.create_response().await
+        self.invoke_write(|s| async move { s.create_response().await }).await
     }
 
-    /// Interrupt the current response.
+    /// Interrupt current response for the active session generation.
     pub async fn interrupt(&self) -> Result<()> {
-        let session = self.session_handle().await?;
-        session.interrupt().await
+        self.invoke_write(|s| async move { s.interrupt().await }).await
     }
 
-    /// Get the next raw event from the session.
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// use adk_realtime::events::ServerEvent;
-    /// use tracing::{info, error};
-    ///
-    /// async fn process_events(runner: &adk_realtime::RealtimeRunner) {
-    ///     while let Some(event) = runner.next_event().await {
-    ///         match event {
-    ///             Ok(ServerEvent::SpeechStarted { .. }) => info!("User is speaking"),
-    ///             Ok(_) => info!("Received other event"),
-    ///             Err(e) => error!("Error: {e}"),
-    ///         }
-    ///     }
-    /// }
-    /// ```
-    /// Why the provider ended the stream, once [`Self::next_event`] has returned
-    /// `None`.
-    ///
-    /// Callers that poll `next_event` never see the runner's `on_disconnect`
-    /// dispatch, so without this a provider that deliberately closed an idle
-    /// session is indistinguishable from a dropped socket — and both get
-    /// recorded as the same generic stream failure.
+    /// Why the provider ended the stream.
     pub async fn disconnect_reason(&self) -> Option<crate::session::DisconnectReason> {
-        self.session_handle().await.ok().and_then(|session| session.disconnect_reason())
+        self.supervisor
+            .get_active_generation()
+            .await
+            .ok()
+            .and_then(|g| g.session.disconnect_reason())
     }
 
-    pub async fn next_event(&self) -> Option<Result<ServerEvent>> {
-        let session = match self.session_handle().await {
-            Ok(session) => session,
-            Err(_) => {
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                return None;
+    /// Read next event from active generation session, handling generation switches.
+    async fn poll_session_next(
+        &self,
+        watcher: &mut tokio::sync::watch::Receiver<u64>,
+        current_gen_id: u64,
+        session: &Arc<dyn crate::session::RealtimeSession>,
+    ) -> Option<Result<ServerEvent>> {
+        let event = tokio::select! {
+            biased;
+            _ = watcher.changed() => {
+                if *watcher.borrow() != current_gen_id {
+                    tracing::info!(
+                        from = current_gen_id,
+                        to = *watcher.borrow(),
+                        "generation changed; switching to active generation"
+                    );
+                    return None;
+                }
+                session.next_event().await
             }
+            ev = session.next_event() => ev,
         };
 
-        // Some sessions might yield inside next_event, but just in case, yield here too
-        tokio::task::yield_now().await;
-        let event = session.next_event().await?;
-        if let Ok(event) = &event
-            && let Err(error) = self.observe_event(event).await
+        // Never yield after an event has been obtained: the caller's `select!`
+        // may cancel this future at a yield point, which would drop the event
+        // a buffered session already handed over.
+        let event = event?;
+        if let Ok(inner) = &event
+            && let Err(error) = self.observe_event(inner).await
         {
             return Some(Err(error));
         }
@@ -1032,131 +1126,225 @@ impl RealtimeRunner {
             && self.response_closed_awaiting_tools.swap(false, Ordering::AcqRel)
     }
 
-    /// Send a tool response to the session.
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// use adk_realtime::events::ToolResponse;
-    /// use serde_json::json;
-    ///
-    /// async fn example(runner: &adk_realtime::RealtimeRunner) {
-    ///     let response = ToolResponse {
-    ///         call_id: "call_123".to_string(),
-    ///         output: json!({"temperature": 72}),
-    ///     };
-    ///     runner.send_tool_response(response).await.unwrap();
-    /// }
-    /// ```
-    pub async fn send_tool_response(&self, response: ToolResponse) -> Result<()> {
-        let session = self.session_handle().await?;
-        session.send_tool_response(response).await
+    /// Authoritatively spawn planned proactive replacement and notify the application event handler.
+    async fn handle_planned_rotation(&self, gen_id: u64, time_left: Option<String>) -> Result<()> {
+        let supervisor = Arc::clone(&self.supervisor);
+        let time_left_clone = time_left.clone();
+        tokio::spawn(async move {
+            let cause = RecoveryCause::PlannedRotation { time_left: time_left_clone };
+            if let Err(e) = supervisor.execute_planned_replacement(gen_id, cause).await {
+                // Fixed category, not the error Display: recovery errors
+                // carry provider text (CWE-532).
+                tracing::warn!(
+                    gen_id,
+                    error = crate::recovery::error_category(&e),
+                    "proactive planned replacement attempt failed; keeping generation N authoritative"
+                );
+            }
+        });
+        self.event_handler.on_planned_rotation(time_left.as_deref()).await
     }
 
-    /// Execute a tool call against the registered handlers, sending the result
-    /// back to the model when `auto_respond_tools` is enabled.
+    /// Report read failure to supervisor, returning true if recovered/stale (caller should loop).
+    async fn report_read_failure(&self, gen_id: u64, cause: RecoveryCause) -> bool {
+        let report = FailureReport { generation: gen_id, cause };
+        matches!(
+            self.supervisor.report_failure(report).await,
+            Ok(RecoveryOutcome::Recovered { .. }) | Ok(RecoveryOutcome::Stale(_))
+        )
+    }
+
+    /// Get the next managed event from the session with generation awareness and automatic recovery.
     ///
-    /// This is the same dispatch the [`run`](Self::run) loop performs for a
-    /// `response.function_call_arguments.done` event, exposed so that callers
-    /// driving the session manually via [`next_event`](Self::next_event) — such
-    /// as `IntegratedRealtimeRunner` (available with the `integration` feature) —
-    /// can execute tools without re-implementing the lookup/respond logic.
+    /// Provides pull-based reading parity with [`run`](Self::run). `next_event` subscribes to generation
+    /// change signals and automatically switches to newly published generations without blocking on
+    /// graceful closure of older sessions. Connection losses trigger background recovery automatically.
+    pub async fn next_event(&self) -> Option<Result<ServerEvent>> {
+        loop {
+            let mut watcher = self.supervisor.subscribe_generation();
+            let gen_item = match self.supervisor.get_active_generation().await {
+                Ok(g) => g,
+                Err(RealtimeError::SessionClosed) | Err(RealtimeError::NotConnected) => {
+                    return None;
+                }
+                Err(err) => return Some(Err(err)),
+            };
+
+            if *watcher.borrow_and_update() != gen_item.id {
+                continue;
+            }
+
+            let current_gen_id = gen_item.id;
+            let session = gen_item.session;
+
+            match self.poll_session_next(&mut watcher, current_gen_id, &session).await {
+                Some(Ok(ServerEvent::PlannedRotation { time_left })) => {
+                    let _ = self.handle_planned_rotation(current_gen_id, time_left.clone()).await;
+                    return Some(Ok(ServerEvent::PlannedRotation { time_left }));
+                }
+                Some(Ok(event)) => return Some(Ok(event)),
+                Some(Err(e)) => {
+                    if self
+                        .report_read_failure(
+                            current_gen_id,
+                            RecoveryCause::ReadFailed(Arc::new(e.clone())),
+                        )
+                        .await
+                    {
+                        continue;
+                    }
+                    return Some(Err(e));
+                }
+                None => {
+                    if *watcher.borrow() != current_gen_id {
+                        continue;
+                    }
+                    if self.report_read_failure(current_gen_id, RecoveryCause::UnexpectedEof).await
+                    {
+                        continue;
+                    }
+                    return None;
+                }
+            }
+        }
+    }
+
+    /// Send tool response.
+    pub async fn send_tool_response(&self, response: ToolResponse) -> Result<()> {
+        self.invoke_write(|s| async move { s.send_tool_response(response).await }).await
+    }
+
+    /// Execute tool call.
     pub async fn dispatch_tool_call(
         &self,
         call_id: &str,
         name: &str,
-        arguments: &str,
+        arguments: &serde_json::Value,
     ) -> Result<()> {
         self.execute_tool_call(call_id, name, arguments).await
     }
 
-    /// Sends a tool result the caller produced, honouring `auto_respond_tools`.
-    ///
-    /// Used by the integration layer, which runs ADK tools through its own policy pipeline and
-    /// then needs the result delivered exactly as `execute_tool_call` would deliver it: the
-    /// output is sent now, and the single follow-up `create_response` is deferred until the
-    /// dispatching response closes, so several parallel calls produce one response.
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// let result = my_policy_pipeline.run(&call).await?;
-    /// runner.send_tool_result(&call.call_id, result).await?;
-    /// ```
+    /// Send tool result.
     pub async fn send_tool_result(&self, call_id: &str, output: serde_json::Value) -> Result<()> {
         if !self.runner_config.auto_respond_tools {
             return Ok(());
         }
-
-        if let Ok(session) = self.session_handle().await {
-            session.send_tool_output(ToolResponse { call_id: call_id.to_string(), output }).await?;
-            self.pending_tool_response.store(true, Ordering::Release);
+        let response = ToolResponse { call_id: call_id.to_string(), output, scheduling: None };
+        if let Err(e) =
+            self.invoke_write(|s| async move { s.send_tool_output(response).await }).await
+        {
+            self.tool_output_failed.store(true, Ordering::Release);
+            return Err(e);
         }
+        self.pending_tool_response.store(true, Ordering::Release);
         Ok(())
     }
 
-    /// Run the event loop, processing events until disconnected.
+    /// Run with cancellation token.
+    pub async fn run_with_cancellation(
+        &self,
+        cancel_token: tokio_util::sync::CancellationToken,
+    ) -> Result<()> {
+        self.run_loop(Some(cancel_token)).await
+    }
+
+    /// Run the event loop.
     pub async fn run(&self) -> Result<()> {
+        self.run_loop(None).await
+    }
+
+    /// Internal unified event loop.
+    async fn run_loop(
+        &self,
+        cancel_token: Option<tokio_util::sync::CancellationToken>,
+    ) -> Result<()> {
         use futures::stream::{FuturesUnordered, StreamExt};
 
-        // Tool handlers run as futures on this set rather than inline, so reading the next
-        // provider event never waits for a tool. `max_concurrent_tools` bounds how many
-        // are past their permit acquisition at once.
         let mut running_tools = FuturesUnordered::new();
 
         loop {
-            let session = self.session_handle().await?;
-            let old_session_id = session.session_id().to_string();
+            if let Some(token) = &cancel_token
+                && token.is_cancelled()
+            {
+                tracing::info!("RealtimeRunner run loop cancelled via cancellation token.");
+                self.close().await?;
+                self.event_handler.on_disconnect().await?;
+                break;
+            }
 
-            // With no tools in flight there is nothing to drain, and polling an empty
-            // `FuturesUnordered` in a `select!` would spin.
-            let event = if running_tools.is_empty() {
-                session.next_event().await
-            } else {
-                tokio::select! {
-                    biased;
-                    Some(finished) = running_tools.next() => {
-                        let () = finished?;
-                        continue;
-                    }
-                    event = session.next_event() => event,
-                }
-            };
-
-            match event {
-                Some(Ok(event)) => {
-                    if let Err(error) = self.observe_event(&event).await {
-                        self.event_handler.on_error(&error).await?;
-                        let _ = self.close().await;
-                        return Err(error);
-                    }
-                    if let Some(call) = self.handle_event(event).await? {
-                        self.outstanding_tools.fetch_add(1, Ordering::AcqRel);
-                        running_tools.push(self.run_tool_call(call));
-                    }
-                }
-                Some(Err(e)) => {
-                    self.event_handler.on_error(&e).await?;
-                    return Err(e);
-                }
-                None => {
-                    // Session closed or swapped out. Check if a new session was installed (e.g., during reconnect).
-                    let current_session_id = self.session_id().await;
-                    if let Some(id) = current_session_id
-                        && id != old_session_id
-                    {
-                        // A new session handle was installed concurrently. Continue polling.
-                        continue;
-                    }
-                    // A real disconnect. Let dispatched tools finish so their output and
-                    // the follow-up response are not dropped mid-flight.
-                    while let Some(finished) = running_tools.next().await {
-                        finished?;
-                    }
-                    // Surfaced distinctly: `run` returning `Ok(())` alone cannot be told
-                    // apart from a graceful `close`.
+            let mut watcher = self.supervisor.subscribe_generation();
+            let gen_item = match self.supervisor.get_active_generation().await {
+                Ok(g) => g,
+                Err(RealtimeError::SessionClosed) | Err(RealtimeError::NotConnected) => {
                     self.event_handler.on_disconnect().await?;
                     break;
+                }
+                Err(err) => return Err(err),
+            };
+
+            if *watcher.borrow_and_update() != gen_item.id {
+                continue;
+            }
+
+            let current_gen_id = gen_item.id;
+            let session = gen_item.session;
+
+            tokio::select! {
+                biased;
+                _ = async {
+                    match &cancel_token {
+                        Some(token) => token.cancelled().await,
+                        None => futures::future::pending().await,
+                    }
+                } => {
+                    tracing::info!("RealtimeRunner run loop cancelled via cancellation token.");
+                    self.close().await?;
+                    self.event_handler.on_disconnect().await?;
+                    return Ok(());
+                }
+                Some(finished) = running_tools.next(), if !running_tools.is_empty() => {
+                    if let Err(e) = finished {
+                        self.event_handler.on_error(&e).await?;
+                        if !self.supervisor.is_connected().await {
+                            return Err(e);
+                        }
+                    }
+                }
+                event_res = self.poll_session_next(&mut watcher, current_gen_id, &session) => {
+                    match event_res {
+                        Some(Ok(event)) => {
+                            if let Some(call) =
+                                self.handle_event_for_generation(event, Some(current_gen_id)).await?
+                            {
+                                running_tools.push(self.run_tool_call(call));
+                            }
+                        }
+                        Some(Err(e)) => {
+                            if self.report_read_failure(current_gen_id, RecoveryCause::ReadFailed(Arc::new(e.clone()))).await {
+                                continue;
+                            }
+                            self.event_handler.on_error(&e).await?;
+                            return Err(e);
+                        }
+                        None => {
+                            if *watcher.borrow() != current_gen_id {
+                                continue;
+                            }
+                            while let Some(finished) = running_tools.next().await {
+                                if let Err(e) = finished {
+                                    self.event_handler.on_error(&e).await?;
+                                    if !self.supervisor.is_connected().await {
+                                        return Err(e);
+                                    }
+                                }
+                            }
+                            if self.report_read_failure(current_gen_id, RecoveryCause::UnexpectedEof).await {
+                                continue;
+                            }
+                            self.event_handler.on_disconnect().await?;
+                            break;
+                        }
+                    }
                 }
             }
         }
@@ -1164,29 +1352,68 @@ impl RealtimeRunner {
     }
 
     /// Run one dispatched tool call under the configured concurrency bound.
-    ///
-    /// The permit is acquired inside the future so queueing a call never blocks the event
-    /// loop; the bound applies to execution, not to admission.
     async fn run_tool_call(&self, call: PendingToolCall) -> Result<()> {
-        let permit = Arc::clone(&self.tool_permits).acquire_owned().await;
-        let result = self.execute_tool_call(&call.call_id, &call.name, &call.arguments).await;
+        struct ToolCounterGuard<'a>(&'a RealtimeRunner);
+        impl<'a> Drop for ToolCounterGuard<'a> {
+            fn drop(&mut self) {
+                self.0.outstanding_tools.fetch_sub(1, Ordering::AcqRel);
+            }
+        }
+
+        struct FenceGuard<'a>(&'a RealtimeRunner, String);
+        impl<'a> Drop for FenceGuard<'a> {
+            fn drop(&mut self) {
+                self.0.unregister_tool_call(&self.1);
+            }
+        }
+
+        self.outstanding_tools.fetch_add(1, Ordering::AcqRel);
+        let guard = ToolCounterGuard(self);
+        let token = self.register_tool_call_at(&call.call_id, &call.name, call.epoch);
+        let _fence_guard = FenceGuard(self, call.call_id.clone());
+
+        // A call fenced while it waits for a permit never executes.
+        let permit = tokio::select! {
+            biased;
+            _ = token.cancelled() => None,
+            permit = Arc::clone(&self.tool_permits).acquire_owned() => Some(permit),
+        };
+        let Some(permit) = permit else {
+            drop(guard);
+            return Ok(());
+        };
+        let result = if token.is_cancelled() {
+            Ok(())
+        } else {
+            self.execute_tool_call_fenced(&call.call_id, &call.name, &call.arguments, &token).await
+        };
         drop(permit);
 
-        // The follow-up response is owed once *every* dispatched tool is in and the
-        // dispatching response has closed, whichever happens last. Before tools ran
-        // concurrently, ordering was implicit: `ResponseDone` could not arrive until the
-        // inline await returned. It can now, so the last tool to finish issues it.
-        if self.outstanding_tools.fetch_sub(1, Ordering::AcqRel) == 1
+        drop(guard);
+
+        // A cancelled call is owed no follow-up response.
+        if !token.is_cancelled()
+            && self.outstanding_tools.load(Ordering::Acquire) == 0
             && self.response_closed_awaiting_tools.swap(false, Ordering::AcqRel)
         {
             self.respond_after_tools().await?;
         }
+
         result
     }
 
-    /// Process a single event.
+    /// Process a single event (test utility).
+    #[cfg(test)]
     async fn handle_event(&self, event: ServerEvent) -> Result<Option<PendingToolCall>> {
-        // Track state transitions before forwarding the event
+        self.handle_event_for_generation(event, None).await
+    }
+
+    /// Process a single event tagged with its source generation ID.
+    async fn handle_event_for_generation(
+        &self,
+        event: ServerEvent,
+        gen_id: Option<u64>,
+    ) -> Result<Option<PendingToolCall>> {
         match &event {
             ServerEvent::ResponseCreated { .. } => {
                 let mut state = self.state.write().await;
@@ -1203,6 +1430,10 @@ impl RealtimeRunner {
             _ => {}
         }
 
+        if let Some(source) = caller_activity_source(&event) {
+            self.event_handler.on_caller_activity(source).await?;
+        }
+
         match event {
             ServerEvent::AudioDelta { delta, item_id, .. } => {
                 self.event_handler.on_audio(&delta, &item_id).await?;
@@ -1213,55 +1444,67 @@ impl RealtimeRunner {
             ServerEvent::TranscriptDelta { delta, item_id, .. } => {
                 self.event_handler.on_transcript(&delta, &item_id).await?;
             }
+            ServerEvent::InputTranscriptCompleted { transcript, item_id, .. } => {
+                self.event_handler.on_input_transcript_completed(&transcript, &item_id).await?;
+            }
             ServerEvent::SpeechStarted { audio_start_ms, .. } => {
                 self.event_handler.on_speech_started(audio_start_ms).await?;
             }
             ServerEvent::SpeechStopped { audio_end_ms, .. } => {
                 self.event_handler.on_speech_stopped(audio_end_ms).await?;
             }
+            ServerEvent::ToolCallCancelled { call_ids } => {
+                self.cancel_tool_calls(&call_ids);
+                self.event_handler.on_tool_calls_cancelled(&call_ids).await?;
+            }
+            ServerEvent::PlannedRotation { time_left } => {
+                let target_gen = match gen_id {
+                    Some(id) => Some(id),
+                    None => self.supervisor.get_active_generation().await.ok().map(|g| g.id),
+                };
+                if let Some(target_gen_id) = target_gen {
+                    self.handle_planned_rotation(target_gen_id, time_left).await?;
+                } else {
+                    self.event_handler.on_planned_rotation(time_left.as_deref()).await?;
+                }
+            }
+            ServerEvent::ResponseCancelled { .. } => {
+                self.cancel_all_tool_calls();
+                self.pending_tool_response.store(false, Ordering::Release);
+                self.tool_output_failed.store(false, Ordering::Release);
+                self.response_closed_awaiting_tools.store(false, Ordering::Release);
+                {
+                    let mut state = self.state.write().await;
+                    if let RunnerState::Generating = *state {
+                        *state = RunnerState::Idle;
+                    }
+                }
+                self.event_handler.on_response_cancelled().await?;
+            }
             ServerEvent::ResponseDone { .. } => {
                 self.event_handler.on_response_done().await?;
-                // If this response dispatched tool call(s), send the one owed
-                // follow-up response now that it's closed.
                 self.respond_after_tools().await?;
                 self.check_resumption_queue().await?;
             }
             ServerEvent::FunctionCallDone { call_id, name, arguments, .. }
                 if self.runner_config.auto_execute_tools =>
             {
-                // Returned rather than awaited: the run loop dispatches it so event
-                // intake — audio deltas included — continues while the tool runs.
-                return Ok(Some(PendingToolCall { call_id, name, arguments }));
-            }
-            ServerEvent::SessionUpdated { session, .. } => {
-                // Check if the generic session update contains a resumption token
-                if let Some(token) = session.get("resumeToken").and_then(|t| t.as_str()) {
-                    tracing::info!(
-                        "Received Gemini sessionResumption token, saving for future reconnects."
-                    );
-                    let mut config = self.config.write().await;
-                    let mut extra = config.extra.clone().unwrap_or_else(|| serde_json::json!({}));
-                    extra["resumeToken"] = serde_json::Value::String(token.to_string());
-                    config.extra = Some(extra);
-                }
+                let epoch = self.fence_epoch();
+                return Ok(Some(PendingToolCall { call_id, name, arguments, epoch }));
             }
             ServerEvent::Error { error, .. } => {
                 let err = RealtimeError::server(error.code.unwrap_or_default(), error.message);
                 self.event_handler.on_error(&err).await?;
             }
-            _ => {
-                // Ignore other events
-            }
+            _ => {}
         }
         Ok(None)
     }
 
     /// Safely transitions the runner back to Idle and executes any queued resumptions.
     async fn check_resumption_queue(&self) -> Result<()> {
-        // 1. Acquire the state lock to inspect the queue.
         let mut state = self.state.write().await;
 
-        // 2. Extract the pending configuration and attempt count if one exists.
         let pending =
             if let RunnerState::PendingResumption { config, bridge_message, attempts } = &*state {
                 Some((config.clone(), bridge_message.clone(), *attempts))
@@ -1275,45 +1518,189 @@ impl RealtimeRunner {
                 attempts + 1
             );
 
-            // 3. Mark the state as Idle so the background loop is unblocked.
             *state = RunnerState::Idle;
-
-            // 4. Release the state lock *before* performing the heavy async socket connection.
             drop(state);
 
-            // 5. Attempt the actual transport teardown/rebuild.
-            if let Err(e) = self.execute_resumption((*config).clone(), bridge_message.clone()).await
+            let snapshot = self.supervisor.get_config().await;
+
+            let model = Arc::clone(&self.model);
+            let cfg = snapshot.config.clone();
+            match self
+                .supervisor
+                .execute_resumption_with(snapshot, move || async move {
+                    let s = model.connect(cfg).await?;
+                    Ok(Arc::from(s) as Arc<dyn RealtimeSession>)
+                })
+                .await
             {
-                tracing::error!("Resumption failed: {}.", e);
-
-                // 6. If the reconnect fails (e.g., transient network error), re-acquire the lock
-                // to safely handle the retry logic without crashing the event loop.
-                let mut fallback_state = self.state.write().await;
-
-                // 7. Enforce a maximum retry budget to prevent infinite "hot-looping"
-                if attempts + 1 >= 3 {
-                    tracing::error!(
-                        "Maximum resumption attempts reached (3). Dropping queued mutation to prevent infinite loop."
-                    );
-                    *fallback_state = RunnerState::Idle;
-                } else {
-                    tracing::info!("Restoring pending queue state for retry.");
-                    *fallback_state = RunnerState::PendingResumption {
-                        config,
-                        bridge_message,
-                        attempts: attempts + 1,
-                    };
+                Ok(_) => {
+                    if let Some(msg) = bridge_message {
+                        tracing::info!("Sending bridge message post-resumption via invoke_write.");
+                        let event = crate::events::ClientEvent::Message {
+                            role: "user".to_string(),
+                            parts: vec![adk_core::types::Part::Text { text: msg }],
+                        };
+                        if let Err(e) =
+                            self.invoke_write(|s| async move { s.send_event(event).await }).await
+                        {
+                            // Fixed category, not the error Display (CWE-532); `e`
+                            // still travels to the event handler below.
+                            tracing::warn!(
+                                error = crate::recovery::error_category(&e),
+                                "failed to send bridge message after queued resumption"
+                            );
+                            let _ = self.event_handler.on_error(&e).await;
+                        }
+                    }
                 }
+                Err(e) => {
+                    // Fixed category, not the error Display (CWE-532); `e`
+                    // still travels to the event handler below.
+                    tracing::error!(
+                        error = crate::recovery::error_category(&e),
+                        "Resumption failed."
+                    );
 
-                // 8. Do not return Err(e) here, as that would permanently kill the `run()` loop.
-                // Instead, report the error to the downstream handler and allow the event loop to continue spinning.
-                let _ = self.event_handler.on_error(&e).await;
+                    let mut fallback_state = self.state.write().await;
+
+                    match &*fallback_state {
+                        RunnerState::PendingResumption { .. } => {
+                            tracing::info!(
+                                "Newer resumption intent already queued while resumption failed; preserving newer intent."
+                            );
+                        }
+                        RunnerState::Idle
+                        | RunnerState::Generating
+                        | RunnerState::ExecutingTool => {
+                            if attempts + 1 >= 3 {
+                                tracing::error!(
+                                    "Maximum resumption attempts reached (3). Dropping queued mutation to prevent infinite loop."
+                                );
+                            } else {
+                                tracing::info!("Restoring pending queue state for retry.");
+                                *fallback_state = RunnerState::PendingResumption {
+                                    config,
+                                    bridge_message,
+                                    attempts: attempts + 1,
+                                };
+                            }
+                        }
+                    }
+
+                    let _ = self.event_handler.on_error(&e).await;
+                }
             }
         } else {
-            // No resumptions were queued; simply mark as Idle.
             *state = RunnerState::Idle;
         }
         Ok(())
+    }
+
+    /// The current fence generation.
+    pub(crate) fn fence_epoch(&self) -> u64 {
+        self.tool_fence.lock().unwrap_or_else(|e| e.into_inner()).epoch
+    }
+
+    /// Register a dispatched call in the fence and return its token.
+    pub(crate) fn register_tool_call(&self, call_id: &str, name: &str) -> CancellationToken {
+        let epoch = self.fence_epoch();
+        self.register_tool_call_at(call_id, name, epoch)
+    }
+
+    /// Register a call issued under an earlier fence generation. A stale
+    /// generation's token is already cancelled, so the call never runs.
+    pub(crate) fn register_tool_call_at(
+        &self,
+        call_id: &str,
+        name: &str,
+        epoch: u64,
+    ) -> CancellationToken {
+        let effect = self
+            .tools
+            .get(name)
+            .map(|(definition, _)| definition.effect)
+            .unwrap_or(adk_core::ToolEffect::NonIdempotent);
+        let mut fence = self.tool_fence.lock().unwrap_or_else(|e| e.into_inner());
+        // One call_id names one call. A second registration (the integration
+        // spawn path registering, then `dispatch_tool_call` registering
+        // again on its way in) must join the existing fence entry, not
+        // replace it: replacing it would swap in an uncancelled token and
+        // drop the recorded abort handle, so a withdrawal arriving during
+        // execution would cancel a token nobody is watching.
+        if let Some(entry) = fence.calls.get(call_id) {
+            let token = entry.token.clone();
+            if epoch != fence.epoch {
+                token.cancel();
+            }
+            return token;
+        }
+        let token = CancellationToken::new();
+        if epoch != fence.epoch {
+            token.cancel();
+        }
+        fence.calls.insert(
+            call_id.to_string(),
+            FencedToolCall { token: token.clone(), abort_handle: None, effect },
+        );
+        token
+    }
+
+    /// The fence token already registered for `call_id`, if any.
+    pub(crate) fn fence_token(&self, call_id: &str) -> Option<CancellationToken> {
+        self.tool_fence
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .calls
+            .get(call_id)
+            .map(|entry| entry.token.clone())
+    }
+
+    /// Record the abort handle of a task spawned for a registered call.
+    #[cfg(feature = "integration")]
+    pub(crate) fn set_tool_abort_handle(&self, call_id: &str, handle: tokio::task::AbortHandle) {
+        let mut fence = self.tool_fence.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(entry) = fence.calls.get_mut(call_id) {
+            entry.abort_handle = Some(handle);
+        }
+    }
+
+    /// Drop a finished call from the fence.
+    pub(crate) fn unregister_tool_call(&self, call_id: &str) {
+        self.tool_fence.lock().unwrap_or_else(|e| e.into_inner()).calls.remove(call_id);
+    }
+
+    /// Fence the named calls: their tokens are cancelled, and a spawned
+    /// task for a retry-safe (read-only or idempotent) call is aborted.
+    /// A non-idempotent task is left to its token so a call cancelled
+    /// after it started can be answered as outcome-unknown.
+    pub(crate) fn cancel_tool_calls(&self, call_ids: &[crate::events::ToolCallId]) {
+        let fence = self.tool_fence.lock().unwrap_or_else(|e| e.into_inner());
+        for id in call_ids {
+            if let Some(entry) = fence.calls.get(id.as_str()) {
+                entry.token.cancel();
+                if entry.effect.is_retry_safe()
+                    && let Some(handle) = &entry.abort_handle
+                {
+                    handle.abort();
+                }
+            }
+        }
+    }
+
+    /// Fence every in-flight call and advance the fence generation, so a
+    /// call issued before this response was cancelled can never start.
+    pub(crate) fn cancel_all_tool_calls(&self) {
+        let mut fence = self.tool_fence.lock().unwrap_or_else(|e| e.into_inner());
+        fence.epoch += 1;
+        for entry in fence.calls.values() {
+            entry.token.cancel();
+            if entry.effect.is_retry_safe()
+                && let Some(handle) = &entry.abort_handle
+            {
+                handle.abort();
+            }
+        }
+        fence.calls.clear();
     }
 
     /// Runs one call through the governed path configured with
@@ -1398,31 +1785,160 @@ impl RealtimeRunner {
     }
 
     /// Execute a tool call and optionally send the response.
-    async fn execute_tool_call(&self, call_id: &str, name: &str, arguments: &str) -> Result<()> {
-        let handler = self.tools.get(name).map(|(definition, h)| (definition, h.clone()));
+    async fn execute_tool_call(
+        &self,
+        call_id: &str,
+        name: &str,
+        arguments: &serde_json::Value,
+    ) -> Result<()> {
+        // Join a fence entry an outer dispatch path already registered
+        // (and may have attached an abort handle to); only the path that
+        // created the entry removes it.
+        let (token, owns_entry) = match self.fence_token(call_id) {
+            Some(token) => (token, false),
+            None => (self.register_tool_call(call_id, name), true),
+        };
+        let result = self.execute_tool_call_fenced(call_id, name, arguments, &token).await;
+        if owns_entry {
+            self.unregister_tool_call(call_id);
+        }
+        result
+    }
 
-        let result = match (handler, parse_tool_arguments(arguments)) {
-            (None, _) => serde_json::json!({ "error": format!("Unknown tool: {name}") }),
-            (Some(_), Err(reason)) => {
-                serde_json::json!({ "error": format!("Tool '{name}' was not run: {reason}") })
+    /// [`execute_tool_call`](Self::execute_tool_call) under a fence token:
+    /// cancellation is checked before authorization and before execution,
+    /// and a fenced call's output and follow-up response are suppressed —
+    /// except a non-idempotent call cancelled after it started, whose
+    /// withheld result is answered as outcome-unknown, never as a success.
+    async fn execute_tool_call_fenced(
+        &self,
+        call_id: &str,
+        name: &str,
+        arguments: &serde_json::Value,
+        token: &CancellationToken,
+    ) -> Result<()> {
+        if token.is_cancelled() {
+            return Ok(());
+        }
+        if self.circuit_breaker_tripped.load(Ordering::Acquire) {
+            tracing::warn!(
+                call_id,
+                name,
+                "Circuit breaker is OPEN — rejecting tool execution call"
+            );
+            let result = serde_json::json!({
+                "status": "rejected",
+                "reason": "tool_unavailable",
+                "error": "circuit_breaker_open"
+            });
+            if self.runner_config.auto_respond_tools && !token.is_cancelled() {
+                let response =
+                    ToolResponse { call_id: call_id.to_string(), output: result, scheduling: None };
+                if let Err(e) =
+                    self.invoke_write(|s| async move { s.send_tool_output(response).await }).await
+                {
+                    self.tool_output_failed.store(true, Ordering::Release);
+                    return Err(e);
+                }
+                self.pending_tool_response.store(true, Ordering::Release);
             }
-            (Some((definition, handler)), Ok(args)) => {
+            return Ok(());
+        }
+
+        let args = match parse_tool_arguments(arguments) {
+            Ok(args) => args,
+            Err(reason) => {
+                let result = serde_json::json!({
+                    "error": format!("Tool '{name}' was not run: {reason}")
+                });
+                if self.runner_config.auto_respond_tools && !token.is_cancelled() {
+                    let response = ToolResponse {
+                        call_id: call_id.to_string(),
+                        output: result,
+                        scheduling: None,
+                    };
+                    if let Err(e) = self
+                        .invoke_write(|s| async move { s.send_tool_output(response).await })
+                        .await
+                    {
+                        self.tool_output_failed.store(true, Ordering::Release);
+                        return Err(e);
+                    }
+                    self.pending_tool_response.store(true, Ordering::Release);
+                }
+                return Ok(());
+            }
+        };
+
+        let handler = self.tools.get(name).map(|(definition, h)| (definition, h.clone()));
+        // Set when a non-idempotent call is fenced after it started: its
+        // handler's result (if any) is withheld and the call is answered
+        // as outcome-unknown instead.
+        let mut fenced_outcome_unknown = false;
+
+        let result = match handler {
+            None => serde_json::json!({ "error": format!("Unknown tool: {name}") }),
+            Some((definition, handler)) => {
                 let screened_args = self.tool_result_screen.as_ref().map(|_| args.clone());
-                // Native handlers declare no read-only flag, so the policy treats them as
-                // having side effects.
-                let mut call = adk_core::GovernedCall::new(name, call_id, args);
+                let effect = definition.effect;
+                let mut call =
+                    adk_core::GovernedCall::new(name, call_id, args.clone()).with_effect(effect);
                 call.origin = Some(definition.handler_origin());
-                let result = match self.authorize_tool_call(call).await? {
+                // Fenced before authorization: a withdrawn call is never
+                // authorized, let alone executed.
+                if token.is_cancelled() {
+                    return Ok(());
+                }
+                let authorized = tokio::select! {
+                    biased;
+                    _ = token.cancelled() => return Ok(()),
+                    authorized = self.authorize_tool_call(call) => authorized?,
+                };
+                let result = match authorized {
                     adk_core::ToolAuthorization::Execute { args, .. } => {
+                        // Fenced again before execution, and the handler
+                        // runs under the token: cancellation drops it.
+                        if token.is_cancelled() {
+                            return Ok(());
+                        }
                         let call = ToolCall {
                             call_id: call_id.to_string(),
                             name: name.to_string(),
                             arguments: args,
                         };
-                        match tokio::time::timeout(self.tool_timeout, handler.execute(&call)).await
-                        {
-                            Ok(Ok(value)) => value,
-                            Ok(Err(e)) => {
+                        let executed = tokio::select! {
+                            biased;
+                            _ = token.cancelled() => None,
+                            executed = tokio::time::timeout(
+                                self.tool_timeout,
+                                handler.execute_cancellable(&call, token.clone()),
+                            ) => Some(executed),
+                        };
+                        match executed {
+                            None => {
+                                if effect == adk_core::ToolEffect::NonIdempotent {
+                                    fenced_outcome_unknown = true;
+                                    adk_core::outcome_unknown_response(format!(
+                                        "tool '{name}' was cancelled after it started; its outcome is unknown"
+                                    ))
+                                } else {
+                                    return Ok(());
+                                }
+                            }
+                            Some(Ok(Ok(value))) => {
+                                if token.is_cancelled()
+                                    && effect == adk_core::ToolEffect::NonIdempotent
+                                {
+                                    fenced_outcome_unknown = true;
+                                    adk_core::outcome_unknown_response(format!(
+                                        "tool '{name}' was cancelled after it started; its outcome is unknown"
+                                    ))
+                                } else {
+                                    self.consecutive_tool_failures.store(0, Ordering::Release);
+                                    value
+                                }
+                            }
+                            Some(Ok(Err(e))) => {
                                 // A message can quote credentials or internal hosts.
                                 if self.records_payloads() {
                                     tracing::warn!(
@@ -1438,13 +1954,40 @@ impl RealtimeRunner {
                                         "realtime tool handler failed"
                                     );
                                 }
-                                if self.expose_tool_error_messages {
+                                let failures =
+                                    self.consecutive_tool_failures.fetch_add(1, Ordering::AcqRel)
+                                        + 1;
+                                if failures >= self.runner_config.max_consecutive_tool_failures {
+                                    if !self.circuit_breaker_tripped.swap(true, Ordering::AcqRel) {
+                                        tracing::error!(
+                                            call_id,
+                                            name,
+                                            failures,
+                                            max = self.runner_config.max_consecutive_tool_failures,
+                                            "Tool execution circuit breaker TRIPPED: entering Open state"
+                                        );
+                                        let _ = self
+                                            .event_handler
+                                            .on_error(&RealtimeError::provider(format!(
+                                                "Tool execution circuit breaker tripped after {} consecutive failures: {}",
+                                                failures, e
+                                            )))
+                                            .await;
+                                    }
+                                    serde_json::json!({
+                                        "status": "rejected",
+                                        "reason": "tool_unavailable",
+                                        "error": "circuit_breaker_open"
+                                    })
+                                } else if self.expose_tool_error_messages {
                                     serde_json::json!({ "error": e.to_string() })
                                 } else {
-                                    serde_json::json!({ "error": format!("tool '{name}' failed") })
+                                    serde_json::json!({
+                                        "error": format!("tool '{name}' failed")
+                                    })
                                 }
                             }
-                            Err(_) => serde_json::json!({
+                            Some(Err(_)) => serde_json::json!({
                                 "error": format!(
                                     "Tool '{name}' timed out after {:?}",
                                     self.tool_timeout
@@ -1464,16 +2007,21 @@ impl RealtimeRunner {
             }
         };
 
-        if self.runner_config.auto_respond_tools {
-            let response = ToolResponse { call_id: call_id.to_string(), output: result };
+        if token.is_cancelled() && !fenced_outcome_unknown {
+            // Fenced before it could finish: no output, no follow-up.
+            return Ok(());
+        }
 
-            if let Ok(session) = self.session_handle().await {
-                // Send the output now, but defer the response trigger: several
-                // parallel tool calls in one response must produce a *single*
-                // `create_response`, issued once the dispatch response finishes
-                // (see `respond_after_tools`). Firing one per output collides
-                // with the still-active response on OpenAI.
-                session.send_tool_output(response).await?;
+        if self.runner_config.auto_respond_tools {
+            let response =
+                ToolResponse { call_id: call_id.to_string(), output: result, scheduling: None };
+            if let Err(e) =
+                self.invoke_write(|s| async move { s.send_tool_output(response).await }).await
+            {
+                self.tool_output_failed.store(true, Ordering::Release);
+                return Err(e);
+            }
+            if !fenced_outcome_unknown {
                 self.pending_tool_response.store(true, Ordering::Release);
             }
         }
@@ -1482,59 +2030,54 @@ impl RealtimeRunner {
     }
 
     /// The system instruction the next connection will use.
-    ///
-    /// Exposed so callers and tests can confirm what context a session was actually created
-    /// with, rather than inferring it from log lines.
     pub async fn instruction(&self) -> Option<String> {
-        self.config.read().await.instruction.clone()
+        self.supervisor.get_config().await.config.instruction.clone()
     }
 
     /// Prepends a context block to the system instruction before connecting.
     ///
-    /// The integration layer uses this to carry prior conversation history and recalled memory
-    /// into the provider session. Call it before [`RealtimeRunner::connect`]: providers read
-    /// the instruction at session creation, so a later change needs `update_session`.
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// runner.prepend_instruction_context("Previously discussed: the refund policy.").await;
-    /// runner.connect().await?;
-    /// ```
+    /// Atomically updates the canonical configuration snapshot and increments the configuration revision.
     pub async fn prepend_instruction_context(&self, block: &str) {
         if block.is_empty() {
             return;
         }
 
-        let mut config = self.config.write().await;
-        config.instruction = Some(match config.instruction.take() {
-            Some(existing) if !existing.is_empty() => format!("{block}\n\n{existing}"),
-            _ => block.to_string(),
-        });
+        self.supervisor
+            .update_config(|config| {
+                config.instruction = Some(match config.instruction.take() {
+                    Some(existing) if !existing.is_empty() => format!("{block}\n\n{existing}"),
+                    _ => block.to_string(),
+                });
+            })
+            .await;
+    }
+
+    /// Forget a pending tool response, so no follow-up response is owed
+    /// for a call the fence has since cancelled.
+    #[cfg(feature = "integration")]
+    pub(crate) fn clear_pending_tool_response(&self) {
+        self.pending_tool_response.store(false, Ordering::Release);
     }
 
     /// Trigger the single follow-up response owed after a tool-dispatching turn.
     ///
-    /// Call this when a response finishes (`ResponseDone`). If tool output(s)
-    /// were sent back during that response (`auto_respond_tools`), the model now
-    /// needs one `create_response` to speak its answer — issued here, after the
-    /// dispatch response is closed and every parallel tool output is in, rather
-    /// than once per tool call. Gemini's `create_response` is a no-op, so this is
-    /// safely uniform across providers. No-op when nothing is pending.
+    /// Ensures exactly one follow-up response is created after all concurrent tool executions in a turn finish.
     pub async fn respond_after_tools(&self) -> Result<()> {
-        // Tools run concurrently with event intake, so this can be reached before their
-        // output is in. Defer to the last tool to finish rather than firing a response the
-        // model cannot yet answer — or, worse, dropping it because
-        // `pending_tool_response` is not set yet.
         if self.outstanding_tools.load(Ordering::Acquire) > 0 {
             self.response_closed_awaiting_tools.store(true, Ordering::Release);
             return Ok(());
         }
 
-        if self.pending_tool_response.swap(false, Ordering::AcqRel)
-            && let Ok(session) = self.session_handle().await
-        {
-            session.create_response().await?;
+        if self.tool_output_failed.swap(false, Ordering::AcqRel) {
+            tracing::warn!(
+                "Tool output delivery failed during turn; suppressing automatic follow-up response creation."
+            );
+            self.pending_tool_response.store(false, Ordering::Release);
+            return Ok(());
+        }
+
+        if self.pending_tool_response.swap(false, Ordering::AcqRel) {
+            self.invoke_write(|s| async move { s.create_response().await }).await?;
         }
         Ok(())
     }
@@ -1544,10 +2087,7 @@ impl RealtimeRunner {
         if let Some(meter) = &self.meter {
             meter.abandon().await;
         }
-        if let Ok(session) = self.session_handle().await {
-            session.close().await?;
-        }
-        Ok(())
+        self.supervisor.close().await
     }
 }
 
@@ -1560,8 +2100,8 @@ mod runner_tests {
     use crate::session::{BoxedSession, ContextMutationOutcome, RealtimeSession};
     use std::pin::Pin;
     use std::sync::atomic::AtomicUsize;
+    use std::time::Duration;
 
-    /// A model just good enough to satisfy the builder (never connects in tests).
     struct MockModel;
 
     #[async_trait]
@@ -1586,7 +2126,6 @@ mod runner_tests {
         }
     }
 
-    /// Records which provider-session entry points the runner calls.
     #[derive(Default)]
     struct Counts {
         raw_audio: AtomicUsize,
@@ -1662,7 +2201,13 @@ mod runner_tests {
     }
 
     fn tool_def(name: &str) -> ToolDefinition {
-        ToolDefinition { name: name.into(), description: None, parameters: None }
+        ToolDefinition {
+            name: name.into(),
+            description: None,
+            parameters: None,
+            behavior: None,
+            effect: adk_core::ToolEffect::NonIdempotent,
+        }
     }
 
     #[test]
@@ -1733,7 +2278,7 @@ mod runner_tests {
             output_index: 0,
             call_id: call_id.into(),
             name: name.into(),
-            arguments: "{}".into(),
+            arguments: serde_json::json!({}),
         }
     }
 
@@ -1745,10 +2290,7 @@ mod runner_tests {
         let runner =
             RealtimeRunner::builder().model(Arc::new(MockModel) as BoxedModel).build().unwrap();
         let session = Arc::new(RecordingSession { counts }) as Arc<dyn RealtimeSession>;
-
-        // The unit test owns the runner and installs the same session handle
-        // that `connect` would publish after provider setup.
-        *runner.session.write().await = Some(session);
+        let _ = runner.set_initial_session(session).await.unwrap();
         runner
     }
 
@@ -1767,8 +2309,10 @@ mod runner_tests {
             .tool_governance(config, adk_core::ApprovalScope::new("voice", "user", "session"))
             .build()
             .unwrap();
-        *runner.session.write().await =
-            Some(Arc::new(RecordingSession { counts }) as Arc<dyn RealtimeSession>);
+        let _ = runner
+            .set_initial_session(Arc::new(RecordingSession { counts }) as Arc<dyn RealtimeSession>)
+            .await
+            .unwrap();
         runner
     }
 
@@ -1792,8 +2336,10 @@ mod runner_tests {
             },
         );
         let runner = configure(builder).build().unwrap();
-        *runner.session.write().await =
-            Some(Arc::new(RecordingSession { counts }) as Arc<dyn RealtimeSession>);
+        let _ = runner
+            .set_initial_session(Arc::new(RecordingSession { counts }) as Arc<dyn RealtimeSession>)
+            .await
+            .unwrap();
         runner
     }
 
@@ -1825,13 +2371,13 @@ mod runner_tests {
     async fn handler_errors_reach_the_model_redacted_unless_exposed() {
         let counts = Arc::new(Counts::default());
         let runner = lookup_runner(Arc::clone(&counts), true, |b| b).await;
-        runner.dispatch_tool_call("c1", "lookup", "{}").await.unwrap();
+        runner.dispatch_tool_call("c1", "lookup", &serde_json::json!({})).await.unwrap();
         let output = counts.last_output.lock().clone().unwrap();
         assert_eq!(output, serde_json::json!({ "error": "tool 'lookup' failed" }));
 
         let runner =
             lookup_runner(Arc::clone(&counts), true, |b| b.expose_tool_error_messages(true)).await;
-        runner.dispatch_tool_call("c2", "lookup", "{}").await.unwrap();
+        runner.dispatch_tool_call("c2", "lookup", &serde_json::json!({})).await.unwrap();
         let output = counts.last_output.lock().clone().unwrap();
         assert!(output["error"].as_str().unwrap_or_default().contains("hunter2"), "{output}");
     }
@@ -1873,7 +2419,7 @@ mod runner_tests {
                 b.tool_governance(config, adk_core::ApprovalScope::new("voice", "user", "s"))
             })
             .await;
-            runner.dispatch_tool_call("c1", "lookup", "{}").await.unwrap();
+            runner.dispatch_tool_call("c1", "lookup", &serde_json::json!({})).await.unwrap();
 
             let values = logged.0.lock().clone();
             assert!(values.contains(&"error.kind=\"tool\"".to_string()), "{values:#?}");
@@ -1892,7 +2438,7 @@ mod runner_tests {
             b.tool_result_screen(Arc::new(SsnScreen { fail: false }))
         })
         .await;
-        runner.dispatch_tool_call("c1", "lookup", "{}").await.unwrap();
+        runner.dispatch_tool_call("c1", "lookup", &serde_json::json!({})).await.unwrap();
         let output = counts.last_output.lock().clone().unwrap();
         assert_eq!(output, serde_json::json!({ "ssn": "[SSN REDACTED]" }));
 
@@ -1900,7 +2446,7 @@ mod runner_tests {
             b.tool_result_screen(Arc::new(SsnScreen { fail: true }))
         })
         .await;
-        runner.dispatch_tool_call("c2", "lookup", "{}").await.unwrap();
+        runner.dispatch_tool_call("c2", "lookup", &serde_json::json!({})).await.unwrap();
         let output = counts.last_output.lock().clone().unwrap();
         assert_eq!(output["status"], adk_core::RESULT_WITHHELD_STATUS, "{output}");
         assert!(!output.to_string().contains("123-45-6789"), "{output}");
@@ -1917,7 +2463,10 @@ mod runner_tests {
         )
         .await;
 
-        runner.dispatch_tool_call("c1", "pay", r#"{"amount": 5"#).await.unwrap();
+        runner
+            .dispatch_tool_call("c1", "pay", &serde_json::json!(r#"{"amount": 5"#))
+            .await
+            .unwrap();
 
         assert_eq!(executions.load(Ordering::SeqCst), 0, "a malformed call must not run");
         let output = counts.last_output.lock().clone().expect("the call is answered");
@@ -1935,13 +2484,14 @@ mod runner_tests {
             .build();
         let runner = governed_runner(Arc::clone(&counts), Arc::clone(&executions), config).await;
 
-        runner.dispatch_tool_call("c1", "pay", "{}").await.unwrap();
+        runner.dispatch_tool_call("c1", "pay", &serde_json::json!({})).await.unwrap();
         assert_eq!(executions.load(Ordering::SeqCst), 0);
         let output = counts.last_output.lock().clone().unwrap();
         assert!(output["error"].as_str().unwrap_or_default().contains("denied by policy"));
 
         control.freeze("drill");
-        let error = runner.dispatch_tool_call("c2", "pay", "{}").await.unwrap_err();
+        let error =
+            runner.dispatch_tool_call("c2", "pay", &serde_json::json!({})).await.unwrap_err();
         assert!(error.to_string().contains("frozen"), "{error}");
         assert_eq!(executions.load(Ordering::SeqCst), 0);
     }
@@ -1984,7 +2534,7 @@ mod runner_tests {
 
         let error = tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            runner.dispatch_tool_call("c1", "pay", "{}"),
+            runner.dispatch_tool_call("c1", "pay", &serde_json::json!({})),
         )
         .await
         .expect("the freeze ends the wait")
@@ -2028,8 +2578,12 @@ mod runner_tests {
         let install = |runner: RealtimeRunner| {
             let counts = Arc::clone(&counts);
             async move {
-                *runner.session.write().await =
-                    Some(Arc::new(RecordingSession { counts }) as Arc<dyn RealtimeSession>);
+                let _ = runner
+                    .set_initial_session(
+                        Arc::new(RecordingSession { counts }) as Arc<dyn RealtimeSession>
+                    )
+                    .await
+                    .unwrap();
                 runner
             }
         };
@@ -2037,7 +2591,7 @@ mod runner_tests {
         let reworded_pay = pay.clone().with_description("Pays anyone");
         let voice = install(runner(pay.clone(), "voice")).await;
 
-        voice.dispatch_tool_call("c1", "pay", "{}").await.unwrap();
+        voice.dispatch_tool_call("c1", "pay", &serde_json::json!({})).await.unwrap();
         let pending = store.pending(&scope).await.unwrap();
         let [held] = pending.as_slice() else { panic!("one held call: {pending:?}") };
         assert_eq!(held.request.origin, Some(pay.handler_origin()));
@@ -2054,16 +2608,16 @@ mod runner_tests {
         // Redefined, the handler is not the one approved.
         store.decide(&scope, &held.fingerprint, adk_core::ToolApproval::approve()).await.unwrap();
         let reworded = install(runner(reworded_pay.clone(), "voice")).await;
-        reworded.dispatch_tool_call("c2", "pay", "{}").await.unwrap();
+        reworded.dispatch_tool_call("c2", "pay", &serde_json::json!({})).await.unwrap();
         assert_eq!(executions.load(Ordering::SeqCst), 0, "a redefined handler needs approval");
 
         // Another agent's identical call is not the one approved.
         let intern = install(runner(pay.clone(), "intern")).await;
-        intern.dispatch_tool_call("c3", "pay", "{}").await.unwrap();
+        intern.dispatch_tool_call("c3", "pay", &serde_json::json!({})).await.unwrap();
         assert_eq!(executions.load(Ordering::SeqCst), 0, "another agent needs its own approval");
 
         // The handler as approved, by the agent it was approved for, runs once.
-        voice.dispatch_tool_call("c4", "pay", "{}").await.unwrap();
+        voice.dispatch_tool_call("c4", "pay", &serde_json::json!({})).await.unwrap();
         assert_eq!(executions.load(Ordering::SeqCst), 1);
         let mut waiting: Vec<_> = store
             .pending(&scope)
@@ -2111,7 +2665,7 @@ mod runner_tests {
             .build();
         let runner = governed_runner(Arc::clone(&counts), Arc::clone(&executions), config).await;
 
-        runner.dispatch_tool_call("c1", "pay", "{}").await.unwrap();
+        runner.dispatch_tool_call("c1", "pay", &serde_json::json!({})).await.unwrap();
         assert_eq!(executions.load(Ordering::SeqCst), 1, "the voice agent's rule allows it");
 
         let unconfigured = adk_core::RunConfig::builder()
@@ -2126,7 +2680,7 @@ mod runner_tests {
             .build();
         let runner =
             governed_runner(Arc::clone(&counts), Arc::clone(&executions), unconfigured).await;
-        runner.dispatch_tool_call("c2", "pay", "{}").await.unwrap();
+        runner.dispatch_tool_call("c2", "pay", &serde_json::json!({})).await.unwrap();
         assert_eq!(
             executions.load(Ordering::SeqCst),
             1,
@@ -2161,9 +2715,107 @@ mod runner_tests {
         assert_eq!(counts.base64_audio.load(Ordering::SeqCst), 1);
     }
 
-    /// Two parallel tool calls in one response must produce exactly one
-    /// `create_response` — issued after the dispatch response finishes — not one
-    /// per tool (which collides with the still-active response on OpenAI).
+    #[tokio::test]
+    async fn mixed_success_concurrent_tool_outputs_suppresses_create_response() {
+        struct SelectiveFailingSession {
+            counts: Arc<Counts>,
+            events: parking_lot::Mutex<std::collections::VecDeque<ServerEvent>>,
+        }
+
+        #[async_trait]
+        impl RealtimeSession for SelectiveFailingSession {
+            fn session_id(&self) -> &str {
+                "failing-tool-output-session"
+            }
+            fn is_connected(&self) -> bool {
+                true
+            }
+            async fn send_audio(&self, _audio: &AudioChunk) -> Result<()> {
+                Ok(())
+            }
+            async fn send_audio_base64(&self, _audio: &str) -> Result<()> {
+                Ok(())
+            }
+            async fn send_text(&self, _text: &str) -> Result<()> {
+                Ok(())
+            }
+            async fn send_tool_response(&self, _response: ToolResponse) -> Result<()> {
+                Ok(())
+            }
+            async fn send_tool_output(&self, response: ToolResponse) -> Result<()> {
+                self.counts.tool_output.fetch_add(1, Ordering::SeqCst);
+                if response.call_id == "c2" {
+                    Err(RealtimeError::connection("simulated output delivery failure for c2"))
+                } else {
+                    Ok(())
+                }
+            }
+            async fn commit_audio(&self) -> Result<()> {
+                Ok(())
+            }
+            async fn clear_audio(&self) -> Result<()> {
+                Ok(())
+            }
+            async fn create_response(&self) -> Result<()> {
+                self.counts.create_response.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+            async fn interrupt(&self) -> Result<()> {
+                Ok(())
+            }
+            async fn send_event(&self, _event: ClientEvent) -> Result<()> {
+                Ok(())
+            }
+            async fn next_event(&self) -> Option<Result<ServerEvent>> {
+                self.events.lock().pop_front().map(Ok)
+            }
+            fn events(
+                &self,
+            ) -> Pin<Box<dyn futures::Stream<Item = Result<ServerEvent>> + Send + '_>> {
+                Box::pin(futures::stream::empty())
+            }
+            async fn close(&self) -> Result<()> {
+                Ok(())
+            }
+            async fn mutate_context(
+                &self,
+                _config: RealtimeConfig,
+            ) -> Result<ContextMutationOutcome> {
+                Ok(ContextMutationOutcome::Applied)
+            }
+        }
+
+        let counts = Arc::new(Counts::default());
+        let runner = RealtimeRunner::builder()
+            .model(Arc::new(MockModel) as BoxedModel)
+            .tool(tool_def("tool_a"), ok_tool())
+            .tool(tool_def("tool_b"), ok_tool())
+            .build()
+            .unwrap();
+
+        let session = Arc::new(SelectiveFailingSession {
+            counts: counts.clone(),
+            events: parking_lot::Mutex::new(
+                vec![function_call("c1", "tool_a"), function_call("c2", "tool_b"), response_done()]
+                    .into(),
+            ),
+        });
+
+        let _ = runner.set_initial_session(session as Arc<dyn RealtimeSession>).await.unwrap();
+        let _ = runner.run().await;
+
+        assert_eq!(
+            counts.tool_output.load(Ordering::SeqCst),
+            2,
+            "both tool outputs were attempted"
+        );
+        assert_eq!(
+            counts.create_response.load(Ordering::SeqCst),
+            0,
+            "zero create_response sent when any output delivery fails"
+        );
+    }
+
     #[tokio::test]
     async fn parallel_tool_calls_trigger_a_single_response() {
         let counts = Arc::new(Counts::default());
@@ -2173,12 +2825,7 @@ mod runner_tests {
             .tool(tool_def("get_time"), ok_tool())
             .build()
             .unwrap();
-        *runner.session.write().await =
-            Some(Arc::new(RecordingSession { counts: counts.clone() }) as Arc<dyn RealtimeSession>);
 
-        // One model response dispatching two tool calls, then ending. Driven through
-        // `run`, because dispatch is the run loop's job now — `handle_event` returns the
-        // call rather than awaiting it, so event intake is not blocked by a tool.
         let scripted = Arc::new(ScriptedSession::new(
             counts.clone(),
             vec![
@@ -2187,7 +2834,7 @@ mod runner_tests {
                 response_done(),
             ],
         ));
-        *runner.session.write().await = Some(scripted as Arc<dyn RealtimeSession>);
+        let _ = runner.set_initial_session(scripted as Arc<dyn RealtimeSession>).await.unwrap();
         runner.run().await.unwrap();
 
         assert_eq!(counts.tool_output.load(Ordering::SeqCst), 2, "both outputs sent");
@@ -2198,41 +2845,55 @@ mod runner_tests {
             "auto path must use send_tool_output, not the output+create combo"
         );
 
-        // The follow-up (spoken-answer) response finishing creates nothing more.
         runner.handle_event(response_done()).await.unwrap();
         assert_eq!(counts.create_response.load(Ordering::SeqCst), 1, "no extra response");
     }
 
-    /// A response with no tool calls must not trigger an auto follow-up response.
     #[tokio::test]
     async fn plain_response_triggers_no_auto_response() {
         let counts = Arc::new(Counts::default());
         let runner =
             RealtimeRunner::builder().model(Arc::new(MockModel) as BoxedModel).build().unwrap();
-        *runner.session.write().await =
-            Some(Arc::new(RecordingSession { counts: counts.clone() }) as Arc<dyn RealtimeSession>);
+        let _ = runner
+            .set_initial_session(
+                Arc::new(RecordingSession { counts: counts.clone() }) as Arc<dyn RealtimeSession>
+            )
+            .await
+            .unwrap();
 
         runner.handle_event(response_done()).await.unwrap();
         assert_eq!(counts.create_response.load(Ordering::SeqCst), 0);
         assert_eq!(counts.tool_output.load(Ordering::SeqCst), 0);
     }
 
-    // ── Bounded concurrent tool dispatch ──────────────────────────────────
-    //
-    // `RunnerConfig::max_concurrent_tools` defaulted to four and was read by nothing: no
-    // semaphore, no scheduler. `FunctionCallDone` was awaited inline inside `handle_event`,
-    // which the run loop awaited before reading the next event, so tool calls ran strictly
-    // one at a time *and* stalled audio and every other event for the duration.
-
-    /// A session that replays a scripted event sequence, then reports disconnect.
     struct ScriptedSession {
         counts: Arc<Counts>,
         events: parking_lot::Mutex<std::collections::VecDeque<ServerEvent>>,
+        close_calls: Arc<AtomicUsize>,
+        stay_connected_when_empty: bool,
     }
 
     impl ScriptedSession {
         fn new(counts: Arc<Counts>, events: Vec<ServerEvent>) -> Self {
-            Self { counts, events: parking_lot::Mutex::new(events.into()) }
+            Self {
+                counts,
+                events: parking_lot::Mutex::new(events.into()),
+                close_calls: Arc::new(AtomicUsize::new(0)),
+                stay_connected_when_empty: false,
+            }
+        }
+
+        fn with_close_counter(
+            counts: Arc<Counts>,
+            events: Vec<ServerEvent>,
+            close_calls: Arc<AtomicUsize>,
+        ) -> Self {
+            Self {
+                counts,
+                events: parking_lot::Mutex::new(events.into()),
+                close_calls,
+                stay_connected_when_empty: true,
+            }
         }
     }
 
@@ -2279,12 +2940,20 @@ mod runner_tests {
         }
         async fn next_event(&self) -> Option<Result<ServerEvent>> {
             let event = self.events.lock().pop_front();
-            event.map(Ok)
+            if let Some(ev) = event {
+                Some(Ok(ev))
+            } else if self.stay_connected_when_empty {
+                std::future::pending::<()>().await;
+                None
+            } else {
+                None
+            }
         }
         fn events(&self) -> Pin<Box<dyn futures::Stream<Item = Result<ServerEvent>> + Send + '_>> {
             Box::pin(futures::stream::empty())
         }
         async fn close(&self) -> Result<()> {
+            self.close_calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
         async fn mutate_context(&self, _config: RealtimeConfig) -> Result<ContextMutationOutcome> {
@@ -2292,7 +2961,6 @@ mod runner_tests {
         }
     }
 
-    /// A tool that reports how many copies of itself run at once.
     struct ConcurrencyProbe {
         in_flight: Arc<AtomicUsize>,
         peak: Arc<AtomicUsize>,
@@ -2306,8 +2974,6 @@ mod runner_tests {
             self.peak.fetch_max(now, Ordering::SeqCst);
 
             match &self.barrier {
-                // Every participant must be running for this to return, so it can only
-                // complete if the dispatcher truly overlaps them.
                 Some(barrier) => {
                     barrier.wait().await;
                 }
@@ -2337,7 +3003,6 @@ mod runner_tests {
         let counts = Arc::new(Counts::default());
         let in_flight = Arc::new(AtomicUsize::new(0));
         let peak = Arc::new(AtomicUsize::new(0));
-        // Only satisfiable if all three run at once, which serial dispatch cannot do.
         let barrier = Arc::new(tokio::sync::Barrier::new(3));
 
         let probe = || ConcurrencyProbe {
@@ -2352,6 +3017,7 @@ mod runner_tests {
                 auto_execute_tools: true,
                 auto_respond_tools: true,
                 max_concurrent_tools: 3,
+                ..Default::default()
             })
             .tool(tool_def("a"), probe())
             .tool(tool_def("b"), probe())
@@ -2363,7 +3029,7 @@ mod runner_tests {
             Arc::clone(&counts),
             vec![function_call("c1", "a"), function_call("c2", "b"), function_call("c3", "c")],
         ));
-        *runner.session.write().await = Some(scripted as Arc<dyn RealtimeSession>);
+        let _ = runner.set_initial_session(scripted as Arc<dyn RealtimeSession>).await.unwrap();
 
         tokio::time::timeout(std::time::Duration::from_secs(5), runner.run())
             .await
@@ -2392,6 +3058,7 @@ mod runner_tests {
                 auto_execute_tools: true,
                 auto_respond_tools: true,
                 max_concurrent_tools: 2,
+                ..Default::default()
             })
             .tool(tool_def("a"), probe())
             .tool(tool_def("b"), probe())
@@ -2409,7 +3076,7 @@ mod runner_tests {
                 function_call("c4", "d"),
             ],
         ));
-        *runner.session.write().await = Some(scripted as Arc<dyn RealtimeSession>);
+        let _ = runner.set_initial_session(scripted as Arc<dyn RealtimeSession>).await.unwrap();
 
         runner.run().await.unwrap();
 
@@ -2421,7 +3088,6 @@ mod runner_tests {
         assert_eq!(counts.tool_output.load(Ordering::SeqCst), 4, "all four still complete");
     }
 
-    /// A tool that blocks until an audio event has been handled.
     struct WaitsForAudio {
         audio_seen: Arc<tokio::sync::Notify>,
     }
@@ -2434,7 +3100,6 @@ mod runner_tests {
         }
     }
 
-    /// Signals the tool once audio is delivered.
     struct AudioSignaller {
         audio_seen: Arc<tokio::sync::Notify>,
         audio_events: Arc<AtomicUsize>,
@@ -2447,6 +3112,119 @@ mod runner_tests {
             self.audio_seen.notify_waiters();
             Ok(())
         }
+    }
+
+    struct InputTurnSignaller {
+        completed: Arc<AtomicUsize>,
+        item_id: Arc<parking_lot::Mutex<Option<String>>>,
+    }
+
+    #[async_trait]
+    impl EventHandler for InputTurnSignaller {
+        async fn on_input_transcript_completed(
+            &self,
+            _transcript: &str,
+            item_id: &str,
+        ) -> Result<()> {
+            self.completed.fetch_add(1, Ordering::SeqCst);
+            *self.item_id.lock() = Some(item_id.to_string());
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn completed_input_transcript_reaches_the_event_handler() {
+        let completed = Arc::new(AtomicUsize::new(0));
+        let item_id = Arc::new(parking_lot::Mutex::new(None));
+        let runner = RealtimeRunner::builder()
+            .model(Arc::new(MockModel) as BoxedModel)
+            .event_handler(InputTurnSignaller {
+                completed: completed.clone(),
+                item_id: item_id.clone(),
+            })
+            .build()
+            .unwrap();
+
+        runner
+            .handle_event(ServerEvent::InputTranscriptCompleted {
+                item_id: "caller-turn-7".to_string(),
+                content_index: 0,
+                transcript: "sensitive caller content".to_string(),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(completed.load(Ordering::SeqCst), 1);
+        assert_eq!(item_id.lock().as_deref(), Some("caller-turn-7"));
+    }
+
+    struct ActivityRecorder {
+        sources: Arc<parking_lot::Mutex<Vec<CallerActivitySource>>>,
+    }
+
+    #[async_trait]
+    impl EventHandler for ActivityRecorder {
+        async fn on_caller_activity(&self, source: CallerActivitySource) -> Result<()> {
+            self.sources.lock().push(source);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn input_transcript_delta_reaches_the_event_handler_as_caller_activity() {
+        let sources = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let runner = RealtimeRunner::builder()
+            .model(Arc::new(MockModel) as BoxedModel)
+            .event_handler(ActivityRecorder { sources: sources.clone() })
+            .build()
+            .unwrap();
+
+        runner
+            .handle_event(ServerEvent::InputTranscriptDelta {
+                item_id: String::new(),
+                content_index: 0,
+                delta: "sensitive caller content".to_string(),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(sources.lock().as_slice(), &[CallerActivitySource::TranscriptDelta]);
+    }
+
+    #[tokio::test]
+    async fn every_caller_activity_source_is_delivered_and_labelled() {
+        let sources = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let runner = RealtimeRunner::builder()
+            .model(Arc::new(MockModel) as BoxedModel)
+            .event_handler(ActivityRecorder { sources: sources.clone() })
+            .build()
+            .unwrap();
+
+        for event in [
+            ServerEvent::InputTranscriptDelta {
+                item_id: String::new(),
+                content_index: 0,
+                delta: "part".to_string(),
+            },
+            ServerEvent::InputTranscriptCompleted {
+                item_id: "item-1".to_string(),
+                content_index: 0,
+                transcript: "whole".to_string(),
+            },
+            ServerEvent::SpeechStopped { event_id: "e1".to_string(), audio_end_ms: 10 },
+            ServerEvent::SpeechStarted { event_id: "e2".to_string(), audio_start_ms: 0 },
+        ] {
+            runner.handle_event(event).await.unwrap();
+        }
+
+        assert_eq!(
+            sources.lock().as_slice(),
+            &[
+                CallerActivitySource::TranscriptDelta,
+                CallerActivitySource::TranscriptCompleted,
+                CallerActivitySource::SpeechStopped,
+            ]
+        );
     }
 
     #[tokio::test]
@@ -2465,13 +3243,11 @@ mod runner_tests {
             .build()
             .unwrap();
 
-        // The tool can only finish once the audio delta *after* it has been handled, so
-        // this sequence completes only if event intake continues during tool execution.
         let scripted = Arc::new(ScriptedSession::new(
             Arc::clone(&counts),
             vec![function_call("c1", "slow"), audio_delta(), response_done()],
         ));
-        *runner.session.write().await = Some(scripted as Arc<dyn RealtimeSession>);
+        let _ = runner.set_initial_session(scripted as Arc<dyn RealtimeSession>).await.unwrap();
 
         tokio::time::timeout(std::time::Duration::from_secs(5), runner.run())
             .await
@@ -2480,6 +3256,478 @@ mod runner_tests {
 
         assert_eq!(audio_events.load(Ordering::SeqCst), 1, "the audio delta was handled");
         assert_eq!(counts.tool_output.load(Ordering::SeqCst), 1, "the tool still reported output");
+    }
+
+    /// A tool handler that records that it started and then never finishes.
+    struct BlockingToolHandler {
+        executions: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl ToolHandler for BlockingToolHandler {
+        async fn execute(&self, _call: &ToolCall) -> Result<serde_json::Value> {
+            self.executions.fetch_add(1, Ordering::SeqCst);
+            std::future::pending().await
+        }
+    }
+
+    fn tool_def_effect(name: &str, effect: adk_core::ToolEffect) -> ToolDefinition {
+        tool_def(name).with_effect(effect)
+    }
+
+    async fn fenced_runner(
+        counts: Arc<Counts>,
+        tools: Vec<(ToolDefinition, Arc<dyn ToolHandler>)>,
+        max_concurrent_tools: usize,
+    ) -> Arc<RealtimeRunner> {
+        let mut builder = RealtimeRunner::builder()
+            .model(Arc::new(MockModel) as BoxedModel)
+            .runner_config(RunnerConfig { max_concurrent_tools, ..RunnerConfig::default() });
+        for (definition, handler) in tools {
+            builder = builder.tool_arc(definition, handler);
+        }
+        let runner = Arc::new(builder.build().unwrap());
+        let _ = runner
+            .set_initial_session(Arc::new(RecordingSession { counts }) as Arc<dyn RealtimeSession>)
+            .await
+            .unwrap();
+        runner
+    }
+
+    async fn wait_started(executions: &AtomicUsize) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while executions.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the tool started");
+    }
+
+    fn tool_call_cancelled(call_id: &str) -> ServerEvent {
+        ServerEvent::ToolCallCancelled {
+            call_ids: vec![crate::events::ToolCallId::parse(call_id).unwrap()],
+        }
+    }
+
+    #[test]
+    fn merge_config_merges_language() {
+        let mut base = RealtimeConfig::default();
+        let update =
+            SessionUpdateConfig(RealtimeConfig::default().try_with_language("fr-CA").unwrap());
+        RealtimeRunner::merge_config(&mut base, &update);
+        assert_eq!(base.language.as_ref().map(|code| code.as_str()), Some("fr-CA"));
+    }
+
+    #[tokio::test]
+    async fn tool_call_cancelled_aborts_readonly() {
+        let counts = Arc::new(Counts::default());
+        let executions = Arc::new(AtomicUsize::new(0));
+        let runner = fenced_runner(
+            Arc::clone(&counts),
+            vec![(
+                tool_def_effect("lookup", adk_core::ToolEffect::ReadOnly),
+                Arc::new(BlockingToolHandler { executions: Arc::clone(&executions) })
+                    as Arc<dyn ToolHandler>,
+            )],
+            4,
+        )
+        .await;
+        let pending = runner
+            .handle_event(function_call("c1", "lookup"))
+            .await
+            .unwrap()
+            .expect("the call is dispatched");
+        let task_runner = Arc::clone(&runner);
+        let mut task = tokio::spawn(async move { task_runner.run_tool_call(pending).await });
+        wait_started(&executions).await;
+
+        // Speech onset alone must not fence the call.
+        runner
+            .handle_event(ServerEvent::SpeechStarted {
+                event_id: "e-speech".into(),
+                audio_start_ms: 0,
+            })
+            .await
+            .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut task).await.is_err(),
+            "SpeechStarted alone fenced an in-flight call"
+        );
+
+        runner.handle_event(tool_call_cancelled("c1")).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("the fenced call ends")
+            .unwrap()
+            .unwrap();
+        assert_eq!(counts.tool_output.load(Ordering::SeqCst), 0, "no output for a fenced call");
+        assert_eq!(counts.create_response.load(Ordering::SeqCst), 0, "no follow-up response");
+    }
+
+    #[tokio::test]
+    async fn response_cancelled_aborts_all_inflight_readonly() {
+        let counts = Arc::new(Counts::default());
+        let executions = Arc::new(AtomicUsize::new(0));
+        let runner = fenced_runner(
+            Arc::clone(&counts),
+            vec![
+                (
+                    tool_def_effect("lookup", adk_core::ToolEffect::ReadOnly),
+                    Arc::new(BlockingToolHandler { executions: Arc::clone(&executions) })
+                        as Arc<dyn ToolHandler>,
+                ),
+                (
+                    tool_def_effect("search", adk_core::ToolEffect::ReadOnly),
+                    Arc::new(BlockingToolHandler { executions: Arc::clone(&executions) })
+                        as Arc<dyn ToolHandler>,
+                ),
+            ],
+            4,
+        )
+        .await;
+        let mut tasks = Vec::new();
+        for (call_id, name) in [("c1", "lookup"), ("c2", "search")] {
+            let pending = runner.handle_event(function_call(call_id, name)).await.unwrap().unwrap();
+            let task_runner = Arc::clone(&runner);
+            tasks.push(tokio::spawn(async move { task_runner.run_tool_call(pending).await }));
+        }
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while executions.load(Ordering::SeqCst) < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("both tools started");
+
+        runner
+            .handle_event(ServerEvent::ResponseCancelled { event_id: "e-cancel".into() })
+            .await
+            .unwrap();
+        for task in tasks {
+            tokio::time::timeout(Duration::from_secs(5), task)
+                .await
+                .expect("the fenced call ends")
+                .unwrap()
+                .unwrap();
+        }
+        assert_eq!(counts.tool_output.load(Ordering::SeqCst), 0, "no output for fenced calls");
+        assert_eq!(counts.create_response.load(Ordering::SeqCst), 0, "no follow-up response");
+    }
+
+    #[tokio::test]
+    async fn queued_nonidempotent_cancelled_never_executes() {
+        let counts = Arc::new(Counts::default());
+        let blocker_executions = Arc::new(AtomicUsize::new(0));
+        let pay_executions = Arc::new(AtomicUsize::new(0));
+        let pay_count = Arc::clone(&pay_executions);
+        let runner = fenced_runner(
+            Arc::clone(&counts),
+            vec![
+                (
+                    tool_def_effect("blocker", adk_core::ToolEffect::ReadOnly),
+                    Arc::new(BlockingToolHandler { executions: Arc::clone(&blocker_executions) })
+                        as Arc<dyn ToolHandler>,
+                ),
+                (
+                    tool_def_effect("pay", adk_core::ToolEffect::NonIdempotent),
+                    Arc::new(FnToolHandler::new(move |_call: &ToolCall| {
+                        pay_count.fetch_add(1, Ordering::SeqCst);
+                        Ok(serde_json::json!({ "paid": true }))
+                    })) as Arc<dyn ToolHandler>,
+                ),
+            ],
+            1,
+        )
+        .await;
+        let blocker = runner.handle_event(function_call("c1", "blocker")).await.unwrap().unwrap();
+        let task_runner = Arc::clone(&runner);
+        let blocker_task = tokio::spawn(async move { task_runner.run_tool_call(blocker).await });
+        wait_started(&blocker_executions).await;
+
+        // The second call queues behind the single permit.
+        let pay = runner.handle_event(function_call("c2", "pay")).await.unwrap().unwrap();
+        let task_runner = Arc::clone(&runner);
+        let pay_task = tokio::spawn(async move { task_runner.run_tool_call(pay).await });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        runner.handle_event(tool_call_cancelled("c2")).await.unwrap();
+        runner.handle_event(tool_call_cancelled("c1")).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), blocker_task)
+            .await
+            .expect("the blocker ends")
+            .unwrap()
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), pay_task)
+            .await
+            .expect("the queued call ends")
+            .unwrap()
+            .unwrap();
+        assert_eq!(pay_executions.load(Ordering::SeqCst), 0, "a fenced queued call never runs");
+        assert_eq!(counts.tool_output.load(Ordering::SeqCst), 0, "no output for fenced calls");
+    }
+
+    #[tokio::test]
+    async fn nonidempotent_cancel_after_start_reports_outcome_unknown_not_success() {
+        let counts = Arc::new(Counts::default());
+        let executions = Arc::new(AtomicUsize::new(0));
+        let runner = fenced_runner(
+            Arc::clone(&counts),
+            vec![(
+                tool_def_effect("pay", adk_core::ToolEffect::NonIdempotent),
+                Arc::new(BlockingToolHandler { executions: Arc::clone(&executions) })
+                    as Arc<dyn ToolHandler>,
+            )],
+            4,
+        )
+        .await;
+        let pending = runner.handle_event(function_call("c1", "pay")).await.unwrap().unwrap();
+        let task_runner = Arc::clone(&runner);
+        let task = tokio::spawn(async move { task_runner.run_tool_call(pending).await });
+        wait_started(&executions).await;
+
+        runner.handle_event(tool_call_cancelled("c1")).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("the fenced call ends")
+            .unwrap()
+            .unwrap();
+        let output = counts.last_output.lock().clone().expect("the call is answered");
+        assert_eq!(output["status"], adk_core::OUTCOME_UNKNOWN_STATUS, "{output}");
+        assert!(adk_core::is_outcome_unknown(&output), "{output}");
+        assert_eq!(counts.create_response.load(Ordering::SeqCst), 0, "no follow-up response");
+    }
+
+    #[tokio::test]
+    async fn nonidempotent_response_cancel_after_start_reports_outcome_unknown_not_success() {
+        let counts = Arc::new(Counts::default());
+        let executions = Arc::new(AtomicUsize::new(0));
+        let runner = fenced_runner(
+            Arc::clone(&counts),
+            vec![(
+                tool_def_effect("pay", adk_core::ToolEffect::NonIdempotent),
+                Arc::new(BlockingToolHandler { executions: Arc::clone(&executions) })
+                    as Arc<dyn ToolHandler>,
+            )],
+            4,
+        )
+        .await;
+        let pending = runner.handle_event(function_call("c1", "pay")).await.unwrap().unwrap();
+        let task_runner = Arc::clone(&runner);
+        let task = tokio::spawn(async move { task_runner.run_tool_call(pending).await });
+        wait_started(&executions).await;
+
+        runner
+            .handle_event(ServerEvent::ResponseCancelled { event_id: "e-cancel".into() })
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("the fenced call ends")
+            .unwrap()
+            .unwrap();
+        let output = counts.last_output.lock().clone().expect("the call is answered");
+        assert_eq!(output["status"], adk_core::OUTCOME_UNKNOWN_STATUS, "{output}");
+        assert!(adk_core::is_outcome_unknown(&output), "{output}");
+        assert_eq!(counts.create_response.load(Ordering::SeqCst), 0, "no follow-up response");
+    }
+
+    #[tokio::test]
+    async fn idempotent_cancel_after_start_is_suppressed_not_outcome_unknown() {
+        let counts = Arc::new(Counts::default());
+        let executions = Arc::new(AtomicUsize::new(0));
+        let runner = fenced_runner(
+            Arc::clone(&counts),
+            vec![(
+                tool_def_effect("charge", adk_core::ToolEffect::Idempotent),
+                Arc::new(BlockingToolHandler { executions: Arc::clone(&executions) })
+                    as Arc<dyn ToolHandler>,
+            )],
+            4,
+        )
+        .await;
+        let pending = runner.handle_event(function_call("c1", "charge")).await.unwrap().unwrap();
+        let task_runner = Arc::clone(&runner);
+        let task = tokio::spawn(async move { task_runner.run_tool_call(pending).await });
+        wait_started(&executions).await;
+
+        runner.handle_event(tool_call_cancelled("c1")).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("the fenced call ends")
+            .unwrap()
+            .unwrap();
+        // A retry-safe call may simply be re-issued, so it is owed no
+        // answer at all — in particular not an outcome-unknown one.
+        assert_eq!(counts.tool_output.load(Ordering::SeqCst), 0, "no output for a fenced call");
+        assert_eq!(*counts.last_output.lock(), None);
+        assert_eq!(counts.create_response.load(Ordering::SeqCst), 0, "no follow-up response");
+    }
+
+    #[tokio::test]
+    async fn response_cancelled_fences_calls_issued_before_it() {
+        let counts = Arc::new(Counts::default());
+        let executions = Arc::new(AtomicUsize::new(0));
+        let exec_count = Arc::clone(&executions);
+        let runner = fenced_runner(
+            Arc::clone(&counts),
+            vec![(
+                tool_def_effect("pay", adk_core::ToolEffect::NonIdempotent),
+                Arc::new(FnToolHandler::new(move |_call: &ToolCall| {
+                    exec_count.fetch_add(1, Ordering::SeqCst);
+                    Ok(serde_json::json!({ "paid": true }))
+                })) as Arc<dyn ToolHandler>,
+            )],
+            4,
+        )
+        .await;
+        // Issued, then the response that produced it is cancelled before
+        // the run loop gets around to dispatching it.
+        let pending = runner.handle_event(function_call("c1", "pay")).await.unwrap().unwrap();
+        runner
+            .handle_event(ServerEvent::ResponseCancelled { event_id: "e-cancel".into() })
+            .await
+            .unwrap();
+        runner.run_tool_call(pending).await.unwrap();
+        assert_eq!(executions.load(Ordering::SeqCst), 0, "a stale-generation call never runs");
+        assert_eq!(counts.tool_output.load(Ordering::SeqCst), 0, "no output for a fenced call");
+    }
+
+    #[tokio::test]
+    async fn reregistering_a_call_joins_its_fence_entry() {
+        let counts = Arc::new(Counts::default());
+        let runner = fenced_runner(Arc::clone(&counts), vec![], 4).await;
+        let first = runner.register_tool_call("c1", "pay");
+        let second = runner.register_tool_call("c1", "pay");
+        runner.cancel_tool_calls(&[crate::events::ToolCallId::parse("c1").unwrap()]);
+        assert!(first.is_cancelled(), "the registered token is fenced");
+        assert!(second.is_cancelled(), "re-registration shares the fenced token, not a fresh one");
+    }
+
+    #[tokio::test]
+    async fn circuit_breaker_trips_and_blocks_subsequent_tool_calls() {
+        let calls_made = Arc::new(AtomicUsize::new(0));
+        let calls_made_clone = Arc::clone(&calls_made);
+
+        let runner = RealtimeRunner::builder()
+            .model(Arc::new(MockModel) as BoxedModel)
+            .tool_fn(tool_def("failing"), move |_| {
+                calls_made_clone.fetch_add(1, Ordering::SeqCst);
+                Err(RealtimeError::provider("database failure"))
+            })
+            .build()
+            .unwrap();
+
+        let counts = Arc::new(Counts::default());
+        let scripted = RecordingSession { counts };
+        let _ = runner
+            .set_initial_session(Arc::new(scripted) as Arc<dyn RealtimeSession>)
+            .await
+            .unwrap();
+
+        for i in 0..3 {
+            runner
+                .execute_tool_call(&format!("call-{}", i), "failing", &serde_json::json!({}))
+                .await
+                .unwrap();
+        }
+
+        assert_eq!(calls_made.load(Ordering::SeqCst), 3, "handler was invoked 3 times");
+        assert!(
+            runner.circuit_breaker_tripped.load(Ordering::Acquire),
+            "circuit breaker is TRIPPED"
+        );
+
+        runner.execute_tool_call("call-4", "failing", &serde_json::json!({})).await.unwrap();
+        assert_eq!(
+            calls_made.load(Ordering::SeqCst),
+            3,
+            "4th call was blocked by open circuit breaker"
+        );
+
+        runner.consecutive_tool_failures.store(0, Ordering::Release);
+        runner.circuit_breaker_tripped.store(false, Ordering::Release);
+
+        runner.execute_tool_call("call-5", "failing", &serde_json::json!({})).await.unwrap();
+        assert_eq!(calls_made.load(Ordering::SeqCst), 4, "handler invoked again after reset");
+    }
+
+    #[tokio::test]
+    async fn run_with_cancellation_exits_cleanly() {
+        let runner =
+            RealtimeRunner::builder().model(Arc::new(MockModel) as BoxedModel).build().unwrap();
+
+        let cancel_token = tokio_util::sync::CancellationToken::new();
+        cancel_token.cancel();
+
+        let result = runner.run_with_cancellation(cancel_token).await;
+        assert!(result.is_ok(), "runner exited cleanly on cancellation token");
+    }
+
+    #[tokio::test]
+    async fn run_with_cancellation_closes_session_and_cleans_up_in_flight_tools() {
+        let counts = Arc::new(Counts::default());
+        let close_calls = Arc::new(AtomicUsize::new(0));
+
+        struct BlockingTool;
+        #[async_trait]
+        impl ToolHandler for BlockingTool {
+            async fn execute(&self, _call: &ToolCall) -> Result<serde_json::Value> {
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                Ok(serde_json::json!({"status": "done"}))
+            }
+        }
+
+        let runner = RealtimeRunner::builder()
+            .model(Arc::new(MockModel) as BoxedModel)
+            .tool(tool_def("blocking_tool"), BlockingTool)
+            .build()
+            .unwrap();
+
+        let scripted = Arc::new(ScriptedSession::with_close_counter(
+            Arc::clone(&counts),
+            vec![function_call("c1", "blocking_tool")],
+            Arc::clone(&close_calls),
+        ));
+        let _ = runner.set_initial_session(scripted as Arc<dyn RealtimeSession>).await.unwrap();
+
+        let cancel_token = tokio_util::sync::CancellationToken::new();
+        let cancel_token_clone = cancel_token.clone();
+
+        let runner_handle = Arc::new(runner);
+        let runner_clone = Arc::clone(&runner_handle);
+
+        let task =
+            tokio::spawn(
+                async move { runner_clone.run_with_cancellation(cancel_token_clone).await },
+            );
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        assert_eq!(
+            runner_handle.outstanding_tools.load(Ordering::Acquire),
+            1,
+            "one tool is in flight"
+        );
+
+        cancel_token.cancel();
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), task)
+            .await
+            .expect("task completes quickly on cancellation")
+            .unwrap();
+
+        assert!(result.is_ok(), "runner exited cleanly");
+        assert_eq!(
+            close_calls.load(Ordering::SeqCst),
+            1,
+            "session.close() was invoked on cancellation"
+        );
+        assert_eq!(
+            runner_handle.outstanding_tools.load(Ordering::Acquire),
+            0,
+            "in-flight tool was dropped and ToolCounterGuard restored counter to 0"
+        );
     }
 
     #[tokio::test]
@@ -2498,14 +3746,11 @@ mod runner_tests {
             .build()
             .unwrap();
 
-        // `ResponseDone` arrives while the tool is still running — impossible before
-        // dispatch was concurrent, and the case that would silently drop the follow-up
-        // response, since `pending_tool_response` is only set once output is sent.
         let scripted = Arc::new(ScriptedSession::new(
             Arc::clone(&counts),
             vec![function_call("c1", "slow"), response_done(), audio_delta()],
         ));
-        *runner.session.write().await = Some(scripted as Arc<dyn RealtimeSession>);
+        let _ = runner.set_initial_session(scripted as Arc<dyn RealtimeSession>).await.unwrap();
 
         tokio::time::timeout(std::time::Duration::from_secs(5), runner.run())
             .await
@@ -2520,7 +3765,6 @@ mod runner_tests {
         );
     }
 
-    /// Records terminal disconnects.
     #[derive(Default)]
     struct DisconnectWatcher {
         disconnects: Arc<AtomicUsize>,
@@ -2535,6 +3779,197 @@ mod runner_tests {
     }
 
     #[tokio::test]
+    async fn failed_resumption_is_preserved_when_runner_is_generating_or_executing_tool() {
+        for busy_state in [RunnerState::Generating, RunnerState::ExecutingTool] {
+            let runner =
+                RealtimeRunner::builder().model(Arc::new(MockModel) as BoxedModel).build().unwrap();
+
+            let mut state_guard = runner.state.write().await;
+            *state_guard = busy_state.clone();
+            drop(state_guard);
+
+            let config_a = Box::new(RealtimeConfig::default().with_instruction("mutation A"));
+            let attempts = 0u8;
+
+            let mut fallback_state = runner.state.write().await;
+            match &*fallback_state {
+                RunnerState::PendingResumption { .. } => {
+                    panic!("Should not have PendingResumption initially");
+                }
+                RunnerState::Idle | RunnerState::Generating | RunnerState::ExecutingTool => {
+                    *fallback_state = RunnerState::PendingResumption {
+                        config: config_a,
+                        bridge_message: Some("message A".into()),
+                        attempts: attempts + 1,
+                    };
+                }
+            }
+            drop(fallback_state);
+
+            let check_state = runner.state.read().await;
+            match &*check_state {
+                RunnerState::PendingResumption { config, attempts, .. } => {
+                    assert_eq!(config.instruction.as_deref(), Some("mutation A"));
+                    assert_eq!(*attempts, 1);
+                }
+                other => panic!("Expected PendingResumption for {:?}, got {:?}", busy_state, other),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn pending_resumption_does_not_overwrite_newer_mutation() {
+        let runner =
+            RealtimeRunner::builder().model(Arc::new(MockModel) as BoxedModel).build().unwrap();
+
+        let mut state_guard = runner.state.write().await;
+        *state_guard = RunnerState::PendingResumption {
+            config: Box::new(RealtimeConfig::default().with_instruction("newer mutation B")),
+            bridge_message: Some("message B".into()),
+            attempts: 0,
+        };
+        drop(state_guard);
+
+        let fallback_state = runner.state.write().await;
+        match &*fallback_state {
+            RunnerState::PendingResumption { config, .. } => {
+                assert_eq!(
+                    config.instruction.as_deref(),
+                    Some("newer mutation B"),
+                    "Newer mutation B must be preserved and NOT overwritten by older failed mutation A"
+                );
+            }
+            other => panic!("Expected PendingResumption B, got {:?}", other),
+        }
+    }
+
+    struct CallNameTrackingSession {
+        counts: Arc<Counts>,
+        call_ids: Arc<parking_lot::Mutex<std::collections::HashSet<String>>>,
+    }
+
+    #[async_trait]
+    impl RealtimeSession for CallNameTrackingSession {
+        fn session_id(&self) -> &str {
+            "call-tracking-session"
+        }
+        fn is_connected(&self) -> bool {
+            true
+        }
+        async fn send_audio(&self, _audio: &AudioChunk) -> Result<()> {
+            Ok(())
+        }
+        async fn send_audio_base64(&self, _audio: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn send_text(&self, _text: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn send_tool_response(&self, response: ToolResponse) -> Result<()> {
+            if self.call_ids.lock().remove(&response.call_id) {
+                self.counts.tool_response.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            } else {
+                Err(RealtimeError::protocol(format!(
+                    "Missing tool name for call_id '{}' in session",
+                    response.call_id
+                )))
+            }
+        }
+        async fn send_tool_output(&self, response: ToolResponse) -> Result<()> {
+            if self.call_ids.lock().remove(&response.call_id) {
+                self.counts.tool_output.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            } else {
+                Err(RealtimeError::protocol(format!(
+                    "Missing tool name for call_id '{}' in session",
+                    response.call_id
+                )))
+            }
+        }
+        async fn commit_audio(&self) -> Result<()> {
+            Ok(())
+        }
+        async fn clear_audio(&self) -> Result<()> {
+            Ok(())
+        }
+        async fn create_response(&self) -> Result<()> {
+            self.counts.create_response.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+        async fn interrupt(&self) -> Result<()> {
+            Ok(())
+        }
+        async fn send_event(&self, _event: ClientEvent) -> Result<()> {
+            Ok(())
+        }
+        async fn next_event(&self) -> Option<Result<ServerEvent>> {
+            None
+        }
+        fn events(&self) -> Pin<Box<dyn futures::Stream<Item = Result<ServerEvent>> + Send + '_>> {
+            Box::pin(futures::stream::empty())
+        }
+        async fn close(&self) -> Result<()> {
+            Ok(())
+        }
+        async fn mutate_context(&self, _config: RealtimeConfig) -> Result<ContextMutationOutcome> {
+            Ok(ContextMutationOutcome::Applied)
+        }
+    }
+
+    #[tokio::test]
+    async fn stale_tool_response_from_replaced_generation_n_is_rejected_fail_closed_on_n_plus_1() {
+        let counts_n0 = Arc::new(Counts::default());
+        let counts_n1 = Arc::new(Counts::default());
+
+        let call_ids_n0 = Arc::new(parking_lot::Mutex::new(std::collections::HashSet::new()));
+        let call_ids_n1 = Arc::new(parking_lot::Mutex::new(std::collections::HashSet::new()));
+
+        let session_n0 = Arc::new(CallNameTrackingSession {
+            counts: counts_n0.clone(),
+            call_ids: call_ids_n0.clone(),
+        }) as Arc<dyn RealtimeSession>;
+
+        let session_n1 = Arc::new(CallNameTrackingSession {
+            counts: counts_n1.clone(),
+            call_ids: call_ids_n1.clone(),
+        }) as Arc<dyn RealtimeSession>;
+
+        let runner =
+            RealtimeRunner::builder().model(Arc::new(MockModel) as BoxedModel).build().unwrap();
+
+        let gen0_id = runner.set_initial_session(session_n0.clone()).await.unwrap();
+        assert_eq!(gen0_id, 0);
+
+        // Record function call_gen0_123 on Generation 0
+        call_ids_n0.lock().insert("call_gen0_123".to_string());
+
+        // Supervisor publishes replacement Generation 1
+        let gen1_id =
+            runner.supervisor.publish_replacement(session_n1.clone(), 0).await.unwrap().id;
+        assert_eq!(gen1_id, 1);
+
+        // Attempt send_tool_response for call_gen0_123 targeting active Generation 1
+        let tool_response = ToolResponse {
+            call_id: "call_gen0_123".to_string(),
+            output: serde_json::json!({ "result": "stale" }),
+            scheduling: None,
+        };
+
+        let send_res = runner.send_tool_response(tool_response).await;
+
+        // Must be rejected because Generation 1's call_ids map does not contain call_gen0_123
+        assert!(
+            send_res.is_err(),
+            "Tool response from Generation 0 must be rejected on Generation 1"
+        );
+
+        // Zero tool output/response writes reach Generation 1
+        assert_eq!(counts_n1.tool_response.load(Ordering::SeqCst), 0);
+        assert_eq!(counts_n1.tool_output.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
     async fn a_terminal_disconnect_is_surfaced_once() {
         let counts = Arc::new(Counts::default());
         let disconnects = Arc::new(AtomicUsize::new(0));
@@ -2546,10 +3981,8 @@ mod runner_tests {
             .unwrap();
 
         let scripted = Arc::new(ScriptedSession::new(Arc::clone(&counts), vec![response_done()]));
-        *runner.session.write().await = Some(scripted as Arc<dyn RealtimeSession>);
+        let _ = runner.set_initial_session(scripted as Arc<dyn RealtimeSession>).await.unwrap();
 
-        // `run` returns `Ok(())` on transport loss, which on its own is indistinguishable
-        // from a graceful `close`.
         runner.run().await.unwrap();
 
         assert_eq!(
@@ -2557,5 +3990,430 @@ mod runner_tests {
             1,
             "transport loss must be reported exactly once"
         );
+    }
+
+    #[tokio::test]
+    async fn subscribe_generation_wakes_on_published_generation_n_plus_1_only() {
+        let runner = RealtimeRunner::builder()
+            .model(Arc::new(MockModel) as BoxedModel)
+            .recovery_policy(
+                RecoveryPolicy::default()
+                    .with_max_attempts(std::num::NonZeroU32::new(3).unwrap())
+                    .with_initial_delay(std::time::Duration::ZERO),
+            )
+            .build()
+            .unwrap();
+
+        let session2 = Arc::new(ScriptedSession::new(Arc::new(Counts::default()), vec![]))
+            as Arc<dyn RealtimeSession>;
+
+        use std::time::Duration;
+
+        // Setup a recovery implementation where attempt 1 fails (so candidate fails), but attempt 2 succeeds and publishes N+1
+        struct TwoAttemptRecovery {
+            attempts: Arc<AtomicUsize>,
+            session2: Arc<dyn RealtimeSession>,
+            started_1: Arc<tokio::sync::Notify>,
+            continue_1: Arc<tokio::sync::Notify>,
+            started_2: Arc<tokio::sync::Notify>,
+            continue_2: Arc<tokio::sync::Notify>,
+        }
+
+        #[async_trait]
+        impl crate::recovery::RealtimeRecovery for TwoAttemptRecovery {
+            fn classify(&self, _cause: &RecoveryCause) -> crate::recovery::RecoveryDisposition {
+                crate::recovery::RecoveryDisposition::Recoverable
+            }
+            fn classify_attempt_error(
+                &self,
+                _error: &RealtimeError,
+            ) -> crate::recovery::RecoveryDisposition {
+                crate::recovery::RecoveryDisposition::Recoverable
+            }
+            async fn recover(
+                &self,
+                _context: crate::recovery::RecoveryContext<'_>,
+            ) -> Result<crate::recovery::RecoveredSession> {
+                let count = self.attempts.fetch_add(1, Ordering::SeqCst) + 1;
+                if count == 1 {
+                    self.started_1.notify_one();
+                    self.continue_1.notified().await;
+                    Err(RealtimeError::ConnectionError("Connection reset by peer".into()))
+                } else {
+                    self.started_2.notify_one();
+                    self.continue_2.notified().await;
+                    Ok(crate::recovery::RecoveredSession::new(
+                        self.session2.clone(),
+                        crate::recovery::RecoveryContinuity::Reconnected,
+                    ))
+                }
+            }
+        }
+
+        struct RetryableSession {
+            inner: ScriptedSession,
+            rec: TwoAttemptRecovery,
+        }
+
+        #[async_trait]
+        impl RealtimeSession for RetryableSession {
+            fn session_id(&self) -> &str {
+                self.inner.session_id()
+            }
+            fn is_connected(&self) -> bool {
+                self.inner.is_connected()
+            }
+            fn recovery(&self) -> Option<&dyn crate::recovery::RealtimeRecovery> {
+                Some(&self.rec)
+            }
+            async fn send_audio(&self, a: &AudioChunk) -> Result<()> {
+                self.inner.send_audio(a).await
+            }
+            async fn send_audio_base64(&self, a: &str) -> Result<()> {
+                self.inner.send_audio_base64(a).await
+            }
+            async fn send_text(&self, t: &str) -> Result<()> {
+                self.inner.send_text(t).await
+            }
+            async fn send_tool_response(&self, r: ToolResponse) -> Result<()> {
+                self.inner.send_tool_response(r).await
+            }
+            async fn commit_audio(&self) -> Result<()> {
+                self.inner.commit_audio().await
+            }
+            async fn clear_audio(&self) -> Result<()> {
+                self.inner.clear_audio().await
+            }
+            async fn create_response(&self) -> Result<()> {
+                self.inner.create_response().await
+            }
+            async fn interrupt(&self) -> Result<()> {
+                self.inner.interrupt().await
+            }
+            async fn send_event(&self, e: ClientEvent) -> Result<()> {
+                self.inner.send_event(e).await
+            }
+            async fn next_event(&self) -> Option<Result<ServerEvent>> {
+                self.inner.next_event().await
+            }
+            fn events(
+                &self,
+            ) -> Pin<Box<dyn futures::Stream<Item = Result<ServerEvent>> + Send + '_>> {
+                self.inner.events()
+            }
+            async fn close(&self) -> Result<()> {
+                self.inner.close().await
+            }
+            async fn mutate_context(&self, c: RealtimeConfig) -> Result<ContextMutationOutcome> {
+                self.inner.mutate_context(c).await
+            }
+        }
+
+        let attempts_counter = Arc::new(AtomicUsize::new(0));
+        let started_1 = Arc::new(tokio::sync::Notify::new());
+        let continue_1 = Arc::new(tokio::sync::Notify::new());
+        let started_2 = Arc::new(tokio::sync::Notify::new());
+        let continue_2 = Arc::new(tokio::sync::Notify::new());
+
+        let retryable = Arc::new(RetryableSession {
+            inner: ScriptedSession::new(Arc::new(Counts::default()), vec![]),
+            rec: TwoAttemptRecovery {
+                attempts: Arc::clone(&attempts_counter),
+                session2: session2.clone(),
+                started_1: Arc::clone(&started_1),
+                continue_1: Arc::clone(&continue_1),
+                started_2: Arc::clone(&started_2),
+                continue_2: Arc::clone(&continue_2),
+            },
+        });
+
+        // Set initial session to retryable session (generation 0)
+        let _ = runner.set_initial_session(retryable).await.unwrap();
+
+        // Subscribe AFTER set_initial_session so watch channel's initial value is 0
+        let mut rx = runner.subscribe_generation();
+        assert_eq!(*rx.borrow_and_update(), 0, "initial generation is 0");
+
+        let supervisor_arc = Arc::clone(&runner.supervisor);
+        let recovery_task = tokio::spawn(async move {
+            let report = FailureReport { generation: 0, cause: RecoveryCause::UnexpectedEof };
+            supervisor_arc.report_failure(report).await
+        });
+
+        // Wait until recovery attempt 1 has started inside recover()
+        tokio::time::timeout(Duration::from_secs(2), started_1.notified())
+            .await
+            .expect("attempt 1 started");
+
+        // Allow attempt 1 to complete and fail
+        continue_1.notify_one();
+
+        // Wait until recovery attempt 2 starts inside recover()
+        tokio::time::timeout(Duration::from_secs(2), started_2.notified())
+            .await
+            .expect("attempt 2 started");
+
+        // Assert watcher still reads generation 0 while attempt 1 failed and attempt 2 is paused
+        assert_eq!(
+            *rx.borrow(),
+            0,
+            "failed candidate attempt 1 must not advance watcher to generation 1"
+        );
+
+        // Allow attempt 2 to complete and succeed
+        continue_2.notify_one();
+
+        let recovery_res = tokio::time::timeout(Duration::from_secs(2), recovery_task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+
+        assert!(matches!(recovery_res, RecoveryOutcome::Recovered { .. }));
+        assert_eq!(attempts_counter.load(Ordering::SeqCst), 2, "2 attempts were made");
+
+        // Watcher must wake exactly for published N+1 (generation 1)
+        tokio::time::timeout(Duration::from_secs(2), rx.changed())
+            .await
+            .expect("watcher changed")
+            .unwrap();
+        assert_eq!(*rx.borrow(), 1, "ready published candidate advances watcher to generation 1");
+    }
+
+    struct SignallingRecovery {
+        replacement_started: Arc<tokio::sync::Notify>,
+        session2: Arc<dyn RealtimeSession>,
+    }
+
+    #[async_trait]
+    impl crate::recovery::RealtimeRecovery for SignallingRecovery {
+        fn classify(&self, _cause: &RecoveryCause) -> crate::recovery::RecoveryDisposition {
+            crate::recovery::RecoveryDisposition::Recoverable
+        }
+        async fn recover(
+            &self,
+            _context: crate::recovery::RecoveryContext<'_>,
+        ) -> Result<crate::recovery::RecoveredSession> {
+            self.replacement_started.notify_one();
+            Ok(crate::recovery::RecoveredSession::new(
+                self.session2.clone(),
+                crate::recovery::RecoveryContinuity::Reconnected,
+            ))
+        }
+    }
+
+    struct RecoverableSessionWithSignalling {
+        inner: ScriptedSession,
+        rec: SignallingRecovery,
+    }
+
+    #[async_trait]
+    impl RealtimeSession for RecoverableSessionWithSignalling {
+        fn session_id(&self) -> &str {
+            self.inner.session_id()
+        }
+        fn is_connected(&self) -> bool {
+            self.inner.is_connected()
+        }
+        fn recovery(&self) -> Option<&dyn crate::recovery::RealtimeRecovery> {
+            Some(&self.rec)
+        }
+        async fn send_audio(&self, a: &AudioChunk) -> Result<()> {
+            self.inner.send_audio(a).await
+        }
+        async fn send_audio_base64(&self, a: &str) -> Result<()> {
+            self.inner.send_audio_base64(a).await
+        }
+        async fn send_text(&self, t: &str) -> Result<()> {
+            self.inner.send_text(t).await
+        }
+        async fn send_tool_response(&self, r: ToolResponse) -> Result<()> {
+            self.inner.send_tool_response(r).await
+        }
+        async fn commit_audio(&self) -> Result<()> {
+            self.inner.commit_audio().await
+        }
+        async fn clear_audio(&self) -> Result<()> {
+            self.inner.clear_audio().await
+        }
+        async fn create_response(&self) -> Result<()> {
+            self.inner.create_response().await
+        }
+        async fn interrupt(&self) -> Result<()> {
+            self.inner.interrupt().await
+        }
+        async fn send_event(&self, e: ClientEvent) -> Result<()> {
+            self.inner.send_event(e).await
+        }
+        async fn next_event(&self) -> Option<Result<ServerEvent>> {
+            self.inner.next_event().await
+        }
+        fn events(&self) -> Pin<Box<dyn futures::Stream<Item = Result<ServerEvent>> + Send + '_>> {
+            self.inner.events()
+        }
+        async fn close(&self) -> Result<()> {
+            self.inner.close().await
+        }
+        async fn mutate_context(&self, c: RealtimeConfig) -> Result<ContextMutationOutcome> {
+            self.inner.mutate_context(c).await
+        }
+    }
+
+    #[tokio::test]
+    async fn test_planned_rotation_launches_replacement_when_event_handler_blocks() {
+        let replacement_started = Arc::new(tokio::sync::Notify::new());
+        let handler_started = Arc::new(tokio::sync::Notify::new());
+        let handler_allow_exit = Arc::new(tokio::sync::Notify::new());
+
+        struct BlockingRotationHandler {
+            handler_started: Arc<tokio::sync::Notify>,
+            handler_allow_exit: Arc<tokio::sync::Notify>,
+        }
+
+        #[async_trait]
+        impl EventHandler for BlockingRotationHandler {
+            async fn on_planned_rotation(&self, _time_left: Option<&str>) -> Result<()> {
+                self.handler_started.notify_one();
+                self.handler_allow_exit.notified().await;
+                Ok(())
+            }
+        }
+
+        let session2 = Arc::new(ScriptedSession::new(Arc::new(Counts::default()), vec![]));
+        let session1 = Arc::new(RecoverableSessionWithSignalling {
+            inner: ScriptedSession::new(Arc::new(Counts::default()), vec![]),
+            rec: SignallingRecovery {
+                replacement_started: Arc::clone(&replacement_started),
+                session2,
+            },
+        });
+
+        let runner = RealtimeRunner::builder()
+            .model(Arc::new(MockModel) as BoxedModel)
+            .event_handler(BlockingRotationHandler {
+                handler_started: Arc::clone(&handler_started),
+                handler_allow_exit: Arc::clone(&handler_allow_exit),
+            })
+            .build()
+            .unwrap();
+
+        let _ = runner.set_initial_session(session1).await.unwrap();
+
+        let runner_arc = Arc::new(runner);
+        let r_clone = Arc::clone(&runner_arc);
+        let event_task = tokio::spawn(async move {
+            r_clone
+                .handle_event_for_generation(
+                    ServerEvent::PlannedRotation { time_left: Some("30s".into()) },
+                    Some(0),
+                )
+                .await
+        });
+
+        tokio::time::timeout(Duration::from_secs(2), handler_started.notified())
+            .await
+            .expect("handler started");
+
+        tokio::time::timeout(Duration::from_secs(2), replacement_started.notified())
+            .await
+            .expect("replacement task must be launched concurrently without waiting for handler");
+
+        handler_allow_exit.notify_one();
+        event_task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_planned_rotation_uses_originating_generation_preventing_cascade() {
+        let session0 = Arc::new(ScriptedSession::new(Arc::new(Counts::default()), vec![]));
+        let session1 = Arc::new(ScriptedSession::new(Arc::new(Counts::default()), vec![]));
+
+        let runner =
+            RealtimeRunner::builder().model(Arc::new(MockModel) as BoxedModel).build().unwrap();
+
+        let gen0_id = runner.set_initial_session(session0).await.unwrap();
+        assert_eq!(gen0_id, 0);
+
+        let gen1_id = runner.supervisor.publish_replacement(session1, 0).await.unwrap().id;
+        assert_eq!(gen1_id, 1);
+
+        let res = runner
+            .handle_event_for_generation(
+                ServerEvent::PlannedRotation { time_left: Some("30s".into()) },
+                Some(0),
+            )
+            .await;
+        assert!(res.is_ok());
+
+        // Explicitly assert execute_planned_replacement directly rejects stale originating generation 0
+        let rotation_res = runner
+            .supervisor
+            .execute_planned_replacement(
+                0,
+                crate::recovery::RecoveryCause::PlannedRotation { time_left: Some("30s".into()) },
+            )
+            .await;
+        assert!(
+            rotation_res.is_err()
+                || matches!(
+                    rotation_res,
+                    Ok(crate::recovery::supervisor::RecoveryOutcome::Stale(_))
+                ),
+            "stale generation 0 rotation report must not rotate generation 1"
+        );
+
+        let active = runner.supervisor.get_active_generation().await.unwrap();
+        assert_eq!(active.id, 1, "stale generation 0 rotation report must not rotate generation 1");
+    }
+
+    #[derive(Clone)]
+    struct FailingPlannedRotationHandler {
+        barrier: Arc<crate::recovery::TestRecoveryBarrier>,
+    }
+
+    #[async_trait]
+    impl EventHandler for FailingPlannedRotationHandler {
+        async fn on_planned_rotation(&self, _time_left: Option<&str>) -> Result<()> {
+            self.barrier.wait_until_planned_entered().await;
+            Err(RealtimeError::connection("deliberate callback failure"))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_planned_rotation_event_handler_error_propagates_and_spawns_replacement() {
+        let barrier = Arc::new(crate::recovery::TestRecoveryBarrier::new());
+        let handler = FailingPlannedRotationHandler { barrier: Arc::clone(&barrier) };
+
+        let runner = RealtimeRunner::builder()
+            .model(Arc::new(MockModel) as BoxedModel)
+            .event_handler(handler)
+            .build()
+            .unwrap();
+
+        runner.supervisor.set_recovery_barrier_for_testing(Arc::clone(&barrier));
+
+        let session2 = Arc::new(ScriptedSession::new(Arc::new(Counts::default()), vec![]));
+        let replacement_started = Arc::new(tokio::sync::Notify::new());
+        let session0 = Arc::new(RecoverableSessionWithSignalling {
+            inner: ScriptedSession::new(Arc::new(Counts::default()), vec![]),
+            rec: SignallingRecovery { replacement_started, session2 },
+        });
+        let gen0_id = runner.set_initial_session(session0).await.unwrap();
+        assert_eq!(gen0_id, 0);
+
+        let res = runner
+            .handle_event_for_generation(
+                ServerEvent::PlannedRotation { time_left: Some("30s".into()) },
+                Some(0),
+            )
+            .await;
+
+        assert!(res.is_err(), "event handling must propagate callback error");
+        let err_msg = res.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("deliberate callback failure"),
+            "propagated error must be the callback failure, got: {err_msg}"
+        );
+
+        barrier.release();
     }
 }

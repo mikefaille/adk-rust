@@ -31,6 +31,7 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
 
+use crate::schema_adapter::SchemaCompileError;
 use crate::{GenericSchemaAdapter, SchemaAdapter};
 
 /// A thread-safe cache for normalized JSON Schemas.
@@ -59,7 +60,17 @@ pub struct SchemaCache {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum CacheKey {
     Bound(u64),
-    Legacy { schema: u64, normalized: u64 },
+    Legacy {
+        schema: u64,
+        normalized: u64,
+    },
+    /// A schema compiled by a named adapter. Keyed on the adapter's declared
+    /// identity rather than its normalized output, because compilation can fail
+    /// and two adapters that agree on one schema may disagree on the next.
+    Compiled {
+        schema: u64,
+        adapter: u64,
+    },
 }
 
 /// Adds a value to the hash in a fixed order.
@@ -198,6 +209,34 @@ impl SchemaCache {
         self.lock_entries().entry(key).or_insert(normalized).clone()
     }
 
+    /// Returns the schema compiled by the supplied adapter, caching the result.
+    ///
+    /// Compilation is fallible, so unlike normalization a rejected schema is not
+    /// cached: the error is returned and the next call retries. Entries are keyed
+    /// on the adapter's declared identity (`identifier`/`version`/`surface`), so
+    /// two adapters never read each other's compiled output.
+    pub fn get_or_compile(
+        &self,
+        schema: &Value,
+        adapter: &dyn SchemaAdapter,
+    ) -> Result<Value, SchemaCompileError> {
+        let key = CacheKey::Compiled {
+            schema: Self::hash_schema(schema),
+            adapter: Self::hash_adapter_identity(adapter),
+        };
+
+        {
+            let cache = self.entries.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(cached) = cache.get(&key) {
+                return Ok(cached.clone());
+            }
+        }
+
+        let compiled = adapter.compile_schema(schema)?;
+        let mut cache = self.entries.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        Ok(cache.entry(key).or_insert(compiled).clone())
+    }
+
     /// Clears all cached entries.
     ///
     /// Call this when the set of tools changes (e.g., MCP server advertises
@@ -245,6 +284,18 @@ impl SchemaCache {
     fn hash_schema(schema: &Value) -> u64 {
         let mut hasher = DefaultHasher::new();
         hash_canonical(schema, &mut hasher);
+        hasher.finish()
+    }
+
+    /// Hashes the identity an adapter declares for itself.
+    ///
+    /// A borrowed `&dyn SchemaAdapter` has no address the cache can trust, so the
+    /// adapter's own `identifier`/`version`/`surface` stand in for it.
+    fn hash_adapter_identity(adapter: &dyn SchemaAdapter) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        adapter.identifier().hash(&mut hasher);
+        adapter.version().hash(&mut hasher);
+        adapter.surface().hash(&mut hasher);
         hasher.finish()
     }
 }
@@ -353,6 +404,58 @@ mod tests {
         assert_eq!(alpha["normalized_by"], "alpha");
         assert_eq!(beta["normalized_by"], "beta");
         assert_eq!(cache.len(), 2);
+    }
+
+    /// Ported from the fork: compiled output must not leak between adapters.
+    #[test]
+    fn compiled_entries_are_separated_by_adapter_identity() {
+        #[derive(Debug)]
+        struct NamedAdapter(&'static str);
+        impl SchemaAdapter for NamedAdapter {
+            fn identifier(&self) -> &str {
+                self.0
+            }
+            fn normalize_schema(&self, schema: Value) -> Value {
+                schema
+            }
+        }
+
+        let cache = SchemaCache::new();
+        let schema = json!({"type": "string"});
+
+        cache.get_or_compile(&schema, &NamedAdapter("a1")).expect("compiles");
+        assert_eq!(cache.len(), 1);
+
+        cache.get_or_compile(&schema, &NamedAdapter("a2")).expect("compiles");
+        assert_eq!(cache.len(), 2, "different adapters must not share a compiled entry");
+    }
+
+    /// Ported from the fork: normalize and compile are separate operations and
+    /// must not collide on one key.
+    #[test]
+    #[allow(deprecated)]
+    fn normalize_and_compile_do_not_share_an_entry() {
+        let cache = SchemaCache::new();
+        let schema = json!({"type": "string"});
+        let adapter = GenericSchemaAdapter;
+
+        cache.get_or_normalize(&schema, &adapter);
+        assert_eq!(cache.len(), 1);
+
+        cache.get_or_compile(&schema, &adapter).expect("compiles");
+        assert_eq!(cache.len(), 2, "normalize and compile must be separate entries");
+    }
+
+    /// Ported from the fork: a second compile of the same schema is a cache hit.
+    #[test]
+    fn repeated_compiles_reuse_one_entry() {
+        let cache = SchemaCache::new();
+        let schema = json!({"type": "string"});
+        let adapter = GenericSchemaAdapter;
+
+        cache.get_or_compile(&schema, &adapter).expect("compiles");
+        cache.get_or_compile(&schema, &adapter).expect("compiles");
+        assert_eq!(cache.len(), 1);
     }
 
     #[test]
