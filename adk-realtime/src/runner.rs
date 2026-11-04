@@ -1199,6 +1199,17 @@ impl RealtimeRunner {
                     if *watcher.borrow() != current_gen_id {
                         continue;
                     }
+                    // An event stream that ends while the session is still
+                    // connected is an idle end, not a disconnect: the
+                    // scripted session ends its stream at its idle timeout
+                    // yet stays writable for a later client action. Only a
+                    // stream that ends on a dead session is an unexpected
+                    // EOF worth recovering from; terminalizing a live
+                    // session here would refuse the writes that follow
+                    // (e.g. a resumed held call's tool output).
+                    if session.is_connected() {
+                        return None;
+                    }
                     if self.report_read_failure(current_gen_id, RecoveryCause::UnexpectedEof).await
                     {
                         continue;
@@ -1337,6 +1348,12 @@ impl RealtimeRunner {
                                         return Err(e);
                                     }
                                 }
+                            }
+                            // Idle end on a still-connected session (see
+                            // next_event): not a disconnect, no recovery.
+                            if session.is_connected() {
+                                self.event_handler.on_disconnect().await?;
+                                break;
                             }
                             if self.report_read_failure(current_gen_id, RecoveryCause::UnexpectedEof).await {
                                 continue;
