@@ -60,7 +60,16 @@ use async_trait::async_trait;
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 
-use adk_core::{RunState, UsageUnit, UsageVector};
+#[cfg(any(
+    feature = "sqlite",
+    feature = "postgres",
+    feature = "redis",
+    feature = "mongodb",
+    feature = "firestore",
+    feature = "neo4j"
+))]
+use adk_core::UsageUnit;
+use adk_core::{RunState, UsageVector};
 
 use crate::bus::SpendDelta;
 use crate::error::Result;

@@ -629,7 +629,27 @@ impl IntegratedRealtimeRunner {
             return Some(Ok(event));
         }
 
-        let event = inner.runner.next_event().await?;
+        // A concurrently dispatched call may have surfaced its hold while
+        // this call waited on the provider. That hold must reach the caller
+        // before the provider event just obtained: a caller that acts on
+        // holds as events arrive (a spoken decision, say) would otherwise
+        // settle the earlier hold before learning the repeat superseded
+        // it. The obtained event keeps its place behind the queued hold.
+        let event = match inner.runner.next_event().await? {
+            Ok(current) => {
+                let mut pending = inner.pending_events.lock().unwrap_or_else(|e| e.into_inner());
+                if pending
+                    .iter()
+                    .any(|queued| matches!(queued, ServerEvent::ToolConfirmationRequested { .. }))
+                {
+                    pending.push_back(current);
+                    let queued = pending.pop_front();
+                    return Some(Ok(queued.expect("a hold was queued above")));
+                }
+                Ok(current)
+            }
+            Err(error) => Err(error),
+        };
 
         if let Ok(server_event) = &event {
             // Feed to transcript aggregator

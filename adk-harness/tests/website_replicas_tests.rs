@@ -14,7 +14,7 @@
 //!   --test integration -E 'test(/^website_replicas_tests::/)'
 //! ```
 
-#![cfg(feature = "website")]
+#![cfg(all(feature = "website", any(feature = "sqlite", feature = "postgres")))]
 
 use crate::website_common::{self, OWNER, PUBLISHER};
 
