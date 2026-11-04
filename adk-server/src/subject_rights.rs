@@ -3,7 +3,7 @@
 //!
 //! | Route | Does |
 //! |-------|------|
-//! | `GET /subject/export` | Everything the deployment's [`SubjectRights`] stores hold about the caller and its linked visitor ids |
+//! | `GET /subject/export` | Everything the deployment's [`SubjectRights`](adk_core::subject::SubjectRights) stores hold about the caller and its linked visitor ids |
 //! | `POST /subject/erase` | Erases it; answers the [`ErasureReport`](adk_core::subject::ErasureReport) |
 //! | `POST /subject/link` | Links the visitor id the request's token carries to the caller, once |
 //!
@@ -14,7 +14,7 @@
 //! A link needs the visitor's token — the `AWP-Subject` header or the `__Host-adk_visitor`
 //! cookie — and a fresh sign-in: the request context's `auth_time` metadata (Unix seconds,
 //! such as an OIDC token's `auth_time` claim) no older than
-//! [`with_max_sign_in_age`](SubjectRightsEndpoints::with_max_sign_in_age), ten minutes by
+//! [`with_max_sign_in_age`](crate::subject_rights::SubjectRightsEndpoints::with_max_sign_in_age), ten minutes by
 //! default. A visitor id links once; the response clears the visitor cookie, so the browser
 //! continues as the signed-in person.
 
